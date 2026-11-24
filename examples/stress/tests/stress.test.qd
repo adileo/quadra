@@ -1,0 +1,117 @@
+# The features the benchmark measures, checked on a small world: rollups four levels up,
+# checks one to four relations away, permissions through several relations.
+
+from tests.fixtures import world
+
+
+test "rollups from a shipment up to the region":
+    use world
+    let o = Order(number="O-1", customer=rossi, date=2026-03-02,
+                  lines=[OrderLine(product=hammer, qty=10 pcs), OrderLine(product=saw, qty=2 pcs, discount=10%)])
+    expect o.total == 156.00 EUR                        # 10 × 12 + 2 × 20 − 10%
+    expect o.line_count == 2
+    expect o.biggest_line == 120.00 EUR
+    expect rossi.revenue == 0.00 EUR                    # a draft does not count
+
+    o.confirm()
+    expect rossi.revenue == 156.00 EUR
+    expect rossi.open_orders == 1
+    expect north.revenue == 156.00 EUR
+    expect north.to_ship == 12 pcs
+    expect hammer.units_sold == 10 pcs
+    expect hand.units_sold == 12 pcs
+
+    let l = o.lines.find(x => x.product == hammer) ?? fail "no hammer line"
+    Shipment(line=l, qty=4 pcs, date=2026-03-03)
+    expect l.shipped == 4 pcs
+    expect o.to_ship == 8 pcs
+    expect rossi.to_ship == 8 pcs
+    expect north.to_ship == 8 pcs                       # four levels up
+
+    l.qty = 12 pcs                                      # rollups and checks move together
+    expect north.revenue == 180.00 EUR
+    expect rossi.avg_order == 180.00 EUR
+    expect north.best_customer == 180.00 EUR
+    expect vip.customer_count == 1
+    expect new.customer_count == 2
+    expect hand.depth == 1
+    expect hand.path == "Tools/Hand tools"
+
+
+test "checks one to four relations away, and on aggregates":
+    use world
+    let o = Order(number="O-2", customer=rossi, date=2026-03-02, lines=[OrderLine(product=hammer, qty=5 pcs)])
+    o.confirm()
+    let l = o.lines.single()
+    expect_error "Shipped more than ordered":
+        Shipment(line=l, qty=6 pcs, date=2026-03-03)
+    expect_error "Shipped before it was ordered":
+        Shipment(line=l, qty=1 pcs, date=2026-03-01)
+    Shipment(line=l, qty=5 pcs, date=2026-03-03)
+    o.ship()
+
+    # four relations away: the shipment reads the region of the customer of the order of its line
+    let o2 = Order(number="O-3", customer=rossi, date=2026-03-02, lines=[OrderLine(product=saw, qty=1 pcs)])
+    o2.confirm()
+    north.last_delivery = 2026-03-03
+    expect_error "No deliveries to the region after its last delivery date":
+        Shipment(line=o2.lines.single(), qty=1 pcs, date=2026-03-04)
+    Shipment(line=o2.lines.single(), qty=1 pcs, date=2026-03-03)
+
+    # two and three relations away: no new drafts in an inactive category
+    hand.active = false
+    expect_error "The category is not sold any more":
+        Order(number="O-4", customer=rossi, date=2026-03-02, lines=[OrderLine(product=hammer, qty=1 pcs)])
+
+    # an aggregate: the credit limit
+    rossi.credit_limit = 100.00 EUR
+    expect_error "Credit limit exceeded":
+        Order(number="O-5", customer=rossi, date=2026-03-02, lines=[OrderLine(product=saw, qty=10 pcs)]).confirm()
+
+
+test "permissions through several relations":
+    use world
+    let o = as giulia: Order(number="O-6", customer=rossi, date=2026-03-02, lines=[OrderLine(product=hammer, qty=1 pcs)])
+    as giulia:
+        o.priority = High
+    as marta:                                           # the manager of the customer's region
+        o.priority = Low
+    expect_error "permission denied: paolo cannot edit Order.priority":
+        as paolo: o.priority = Normal                   # in the region's team: reads the customer, not its orders
+    expect_error "permission denied":
+        as giulia: Order(number="O-7", customer=bianchi, date=2026-03-02)
+
+    as giulia: o.confirm()
+    # four relations away: luca ships to the north
+    as luca: Shipment(line=o.lines.single(), qty=1 pcs, date=2026-03-05)
+
+    # books closed: denied through three relations, whatever the role
+    north.locked = true
+    expect_error "permission denied: deny edit Order":
+        as marta: o.priority = High
+    expect_error "permission denied: deny create Shipment":
+        as luca: Shipment(line=o.lines.single(), qty=1 pcs, date=2026-03-06)
+
+
+test "a controller reads, and changes nothing":
+    use world
+    let o = Order(number="O-8", customer=rossi, date=2026-03-02, lines=[OrderLine(product=hammer, qty=1 pcs)])
+    # `read *` (the orders of a locked region denied: see crates/quadra-cli/tests/permissions.rs)
+    expect_error "permission denied: carlo cannot edit Order.priority":
+        as carlo: o.priority = High
+    expect_error "permission denied: carlo cannot create Order":
+        as carlo: Order(number="O-9", customer=rossi, date=2026-03-02)
+
+
+test "queries over whole entities":
+    use world
+    let o = Order(number="Q-1", customer=rossi, date=2026-03-02, priority=High, lines=[OrderLine(product=hammer, qty=3 pcs)])
+    o.confirm()
+    Shipment(line=o.lines.first() ?? fail "no line", qty=2 pcs, date=2026-03-04)
+    Order(number="Q-2", customer=rossi, date=2026-03-05)
+    north.review(since=2026-03-01)
+    expect Review.find(r => r.region == north)?.note == "1 active customers, 1 confirmed orders, 2 pcs shipped since 2026-03-01, first C1, 1 urgent"
+    expect Order.count(o => o.customer.region == north and o.state is Draft) == 1
+    expect_error "Too many draft orders in the region":
+        Campaign(name="Spring", region=north, max_drafts=0)
+    Campaign(name="Spring", region=north)

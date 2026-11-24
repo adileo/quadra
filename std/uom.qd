@@ -1,0 +1,34 @@
+# Units of measure. Qty<U>.to(V) converts through `factor` and fails across categories.
+
+entity UomCategory:
+    name: Text unique
+    uoms: [Uom]
+    reference = uoms.single(u => u.factor == 1)
+    check uoms.count(u => u.factor == 1) == 1, f"Category {name} needs exactly one reference unit"
+
+
+entity Uom:
+    code: Code unique
+    name: Text
+    category: UomCategory
+    factor: Decimal where > 0                       # 1 unit = factor reference units
+    precision: Decimal default 0.001                # rounding of quantities in this unit
+
+
+seed:
+    let units = UomCategory(name="Units")
+    let weight = UomCategory(name="Weight")
+    let volume = UomCategory(name="Volume")
+    let length = UomCategory(name="Length")
+    let time = UomCategory(name="Time")
+
+    Uom(code="pcs", name="Pieces", category=units, factor=1, precision=1)
+    Uom(code="kg", name="Kilograms", category=weight, factor=1)
+    Uom(code="g", name="Grams", category=weight, factor=0.001)
+    Uom(code="t", name="Tonnes", category=weight, factor=1000)
+    Uom(code="l", name="Litres", category=volume, factor=1)
+    Uom(code="ml", name="Millilitres", category=volume, factor=0.001)
+    Uom(code="m", name="Metres", category=length, factor=1)
+    Uom(code="cm", name="Centimetres", category=length, factor=0.01)
+    Uom(code="h", name="Hours", category=time, factor=1)
+    Uom(code="min", name="Minutes", category=time, factor=1/60)

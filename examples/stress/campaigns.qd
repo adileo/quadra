@@ -1,0 +1,34 @@
+# Queries over whole entities written in the model (docs/SCALING.md, item 11), answered in
+# SQL on a database: a campaign may not start in a region with too many draft orders (a check
+# counting `Order.where(…)`), and a region's review (an action with `Customer.where`,
+# `Order.count`, `.sum`, `.sort_by(…).first()`, a loop over `Order.where(…)`). The generator
+# makes neither campaigns nor reviews.
+
+from sales import Region, Customer, Order, Shipment
+
+
+entity Campaign:
+    name: Text
+    region: Region
+    max_drafts: Int default 1000
+
+    check Order.count(o => o.customer.region == region and o.state is Draft) <= max_drafts, "Too many draft orders in the region"
+
+
+# what a review of a region found
+entity Review:
+    region: Region
+    since: Date
+    note: Text
+
+
+extend Region:
+    action review(since: Date):
+        let active = Customer.where(c => c.region == self and c.active)
+        let open = Order.count(o => o.customer.region == self and o.state is Confirmed)
+        let shipped = Shipment.where(s => s.line.order.customer.region == self and s.date >= since).sum(s => s.qty)
+        let first = Customer.where(c => c.region == self).sort_by(c => c.code).first()
+        let urgent = 0
+        for o in Order.where(o => o.customer.region == self and o.priority is High and o.state is Confirmed):
+            urgent = urgent + 1
+        Review(region=self, since=since, note=f"{active.count()} active customers, {open} confirmed orders, {shipped} shipped since {since}, first {first?.code}, {urgent} urgent")

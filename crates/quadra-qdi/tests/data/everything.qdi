@@ -1,0 +1,223 @@
+# Every construct of a .qdi file, in its canonical form (tests/roundtrip.rs).
+# A second line of the comment.
+app "Everything":
+    description: "An app with every component and option."
+    share: role Admin change, role Sales use, everyone use
+
+    filter region "Region": multi Order.customer.region default [3, 5]
+    filter period: date_range Order.date default [2026-01-01, 2026-03-31]
+    # the state of the orders
+    filter state "State": select Order.state default Confirmed
+    filter amount "Amount": number_range Order.total
+    filter rush: toggle Order.rush default true
+    filter search "Customer": text Order.customer.name default "Ac me"
+        meta extra: {a: 1, "b c": [1, 2.5, none]}
+
+    let sold = Order.where(o => o.state in {Confirmed, Shipped})
+    let by_month = sold.group_by(o => o.date.start_of_month())
+        .map(g => (month: g.key, revenue: g.items.sum(o => o.total)))
+
+    page main "Main":
+        row height 2:
+            filters bar width 18:
+                show: region, period, state, amount
+                layout: row
+            filters side width 6:
+                show: rush, search, region
+
+        row height 3:
+            kpi k1 "Revenue" width 6:
+                source: sold.sum(o => o.total)
+                label: "Revenue"
+                format: money
+                decimals: 0
+                compare: previous @period
+                higher_is_better: true
+                sparkline: by_month
+            # the revenue
+            kpi k2 width 6:
+                source: cell grid1 "Sheet1!B2"
+                compare: target 2500.00 EUR
+            space 2
+            kpi k3 "Empty" width 4
+            kpi k4 width 6:
+                source: raw "Order.cnt(("
+
+        row height 6:
+            chart c1 "Bars" width 12:
+                kind: bar
+                source: Order.group_by(o => o.customer.region)
+                    .map(g => (g.key.name, g.items.count()))
+                stacked: true
+                horizontal: false
+                legend: true
+                max_points: 100
+                x_title: "Region"
+                y_title: "Orders"
+                format: "number"
+            chart c2 width 12:
+                kind: line
+                source: range grid1 "Sheet1!A1:C10"
+
+        row height 8:
+            view v1 "Orders" width 12:
+                of: Order
+                type: grid
+                select: order
+                page_size: 50
+                fields: number, customer, customer.region, total, margin
+                widths: customer.region 200, number 120
+                where: total > 100.00 EUR and @rush == false
+                compute margin: total - cost
+                color "#fee2e2": total > 1000.00 EUR
+                color "#dcfce7": state is Shipped
+                sort: date desc, number
+                search: "acme"
+                known: number, customer, total
+            view v2 width 12:
+                of: Order
+                type: groups
+                group: customer.region, date by month
+                aggregates: qty avg, total sum
+                pivot: true
+                group_order: count desc
+                measure: total
+                grouped: true
+                apply OrderLine: region -> order.customer.region, state -> none
+                apply auto: false
+
+        row height 9:
+            view board "Board" width 10:
+                of: Order
+                type: kanban
+                select: picked
+                board: true
+                by: state
+                cards: customer, total
+                card_title: number
+                hidden: Draft, Cancelled
+                collapsed: Shipped
+                wip: Confirmed 10, Shipped 5
+                sum: total
+            column width 14:
+                row height 2:
+                    button b1 width 7:
+                        label: "Ship"
+                        run: @order.ship(carrier=Road, count=cell grid1 "B2", note="Fragile, handle with care", priority=@state, qty="5 pcs", ref=id 7, when=2026-01-31)
+                    button b2 width 7:
+                        run: Customer[@region].block()
+                row height 2:
+                    button b3 width 5:
+                        run: Order[42].confirm()
+                        style: secondary
+                    button b4 width 4:
+                        run: Order.recompute()
+                    button b5 width 5:
+                        run: Order[cell grid1 "A1"].cancel()
+                        confirm: "Sure?"
+                        style: danger
+                form f1 "New order" height 2:
+                    entity: Order
+                    fields: number, customer, date
+                    default customer: @region
+                    default date: 2026-01-01
+                    columns: 3
+                    submit_label: "Create"
+                form f2 "Edit order" height 3:
+                    entity: Order
+                    mode: edit
+                    record: @order
+                    section "Main": number, customer
+                    section "Delivery": date, priority
+                    section: total
+
+        row height 8:
+            form move_stock "Move stock" width 8:
+                field product: Product
+                field qty "Quantity": Qty<pcs> where > 0 default 1 pcs
+                field to: Location default @picked.warehouse
+                field note: Text?
+                submit "Move":
+                    let t = Transfer(product=product, qty=qty, to=to, note=note)
+                    t.confirm()
+
+                    # the record the form publishes
+                    t
+                confirm: "Move it?"
+                after: select Transfer as transfer
+                message: f"Moved {qty} of {product.name}"
+            form quick "Quick" width 8:
+                field n: Int where 1..100
+                submit:
+                    Counter.bump(n)
+                after: keep
+            markdown note width 8:
+                "Hello **world** {= Order.count() }"
+
+        row height 10:
+            sheet grid1 "Workbook" width 24:
+                active: s2
+                tab Sheet1 "Sheet1" fixed 20 x 8:
+                    A1 bold italic underline strike wrap color "#111111" fill "#eeeeee" align center valign top: "Region"
+                    B1 fmt number dec 2 thousands: "1234.5"
+                    C1 fmt date date "d mmm yyyy" border {b: medium, c: "#000000", t: thin}: "2026-01-31"
+                    D1 style {b: false, x: 1}: "odd"
+                    E1 style {}:
+                    A2: = Order.count()
+                    B2: = 'Q4 plan'!A1 + Sheet1!B1 * $A$1
+                    C2: = A2#
+                    D2: "=A1 +"
+                    E2: "   spaced"
+                    A3:
+                    width A 160, B 90
+                    height 1 30, 2 24
+                    merge A5:B6, C5:D5
+                    freeze rows 1 cols 2
+                    meta zoom: 1.25
+                tab s2 "Q4 plan" free rows 1000:
+                    A1: "Plan"
+
+        space 4
+
+        markdown floating "Overlay" at 2, 50 size 6 x 3:
+            "Over"
+
+        kpi over at 4, 51 size 6 x 3:
+            source: 1
+
+        space 4
+
+        row height 4:
+            component gauge g1 "Gauge" width 6:
+                config bands: [{color: red, to: 50}, {color: green, to: 100}]
+                config max: 100
+                config min: 0
+                meta extra: true
+        meta zoom: 2
+
+    page second:
+        row height 3:
+            markdown story width 24:
+                """
+                ## A story
+                Over two lines, with "quotes" and \\ a backslash.
+                """
+                apply Order: period -> date
+
+    meta theme: dark
+
+# Orders waiting to be shipped
+view "To ship" of Order:
+    description: "Confirmed orders with something left to ship."
+    share: role Logistics use
+    fields: number, customer, date, total
+    where: state is Confirmed and to_ship > 0 pcs
+    sort: date, number desc
+
+view "Pipeline" of Order:
+    type: kanban
+    board: true
+    by: state
+    cards: customer, total
+    sum: total
+    config drill: [{bucket: none, d: Confirmed, field: state, label: State, value: Confirmed}]

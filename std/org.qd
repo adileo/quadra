@@ -1,0 +1,25 @@
+# Companies, users and document numbering. Projects add their own fields with `extend`.
+
+entity Company:
+    name: Text
+    currency: Currency                              # accounting currency
+
+
+entity User:
+    login: Code unique
+    name: Text?
+    roles: {Role}
+
+
+entity Sequence:
+    company: Company default current.company
+    code: Code
+    pattern: Text default "{code}/{year}/{n:05}"
+    gapless: Bool default false                     # invoices: no number may be skipped (every sequence is)
+    unique (company, code)
+
+
+# Atomic and gapless: the number is consumed only if the transaction commits, and two
+# transactions numbering from the same sequence at once are serialized. Pattern: `{code}`,
+# `{year}`, `{n}`, with an optional f-string format (`{n:05}`).
+builtin fn next_number(company: Company, code: Code, on: Date = today()) -> Code

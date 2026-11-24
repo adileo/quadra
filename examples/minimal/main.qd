@@ -1,0 +1,96 @@
+# Quadra — minimal example: customers, products, orders, stock.
+# One file, no imports: currencies (EUR) and units (pcs) come from the standard library.
+# Shows the basics: fields, formulas (=), initial values (default), relations,
+# constraints, states with flow, actions, a ledger, a test.
+
+
+entity Customer:
+    name: Text unique
+    email: Email?
+    credit_limit: Money<EUR> default 1_000.00 EUR
+    orders: [Order]                                     # inverse of Order.customer
+
+    open_total = orders.where(o => o.state is Confirmed).sum(o => o.total)
+    check open_total <= credit_limit, "Credit limit exceeded"
+
+
+entity Product:
+    code: Code unique
+    name: Text
+    price: Price<EUR, pcs>
+    stock = Stock.where(s => s.product == self).sum(s => s.qty)
+
+
+entity Order:
+    customer: Customer
+    date: Date default today()
+    lines: [OrderLine]
+    state: enum(Draft, Confirmed, Shipped, Cancelled) default Draft
+
+    total: Money<EUR> = lines.sum(l => l.amount)
+
+    frozen when state is not Draft
+
+    flow state:
+        Draft -> Confirmed              by confirm
+        Confirmed -> Shipped            by ship
+        Draft | Confirmed -> Cancelled  by cancel
+
+    action confirm:
+        require lines.count() > 0, "Order has no lines"
+
+    post to Stock when state is Shipped:
+        for l in lines:
+            add(product=l.product, qty=-l.qty)
+
+
+entity OrderLine:
+    order: Order parent                                 # composition: lives and dies with the order
+    product: Product
+    qty: Qty<pcs> where > 0
+    price: Price<EUR, pcs> default product.price        # snapshot: the list price may change later
+    discount: Percent where 0%..100% default 0%
+
+    amount = (qty * price * (1 - discount)).round()
+
+
+entity Restock:
+    product: Product
+    qty: Qty<pcs> where > 0
+
+    post to Stock:
+        add(product=product, qty=qty)
+
+
+ledger Stock:
+    key product: Product
+    measure qty: Qty<pcs>
+
+    check per (product): g => g.sum(r => r.qty) >= 0, "Not enough stock"
+
+
+test "order: confirm, ship, stock":
+    let anna = Customer(name="Anna Bianchi")
+    let pen = Product(code="PEN", name="Pen", price=1.50 EUR/pcs)
+    Restock(product=pen, qty=10 pcs)
+
+    let o = Order(customer=anna, lines=[OrderLine(product=pen, qty=4 pcs, discount=10%)])
+    expect o.total == 5.40 EUR                          # 4 × 1.50 − 10%
+    o.confirm()
+    expect anna.open_total == 5.40 EUR
+    o.ship()
+    expect pen.stock == 6 pcs
+    expect anna.open_total == 0 EUR
+
+    let big = Order(customer=anna, lines=[OrderLine(product=pen, qty=7 pcs)])
+    big.confirm()
+    expect_error "Not enough stock":
+        big.ship()
+    expect big.state is Confirmed                       # the transaction was rolled back
+
+
+test "the compiler rejects type errors":
+    expect_compile_error "cannot add Money<EUR> and Money<USD>":
+        let x = 10.00 EUR + 5.00 USD
+    expect_compile_error "cannot add Qty<kg> and Qty<pcs>":
+        let y = 2 kg + 3 pcs

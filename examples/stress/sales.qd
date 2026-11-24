@@ -1,0 +1,139 @@
+# The chain the stress test is about, four levels of `parent` lines and references:
+#
+#     Region ← Customer ← Order ← OrderLine ← Shipment
+#
+# with rollups at every level (and rollups of rollups up to the region), checks that read
+# one to four relations away, and a check on an aggregate at every level.
+
+from catalog import Category, Product, Tag
+
+
+entity Region:
+    code: Code unique
+    name: Text
+    manager: User?
+    logistics: User?                                    # who ships to the region
+    team: {User}                                        # many-to-many: who may see its customers
+    active: Bool default true
+    locked: Bool default false                          # books closed: its orders cannot change
+    last_delivery: Date?                                # no deliveries to the region after this date
+    target: Money<EUR> default 0.00 EUR
+    customers: [Customer]
+
+    customer_count = customers.count()
+    active_customers = customers.count(c => c.active)
+    # rollups of rollups: shipments → lines → orders → customers → region
+    revenue: Money<EUR> = customers.sum(c => c.revenue)
+    open_total: Money<EUR> = customers.sum(c => c.open_total)
+    open_orders = customers.sum(c => c.open_orders)
+    best_customer: Money<EUR>? = customers.max(c => c.revenue)
+    to_ship: Qty<pcs> = customers.sum(c => c.to_ship)
+
+    check not active or manager != none, "An active region needs a manager"
+
+
+entity Customer:
+    code: Code unique
+    name: Text
+    region: Region
+    salesperson: User
+    tags: {Tag}                                         # many-to-many: a join table
+    credit_limit: Money<EUR> default 50_000.00 EUR      # hidden from salespeople
+    active: Bool default true
+    orders: [Order]
+
+    order_count = orders.count()
+    open_orders = orders.count(o => o.state is Confirmed)
+    revenue: Money<EUR> = orders.where(o => o.state in {Confirmed, Shipped}).sum(o => o.total)
+    open_total: Money<EUR> = orders.where(o => o.state is Confirmed).sum(o => o.total)
+    avg_order: Money<EUR> = (revenue / order_count).round() if order_count > 0 else 0.00 EUR
+    first_order: Date? = orders.min(o => o.date)
+    last_order: Date? = orders.max(o => o.date)
+    to_ship: Qty<pcs> = orders.where(o => o.state is Confirmed).sum(o => o.to_ship)
+
+    check open_total <= credit_limit, "Credit limit exceeded"                       # an aggregate
+    check region.active or not active, "An active customer in an inactive region"   # 1 relation
+
+
+entity Order:
+    number: Code unique
+    customer: Customer
+    date: Date
+    state: enum(Draft, Confirmed, Shipped, Cancelled) default Draft
+    priority: enum(Low, Normal, High) default Normal
+    lines: [OrderLine]
+
+    total: Money<EUR> = lines.sum(l => l.amount)
+    line_count = lines.count()
+    biggest_line: Money<EUR>? = lines.max(l => l.amount)
+    ordered: Qty<pcs> = lines.sum(l => l.qty)
+    to_ship: Qty<pcs> = lines.sum(l => l.to_ship)
+
+    # a cancelled order keeps its lines as they were
+    frozen when state is Cancelled
+
+    check customer.active or state in {Shipped, Cancelled}, "The customer is not active"       # 1 relation
+    check customer.region.active or state is not Draft, "The region does not take orders"      # 2 relations
+    check state is not Shipped or to_ship == 0, "A shipped order has every line shipped"       # an aggregate
+    check line_count <= 200, "At most 200 lines per order"
+
+    flow state:
+        Draft -> Confirmed                by confirm
+        Confirmed -> Shipped              by ship
+        Draft | Confirmed -> Cancelled    by cancel
+
+    action confirm:
+        require line_count > 0, "The order has no lines"
+
+    action ship:
+        require to_ship == 0, "Some lines are not shipped yet"
+
+
+entity OrderLine:
+    order: Order parent
+    product: Product
+    qty: Qty<pcs> where > 0
+    price: Price<EUR, pcs> default product.price        # snapshot of the list price
+    discount: Percent where 0%..50% default 0%
+    shipments: [Shipment]
+
+    amount: Money<EUR> = (qty * price * (1 - discount)).round()
+    shipped: Qty<pcs> = shipments.sum(s => s.qty)
+    to_ship: Qty<pcs> = qty - shipped if order.state is not Cancelled else 0 pcs
+    shipment_count = shipments.count()
+    last_shipped: Date? = shipments.max(s => s.date)
+
+    check shipped <= qty, "Shipped more than ordered"                                           # an aggregate
+    check product.active or order.state is not Draft, "The product is not sold any more"         # 1 relation
+    check product.category.active or order.state is not Draft, "The category is not sold any more"   # 2 relations
+    check order.customer.region.active or order.state is not Draft, "The region does not take orders"  # 3 relations
+
+
+entity Shipment:
+    line: OrderLine parent
+    qty: Qty<pcs> where > 0
+    date: Date
+    carrier: enum(Road, Rail, Air) default Road
+    tracking: Code?
+
+    # 2, 3 and 4 relations away
+    check date >= line.order.date, "Shipped before it was ordered"
+    check line.order.state is not Draft, "Draft orders are not shipped"
+    check line.order.customer.active, "The customer is not active"
+    check date <= (line.order.customer.region.last_delivery ?? date), "No deliveries to the region after its last delivery date"
+
+
+# the rollups of what was sold, on the catalog
+extend Product:
+    lines: [OrderLine]
+    units_sold: Qty<pcs> = lines.where(l => l.order.state in {Confirmed, Shipped}).sum(l => l.qty)
+    line_count = lines.count()
+
+
+extend Category:
+    units_sold: Qty<pcs> = products.sum(p => p.units_sold)
+
+
+extend Tag:
+    customers: {Customer} via tags                      # the inverse of a many-to-many
+    customer_count = customers.count()

@@ -1,0 +1,149 @@
+# Scenari order-to-cash: vendita, consegna, fattura, incasso, valute, fido, errori di tipo.
+
+from tests.fixtures import italy
+
+
+test "ordine → consegna → fattura → incasso":
+    use italy
+
+    let so = SalesOrder(customer=rossi, lines=[SalesLine(product=widget, qty=3 pcs)])
+    expect so.lines.single().price == 10.00 EUR/pcs           # dal listino base
+    expect so.untaxed == 30.00 EUR
+    expect so.tax == 6.60 EUR
+    expect so.total == 36.60 EUR
+
+    so.confirm()
+    expect so.state is Confirmed
+    let delivery = so.deliveries.single()
+    expect delivery.state is Waiting
+    expect widget.on_hand == 100 pcs                          # la consegna non è ancora evasa
+
+    as anna:
+        for m in delivery.moves:
+            m.reserve()
+        delivery.validate()
+    expect delivery.state is Done
+    expect widget.on_hand == 97 pcs
+    expect widget.stock_value == 582.00 EUR                   # 97 × 6,00
+    expect so.delivery_status is Delivered
+    expect so.invoice_status is ToInvoice                     # confermato (congelato), ma `live`
+
+    let inv = as marco: so.create_invoice()
+    expect so.invoices == [inv]
+    as anna: inv.post()
+    expect inv.number == "FT/2026/00001"
+    expect inv.total == 36.60 EUR
+    expect inv.installments.map(i => i.amount) == [18.30 EUR, 18.30 EUR]      # 30/60: la somma torna
+    expect inv.entries.single().lines.sum(l => l.balance) == 0
+    expect GL.where(g => g.company == acme and g.account == crediti and g.partner == rossi).sum(g => g.amount) == 36.60 EUR
+    expect GL.where(g => g.company == acme and g.account == ricavi).sum(g => g.amount) == -30.00 EUR
+    expect GL.where(g => g.company == acme and g.account == iva_deb).sum(g => g.amount) == -6.60 EUR
+    expect so.invoice_status is Invoiced
+
+    as anna:
+        Payment(direction=Inbound, partner=rossi, journal=bnk, amount=36.60 EUR,
+                allocations=[PaymentAllocation(invoice=inv, amount=36.60 EUR)]).post()
+    expect inv.payment_state is Paid
+    expect GL.where(g => g.company == acme and g.account == crediti and g.partner == rossi).sum(g => g.amount) == 0
+
+
+test "IVA per aliquota sul totale, poi ridistribuita sulle righe senza perdere centesimi":
+    use italy
+    let bullone = Product(code="B-01", name="Bullone", category=ferramenta, hs_code="73181590", uom=pcs,
+                          list_price=0.10 EUR/pcs, sale_tax=iva22v)
+    let inv = Invoice(kind=CustomerInvoice, partner=rossi, journal=ven, lines=[
+        InvoiceLine(product=bullone, qty=1 pcs, price=0.10 EUR/pcs, tax=iva22v),
+        InvoiceLine(product=bullone, qty=1 pcs, price=0.10 EUR/pcs, tax=iva22v),
+        InvoiceLine(product=bullone, qty=1 pcs, price=0.10 EUR/pcs, tax=iva22v),
+    ])
+    # riga per riga: 3 × round(0,022) = 0,06 €   ·   sul totale: round(0,066) = 0,07 €
+    expect inv.tax == 0.07 EUR
+    # 0,07 ripartito su tre pesi uguali: 0,0233… ciascuno → il centesimo in più va alla prima riga
+    expect inv.lines.map(l => l.tax_share) == [0.03 EUR, 0.02 EUR, 0.02 EUR]
+    expect inv.lines.sum(l => l.tax_share) == inv.tax
+
+
+test "fattura in dollari: differenza cambio realizzata all'incasso":
+    use italy
+    let inv = Invoice(kind=CustomerInvoice, partner=acme_inc, journal=ven, date=2026-11-02,
+                      lines=[InvoiceLine(description="Consulenza", qty=1 pcs,
+                                         price=1_000.00 USD/pcs, tax=export)])
+    as anna: inv.post()
+    expect inv.rate == 0.92
+    expect inv.total_company == 920.00 EUR
+
+    clock 2026-11-20 10:00
+    let pay = as anna: Payment(direction=Inbound, partner=acme_inc, journal=bnk_usd, amount=1_000.00 USD,
+                               allocations=[PaymentAllocation(invoice=inv, amount=1_000.00 USD)])
+    as anna: pay.post()
+    expect pay.currency == USD                                 # dalla banca in dollari
+    expect pay.amount_company == 950.00 EUR
+    expect pay.allocations.single().fx_diff == 30.00 EUR
+    expect pay.entries.single().lines.sum(l => l.balance) == 0
+    expect GL.where(g => g.company == acme and g.account == utili_c).sum(g => g.amount) == -30.00 EUR     # utile in avere
+    expect GL.where(g => g.company == acme and g.account == crediti and g.partner == acme_inc).sum(g => g.amount) == 0
+    expect inv.payment_state is Paid
+
+
+test "il fido blocca la conferma e la transazione si annulla":
+    use italy
+    let so = SalesOrder(customer=rossi, lines=[SalesLine(product=widget, qty=450 pcs)])
+    expect so.total == 5_490.00 EUR
+    expect_error "Fido superato":
+        so.confirm()
+    expect so.state is Draft
+    expect so.deliveries.count() == 0                         # anche la reazione è stata annullata
+
+
+test "una fattura registrata non si modifica: si storna":
+    use italy
+    let inv = Invoice(kind=CustomerInvoice, partner=rossi, journal=ven,
+                      lines=[InvoiceLine(product=widget, qty=1 pcs, price=10.00 EUR/pcs, tax=iva22v)])
+    as anna: inv.post()
+    expect_error "is frozen":
+        inv.lines.single().price = 9.00 EUR/pcs
+    let nc = as anna: inv.credit_note(reason="Reso")
+    as anna: nc.post()
+    expect GL.where(g => g.company == acme and g.account == crediti and g.partner == rossi).sum(g => g.amount) == 0
+
+
+test "una fattura registrata non cambia se cambia l'aliquota":
+    use italy
+    let inv = Invoice(kind=CustomerInvoice, partner=rossi, journal=ven,
+                      lines=[InvoiceLine(product=widget, qty=1 pcs, price=10.00 EUR/pcs, tax=iva22v)])
+    as anna: inv.post()
+    iva22v.rate = 24%
+    expect inv.tax == 2.20 EUR                                # fotografia alla registrazione
+    let draft = Invoice(kind=CustomerInvoice, partner=rossi, journal=ven,
+                        lines=[InvoiceLine(product=widget, qty=1 pcs, price=10.00 EUR/pcs, tax=iva22v)])
+    expect draft.tax == 2.40 EUR                              # le bozze seguono i dati
+
+
+test "il compilatore rifiuta gli errori di tipo e di logica":
+    expect_compile_error "cannot add Money<EUR> and Money<USD>":
+        let x = 10.00 EUR + 5.00 USD
+    expect_compile_error "cannot add Qty<kg> and Qty<pcs>":
+        let y = 2 kg + 3 pcs
+    expect_compile_error "cannot multiply Qty<kg> by Price<EUR, pcs>":
+        let z = 2 kg * 10.00 EUR/pcs
+    expect_compile_error "must be rounded":
+        extend SalesLine:
+            net_price: Price<order.currency, uom> default price * (1 - discount)
+    expect_compile_error "is optional":
+        fn limit(p: Partner) -> Money?:
+            return p.as_customer.credit_limit
+    expect_compile_error "now() is not allowed in a formula":
+        extend StockMove:
+            age = now() - date
+    expect_compile_error "missing Cancelled":
+        extend SalesOrder:
+            label: Text = match state:
+                Draft     => "Bozza"
+                Sent      => "Inviata"
+                Confirmed => "Confermata"
+                Locked    => "Chiusa"
+    expect_compile_error "formula cycle":
+        patch StockMove:                            # `patch`: solo nei test, sostituisce una definizione
+            unit_cost: Price<company.currency, product.uom> = product.cost[company].round()
+    expect_compile_error "different currencies":
+        let all = SalesLine.all().sum(l => l.subtotal)

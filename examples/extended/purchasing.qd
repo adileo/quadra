@@ -1,0 +1,135 @@
+# Ordini d'acquisto con approvazione, ricevimenti, costi accessori (landed cost).
+
+from core.base import Document, SendEmail
+from partners import Partner, PaymentTerm
+from products import Product, SupplierInfo
+from accounting import Tax, InvoiceableLine
+from inventory import Warehouse, Transfer, StockMove, Stock, virtual_location
+
+
+entity PurchaseOrder is Document:
+    number default next_number(company, "PO")
+    vendor: Partner where p => p.as_vendor != none
+    currency: Currency default vendor.currency
+    payment_term: PaymentTerm? default vendor.as_vendor?.payment_term
+    warehouse: Warehouse default Warehouse.first(w => w.company == company)
+    buyer: User default current.user
+    lines: [PurchaseLine]
+    transfers: [Transfer] via origin
+    receipts = transfers.where(t => t.kind is Receipt)
+
+    state: enum(Draft, Sent, ToApprove, Confirmed, Cancelled) default Draft
+    approved_by: User? required when state is Confirmed and needs_approval
+
+    untaxed = lines.sum(l => l.subtotal)
+    tax = lines.sum(l => l.tax_amount)
+    total = untaxed + tax
+    total_company: Money<company.currency> = convert(total, to=company.currency, on=date).round()
+    needs_approval = company.po_approval_limit != none and total_company > company.po_approval_limit
+
+    # separazione dei compiti: usa il campo implicito created_by
+    check approved_by == none or approved_by != created_by, "Chi crea l'ordine non può approvarlo"
+    frozen when state in {Confirmed, Cancelled} except notes live receipts
+
+    flow state:
+        Draft -> Sent                                       by send
+        Draft | Sent -> ToApprove                           by confirm  when needs_approval
+        Draft | Sent -> Confirmed                           by confirm  when not needs_approval
+        ToApprove -> Confirmed                              by approve
+        ToApprove -> Draft                                  by reject
+        Draft | Sent | ToApprove | Confirmed -> Cancelled   by cancel   unless receipts.any(t => t.state is Done)
+
+    action send:
+        emit SendEmail(to=vendor.email ?? fail "Fornitore senza email", template="rfq", document=self)
+
+    action confirm:
+        require lines.count() > 0, "Ordine senza righe"
+
+    action approve:
+        approved_by = current.user
+
+    action reject(reason: Text):
+        notes = reason
+
+    action cancel:
+        for t in receipts.where(t => t.state is not Done):
+            t.cancel()
+
+
+entity PurchaseLine is InvoiceableLine:
+    order: PurchaseOrder parent
+    product: Product where p => p.purchase_ok and p.active
+    qty: Qty<uom> where > 0
+    uom: Uom where u => u.category == product.uom.category default product.purchase_uom
+    supplier_info: SupplierInfo? default product.suppliers
+        .where(s => s.vendor == order.vendor and (s.valid?.contains(order.date) ?? true)
+                    and s.min_qty <= qty.to(product.purchase_uom))
+        .sort_by(s => -s.min_qty)
+        .first()
+    price: Price<order.currency, uom> default
+        convert(supplier_info?.price ?? product.standard_cost[order.company], to=order.currency, on=order.date)
+            .to(uom).round()
+    tax: Tax where t => t.scope is Purchase default product.purchase_tax ?? fail f"{product.code}: manca l'IVA d'acquisto"
+    expected: Date default order.date + (supplier_info?.lead_time ?? 7 days)
+
+    subtotal = (qty * price).round()
+    tax_amount = (subtotal * tax.rate).round()
+
+    # le righe sono congelate con l'ordine; i ricevimenti arrivano dopo
+    live received, to_receive
+    moves: [StockMove] via purchase_line
+    received = moves.where(m => m.state is Done).sum(m => m.qty.to(uom))
+    to_receive = qty - received
+
+    warn supplier_info != none or product.suppliers.count() == 0,
+        "Quantità sotto il minimo d'ordine di tutti i listini del fornitore"
+
+
+extend StockMove:
+    purchase_line: PurchaseLine?
+
+
+on PurchaseOrder enters Confirmed as po:
+    let goods = po.lines.where(l => l.product.type is not Service)
+    if goods.any():
+        Transfer(kind=Receipt, warehouse=po.warehouse, partner=po.vendor, origin=po,
+            moves=goods.map(l => StockMove(
+                product=l.product, qty=l.qty, uom=l.uom,
+                source=virtual_location(Supplier), dest=po.warehouse.stock,
+                origin=po, purchase_line=l,
+                # valore di carico = prezzo d'acquisto, convertito nella valuta della società
+                unit_cost=convert(l.price.to(l.product.uom), to=po.company.currency, on=po.date).round())))
+
+
+# Costi accessori (trasporto, dazi) ripartiti sui ricevimenti.
+# È il caso tipico "rollup → ridistribuzione": un totale si spalma sulle righe
+# e la somma delle quote deve tornare al centesimo.
+entity LandedCost is Document:
+    number default next_number(company, "LC")
+    receipts: {Transfer} where t => t.kind is Receipt and t.state is Done     # molti-a-molti
+    description: Text
+    amount: Money<company.currency> where > 0
+    split_by: enum(ByValue, ByQty, ByWeight) default ByValue
+    state: enum(Draft, Posted) default Draft
+
+    # salto: LandedCost → {Transfer} → [StockMove]
+    moves = receipts.flat_map(t => t.moves).where(m => m.state is Done)
+
+    shares = match split_by:
+        ByValue  => moves.allocate(amount, by=m => m.value.raw)
+        # pezzi e chili si sommano solo togliendo l'unità: .raw rende la scelta esplicita
+        ByQty    => moves.allocate(amount, by=m => m.qty_base.raw)
+        ByWeight => moves.allocate(amount,
+                        by=m => (m.product.weight ?? fail f"{m.product.code}: peso mancante").raw * m.qty_base.raw)
+
+    check receipts.count() > 0, "Nessun ricevimento selezionato"
+    frozen when state is Posted
+
+    flow state:
+        Draft -> Posted by post
+
+    # La quota entra nel valore di magazzino (qty = 0, solo valore).
+    post to Stock when state is Posted:
+        for a in shares:
+            add(company=company, product=a.item.product, location=a.item.dest, lot=a.item.lot,
+                qty=0, value=a.share)

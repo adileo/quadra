@@ -1,0 +1,114 @@
+app "Sales cockpit":
+    description: "Filters (region, period, state), KPIs, monthly revenue, top customers, the order board with actions, a new-order form and a region × state pivot."
+    share: everyone use
+
+    filter region "Region": multi Order.customer.region
+    filter period "Period": date_range Order.date
+    filter state "State": multi Order.state
+
+    page cockpit "Cockpit":
+        row height 2:
+            markdown intro width 24:
+                """
+                ## Sales cockpit
+                Revenue counts confirmed and shipped orders. Every figure follows the filters, as you are allowed to see it ({= Order.count() } orders).
+                """
+                apply Order: period -> date, region -> customer.region, state -> state
+
+        row height 2:
+            filters filters width 24:
+                show: region, period, state
+                layout: row
+
+        row height 3:
+            kpi k_revenue "Revenue" width 8:
+                source: Order.where(o => o.state in {Confirmed, Shipped}).sum(o => o.total)
+                label: "Revenue (confirmed + shipped)"
+                format: money
+                decimals: 0
+                compare: previous @period
+                sparkline: Order.where(o => o.state in {Confirmed, Shipped})
+                    .group_by(o => o.date.start_of_month())
+                    .map(g => (month: g.key, revenue: g.items.sum(o => o.total)))
+            kpi k_orders "Orders" width 6:
+                source: Order.count()
+                label: "Orders"
+                format: number
+                decimals: 0
+                compare: previous @period
+            kpi k_open "Open" width 5:
+                source: Order.count(o => o.state is Confirmed)
+                label: "Confirmed, to ship"
+                format: number
+                decimals: 0
+                higher_is_better: false
+            kpi k_avg "Average order" width 5:
+                source: (Order.where(o => o.state in {Confirmed, Shipped}).sum(o => o.total) / Order.where(o => o.state in {Confirmed, Shipped}).count()).round() if Order.where(o => o.state in {Confirmed, Shipped}).count() > 0 else 0.00 EUR
+                label: "Average order"
+                format: money
+                decimals: 0
+                compare: target 2500.00 EUR
+
+        row height 7:
+            chart c_monthly "Monthly revenue" width 14:
+                kind: area
+                source: Order.where(o => o.state in {Confirmed, Shipped})
+                    .group_by(o => o.date.start_of_month())
+                    .map(g => (month: g.key, revenue: g.items.sum(o => o.total)))
+                stacked: false
+                max_points: 500
+                y_title: "EUR"
+                format: "currency"
+            chart c_top "Top 10 customers" width 10:
+                kind: bar
+                source: Order.where(o => o.state in {Confirmed, Shipped})
+                    .group_by(o => o.customer)
+                    .sort_by(g => -g.items.sum(o => o.total))
+                    .first(10)
+                    .map(g => (customer: g.key, revenue: g.items.sum(o => o.total)))
+                horizontal: true
+                legend: false
+                format: "currency"
+
+        row height 9:
+            view v_board "Orders by state (click a card to select it)" width 16:
+                of: Order
+                type: kanban
+                select: order
+                page_size: 20
+                edit: move
+                fields: number, customer, date, total, priority
+                board: true
+                by: state
+                cards: customer, total, date
+                sum: total
+            column width 8:
+                button b_confirm height 2:
+                    label: "Confirm the selected order"
+                    run: @order.confirm()
+                    confirm: "Confirm this order? Its customer is told."
+                button b_cancel height 2:
+                    label: "Cancel the selected order"
+                    run: @order.cancel()
+                    confirm: "Cancel this order? Its lines are kept as they are."
+                    style: danger
+                form f_order "New order" height 5:
+                    entity: Order
+                    fields: number, customer, date, priority
+                    submit_label: "Create the order"
+
+        row height 8:
+            sheet s_pivot "Region × state (group_by)" width 24:
+                active: s1
+                tab s1 "Pivot" free 200 x 10:
+                    A1 bold: "Region"
+                    B1 bold: "State"
+                    C1 bold: "Orders"
+                    D1 bold: "Total"
+                    F1 bold: "Orders in the filters"
+                    G1: = Order.count()
+                    A2: = Order.group_by(o => o.customer.region, o => o.state).map(g => (region: g.key, state: g.key2, orders: g.items.count(), total: g.items.sum(o => o.total)))
+                    F2 bold: "Regions chosen"
+                    G2: = @region.count()
+                    width A 160, B 110, F 170
+                apply Order: period -> date, region -> customer.region, state -> state

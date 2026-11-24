@@ -1,0 +1,17 @@
+# Saved views of orders, shared with the roles that work on them.
+view "To ship" of Order:
+    description: "Confirmed orders with something left to ship."
+    share: role Logistics use, role Admin change
+    fields: number, customer, date, total, to_ship
+    where: state is Confirmed and to_ship > 0 pcs
+    sort: date, number
+
+view "Pipeline" of Order:
+    description: "Orders by state."
+    share: role Salesperson use
+    type: kanban
+    fields: number, customer, total
+    board: true
+    by: state
+    cards: customer, total
+    sum: total

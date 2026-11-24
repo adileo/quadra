@@ -1,0 +1,13 @@
+# Build output
+/target
+/editors/vscode/*.vsix
+
+# Dependencies
+node_modules/
+
+# Local data
+/.pgdata
+.quadra/
+
+# OS
+.DS_Store

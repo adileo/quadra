@@ -1,0 +1,123 @@
+# Offerte e ordini di vendita, consegne, analisi.
+# Fatturazione e fido stanno in invoicing.qd, che estende queste entità.
+
+from core.base import Address, Document, SendEmail
+from partners import Partner, PaymentTerm
+from products import Product, Pricelist, price_for
+from accounting import Tax, InvoiceableLine
+from inventory import Warehouse, Transfer, StockMove, virtual_location
+
+
+entity SalesOrder is Document:
+    number default next_number(company, "SO")
+    customer: Partner where p => p.as_customer != none and not p.as_customer.blocked
+    invoice_address: Address default customer.address
+    delivery_address: Address default customer.delivery_addresses.first() ?? customer.address
+    pricelist: Pricelist? default customer.as_customer?.pricelist
+    currency: Currency default pricelist?.currency ?? customer.currency
+    payment_term: PaymentTerm? default customer.as_customer?.payment_term
+    warehouse: Warehouse default Warehouse.first(w => w.company == company)
+    salesperson: User default customer.as_customer?.salesperson ?? current.user
+    valid_until: Date default date + 30 days
+    lines: [SalesLine]
+    transfers: [Transfer] via origin
+    deliveries = transfers.where(t => t.kind is Delivery)
+
+    state: enum(Draft, Sent, Confirmed, Locked, Cancelled) default Draft
+    confirmed_at: DateTime? required when state in {Confirmed, Locked}
+
+    untaxed = lines.sum(l => l.subtotal)
+    tax = lines.sum(l => l.tax_amount)
+    total = untaxed + tax
+    total_company: Money<company.currency> = convert(total, to=company.currency, on=date).round()
+    margin = lines.sum(l => l.margin)
+
+    delivery_status: enum(NothingToDeliver, Delivered, Partial, Pending) = when:
+        lines.all(l => l.product.type is Service)   => NothingToDeliver
+        lines.all(l => l.to_deliver <= 0)           => Delivered
+        lines.any(l => l.delivered > 0)             => Partial
+        else                                        => Pending
+
+    check valid_until >= date, "La scadenza dell'offerta precede la data"
+    frozen when state in {Confirmed, Locked, Cancelled} except notes live deliveries, delivery_status
+
+    flow state:
+        Draft -> Sent                           by send
+        Draft | Sent -> Confirmed               by confirm
+        Confirmed -> Locked                     by lock
+        Draft | Sent | Confirmed -> Cancelled   by cancel  unless deliveries.any(t => t.state is Done)
+
+    action send:
+        require lines.count() > 0, "Offerta senza righe"
+        emit SendEmail(to=customer.email ?? fail "Cliente senza email", template="quotation", document=self)
+
+    action confirm:
+        require lines.count() > 0, "Ordine senza righe"
+        confirmed_at = now()
+
+    action cancel:
+        for t in deliveries.where(t => t.state is not Done):
+            t.cancel()
+
+
+entity SalesLine is InvoiceableLine:
+    order: SalesOrder parent
+    product: Product where p => p.sale_ok and p.active
+    description: Text default product.name
+    qty: Qty<uom> where > 0
+    uom: Uom where u => u.category == product.uom.category default product.uom
+    price: Price<order.currency, uom> default
+        convert(price_for(product, order.pricelist, qty, order.date), to=order.currency, on=order.date)
+            .to(uom).round()
+    discount: Percent where 0%..100% default 0%
+    tax: Tax where t => t.scope is Sale default product.sale_tax ?? fail f"{product.code}: manca l'IVA di vendita"
+
+    subtotal = (qty * price * (1 - discount)).round()
+    tax_amount = (subtotal * tax.rate).round()
+    margin = subtotal - convert(qty.to(product.uom) * product.cost[order.company], to=order.currency, on=order.date).round()
+
+    # le righe sono congelate con l'ordine; le consegne arrivano dopo: queste seguono i dati
+    live delivered, to_deliver
+    moves: [StockMove] via sale_line
+    delivered = moves.where(m => m.state is Done).sum(m => m.qty.to(uom))
+    to_deliver = qty - delivered if product.type is not Service else 0
+
+
+extend StockMove:
+    sale_line: SalesLine?
+
+
+extend Partner:
+    sales_orders: [SalesOrder] via customer
+
+
+# Alla conferma nasce la consegna, con un movimento per ogni riga di merce.
+on SalesOrder enters Confirmed as o:
+    let goods = o.lines.where(l => l.product.type is not Service)
+    if goods.any():
+        Transfer(kind=Delivery, warehouse=o.warehouse, partner=o.customer, origin=o,
+            moves=goods.map(l => StockMove(
+                product=l.product, qty=l.qty, uom=l.uom,
+                source=o.warehouse.stock, dest=virtual_location(Customer),
+                origin=o, sale_line=l)))
+
+
+view SalesOrderForm(o: SalesOrder):
+    header: o.number, o.customer, o.date, o.valid_until, o.pricelist, o.currency, o.state
+    table o.lines as l: l.product, l.description, l.qty, l.uom, l.price, l.discount, l.tax, l.subtotal
+    footer: o.untaxed, o.tax, o.total
+    tab "Consegne": o.deliveries
+    tab "Altro": o.salesperson, o.payment_term, o.delivery_address, o.notes
+    actions: o.send, o.confirm, o.lock, o.cancel
+
+
+report SalesAnalysis:
+    # Il filtro sulla società corrente rende unica la valuta di conto: solo così la somma compila.
+    from SalesLine as l where l.order.state in {Confirmed, Locked} and l.order.company == current.company
+    rows: l.order.customer, l.product.category
+    columns: l.order.date.month
+    values:
+        # sum(l.subtotal) NON compilerebbe: le righe hanno valute diverse (Money<l.order.currency>)
+        revenue = sum(convert(l.subtotal, to=current.company.currency, on=l.order.date).round())
+        margin = sum(convert(l.margin, to=current.company.currency, on=l.order.date).round())
+        orders = count_distinct(l.order)

@@ -1,0 +1,86 @@
+{
+  "name": "quadra",
+  "displayName": "Quadra",
+  "description": "Quadra language support: syntax highlighting, diagnostics, go to definition, hover, references, rename, completion, outline; interface files (.qdi) checked with the code.",
+  "version": "0.4.0",
+  "publisher": "quadra-lang",
+  "private": true,
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:quadra",
+    "onLanguage:qdi"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "quadra",
+        "aliases": [
+          "Quadra",
+          "quadra"
+        ],
+        "extensions": [
+          ".qd"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "qdi",
+        "aliases": [
+          "Quadra interface",
+          "qdi"
+        ],
+        "extensions": [
+          ".qdi"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "quadra",
+        "scopeName": "source.quadra",
+        "path": "./syntaxes/quadra.tmLanguage.json"
+      },
+      {
+        "language": "qdi",
+        "scopeName": "source.qdi",
+        "path": "./syntaxes/qdi.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "quadra",
+        "scopes": {
+          "typeParameter": [
+            "support.constant.unit.quadra"
+          ],
+          "property.readonly": [
+            "variable.other.property.formula.quadra"
+          ],
+          "enumMember": [
+            "constant.other.variant.quadra"
+          ]
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Quadra",
+      "properties": {
+        "quadra.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `quadra` binary. Empty: use target/release or target/debug of the open workspace, then `quadra` on PATH."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

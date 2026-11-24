@@ -1,0 +1,1095 @@
+//! The engine: one thread per tenant. It owns the checked model, the record cache and a
+//! database connection; the HTTP handlers send it jobs and await the reply. Commits are
+//! serialized here, and by the database lock across processes.
+
+use quadra_analysis::Checked;
+use quadra_api::json::{cell, describe};
+use quadra_ir::{EntityKind, Model};
+use quadra_runtime::{Flow, Interp, Store, Units, V};
+use quadra_sema::Project;
+use quadra_store::auth::{self, Principal};
+use quadra_store::conn::{Idle, Pooled};
+use quadra_store::source::{head, load_renames, renamed, Cache, DbSource, Renames};
+use quadra_store::{materialized_formulas, Conn, Database, Sink};
+use serde_json::{json, Value as J};
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::mpsc;
+use tokio::sync::oneshot;
+
+mod apps;
+mod complete;
+mod dev;
+mod ide;
+mod interfaces;
+mod local;
+mod params;
+mod schema;
+mod sheets;
+mod views;
+mod xlsx;
+
+pub use apps::{app_params, bind_for, open_requests, unhex, AppRequest};
+pub use local::Local;
+
+#[derive(Clone)]
+pub struct Config {
+    pub root: PathBuf,
+    pub url: String,
+    pub port: u16,
+    /// `POST /v1/auth/dev-login` with just a login: for local development only
+    pub dev_login: bool,
+    pub secure_cookies: bool,
+    pub cache_mb: usize,
+    /// load the records of the last N days into the cache at start
+    pub prewarm_days: Option<i64>,
+    /// the built web client, served at `/`
+    pub web: Option<PathBuf>,
+    /// seconds between sweeps of time-driven rules (0 = never)
+    pub sweep_every: u64,
+    /// logins allowed to edit the code from the browser (`*`: everyone)
+    pub editors: Vec<String>,
+    /// `quadra dev`: files changed on disk are checked and applied at once
+    pub watch: bool,
+    /// how long a job may run and how much it may read
+    pub limits: Limits,
+    /// how many engines serve the project at once
+    pub engines: Engines,
+}
+
+/// The engines of a project. One engine serves one request at a time; more engines serve
+/// more at once. Each has its own connection and its own cache of records (`cache_mb` each).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Engines {
+    /// engines that only read: grids, records, searches, reports, the formulas of apps. They
+    /// see every commit made before the request reached them.
+    pub readers: usize,
+    /// engines that write. On SQLite always one (the file takes one writer at a time); on
+    /// PostgreSQL several prepare their transactions at once, and only the final write
+    /// waits for the others.
+    pub writers: usize,
+}
+
+impl Default for Engines {
+    /// Two readers and a writer.
+    fn default() -> Self {
+        Engines { readers: 2, writers: 1 }
+    }
+}
+
+impl Engines {
+    /// A single engine: it reads and writes.
+    pub fn one() -> Engines {
+        Engines { readers: 0, writers: 1 }
+    }
+}
+
+/// The limits of the engine's jobs (see `quadra_runtime::limits`): a request that loops or
+/// reads too much stops with an error, and the next one is served as usual.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// a request: reads, writes, actions, the formulas of apps (`None`: no limit). On
+    /// PostgreSQL it is also the time limit of each statement.
+    pub job: Option<std::time::Duration>,
+    /// sweeps of time-driven rules and the editor's long operations (tests, commits, schema
+    /// changes)
+    pub background: Option<std::time::Duration>,
+    /// rows a single statement may return (`None`: no limit)
+    pub max_rows: Option<usize>,
+    /// elements a list or a set may have (`None`: no limit)
+    pub max_list: Option<usize>,
+    /// requests waiting for the engine: past it a request is refused at once (503 with
+    /// `Retry-After`) rather than queued behind a backlog it would time out in (`None`: no
+    /// limit)
+    pub max_queue: Option<usize>,
+    /// SQLite: the size the database file may grow to; past it a write fails and the
+    /// database stays as it was (`None`: no limit). PostgreSQL: not enforced here.
+    pub max_bytes: Option<u64>,
+}
+
+impl Limits {
+    /// No limits: the engine runs in the process of a command of one's own.
+    pub fn none() -> Limits {
+        Limits { job: None, background: None, max_rows: None, max_list: None, max_queue: None, max_bytes: None }
+    }
+}
+
+impl Default for Limits {
+    /// For a server of one's own: two minutes per request, an hour for the long operations,
+    /// no caps on rows and lists, at most 1000 requests waiting, no limit on the size.
+    fn default() -> Self {
+        Limits { job: Some(std::time::Duration::from_secs(120)), background: Some(std::time::Duration::from_secs(3600)), max_rows: None, max_list: None, max_queue: Some(1000), max_bytes: None }
+    }
+}
+
+pub struct Reply {
+    pub status: u16,
+    pub body: J,
+    /// a new session secret to set as cookie
+    pub session: Option<String>,
+}
+
+fn reply(status: u16, body: J) -> Reply {
+    Reply { status, body, session: None }
+}
+
+fn error(status: u16, msg: impl Into<String>) -> Reply {
+    reply(status, json!({ "error": msg.into() }))
+}
+
+pub enum Req {
+    Me,
+    Model,
+    Query(J),
+    Record {
+        entity: String,
+        id: u64,
+        base: Option<u64>,
+    },
+    History {
+        entity: String,
+        id: u64,
+        limit: Option<usize>,
+        before: Option<u64>,
+    },
+    Search {
+        entity: String,
+        q: String,
+        limit: usize,
+        after: Option<String>,
+    },
+    Tx {
+        body: J,
+        key: String,
+    },
+    DevFiles,
+    DevRead {
+        path: String,
+    },
+    DevSave {
+        path: String,
+        text: String,
+    },
+    DevDelete {
+        path: String,
+    },
+    DevCheck {
+        buffers: J,
+    },
+    DevTest {
+        buffers: J,
+    },
+    DevStatus,
+    DevDiff,
+    DevCommit {
+        message: String,
+    },
+    DevIde {
+        body: J,
+    },
+    DevRename {
+        from: String,
+        to: String,
+    },
+    DevMkdir {
+        path: String,
+    },
+    DevRmdir {
+        path: String,
+    },
+    DevSchema {
+        body: J,
+    },
+    DevLive,
+    /// `/v1/views…`, `/v1/teams…`, `/v1/directory` (engine/views.rs)
+    Views {
+        method: String,
+        path: String,
+        query: HashMap<String, String>,
+        body: J,
+    },
+    /// a request that fails with an internal error (tests of the recovery)
+    #[cfg(test)]
+    Panic,
+}
+
+impl Job {
+    /// Only reads the database: any engine of the tenant can do it. (A misrouted write would
+    /// still be correct, the database serializing commits, only slower.)
+    pub(crate) fn reads(&self) -> bool {
+        match self {
+            Job::Auth { .. } | Job::Commits { .. } => true,
+            Job::Call { req, .. } => req.reads(),
+            _ => false,
+        }
+    }
+}
+
+impl Req {
+    fn reads(&self) -> bool {
+        match self {
+            Req::Me | Req::Model | Req::Query(_) | Req::Record { .. } | Req::History { .. } | Req::Search { .. } => true,
+            // formulas evaluated as the caller and completions are reads sent as `POST`
+            Req::Views { method, path, .. } => method == "GET" || path == "/v1/eval" || path == "/v1/complete",
+            // the editor keeps its state on the first engine
+            _ => false,
+        }
+    }
+
+    /// The editor's operations that may take long: they get the background limit.
+    fn is_long(&self) -> bool {
+        matches!(self, Req::DevTest { .. } | Req::DevCommit { .. } | Req::DevSchema { .. })
+    }
+}
+
+pub enum Job {
+    Auth {
+        secret: String,
+        reply: oneshot::Sender<Option<Principal>>,
+    },
+    DevLogin {
+        login: String,
+        reply: oneshot::Sender<Reply>,
+    },
+    Logout {
+        secret: String,
+    },
+    Call {
+        who: Principal,
+        req: Req,
+        reply: oneshot::Sender<Reply>,
+    },
+    Commits {
+        since: u64,
+        reply: oneshot::Sender<(u64, Vec<J>)>,
+    },
+    /// a pass of the rules that read the clock; the answer (if asked): the transaction written
+    Sweep {
+        reply: Option<oneshot::Sender<Result<Option<u64>, String>>>,
+    },
+    /// `quadra dev`: the files changed; the event to broadcast, if any
+    DevReload {
+        reply: oneshot::Sender<Option<J>>,
+    },
+    /// `quadra dev`: the data changed while the saved code did not fit it: try it again
+    DevRetry {
+        reply: oneshot::Sender<Option<J>>,
+    },
+    /// the host stops the tenant: the database is closed when the answer comes
+    Stop {
+        reply: oneshot::Sender<()>,
+    },
+}
+
+fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic".into())
+}
+
+/// The stack of an engine's thread. A user's function may call itself up to the
+/// interpreter's limit (200 calls deep), and every call is several frames of the
+/// interpreter: a stack overflow cannot be caught, and would end the whole process. Only
+/// the pages actually used take memory.
+pub const ENGINE_STACK: usize = 256 << 20;
+
+pub fn now() -> chrono::NaiveDateTime {
+    // an instant, in UTC (docs: a DateTime is an instant; the project's zone reads it)
+    let t = chrono::Utc::now().naive_utc();
+    t - chrono::Duration::nanoseconds(t.and_utc().timestamp_subsec_nanos() as i64)
+}
+
+pub struct Engine {
+    root: PathBuf,
+    files: Vec<(PathBuf, String)>,
+    checked: Rc<Checked>,
+    url: String,
+    schema: Rc<quadra_store::schema::Schema>,
+    cache: Rc<RefCell<Cache>>,
+    conn: Conn,
+    /// idle connections reused by the requests
+    pool: Idle,
+    /// the renames of fields (they change only with a migration)
+    renames: Option<Renames>,
+    /// units, currencies and the company, as of a transaction: read again only when one of
+    /// those records is written
+    units: Option<(Units, Option<u64>, u64)>,
+    overlays: HashMap<String, Rc<Checked>>,
+    overlay_order: VecDeque<String>,
+    dev_login: bool,
+    /// source file → module name (`sales`, `core/base`; `std` for the standard library)
+    modules: HashMap<quadra_sema::FileId, String>,
+    editors: Vec<String>,
+    /// the analysed working copy for editor features, and what it was computed from
+    ide_cache: Option<(String, Rc<ide::IdeState>)>,
+    /// the last analysis with a model: types while the code is being typed
+    ide_types: Option<Rc<ide::IdeState>>,
+    /// bumped when files of the working copy change
+    dev_generation: u64,
+    /// `quadra dev`: watching the files, the files last looked at, what is wrong with them
+    watch: bool,
+    seen: Vec<(PathBuf, String)>,
+    problems: Option<J>,
+    /// checked workbooks and the values of formulas of apps (engine/sheets.rs)
+    sheets: sheets::SheetState,
+    /// checked custom forms (engine/interfaces.rs), by their generated source
+    form_checks: HashMap<String, (Option<Rc<Checked>>, Vec<String>)>,
+    /// `quadra dev`: the interface files last looked at (`None`: look again)
+    seen_interfaces: Option<Vec<(PathBuf, String)>>,
+    limits: Limits,
+    cache_mb: usize,
+    /// the request being served only reads: its interpreters read one moment of the database
+    snapshot: bool,
+}
+
+type Fail = (u16, String);
+
+/// The interface files of a project, as `quadra dev` compares them.
+fn interface_texts(project: &Project) -> Vec<(PathBuf, String)> {
+    project.interface_files().map(|f| (f.path.clone(), f.text.clone())).collect()
+}
+
+impl Engine {
+    /// The project's first engine: it brings the database up to date with the project
+    /// (indexes, the apps of interface files, saved views checked again), then serves.
+    pub fn new(cfg: &Config) -> Result<Engine, String> {
+        Engine::open(cfg, true)
+    }
+
+    /// One more engine of a project whose first engine is running: it serves at once.
+    pub fn follower(cfg: &Config) -> Result<Engine, String> {
+        Engine::open(cfg, false)
+    }
+
+    fn open(cfg: &Config, first: bool) -> Result<Engine, String> {
+        let project = Project::load(&cfg.root).map_err(|e| format!("cannot read the project: {e}"))?;
+        let files: Vec<(PathBuf, String)> = project.user_files().map(|f| (f.path.clone(), f.text.clone())).collect();
+        let modules = project.files().map(|f| (f.id, if f.kind == quadra_sema::FileKind::Std { "std".to_string() } else { f.module.clone() })).collect();
+        let checked = quadra_analysis::check(&project);
+        let Some(model) = &checked.model else {
+            return Err("the project has errors: run `quadra check`".into());
+        };
+        // the interface files are part of a version: one that does not check is not served
+        let interface_errors = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error && project.file(d.file).kind == quadra_sema::FileKind::Interface).count();
+        if interface_errors > 0 {
+            return Err(format!("the interface files have {interface_errors} error(s): run `quadra check`"));
+        }
+        let mut db = Database::open(&cfg.url, model, &checked.report)?;
+        let status = db.status()?;
+        if !status.initialized {
+            return Err("the database is not initialized: run `quadra db init`".into());
+        }
+        if !status.schema_current {
+            return Err("the schema changed: run `quadra db migrate`".into());
+        }
+        let schema = db.schema.clone();
+        // indexes a crash or an older version left missing (PostgreSQL: built concurrently)
+        if first {
+            if let Err(e) = db.ensure_indexes(None) {
+                eprintln!("indexes: {e}");
+            }
+        }
+        drop(db);
+        // PostgreSQL: the connections of this engine stop a statement at the request's limit
+        quadra_store::conn::set_statement_timeout(cfg.limits.job);
+        quadra_store::conn::set_max_bytes(cfg.limits.max_bytes);
+        let mut conn = Conn::open(&cfg.url)?;
+        if first && conn.dialect() == quadra_store::conn::Dialect::Sqlite {
+            // statistics for SQLite's planner where it has none (a database grown by commits):
+            // row rules in SQL start from the small tables. A sample of each index: fast.
+            if let Err(e) = conn.batch("PRAGMA analysis_limit = 1000; PRAGMA optimize = 0x10002") {
+                eprintln!("statistics: {e}");
+            }
+        }
+        let cache = Rc::new(RefCell::new(Cache::new(cfg.cache_mb << 20, std::time::Duration::from_secs(600))));
+        if let Some(days) = cfg.prewarm_days {
+            let n = cache.borrow_mut().prewarm(&mut conn, now() - chrono::Duration::days(days))?;
+            eprintln!("cache: {n} recent records loaded");
+        }
+        let seen = files.clone();
+        let mut engine = Engine {
+            root: cfg.root.clone(),
+            files,
+            checked: Rc::new(checked),
+            url: cfg.url.clone(),
+            schema,
+            cache,
+            conn,
+            pool: Rc::new(RefCell::new(Vec::new())),
+            renames: None,
+            units: None,
+            overlays: HashMap::new(),
+            overlay_order: VecDeque::new(),
+            dev_login: cfg.dev_login,
+            modules,
+            editors: cfg.editors.clone(),
+            ide_cache: None,
+            ide_types: None,
+            dev_generation: 0,
+            watch: cfg.watch,
+            seen,
+            problems: None,
+            sheets: Default::default(),
+            form_checks: HashMap::new(),
+            seen_interfaces: None,
+            limits: cfg.limits,
+            cache_mb: cfg.cache_mb,
+            snapshot: false,
+        };
+        if first {
+            // the apps and views of the interface files, as the files say
+            engine.install_interfaces(&project)?;
+            // saved views checked against this model (renames of the migrations applied)
+            engine.revalidate_views();
+        }
+        engine.seen_interfaces = Some(interface_texts(&project));
+        Ok(engine)
+    }
+
+    pub fn run(mut self, rx: mpsc::Receiver<Job>) {
+        use quadra_runtime::limits;
+        for job in rx {
+            if let Job::Stop { reply } = job {
+                self.close();
+                drop(self);
+                let _ = reply.send(());
+                return;
+            }
+            let long = match &job {
+                Job::Sweep { .. } | Job::DevReload { .. } | Job::DevRetry { .. } => true,
+                Job::Call { req, .. } => req.is_long(),
+                _ => false,
+            };
+            let limit = if long { self.limits.background } else { self.limits.job };
+            let _limits = limits::begin(limits::Limits { deadline: limit.map(|d| std::time::Instant::now() + d), max_rows: self.limits.max_rows, max_list: self.limits.max_list });
+            // a bug met by one request: it fails, the engine goes on serving the others
+            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(job))) {
+                eprintln!("engine: a request failed with an internal error ({}): caches and connections are reset", panic_message(&*panic));
+                self.reset();
+            }
+        }
+    }
+
+    /// Before the engine goes away: SQLite's log written back into the database file, so that
+    /// the file alone holds every commit (a host may copy it once the engine has stopped).
+    fn close(&mut self) {
+        self.pool.borrow_mut().clear();
+        if self.conn.dialect() == quadra_store::conn::Dialect::Sqlite {
+            if let Err(e) = self.conn.batch("PRAGMA wal_checkpoint(TRUNCATE)") {
+                eprintln!("engine: closing the database: {e}");
+            }
+        }
+    }
+
+    /// Whether something of the model changes with time alone (it needs the periodic sweep).
+    pub fn reads_clock(&self) -> bool {
+        self.checked.model.as_ref().is_some_and(quadra_analysis::reads_clock)
+    }
+
+    /// After an internal error: what a request may have left half done is thrown away (the
+    /// record cache, connections with a transaction open). The model does not change.
+    fn reset(&mut self) {
+        self.cache = Rc::new(RefCell::new(Cache::new(self.cache_mb << 20, std::time::Duration::from_secs(600))));
+        self.pool.borrow_mut().clear();
+        match Conn::open(&self.url) {
+            Ok(c) => self.conn = c,
+            Err(e) => eprintln!("engine: cannot reconnect: {e}"),
+        }
+        self.renames = None;
+        self.units = None;
+    }
+
+    fn job(&mut self, job: Job) {
+        {
+            match job {
+                Job::Auth { secret, reply } => {
+                    let p = auth::authenticate(&mut self.conn, &secret, now()).unwrap_or(None);
+                    let _ = reply.send(p);
+                }
+                Job::DevLogin { login, reply } => {
+                    let _ = reply.send(self.dev_login(&login));
+                }
+                Job::Logout { secret } => {
+                    let _ = auth::revoke(&mut self.conn, &secret);
+                }
+                Job::Call { who, req, reply } => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(&who, req))) {
+                        Ok(r) => {
+                            let _ = reply.send(r);
+                        }
+                        Err(panic) => {
+                            let _ = reply.send(error(500, "internal error: the request could not be completed"));
+                            std::panic::resume_unwind(panic);
+                        }
+                    }
+                }
+                Job::Commits { since, reply } => {
+                    let _ = reply.send(self.commits(since).unwrap_or((since, Vec::new())));
+                }
+                Job::DevReload { reply } => {
+                    let _ = reply.send(self.dev_reload());
+                }
+                Job::DevRetry { reply } => {
+                    let data = self.problems.as_ref().is_some_and(|p| p["kind"] == "data");
+                    let ev = if data {
+                        // the files are the same: forget them, so that they are applied again
+                        self.seen.clear();
+                        self.dev_reload()
+                    } else {
+                        None
+                    };
+                    let _ = reply.send(ev);
+                }
+                Job::Stop { .. } => unreachable!("handled by `run`"),
+                Job::Sweep { reply } => {
+                    let checked = self.checked.clone();
+                    let r = quadra_store::ops::sweep(&self.url, checked.model.as_ref().unwrap(), &checked.report, now());
+                    if let Err(e) = &r {
+                        eprintln!("sweep: {e}");
+                    }
+                    if let Some(reply) = reply {
+                        let _ = reply.send(r);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A request of the API. A limit of the job that was hit (limits.rs) is the answer, even
+    /// where it only left a value missing on the way.
+    fn call(&mut self, who: &Principal, req: Req) -> Reply {
+        let who = who.clone();
+        self.snapshot = req.reads();
+        let r = match req {
+            Req::Me => self.me(&who),
+            Req::Model => self.model(&who),
+            Req::Query(q) => self.query(&who, &q),
+            Req::Record { entity, id, base } => self.record(&who, &entity, id, base),
+            Req::History { entity, id, limit, before } => self.history(&who, &entity, id, limit, before),
+            Req::Search { entity, q, limit, after } => self.search(&who, &entity, &q, limit, after.as_deref()),
+            Req::Tx { body, key } => self.tx(&who, &body, &key),
+            Req::DevFiles => self.dev_files(&who),
+            Req::DevRead { path } => self.dev_read(&who, &path),
+            Req::DevSave { path, text } => self.dev_save(&who, &path, &text),
+            Req::DevDelete { path } => self.dev_delete(&who, &path),
+            Req::DevCheck { buffers } => self.dev_check(&who, &buffers),
+            Req::DevTest { buffers } => self.dev_test(&who, &buffers),
+            Req::DevStatus => self.dev_status(&who),
+            Req::DevDiff => self.dev_diff(&who),
+            Req::DevCommit { message } => self.dev_commit(&who, &message),
+            Req::DevIde { body } => self.dev_ide(&who, &body),
+            Req::DevRename { from, to } => self.dev_rename(&who, &from, &to),
+            Req::DevMkdir { path } => self.dev_mkdir(&who, &path),
+            Req::DevRmdir { path } => self.dev_rmdir(&who, &path),
+            Req::DevSchema { body } => self.dev_schema(&who, &body),
+            Req::DevLive => Ok(self::reply(200, json!({ "watching": self.watch, "problems": self.problems }))),
+            Req::Views { method, path, query, body } => self.views_api(&who, &method, &path, &query, &body),
+            #[cfg(test)]
+            Req::Panic => panic!("a test of the recovery"),
+        };
+        self.snapshot = false;
+        let r = r.unwrap_or_else(|(s, m)| error(s, m));
+        match quadra_runtime::limits::take_hit() {
+            Some(m) => error(422, m),
+            None => r,
+        }
+    }
+
+    /// An interpreter over the database as of `base` (default: the latest commit).
+    fn interp<'m>(&mut self, model: &'m Model, who: Option<&Principal>, base: Option<u64>) -> Result<Interp<'m>, Fail> {
+        let e500 = |e: String| (500, e);
+        let mut conn = Pooled::take(&self.pool, &self.url).map_err(e500)?;
+        // a read sees one moment, even while other engines commit: its SQL queries can then be
+        // answered by SQL (no row newer than what the interpreter reads)
+        if self.snapshot {
+            conn.begin_read().map_err(e500)?;
+        }
+        let latest = head(&mut conn).map_err(e500)?;
+        let base = base.unwrap_or(latest);
+        if base > latest {
+            return Err((400, format!("base {base} is ahead of the latest commit ({latest})")));
+        }
+        // the cache catching up with commits is bookkeeping, not a request reading too much
+        let renamed = quadra_runtime::limits::without_row_cap(|| self.cache.borrow_mut().sync(&mut conn, base)).map_err(e500)?;
+        if renamed || self.renames.is_none() {
+            self.renames = Some(load_renames(&mut conn).map_err(e500)?);
+            self.units = None;
+        }
+        // units, currencies and the company: kept while none of those records is written
+        let current = base == latest;
+        if let (true, Some((_, _, at))) = (current, &self.units) {
+            let changed =
+                conn.query("SELECT '1' FROM \"_quadra_records\" WHERE \"last_tx\" > ?bigint AND \"entity\" IN ('Uom', 'Currency', 'Company') LIMIT 1", &[quadra_store::conn::Sql::Int(*at as i64)]).map_err(e500)?;
+            if !changed.is_empty() {
+                self.units = None;
+            }
+        }
+        let renames = self.renames.clone().unwrap_or_default();
+        let src = DbSource::with_renames(conn, base, self.schema.clone(), Some(self.cache.clone()), renames).map_err(e500)?;
+        let mut i = Interp::new(model);
+        i.set_clock(now());
+        i.store = Store::over(Rc::new(RefCell::new(src)));
+        match (&self.units, current) {
+            (Some((u, company, _)), true) => {
+                i.set_units(u);
+                i.company = *company;
+            }
+            _ => {
+                i.load_units();
+                i.company = i.ids("Company", None).first().copied();
+                if current {
+                    self.units = Some((i.units(), i.company, latest));
+                }
+            }
+        }
+        i.user = who.map(|w| w.user_id);
+        Ok(i)
+    }
+
+    fn login_of(&mut self, model: &Model, user: u64) -> String {
+        match self.interp(model, None, None) {
+            Ok(mut i) => i.store.read(user, "login", None).map(|v| v.to_string()).unwrap_or_default(),
+            Err(_) => String::new(),
+        }
+    }
+
+    fn dev_login(&mut self, login: &str) -> Reply {
+        if !self.dev_login {
+            return error(404, "not found");
+        }
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = match self.interp(model, None, None) {
+            Ok(i) => i,
+            Err((s, m)) => return error(s, m),
+        };
+        let users = i.ids("User", None);
+        // `quadra dev`: signed in without asking, as the first user (`dev`)
+        let auto = login.is_empty() && self.watch;
+        let Some(user) = users.into_iter().find(|id| auto || i.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login)) else {
+            return error(401, "unknown user");
+        };
+        drop(i);
+        match auth::create(&mut self.conn, "session", user, &format!("dev login {login}"), false, now(), Some(now() + chrono::Duration::hours(12))) {
+            Ok((secret, csrf)) => Reply { status: 200, body: json!({ "user": if auto { self.login_of(model, user) } else { login.to_string() }, "csrf": csrf }), session: Some(secret) },
+            Err(e) => error(500, e),
+        }
+    }
+
+    fn me(&mut self, who: &Principal) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let login = self.login_of(model, who.user_id);
+        Ok(reply(200, json!({ "user": login, "user_id": who.user_id, "read_only": who.read_only, "csrf": who.csrf, "kind": who.kind })))
+    }
+
+    // ---- model --------------------------------------------------------------------------
+
+    /// Entities, fields, actions and flows the user may see, with what they may do.
+    fn model(&mut self, who: &Principal) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = self.interp(model, Some(who), None)?;
+        let modules = &self.modules;
+        let entities = quadra_api::model_json(&mut i, model, &checked.report, &|s| modules.get(&s.file).cloned().unwrap_or_default());
+        Ok(reply(200, json!({ "entities": entities, "base": i.store.base })))
+    }
+
+    // ---- expressions written by users ---------------------------------------------------
+
+    /// The model with formulas added to an entity (`where` filters, personal columns),
+    /// checked like any source: the same messages as in the editor.
+    fn overlay(&mut self, entity: &str, items: &[(String, String)]) -> Result<Rc<Checked>, Reply> {
+        if items.is_empty() {
+            return Ok(self.checked.clone());
+        }
+        let key = format!("{entity}\u{1}{}", items.iter().map(|(n, e)| format!("{n}\u{2}{e}")).collect::<Vec<_>>().join("\u{1}"));
+        if let Some(c) = self.overlays.get(&key) {
+            return Ok(c.clone());
+        }
+        let src = quadra_api::overlay_source(entity, items);
+        let mut sources = self.files.clone();
+        let path = self.root.join("tests/__api__.qd");
+        sources.push((path.clone(), src));
+        let project = Project::from_sources(&self.root, sources);
+        let checked = quadra_analysis::check(&project);
+        let errors: Vec<String> = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
+        if !errors.is_empty() || checked.model.is_none() {
+            return Err(reply(400, json!({ "error": "the expression does not check", "diagnostics": errors })));
+        }
+        // the only difference allowed: these formulas on this entity
+        let (base, over) = (self.checked.model.as_ref().unwrap(), checked.model.as_ref().unwrap());
+        let same_shape = quadra_api::same_shape(base, over, entity, items);
+        if !same_shape {
+            return Err(error(400, "an expression must be a single value"));
+        }
+        let c = Rc::new(checked);
+        self.overlays.insert(key.clone(), c.clone());
+        self.overlay_order.push_back(key);
+        if self.overlay_order.len() > 64 {
+            if let Some(old) = self.overlay_order.pop_front() {
+                self.overlays.remove(&old);
+            }
+        }
+        Ok(c)
+    }
+
+    // ---- reading ------------------------------------------------------------------------
+
+    fn query(&mut self, who: &Principal, q: &J) -> Result<Reply, Fail> {
+        let (entity, items, columns) = quadra_api::query_items(q)?;
+        if self.checked.model.as_ref().unwrap().entity(&entity).map_or(true, |e| e.kind != EntityKind::Entity || e.temporary) {
+            return Err((404, format!("unknown entity `{entity}`")));
+        }
+        let checked = match self.overlay(&entity, &items) {
+            Ok(c) => c,
+            Err(r) => return Ok(r),
+        };
+        let model = checked.model.as_ref().unwrap();
+        let base = q["base"].as_u64();
+        let mut i = self.interp(model, Some(who), base)?;
+        Ok(reply(200, quadra_api::query_rows(&mut i, model, &entity, q, &items, &columns)?))
+    }
+
+    fn record(&mut self, who: &Principal, entity: &str, id: u64, base: Option<u64>) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = self.interp(model, Some(who), base)?;
+        Ok(reply(200, quadra_api::record_json(&mut i, model, entity, id)?))
+    }
+
+    fn search(&mut self, who: &Principal, entity: &str, q: &str, limit: usize, after: Option<&str>) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = self.interp(model, Some(who), None)?;
+        Ok(reply(200, quadra_api::search_rows(&mut i, model, entity, q, limit, after)?))
+    }
+
+    /// The history of a record, newest first in pages (`limit`, `before`: the `seq` of the
+    /// oldest entry of the previous page), or all of it in order.
+    fn history(&mut self, who: &Principal, entity: &str, id: u64, limit: Option<usize>, before: Option<u64>) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = self.interp(model, Some(who), None)?;
+        let actual = i.store.get(id).map(|r| r.ent.to_string()).ok_or((404, format!("{entity}#{id} not found")))?;
+        let rec = V::Ref { ent: Rc::from(actual.as_str()), id };
+        if !i.can("read", &actual, None, Some(&rec)) || !i.can_read_history(&actual) {
+            return Err((403, format!("permission denied: cannot read the history of {actual}#{id}")));
+        }
+        let renames = quadra_store::source::load_renames(&mut self.conn).map_err(|e| (500, e))?;
+        let rows = self
+            .conn
+            .query(
+                &format!(
+                    "SELECT CAST(h.\"tx\" AS TEXT), h.\"field\", h.\"value\", c.\"at\", CAST(c.\"user_id\" AS TEXT), c.\"cause\", CAST(h.\"seq\" AS TEXT) FROM \"_quadra_history\" h JOIN \"_quadra_commits\" c ON c.\"tx\" = h.\"tx\" WHERE h.\"record_id\" = ?bigint{} ORDER BY h.\"seq\"{}",
+                    if before.is_some() { " AND h.\"seq\" < ?bigint" } else { "" },
+                    match limit {
+                        Some(n) => format!(" DESC LIMIT {}", n.clamp(1, 500) + 1),
+                        None => String::new(),
+                    }
+                ),
+                &[Some(quadra_store::conn::Sql::Int(id as i64)), before.map(|b| quadra_store::conn::Sql::Int(b as i64))].into_iter().flatten().collect::<Vec<_>>(),
+            )
+            .map_err(|e| (500, e))?;
+        // a page (newest first): one more row says whether there are older entries
+        let more = limit.map_or(false, |n| rows.len() > n.clamp(1, 500));
+        let mut rows = rows;
+        if more {
+            rows.pop();
+        }
+        let oldest: Option<u64> = rows.last().and_then(|r| r[6].as_deref()).and_then(|s| s.parse().ok());
+        if limit.is_some() {
+            rows.reverse();
+        }
+        let mut logins: HashMap<u64, String> = HashMap::new();
+        let mut out = Vec::new();
+        for r in rows {
+            let tx: u64 = r[0].as_deref().and_then(|t| t.parse().ok()).unwrap_or(0);
+            let field = renamed(&renames, &actual, tx, r[1].clone().unwrap_or_default());
+            let base = field.split(['@', '#']).next().unwrap_or("").to_string();
+            if i.hidden(&actual, &base) {
+                continue;
+            }
+            let v = quadra_store::codec::from_json(&serde_json::from_str(r[2].as_deref().unwrap_or("null")).unwrap_or(J::Null));
+            let user = match r[4].as_deref().and_then(|u| u.parse::<u64>().ok()) {
+                Some(u) => Some(logins.entry(u).or_insert_with(|| i.store.read(u, "login", None).map(|v| v.to_string()).unwrap_or_default()).clone()),
+                None => None,
+            };
+            out.push(json!({ "tx": tx, "at": r[3], "user": user, "cause": r[5], "field": field, "value": cell(&mut i, &v) }));
+        }
+        Ok(reply(200, json!({ "entity": actual, "id": id, "entries": out, "before": if more { oldest } else { None } })))
+    }
+
+    // ---- writing --------------------------------------------------------------------------
+
+    fn tx(&mut self, who: &Principal, body: &J, key: &str) -> Result<Reply, Fail> {
+        if who.read_only {
+            return Err((403, "this token is read-only".into()));
+        }
+        if key.is_empty() || key.len() > 100 || !key.chars().all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c)) {
+            return Err((400, "Idempotency-Key: 1 to 100 characters among letters, digits, - _ : .".into()));
+        }
+        let hash = auth::sha256_hex(&body.to_string());
+        if let Some((h, resp, tx)) = auth::idempotent(&mut self.conn, who.user_id, key).map_err(|e| (500, e))? {
+            if h != hash {
+                return Err((422, "this Idempotency-Key was already used for a different request".into()));
+            }
+            let mut r: J = serde_json::from_str(&resp).unwrap_or(json!({}));
+            r["tx"] = json!(tx);
+            r["replayed"] = json!(true);
+            return Ok(reply(200, r));
+        }
+        let ops = body["ops"].as_array().ok_or((400, "`ops` is required".to_string()))?;
+        if ops.is_empty() || ops.len() > 200 {
+            return Err((400, "1 to 200 operations per transaction".into()));
+        }
+        let base = body["base"].as_u64();
+        if base.is_none() && ops.iter().any(|o| o["op"] != json!("create")) {
+            return Err((400, "`base` is required to change existing records: the commit is refused if they changed since".into()));
+        }
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        // The client's base guards what the client decided on: the records it changes. If others
+        // changed them since it read them, its change would overwrite theirs unseen: refused.
+        // Everything else (totals, rollups, the records the rules read) is read now, and the
+        // rules are checked on it now: a credit limit, a stock level hold on the latest data.
+        if let Some(b) = base {
+            let latest = head(&mut self.conn).map_err(|e| (500, e))?;
+            if b > latest {
+                return Err((400, format!("base {b} is ahead of the latest commit ({latest})")));
+            }
+            let targets: Vec<u64> = ops.iter().filter(|o| o["op"] != json!("create")).filter_map(|o| o["id"].as_u64()).collect();
+            let conflicts = self.changed_since(model, &targets, b)?;
+            if !conflicts.is_empty() {
+                return Ok(reply(409, json!({ "error": "changed by others since you read it: review their changes and try again", "conflicts": conflicts })));
+            }
+        }
+        // a commit of another engine (PostgreSQL) may land while this one runs: then it runs
+        // again on it
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let mut i = self.interp(model, Some(who), None)?;
+            let conn = Pooled::take(&self.pool, &self.url).map_err(|e| (500, e))?;
+            let db = Database::with(conn, self.schema.clone());
+            i.materialize = materialized_formulas(&db.schema);
+            i.sink = Some(Box::new(Sink { db, model }));
+            let created: RefCell<serde_json::Map<String, J>> = RefCell::new(serde_json::Map::new());
+            let user = who.user_id;
+            let r = i.with_cause(format!("API request {key}"), |i| {
+                i.transaction(|i| {
+                    *created.borrow_mut() = quadra_api::apply_ops(i, model, ops)?;
+                    let response = json!({ "created": J::Object(created.borrow().clone()) }).to_string();
+                    i.store.idempotency = Some((user, key.to_string(), hash.clone(), response));
+                    Ok(())
+                })
+            });
+            return match r {
+                Ok(()) => Ok(reply(200, json!({ "tx": i.store.tx, "base": i.store.tx, "created": J::Object(created.into_inner()) }))),
+                Err(Flow::Conflict(_)) if attempt < 5 => continue,
+                Err(Flow::Conflict(c)) => {
+                    let list: Vec<J> = c.iter().map(|x| json!({ "tx": x.tx, "at": x.at, "user": x.user, "cause": x.cause, "what": x.what })).collect();
+                    Ok(reply(409, json!({ "error": "changed by others while it was being saved, several times: try again", "conflicts": list })))
+                }
+                Err(Flow::Fail(m)) if m.contains("_quadra_idempotency") => {
+                    // the same key committed by another process at the same time
+                    drop(i);
+                    self.tx(who, body, key)
+                }
+                Err(Flow::Fail(m)) if m.starts_with("permission denied") || m.contains(": permission denied") => Err((403, m)),
+                Err(other) => Err((422, describe(other))),
+            };
+        }
+    }
+
+    /// What others wrote on these records after `base`: one entry per commit, with the stored
+    /// fields it changed (computed values follow from other changes, they are not decisions).
+    fn changed_since(&mut self, model: &Model, records: &[u64], base: u64) -> Result<Vec<J>, Fail> {
+        if records.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = records.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
+        let rows = self
+            .conn
+            .query(
+                &format!("SELECT CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT), h.\"field\", c.\"at\", CAST(c.\"user_id\" AS TEXT), c.\"cause\" FROM \"_quadra_history\" h JOIN \"_quadra_commits\" c ON c.\"tx\" = h.\"tx\" WHERE h.\"record_id\" IN ({ids}) AND h.\"tx\" > ?bigint ORDER BY h.\"seq\" LIMIT 500"),
+                &[quadra_store::conn::Sql::Int(base as i64)],
+            )
+            .map_err(|e| (500, e))?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut i = self.interp(model, None, None)?;
+        let mut commits: std::collections::BTreeMap<u64, (J, Option<String>, J, Vec<String>)> = std::collections::BTreeMap::new();
+        let num = |s: &Option<String>| s.as_deref().and_then(|v| v.parse::<u64>().ok());
+        for r in rows {
+            let (Some(tx), Some(id)) = (num(&r[0]), num(&r[1])) else { continue };
+            let field = r[2].clone().unwrap_or_default();
+            let Some(ent) = i.store.get(id).map(|x| x.ent.to_string()) else { continue };
+            let name = field.split(['@', '#']).next().unwrap_or("");
+            let computed = model.entity(&ent).and_then(|e| model.find_field(e, name)).map_or(false, |f| f.formula.is_some());
+            if computed {
+                continue;
+            }
+            let user = num(&r[4]).map(|u| i.store.read(u, "login", None).map(|v| v.to_string()).unwrap_or_default());
+            let e = commits.entry(tx).or_insert_with(|| (json!(r[3]), user, json!(r[5]), Vec::new()));
+            let what = format!("{ent}#{id}.{field}");
+            if !e.3.contains(&what) {
+                e.3.push(what);
+            }
+        }
+        Ok(commits.into_iter().map(|(tx, (at, user, cause, what))| json!({ "tx": tx, "at": at, "user": user, "cause": cause, "what": what })).collect())
+    }
+
+    // ---- live updates ---------------------------------------------------------------------
+
+    /// Commits after `since`: (latest transaction, events).
+    fn commits(&mut self, since: u64) -> Result<(u64, Vec<J>), String> {
+        use quadra_store::conn::Sql;
+        let latest = head(&mut self.conn)?;
+        if latest <= since {
+            return Ok((latest, Vec::new()));
+        }
+        let rows = self
+            .conn
+            .query("SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\" FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint ORDER BY \"_quadra_commits\".\"tx\" LIMIT 100", &[Sql::Int(since as i64)])?;
+        let mut out = Vec::new();
+        let mut last = since;
+        for r in rows {
+            let tx: u64 = r[0].as_deref().and_then(|t| t.parse().ok()).unwrap_or(0);
+            last = tx;
+            let recs = self.conn.query(
+                "SELECT DISTINCT CAST(h.\"record_id\" AS TEXT), r.\"entity\" FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE h.\"tx\" = ?bigint LIMIT 500",
+                &[Sql::Int(tx as i64)],
+            )?;
+            let records: Vec<J> = recs.iter().map(|x| json!({ "entity": x[1], "id": x[0].as_deref().and_then(|i| i.parse::<u64>().ok()) })).collect();
+            out.push(json!({ "tx": tx, "at": r[1], "user_id": r[2].as_deref().and_then(|u| u.parse::<u64>().ok()), "cause": r[3], "records": records }));
+        }
+        Ok((last, out))
+    }
+}
+
+/// The limits of the jobs, through the engine's own loop: a request that runs too long,
+/// reads too much or meets a bug fails alone, and the next one is served.
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const PROJECT: &str = "entity Item:\n    n: Int\n\nfn burn(n: Int) -> Int:\n    if n == 0:\n        return 1\n    return burn(n - 1) + burn(n - 1)\n\nfn deep(n: Int) -> Int:\n    if n == 0:\n        return 0\n    return deep(n - 1)\n";
+
+    struct Running {
+        jobs: mpsc::Sender<Job>,
+        dir: PathBuf,
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn who() -> Principal {
+        Principal { user_id: 1, read_only: false, kind: "token".into(), csrf: None, name: "test".into() }
+    }
+
+    /// An engine with `items` records of `Item`, running its loop on a thread of its own.
+    fn start(name: &str, items: usize, limits: Limits) -> Running {
+        let dir = std::env::temp_dir().join(format!("quadra-limits-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"limits\"\n").unwrap();
+        std::fs::write(dir.join("main.qd"), PROJECT).unwrap();
+        let url = format!("sqlite:{}", dir.join("data.db").display());
+        let project = Project::load(&dir).unwrap();
+        let checked = quadra_analysis::check(&project);
+        let errors: Vec<_> = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        quadra_store::ops::init(&url, checked.model.as_ref().unwrap(), &checked.report, now()).unwrap();
+        let cfg = Config { root: dir.clone(), url, port: 0, dev_login: false, secure_cookies: false, cache_mb: 16, prewarm_days: None, web: None, sweep_every: 0, editors: vec![], watch: false, limits: Limits::none(), engines: Engines::one() };
+        // the records first, without limits
+        let (jobs, rx) = mpsc::channel();
+        let (ready_tx, ready) = mpsc::channel();
+        let run_cfg = Config { limits, ..cfg.clone() };
+        std::thread::Builder::new().stack_size(ENGINE_STACK).spawn(move || {
+            let mut setup = Engine::new(&cfg).unwrap();
+            for n in 0..items {
+                let r = setup.call(&who(), Req::Tx { body: json!({ "ops": [{ "op": "create", "entity": "Item", "values": { "n": n } }] }), key: format!("item-{n}") });
+                assert_eq!(r.status, 200, "{}", r.body);
+            }
+            drop(setup);
+            let engine = Engine::new(&run_cfg).unwrap();
+            ready_tx.send(()).unwrap();
+            engine.run(rx);
+        }).unwrap();
+        ready.recv().unwrap();
+        Running { jobs, dir }
+    }
+
+    fn call(r: &Running, req: Req) -> Reply {
+        let (tx, rx) = oneshot::channel();
+        r.jobs.send(Job::Call { who: who(), req, reply: tx }).unwrap();
+        rx.blocking_recv().expect("an answer")
+    }
+
+    fn items(columns: J) -> Req {
+        Req::Query(json!({ "entity": "Item", "fields": ["n"], "columns": columns }))
+    }
+
+    #[test]
+    fn a_request_past_its_time_limit_fails_and_the_next_one_is_served() {
+        let limit = Duration::from_millis(400);
+        let r = start("timeout", 1, Limits { job: Some(limit), ..Limits::none() });
+        let t = Instant::now();
+        let a = call(&r, items(json!({ "x": "burn(190)" })));
+        let took = t.elapsed();
+        assert_eq!(a.status, 422, "{}", a.body);
+        assert!(a.body["error"].as_str().unwrap().starts_with("timeout"), "{}", a.body);
+        assert!(took < limit + limit / 10, "answered after {took:?}");
+        let b = call(&r, items(json!({ "x": "burn(3)" })));
+        assert_eq!(b.status, 200, "{}", b.body);
+        assert_eq!(b.body["rows"][0]["cells"]["x"]["d"], json!("8"));
+    }
+
+    #[test]
+    fn a_function_that_calls_itself_too_deep_fails_without_ending_the_process() {
+        let r = start("deep", 1, Limits::default());
+        let a = call(&r, items(json!({ "x": "deep(100000)" })));
+        assert_eq!(a.status, 200, "{}", a.body);
+        assert!(a.body["rows"][0]["cells"]["x"].to_string().contains("recursion too deep"), "{}", a.body);
+        let b = call(&r, items(json!({ "x": "deep(150)" })));
+        assert_eq!(b.body["rows"][0]["cells"]["x"]["d"], json!("0"), "{}", b.body);
+    }
+
+    #[test]
+    fn a_bug_fails_one_request_and_the_engine_goes_on() {
+        let r = start("panic", 2, Limits::default());
+        let a = call(&r, Req::Panic);
+        assert_eq!(a.status, 500, "{}", a.body);
+        let b = call(&r, items(json!({})));
+        assert_eq!(b.status, 200, "{}", b.body);
+        assert_eq!(b.body["rows"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_request_that_reads_too_many_rows_fails() {
+        let r = start("rows", 20, Limits { max_rows: Some(10), ..Limits::none() });
+        let a = call(&r, items(json!({})));
+        assert_eq!(a.status, 422, "{}", a.body);
+        assert!(a.body["error"].as_str().unwrap().starts_with("too many rows"), "{}", a.body);
+        // a request that reads few rows is served
+        let b = call(&r, Req::Query(json!({ "entity": "Item", "fields": ["n"], "where": "n < 3" })));
+        assert_eq!(b.status, 200, "{}", b.body);
+    }
+
+    #[test]
+    fn a_list_beyond_the_cap_fails_while_it_grows() {
+        let r = start("list", 20, Limits { max_list: Some(100), ..Limits::none() });
+        let a = call(&r, Req::Query(json!({ "entity": "Item", "fields": ["n"], "where": "n == 0", "columns": { "x": "Item.flat_map(a => Item.map(b => b.n)).count()" } })));
+        assert_eq!(a.status, 422, "{}", a.body);
+        assert!(a.body["error"].as_str().unwrap().starts_with("too many elements"), "{}", a.body);
+        let b = call(&r, Req::Query(json!({ "entity": "Item", "fields": ["n"], "where": "n == 0", "columns": { "x": "Item.map(b => b.n).count()" } })));
+        assert_eq!(b.status, 200, "{}", b.body);
+        assert_eq!(b.body["rows"][0]["cells"]["x"]["d"], json!("20"));
+    }
+}

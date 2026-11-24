@@ -1,0 +1,109 @@
+# Prodotti, categorie, fornitori per prodotto, listini.
+
+from partners import Partner, CustomerRole
+
+enum ProductType: Storable, Consumable, Service
+enum Tracking: Untracked, ByLot, BySerial
+enum CostMethod: Standard, Average
+
+
+entity Category:
+    name: Text
+    parent: Category?
+    children: [Category] via parent
+    # Formula ricorsiva sui dati: ammessa perché il check sotto garantisce un albero aciclico.
+    path = f"{parent.path}/{name}" if parent != none else name
+    check not self.closure(c => c.parent).contains(self), "Categoria ciclica"
+
+
+entity Product:
+    code: Code unique
+    name: Text
+    type: ProductType default Storable
+    category: Category
+    uom: Uom                                        # unità di magazzino
+    purchase_uom: Uom where u => u.category == uom.category default uom
+    tracking: Tracking default Untracked
+    sale_ok: Bool default true
+    purchase_ok: Bool default true
+    active: Bool default true
+    barcode: Barcode? unique
+    hs_code: Code where c => c.len() == 8           # nomenclatura doganale (migrations/2026-12-01)
+    weight: Qty<kg>?                                # unità fissa
+    # `per company`: un valore per ogni società, nella sua valuta di conto.
+    # `product.list_price` è quello della società corrente; `product.list_price[c]` quello di c.
+    list_price: Price<company.currency, uom> per company
+    standard_cost: Price<company.currency, uom> per company default 0
+    cost_method: CostMethod default Standard
+
+    suppliers: [SupplierInfo]
+    vendors: {Partner} through SupplierInfo         # salto diretto Product → Partner
+
+    check tracking is Untracked or type is Storable, "Solo i prodotti a magazzino si tracciano per lotto"
+
+
+# Molti-a-molti con attributi: prodotto ↔ fornitore, con prezzo e tempi.
+entity SupplierInfo:
+    product: Product
+    vendor: Partner where v => v.as_vendor != none
+    vendor_code: Code?
+    currency: Currency default vendor.currency
+    price: Price<currency, product.purchase_uom>
+    min_qty: Qty<product.purchase_uom> default 0
+    lead_time: Duration default vendor.as_vendor?.lead_time ?? 7 days
+    valid: DateRange?
+    unique (product, vendor, min_qty)
+
+
+entity Pricelist:
+    name: Text unique
+    currency: Currency
+    rules: [PricelistRule]
+
+
+# A cosa si applica una regola di listino: un enum con dati, non un'unione anonima.
+enum PriceTarget:
+    AllProducts
+    OneProduct(product: Product)
+    InCategory(category: Category)
+
+
+entity PricelistRule:
+    pricelist: Pricelist parent
+    target: PriceTarget default AllProducts
+    min_qty: Decimal default 0                      # nell'unità di magazzino del prodotto
+    valid: DateRange?
+    rule: enum(Fixed(amount: Money<pricelist.currency>), Discount(off: Percent), CostPlus(markup: Percent))
+
+    specificity: Int = match target:
+        OneProduct(_) => 3
+        InCategory(_) => 2
+        AllProducts   => 1
+
+    check rule is not Fixed or target is OneProduct, "Il prezzo fisso vale solo per un prodotto"
+
+    fn matches(p: Product, qty: Qty, on: Date) -> Bool:
+        let hit = match target:
+            OneProduct(x) => x == p
+            InCategory(c) => p.category == c or p.category.closure(k => k.parent).contains(c)
+            AllProducts   => true
+        return hit and qty.to(p.uom).raw >= min_qty and (valid?.contains(on) ?? true)
+
+
+extend CustomerRole:
+    pricelist: Pricelist?
+
+
+fn price_for(product: Product, pricelist: Pricelist?, qty: Qty, on: Date) -> Exact<Price>:
+    if pricelist == none:
+        return product.list_price
+    let list = convert(product.list_price, to=pricelist.currency, on=on)
+    let best = pricelist.rules
+        .where(r => r.matches(product, qty, on))
+        .sort_by(r => (-r.specificity, -r.min_qty))
+        .first()
+    return match best?.rule:
+        Fixed(amount)    => Price(amount, per=product.uom)
+        Discount(off)    => list * (1 - off)
+        CostPlus(markup) => convert(product.standard_cost, to=pricelist.currency, on=on) * (1 + markup)
+        none             => list

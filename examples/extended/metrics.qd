@@ -1,0 +1,91 @@
+# Metriche certificate e controlli di audit.
+#
+# Una `metric` è un numero con una definizione precisa, scritta per un umano (definition)
+# e per la macchina (value). `quadra certify` calcola l'impronta della definizione COMPLETA:
+# la formula più tutto ciò da cui dipende, fino ai campi memorizzati (tipi, vincoli,
+# arrotondamenti, conversioni). L'impronta e l'approvazione finiscono in metrics.lock.
+# Se una modifica al codice cambia anche indirettamente il significato di una metrica,
+# `quadra check` fallisce finché qualcuno non riapprova.
+#
+# Ogni valore pubblicato porta con sé: impronta della definizione + istante dei dati (as_of).
+# Chiunque, revisore compreso, può ricalcolare lo stesso numero dagli stessi dati.
+
+from accounting import GL
+from inventory import Stock
+from invoicing import Invoice, Payment
+
+
+metric revenue(company: Company, period: DateRange) -> Money<company.currency>:
+    label: "Ricavi netti"
+    owner: "Amministrazione"
+    definition: """
+        Somma degli imponibili delle fatture attive registrate con data documento nel periodo,
+        meno le note di credito, convertiti nella valuta della società al cambio di registrazione.
+        Esclusi: IVA, bozze, fatture annullate.
+        """
+    value = Invoice
+        .where(i => i.company == company and i.direction is Out and i.state is Posted and i.date in period)
+        .sum(i => convert(i.untaxed * i.sign, to=company.currency, rate=i.rate).round())
+
+
+metric gross_margin(company: Company, period: DateRange) -> Percent:
+    label: "Margine lordo %"
+    owner: "Controllo di gestione"
+    definition: """
+        (Ricavi netti − costo del venduto) / Ricavi netti. Il costo del venduto è il valore di
+        magazzino delle consegne evase nel periodo, al costo registrato sul movimento.
+        """
+    value =
+        let sales = revenue(company, period)
+        let cogs = Stock
+            .where(s => s.company == company and s.location.kind is Customer and s.date in period)
+            .sum(s => s.value)
+        ((sales - cogs) / sales).as_percent() if sales != 0 else 0%
+
+
+metric open_receivables(company: Company, on: Date) -> Money<company.currency>:
+    label: "Crediti verso clienti aperti"
+    owner: "Amministrazione"
+    definition: "Saldo dei conti clienti in contabilità generale alla data, nella valuta della società."
+    value = GL.where(g => g.company == company and g.account.type is Receivable and g.date <= on).sum(g => g.amount)
+
+
+metric dso(company: Company, on: Date) -> Decimal:
+    label: "Giorni medi di incasso (DSO)"
+    owner: "Tesoreria"
+    definition: "Crediti aperti alla data / ricavi degli ultimi 365 giorni × 365."
+    value =
+        let r = revenue(company, DateRange(on - 365 days, on))
+        open_receivables(company, on) / r * 365 if r != 0 else 0
+
+
+metric inventory_value(company: Company, on: Date) -> Money<company.currency>:
+    label: "Valore di magazzino"
+    owner: "Controllo di gestione"
+    definition: "Somma del valore nel ledger di magazzino per le ubicazioni interne alla data."
+    value = Stock.where(s => s.company == company and s.location.is_internal and s.date <= on).sum(s => s.value)
+
+
+# --- Controlli -----------------------------------------------------------------------------
+# Un `control` è una verifica che due calcoli indipendenti coincidano: è la prova che un
+# revisore chiede ("dimostrami che il partitario quadra con la contabilità"). Oggi è
+# verificato nei tipi e certificato come le metriche; il motore non lo valuta ancora da solo.
+
+control trial_balance:
+    label: "Il bilancio di verifica quadra, per ogni società"
+    holds = Company.all(c => GL.where(g => g.company == c).sum(g => g.amount) == 0)
+
+control receivables_subledger:
+    label: "Il partitario clienti coincide con i conti clienti"
+    holds = Company.all(c =>
+        Invoice.where(i => i.company == c and i.direction is Out and i.state is Posted)
+               .sum(i => convert(i.due * i.sign, to=c.currency, rate=i.rate).round())
+        == open_receivables(c, today())
+           - GL.where(g => g.company == c and g.account.type is Receivable and g.source is Payment).sum(g => g.amount))
+
+control invoice_numbering:
+    label: "Numerazione delle fatture attive senza buchi né duplicati"
+    holds = Invoice
+        .where(i => i.direction is Out and i.state is not Draft)
+        .group_by(i => (journal: i.journal, year: i.date.year))
+        .all(g => g.items.map(i => i.number?.sequence_part()).is_contiguous())

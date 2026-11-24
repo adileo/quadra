@@ -1,0 +1,15 @@
+[package]
+name = "quadra-analysis"
+description = "Whole-program analyses for Quadra: formula cycles, flows, trace, certified fingerprints, formatting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quadra-syntax.workspace = true
+quadra-sema.workspace = true
+quadra-ir.workspace = true
+quadra-types.workspace = true
+quadra-qdi.workspace = true
+sha2 = "0.10"

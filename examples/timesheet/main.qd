@@ -1,0 +1,14 @@
+entity Project:
+    name: Text
+    members: [User]
+    
+entity TimeLog:
+    hours: Duration
+    date: Date
+    project: Project
+    user: User
+
+    check hours > 0, "Hours must be greater than 0"
+    check date <= today(), "Date must be today or in the past"
+
+

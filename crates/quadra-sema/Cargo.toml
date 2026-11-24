@@ -1,0 +1,12 @@
+[package]
+name = "quadra-sema"
+description = "Modules, imports and name resolution for Quadra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono-tz = "0.10"
+rowan.workspace = true
+quadra-syntax.workspace = true

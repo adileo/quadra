@@ -1,0 +1,538 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Quadra",
+  "scopeName": "source.quadra",
+  "fileTypes": [
+    "qd"
+  ],
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#members"
+    },
+    {
+      "include": "#expression"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.quadra",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.quadra",
+          "begin": "f?\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            {
+              "include": "#escape"
+            },
+            {
+              "include": "#brace-escape"
+            },
+            {
+              "include": "#interpolation"
+            }
+          ]
+        },
+        {
+          "name": "string.interpolated.quadra",
+          "begin": "f\"",
+          "end": "\"|$",
+          "patterns": [
+            {
+              "include": "#escape"
+            },
+            {
+              "include": "#brace-escape"
+            },
+            {
+              "include": "#interpolation"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.quadra",
+          "begin": "\"",
+          "end": "\"|$",
+          "patterns": [
+            {
+              "include": "#escape"
+            }
+          ]
+        }
+      ]
+    },
+    "escape": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.quadra",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "interpolation": {
+      "patterns": [
+        {
+          "name": "meta.interpolation.quadra",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.begin.quadra"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.end.quadra"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#expression"
+            }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "^\\s*(event)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.event.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(temporary\\s+)?(entity|record|trait)\\s+([A-Za-z_]\\w*)(?:\\s+(is)\\b)?",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.quadra"
+            },
+            "2": {
+              "name": "storage.type.quadra"
+            },
+            "3": {
+              "name": "entity.name.type.class.quadra"
+            },
+            "4": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(extend|patch)\\s+([A-Za-z_][\\w.]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.class.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(enum)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.enum.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(ledger)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.ledger.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(builtin\\s+)?(fn)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.quadra"
+            },
+            "2": {
+              "name": "storage.type.function.quadra"
+            },
+            "3": {
+              "name": "entity.name.function.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(action)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.quadra"
+            },
+            "2": {
+              "name": "entity.name.function.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(const)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "variable.other.constant.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(role|view|report|metric|control|migration|change|fixture)\\s+([A-Za-z_]\\w*)(?:\\s+(is|extends)\\b)?",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.section.quadra"
+            },
+            "3": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(test)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(seed)\\s*(?=:)",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(on)\\s+([A-Za-z_][\\w.]*)\\s+(enters|becomes|created|changes)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.reaction.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.class.quadra"
+            },
+            "3": {
+              "name": "keyword.control.reaction.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(before)\\s+([A-Za-z_][\\w.]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.reaction.quadra"
+            },
+            "2": {
+              "name": "entity.name.function.quadra"
+            }
+          }
+        },
+        {
+          "match": "\\b(converges)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.reaction.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(flow)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.flow.quadra"
+            },
+            "2": {
+              "name": "variable.other.property.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(post)\\s+(to)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.quadra"
+            },
+            "2": {
+              "name": "keyword.other.quadra"
+            },
+            "3": {
+              "name": "entity.name.type.ledger.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(key|measure|attr)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.quadra"
+            },
+            "2": {
+              "name": "variable.other.property.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(check|warn)(?:\\s+(per)\\b)?",
+          "captures": {
+            "1": {
+              "name": "keyword.other.constraint.quadra"
+            },
+            "2": {
+              "name": "keyword.other.constraint.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(unique)(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "keyword.other.constraint.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(frozen)\\s+(when)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.other.constraint.quadra"
+            },
+            "2": {
+              "name": "keyword.other.constraint.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(load)\\s+(from)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.other.quadra"
+            },
+            "2": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(deny|allow)?\\s*((?:read|create|edit|run|all|hide|show|derived)(?:\\s*,\\s*(?:read|create|edit|run|all|hide|show))*)(?:\\s+(history))?\\b(?=\\s+[\\w*])",
+          "captures": {
+            "1": {
+              "name": "keyword.other.permission.quadra"
+            },
+            "2": {
+              "name": "keyword.other.permission.quadra"
+            },
+            "3": {
+              "name": "keyword.other.permission.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(header|footer|actions|table|tab|rows|columns|values)\\b(?=.*:)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.view.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(require|fail|emit|expect|expect_error|expect_compile_error|use|clock|rename|convert|backfill|verify)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(label|owner|definition|reason|requested_by|approved_by|effective)\\s*(?=:(?!=))",
+          "captures": {
+            "1": {
+              "name": "variable.other.property.meta.quadra"
+            }
+          }
+        }
+      ]
+    },
+    "members": {
+      "patterns": [
+        {
+          "match": "^\\s*([a-z_]\\w*)(?:\\s*:\\s*[^=#]*?)?\\s*(=)(?![=>])",
+          "captures": {
+            "1": {
+              "name": "variable.other.property.formula.quadra"
+            },
+            "2": {
+              "name": "keyword.operator.formula.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*([a-z_]\\w*)\\s*(:)(?!=)(?=\\s*\\S)",
+          "captures": {
+            "1": {
+              "name": "variable.other.property.quadra"
+            },
+            "2": {
+              "name": "punctuation.separator.type.quadra"
+            }
+          }
+        },
+        {
+          "match": "\\b(default)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.other.default.quadra"
+            }
+          }
+        },
+        {
+          "match": "\\b(required\\s+when|unless|via|through|except|live|by|per\\s+company)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.other.modifier.quadra"
+            }
+          }
+        },
+        {
+          "match": "\\b(parent|unique)\\b(?=\\s*(#.*)?$)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.modifier.quadra"
+            }
+          }
+        }
+      ]
+    },
+    "expression": {
+      "patterns": [
+        {
+          "match": "\\b([a-z_]\\w*)\\s*(?==>)",
+          "captures": {
+            "1": {
+              "name": "variable.parameter.quadra"
+            }
+          }
+        },
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "name": "constant.numeric.date.quadra",
+          "match": "\\b\\d{4}-\\d{2}(?:-\\d{2}(?:[ T]\\d{2}:\\d{2}(?::\\d{2})?)?)?\\b"
+        },
+        {
+          "match": "\\b(\\d[\\d_]*(?:\\.\\d+)?)\\s+(?!(?:if|else|and|or|not|in|is|for|as|when|where|implies|by|unless|then)\\b)([A-Za-z_]\\w*)(/[A-Za-z_]\\w*)?",
+          "captures": {
+            "1": {
+              "name": "constant.numeric.quadra"
+            },
+            "2": {
+              "name": "support.constant.unit.quadra"
+            },
+            "3": {
+              "name": "support.constant.unit.quadra"
+            }
+          }
+        },
+        {
+          "name": "constant.numeric.percent.quadra",
+          "match": "\\b\\d[\\d_]*(?:\\.\\d+)?%"
+        },
+        {
+          "name": "constant.numeric.quadra",
+          "match": "\\b\\d[\\d_]*(?:\\.\\d+)?\\b"
+        },
+        {
+          "name": "keyword.operator.logical.quadra",
+          "match": "\\b(and|or|not|in|is|implies)\\b"
+        },
+        {
+          "name": "keyword.control.quadra",
+          "match": "\\b(if|else|for|let|return|match|when|where|as|from|import|enum)\\b"
+        },
+        {
+          "name": "constant.language.quadra",
+          "match": "\\b(true|false|none)\\b"
+        },
+        {
+          "name": "variable.language.quadra",
+          "match": "\\b(self|it|me|current)\\b"
+        },
+        {
+          "name": "keyword.operator.arrow.quadra",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.arrow.quadra",
+          "match": "=>|->"
+        },
+        {
+          "name": "keyword.operator.quadra",
+          "match": "\\?\\?|\\?\\.|\\.\\.|==|!=|<=|>=|<|>|\\+|-|\\*|/|=|\\||\\?"
+        },
+        {
+          "name": "entity.name.type.quadra",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        },
+        {
+          "match": "\\b([a-z_]\\w*)\\s*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.call.quadra"
+            }
+          }
+        },
+        {
+          "name": "variable.other.property.quadra",
+          "match": "(?<=\\.)[a-z_]\\w*"
+        }
+      ]
+    },
+    "brace-escape": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.quadra",
+          "match": "\\{\\{|\\}\\}"
+        }
+      ]
+    }
+  }
+}

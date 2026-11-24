@@ -1,0 +1,26 @@
+# Version 1 of a tiny shop: the kind of product is free text.
+
+entity Product:
+    code: Code unique
+    name: Text
+    product_kind: Text
+    list_price: Money<EUR>
+
+
+role Admin:
+    all *
+
+role Manager:
+    all *
+
+role Director is Manager:
+    read *
+
+
+seed:
+    User(login="mario", roles={Admin})
+    User(login="lucia", roles={Manager})
+    User(login="dora", roles={Director})
+    Product(code="A", name="Bolt", product_kind="merce", list_price=1.00 EUR)
+    Product(code="B", name="Glue", product_kind="consumo", list_price=2.50 EUR)
+    Product(code="C", name="Repair", product_kind="servizio", list_price=40.00 EUR)

@@ -1,0 +1,10 @@
+[package]
+name = "quadra-syntax"
+description = "Lexer and lossless parser for the Quadra language"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rowan.workspace = true

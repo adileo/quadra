@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.6.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/adileo/quadra"
+homepage = "https://quadra.run"
+
+[workspace.dependencies]
+rowan = "0.16"
+quadra-syntax = { path = "crates/quadra-syntax" }
+quadra-sema = { path = "crates/quadra-sema" }
+quadra-lsp = { path = "crates/quadra-lsp" }
+quadra-ir = { path = "crates/quadra-ir" }
+quadra-types = { path = "crates/quadra-types" }
+quadra-analysis = { path = "crates/quadra-analysis" }
+quadra-runtime = { path = "crates/quadra-runtime" }
+quadra-store = { path = "crates/quadra-store" }
+quadra-server = { path = "crates/quadra-server" }
+quadra-api = { path = "crates/quadra-api" }
+quadra-qdi = { path = "crates/quadra-qdi" }
+
+# Debug builds: line tables only for our code (backtraces keep their lines), no debug
+# information for dependencies. Full debug information made target/ grow past 50 GB.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

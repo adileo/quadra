@@ -1,0 +1,79 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Quadra interface",
+  "scopeName": "source.qdi",
+  "fileTypes": ["qdi"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#block" },
+    { "include": "#header" },
+    { "include": "#line" },
+    { "include": "#rest" }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [{ "name": "comment.line.number-sign.qdi", "match": "#.*$" }]
+    },
+    "header": {
+      "patterns": [
+        {
+          "comment": "app \"Name\":, view \"Name\" of Entity:",
+          "match": "^(app|view)\\s+(\"[^\"]*\")(?:\\s+(of)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
+          "captures": {
+            "1": { "name": "keyword.declaration.qdi" },
+            "2": { "name": "entity.name.type.qdi" },
+            "3": { "name": "keyword.other.qdi" },
+            "4": { "name": "entity.name.type.qdi" }
+          }
+        },
+        {
+          "comment": "a component: kind name \"Title\" width N height N at x, y size w x h",
+          "match": "^\\s*(sheet|markdown|chart|kpi|filters|view|button|form|component)\\b(?:\\s+(?!width\\b|height\\b|at\\b)([A-Za-z_][A-Za-z0-9_]*))?",
+          "captures": {
+            "1": { "name": "storage.type.component.qdi" },
+            "2": { "name": "entity.name.function.qdi" }
+          }
+        },
+        {
+          "match": "^\\s*(page|row|column|space|tab|filter|let|field|submit|section|default|compute|color|apply|config|meta)\\b",
+          "captures": { "1": { "name": "keyword.control.qdi" } }
+        },
+        {
+          "match": "\\b(width|height|at|size|x|free|fixed|rows|cols)\\b(?=\\s+\\d)|\\b(x)\\b",
+          "name": "keyword.other.layout.qdi"
+        }
+      ]
+    },
+    "block": {
+      "patterns": [
+        {
+          "comment": "a cell of a sheet: A1 bold: = formula",
+          "match": "^\\s*([A-Z]{1,3}[1-9][0-9]*)\\b",
+          "captures": { "1": { "name": "variable.other.cell.qdi" } }
+        }
+      ]
+    },
+    "line": {
+      "patterns": [
+        {
+          "comment": "an option: key:",
+          "match": "^\\s*([a-z_][a-z0-9_]*)\\s*(:)",
+          "captures": {
+            "1": { "name": "support.type.property-name.qdi" },
+            "2": { "name": "punctuation.separator.key-value.qdi" }
+          }
+        }
+      ]
+    },
+    "rest": {
+      "patterns": [
+        { "name": "variable.parameter.app.qdi", "match": "@[A-Za-z_][A-Za-z0-9_]*" },
+        { "name": "keyword.operator.arrow.qdi", "match": "->" },
+        { "name": "keyword.other.raw.qdi", "match": "\\braw(?=\\s+\")" },
+        { "name": "keyword.other.qdi", "match": "\\b(role|everyone|use|change|previous|target|cell|range|desc|by|as|select|clear|keep|open|none)\\b(?!\\s*[:(=])" },
+        { "include": "source.quadra#strings" },
+        { "include": "source.quadra#expression" }
+      ]
+    }
+  }
+}

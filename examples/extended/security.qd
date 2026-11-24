@@ -1,0 +1,83 @@
+# Ruoli e permessi. I permessi sono predicati scritti nello stesso linguaggio delle formule,
+# quindi valgono ovunque: viste, API, report, export, azioni, reazioni avviate dall'utente.
+# `me` è l'utente corrente. Senza permesso esplicito, niente è visibile.
+
+from core.base import Country
+from partners import Partner, PaymentTerm
+from products import Product, Category, SupplierInfo, Pricelist
+from accounting import Account, Journal, Tax, JournalEntry
+from inventory import Transfer, StockMove, Lot, InventoryCount, Warehouse
+from sales import SalesOrder
+from purchasing import PurchaseOrder, LandedCost
+from manufacturing import Bom, ProductionOrder, WorkOrder, WorkCenter
+from invoicing import Invoice, Payment
+from planning import ReorderRule
+
+
+role Admin:
+    all *                       # configurazione e test; le regole `deny` valgono comunque
+
+
+role Employee:
+    read Product, Category, Uom, UomCategory, Currency, Country, Partner, Warehouse
+
+
+role Salesperson is Employee:
+    read, create, edit SalesOrder where o => o.salesperson == me
+    run SalesOrder.send, SalesOrder.confirm where o => o.salesperson == me
+    # permesso con più salti: le fatture dei clienti a cui vendo
+    read Invoice where i => i.direction is Out and i.partner.sales_orders.any(o => o.salesperson == me)
+    read Pricelist
+    hide Product.standard_cost, Product.avg_cost, Product.cost, Product.stock_value
+
+
+role SalesManager is Salesperson:
+    read, edit SalesOrder
+    run SalesOrder.lock, SalesOrder.cancel, SalesOrder.create_invoice
+    edit Partner.as_customer.credit_limit, Pricelist
+    show Product.cost
+
+
+role Buyer is Employee:
+    read, create, edit PurchaseOrder where o => o.state in {Draft, Sent}
+    run PurchaseOrder.send, PurchaseOrder.confirm, PurchaseOrder.cancel
+    read, create, edit SupplierInfo, ReorderRule, LandedCost
+    show Product.cost
+
+
+role PurchaseApprover is Employee:
+    read PurchaseOrder
+    run PurchaseOrder.approve, PurchaseOrder.reject where o => o.total_company <= o.company.po_approval_limit * 5
+
+
+role Warehouseman is Employee:
+    read Transfer, StockMove, Lot
+    run Transfer.validate, StockMove.reserve
+    read, create, edit InventoryCount
+    run InventoryCount.apply
+
+
+role Production is Employee:
+    read Bom, WorkCenter
+    read, create ProductionOrder
+    run ProductionOrder.confirm, ProductionOrder.finish
+    run WorkOrder.start, WorkOrder.pause, WorkOrder.finish
+
+
+role Accountant is Employee:
+    all Invoice, Payment, JournalEntry, Account, Journal, Tax, ExchangeRate, PaymentTerm, Sequence
+    run Invoice.post, Invoice.cancel, Invoice.credit_note, Payment.post, Payment.cancel, JournalEntry.reverse
+    run PurchaseOrder.create_bill
+    show Product.cost
+
+
+role Auditor:
+    read *                      # tutto, in sola lettura
+    read history *              # anche le versioni passate e le cause
+    run certify_report          # esporta metriche, impronte e controlli firmati
+
+
+# Separazione dei compiti: regole che valgono per tutti, anche per chi accumula più ruoli.
+deny run PurchaseOrder.approve where o => o.created_by == me
+deny run Payment.post where p => p.allocations.any(a => a.invoice?.created_by == me)
+deny edit ExchangeRate where r => r.date < today() - 1 day      # i cambi passati non si toccano

@@ -1,0 +1,163 @@
+# Centri di lavoro, distinte base multilivello, cicli, ordini di produzione.
+
+from core.base import Document
+from products import Product
+from inventory import Warehouse, StockMove, virtual_location
+
+
+entity WorkCenter:
+    company: Company default current.company
+    code: Code unique
+    name: Text
+    cost_per_hour: Price<company.currency, h>
+    capacity: Int where > 0 default 1               # postazioni in parallelo
+    efficiency: Percent where > 0% default 100%
+
+
+extend Product:
+    boms: [Bom] via product
+    bom = boms.find(b => b.active)
+    check boms.count(b => b.active) <= 1, "Al massimo una distinta attiva per prodotto"
+
+
+entity Bom:
+    company: Company default current.company
+    product: Product where p => p.type is not Service
+    qty: Qty<product.uom> where > 0 default Qty(1, product.uom)
+    kind: enum(Manufacture, Kit) default Manufacture     # Kit = fantasma: si esplode nei componenti
+    active: Bool default true
+    lines: [BomLine]
+    operations: [Operation]
+
+    # salto multilivello: le distinte dei componenti (chi non ha distinta non entra)
+    children = lines.flat_map(l => l.product.bom)
+    depth: Int = 1 + (children.max(c => c.depth) ?? 0)
+
+    check lines.count() > 0, "Distinta senza componenti"
+    check not self.closure(b => b.children).contains(self), "Distinta ciclica: il prodotto contiene se stesso"
+
+    # Rollup dei costi multilivello. È ricorsivo sui dati (BomLine.cost legge la distinta del
+    # componente): il compilatore lo accetta perché il check qui sopra garantisce che termina.
+    material_cost = lines.sum(l => l.cost)
+    labour_cost = operations.sum(o => o.cost)
+    unit_cost = (material_cost + labour_cost) / qty                     # Money / Qty → Price
+
+    # Fabbisogni per `need` unità, attraversando i kit fino ai componenti reali.
+    fn explode(need: Qty) -> [(product: Product, qty: Exact<Qty>)]:
+        let factor = need.to(product.uom) / qty
+        return lines.flat_map(l =>
+            l.product.bom.explode(l.gross_qty * factor) if l.product.bom?.kind is Kit
+            else [(product: l.product, qty: l.gross_qty * factor)])
+
+
+entity BomLine:
+    bom: Bom parent
+    product: Product where p => p.type is not Service
+    qty: Qty<uom> where > 0
+    uom: Uom where u => u.category == product.uom.category default product.uom
+    scrap: Percent where 0%..99% default 0%
+    gross_qty = (qty * (1 + scrap)).to(product.uom)
+    # semilavorato: costo dalla sua distinta; acquistato: costo del prodotto
+    cost = gross_qty * (product.bom?.unit_cost ?? product.cost[bom.company])
+    check product != bom.product, "Un prodotto non può essere componente di se stesso"
+
+
+entity Operation:
+    bom: Bom parent
+    seq: Int
+    name: Text
+    work_center: WorkCenter where w => w.company == bom.company
+    setup: Qty<min> default 0 min
+    run: Qty<min> where > 0                         # tempo per bom.qty
+    duration = (setup + run) / work_center.efficiency
+    cost = duration * work_center.cost_per_hour     # min × valuta/h: conversione automatica min → h
+    unique (bom, seq)
+
+
+entity ProductionOrder is Document:
+    number default next_number(company, "MO")
+    product: Product where p => p.bom != none and p.bom.kind is Manufacture
+    bom: Bom where b => b.product == product default product.bom
+    qty: Qty<product.uom> where > 0
+    warehouse: Warehouse default Warehouse.first(w => w.company == company)
+    due: Date
+    moves: [StockMove] via origin
+    work_orders: [WorkOrder]
+    state: enum(Draft, Confirmed, InProgress, Done, Cancelled) default Draft
+
+    factor = qty / bom.qty
+    components = moves.where(m => m.dest.kind is Production)
+    finished = moves.find(m => m.source.kind is Production)
+
+    # rollup: costo effettivo = componenti consumati + ore lavorate
+    actual_cost = components.where(m => m.state is Done).sum(m => m.value) + work_orders.sum(w => w.actual_cost)
+    planned_cost = (qty * bom.unit_cost).round()
+    variance = actual_cost - planned_cost
+
+    frozen when state in {Done, Cancelled}
+
+    flow state:
+        Draft -> Confirmed                  by confirm
+        Confirmed -> InProgress             when work_orders.any(w => w.state is not Pending)
+        Confirmed | InProgress -> Done      by finish
+        Draft | Confirmed -> Cancelled      by cancel
+
+    action confirm:
+        let prod = virtual_location(Production)
+        for c in bom.explode(qty):
+            StockMove(product=c.product, qty=c.qty.round(), uom=c.product.uom,
+                      source=warehouse.stock, dest=prod, origin=self)
+        StockMove(product=product, qty=qty, uom=product.uom,
+                  source=prod, dest=warehouse.stock, origin=self)
+        for op in bom.operations:
+            WorkOrder(production=self, operation=op, planned=(op.setup + op.run * factor).round())
+
+    action finish:
+        require work_orders.all(w => w.state is Done), "Ci sono lavorazioni non completate"
+        for m in components.where(m => m.state is not Done):
+            m.done()
+        # Rollup reiniettato: il prodotto finito entra a magazzino al costo effettivo.
+        # actual_cost qui vede già i componenti appena evasi (lettura nella stessa transazione).
+        let f = finished ?? fail "Movimento del prodotto finito mancante"
+        f.unit_cost = (actual_cost / f.qty_base).round()
+        f.done()
+
+    action cancel:
+        for m in moves.where(m => m.state is not Done):
+            m.cancel()
+
+
+entity WorkOrder:
+    production: ProductionOrder parent
+    operation: Operation
+    work_center = operation.work_center
+    planned: Qty<min>
+    logs: [TimeLog]
+    state: enum(Pending, Running, Paused, Done) default Pending
+    worked = logs.sum(l => l.duration)
+    actual_cost: Money<production.company.currency> = (worked * work_center.cost_per_hour).round()
+
+    flow state:
+        Pending | Paused -> Running     by start
+        Running -> Paused               by pause
+        Running | Paused -> Done        by finish
+
+    action start:
+        TimeLog(work_order=self, operator=current.user, started=now())
+
+    action pause:
+        logs.single(l => l.ended == none).ended = now()
+
+    action finish:
+        if let open = logs.find(l => l.ended == none):
+            open.ended = now()
+
+
+entity TimeLog:
+    work_order: WorkOrder parent
+    operator: User
+    started: DateTime
+    ended: DateTime? where e => e >= started
+    # Formula pura: usa solo dati memorizzati. La durata "fino ad adesso" di un log aperto
+    # richiederebbe now(), che nelle formule è vietato: si mostra nella vista, non si memorizza.
+    duration = (ended - started).to(min) if ended != none else 0 min

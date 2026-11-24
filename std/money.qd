@@ -1,0 +1,41 @@
+# Currencies and exchange rates.
+# Money<C>, Price<C, U>, Exact<T>, convert() and allocate() are built into the language.
+
+enum Rounding: HalfEven, HalfUp, Up, Down
+
+
+entity Currency:
+    code: Code where c => c.len() == 3 unique       # ISO 4217
+    name: Text
+    symbol: Text
+    decimals: Int where 0..4 default 2              # JPY = 0, KWD = 3: used by .round()
+    rounding: Rounding default HalfEven             # how .round() rounds amounts and prices
+    active: Bool default true
+
+
+entity ExchangeRate:
+    base: Currency
+    quote: Currency
+    date: Date
+    rate: Decimal where > 0                         # 1 base = rate quote
+    unique (base, quote, date)
+    check base != quote, "An exchange rate links two different currencies"
+
+
+fn exchange_rate(src: Currency, dst: Currency, on: Date) -> Decimal:
+    if src == dst:
+        return 1
+    if let d = ExchangeRate.where(r => r.base == src and r.quote == dst and r.date <= on).last_by(r => r.date):
+        return d.rate
+    if let i = ExchangeRate.where(r => r.base == dst and r.quote == src and r.date <= on).last_by(r => r.date):
+        return 1 / i.rate
+    fail f"Missing exchange rate {src.code}/{dst.code} on {on}"
+
+
+seed:
+    Currency(code="EUR", name="Euro", symbol="€")
+    Currency(code="USD", name="US Dollar", symbol="$")
+    Currency(code="GBP", name="Pound Sterling", symbol="£")
+    Currency(code="CHF", name="Swiss Franc", symbol="CHF")
+    Currency(code="JPY", name="Yen", symbol="¥", decimals=0)
+    Currency(code="CNY", name="Yuan Renminbi", symbol="¥")

@@ -1,0 +1,511 @@
+//! Operations on a database: init, verify, migrate, changes. Used by the CLI and the tests.
+
+use crate::db::{materialized_formulas, Database, Sink};
+use crate::schema;
+use chrono::NaiveDateTime;
+use quadra_ir::{Block, Model};
+use quadra_runtime::{ChangeDiff, Ctx, Flow, Interp, ScriptMeta, Store, V};
+use quadra_types::Report;
+use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
+
+fn flow(prefix: &str, e: Flow) -> String {
+    match e {
+        Flow::Fail(m) if prefix.is_empty() => m,
+        Flow::Fail(m) => format!("{prefix}: {m}"),
+        Flow::Return(_) => format!("{prefix}: unexpected return"),
+        Flow::Conflict(c) => format!("{prefix}: changed by others in the meantime: {}", c.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("; ")),
+    }
+}
+
+/// An interpreter over the committed state of the database, with units and the clock set.
+pub fn loaded<'m>(db: &mut Database, model: &'m Model, time: NaiveDateTime) -> Result<Interp<'m>, String> {
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = db.load()?;
+    interp.load_units();
+    Ok(interp)
+}
+
+/// Create the tables and commit the seeds as the first transaction. Every migration of the
+/// project counts as applied: the schema is born migrated. On failure the database is left
+/// empty. Returns the number of tables.
+pub fn init(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<usize, String> {
+    let mut db = Database::open(url, model, report)?;
+    db.init()?;
+    crate::deploy::Catalog::of(model, &db.schema, None).write(&mut db)?;
+    let tables = db.schema.tables.len();
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(Box::new(Sink { db, model }));
+    interp.system += 1;
+    let seeded = interp.transaction(|i| {
+        for s in &model.seeds {
+            i.stmts(&s.body, &mut Ctx::default())?;
+        }
+        let tx = i.store.tx;
+        for m in &model.migrations {
+            i.store.applied.insert(format!("migration:{}", m.name), tx);
+        }
+        Ok(())
+    });
+    if let Err(e) = seeded {
+        drop(interp);
+        Database::open(url, model, report)?.uninit()?;
+        return Err(flow("seed failed", e));
+    }
+    Ok(tables)
+}
+
+/// The events of the outbox, oldest first; with `pending`, only those not delivered yet.
+pub fn outbox(url: &str, model: &Model, report: &Report, pending: bool) -> Result<Vec<crate::OutboxEvent>, String> {
+    let mut db = Database::open(url, model, report)?;
+    if !db.status()?.initialized {
+        return Err("the database is not initialized (run `quadra db init`)".into());
+    }
+    db.outbox(pending)
+}
+
+/// Mark outbox events delivered; returns how many were pending.
+pub fn outbox_delivered(url: &str, model: &Model, report: &Report, ids: &[u64], time: NaiveDateTime) -> Result<usize, String> {
+    let mut db = Database::open(url, model, report)?;
+    if !db.status()?.initialized {
+        return Err("the database is not initialized (run `quadra db init`)".into());
+    }
+    db.mark_delivered(ids, time)
+}
+
+/// Hash chain and tables against the history, a page at a time (`crate::verify`). Returns
+/// the problems and the record count.
+pub fn verify(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<(Vec<String>, usize), String> {
+    crate::verify::verify(url, model, report, time)
+}
+
+/// `verify` with everything loaded in memory and every formula computed from the history
+/// (the reference the tests compare the streamed verify with).
+pub fn verify_in_memory(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<(Vec<String>, usize), String> {
+    let mut db = Database::open(url, model, report)?;
+    let mut interp = loaded(&mut db, model, time)?;
+    interp.materialize = materialized_formulas(&db.schema);
+    // the data does not change while it is verified: a formula read again (a rollup of
+    // rollups) is not computed again
+    interp.formula_memo = Some(std::collections::HashMap::new());
+    interp.materialize_formulas();
+    let problems = db.verify(model, &interp.store)?;
+    Ok((problems, interp.store.records.len()))
+}
+
+#[derive(Debug, Default)]
+pub struct MigrateReport {
+    pub schema_changed: bool,
+    pub fingerprint: String,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    /// migration name → its report lines
+    pub scripts: Vec<(String, Vec<String>)>,
+    pub new_defaults: usize,
+    /// deployed incrementally (false: every table rebuilt, see `deploy_full`)
+    pub incremental: bool,
+    /// why the tables were rebuilt instead
+    pub rebuilt_because: Option<String>,
+    /// the changes of the tables, in order (`add column order.channel`, …)
+    pub steps: Vec<String>,
+    pub indexes_created: Vec<String>,
+    pub indexes_dropped: Vec<String>,
+    /// indexes that could not be built after the commit (PostgreSQL: retried by the next deploy)
+    pub index_errors: Vec<String>,
+}
+
+/// Run the pending migrations and validate the data against the new model, in one
+/// transaction; unless `dry`, rebuild the tables and commit. `None`: nothing to do.
+pub fn migrate(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool) -> Result<Option<MigrateReport>, String> {
+    migrate_with(url, model, report, root, time, dry, false, None)
+}
+
+/// A new version of the code: like `migrate`, but always validates every record against the
+/// new model (new checks included) and, unless `dry`, rebuilds the tables (formulas may have
+/// changed even when the schema did not). `label` becomes the cause of the migration commit.
+pub fn deploy(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, label: &str) -> Result<MigrateReport, String> {
+    Ok(migrate_with(url, model, report, root, time, dry, true, Some(label))?.unwrap_or_default())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn migrate_with(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, always: bool, label: Option<&str>) -> Result<Option<MigrateReport>, String> {
+    match crate::deploy::deploy(url, model, report, root, time, dry, always, label)? {
+        Ok(crate::deploy::Done::Nothing) => Ok(None),
+        Ok(crate::deploy::Done::Report(r)) => Ok(Some(r)),
+        Err(crate::deploy::Fallback(why)) => {
+            let r = migrate_full(url, model, report, root, time, dry, always, label)?;
+            Ok(r.map(|mut r| {
+                r.rebuilt_because = Some(why);
+                r
+            }))
+        }
+    }
+}
+
+/// `migrate`/`deploy` by rebuilding every table: the reference behaviour, used when the
+/// database has no catalog of what is deployed (created by an older version) or the change
+/// is one the incremental deploy does not handle. Loads the whole database in memory.
+pub fn deploy_full(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, label: &str) -> Result<MigrateReport, String> {
+    Ok(migrate_full(url, model, report, root, time, dry, true, Some(label))?.unwrap_or_default())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn migrate_full(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, always: bool, label: Option<&str>) -> Result<Option<MigrateReport>, String> {
+    let mut db = Database::open(url, model, report)?;
+    let status = db.status()?;
+    if !status.initialized {
+        return Err("the database is not initialized (run `quadra db init`)".into());
+    }
+    let mut interp = loaded(&mut db, model, time)?;
+    let pending: Vec<&Block> = model.migrations.iter().filter(|m| !interp.store.applied.contains_key(&format!("migration:{}", m.name))).collect();
+    if status.schema_current && pending.is_empty() && !always {
+        return Ok(None);
+    }
+    let (added, removed) = db.plan()?;
+    let mut out = MigrateReport { schema_changed: !status.schema_current, fingerprint: status.fingerprint, added, removed, ..Default::default() };
+    let before = interp.store.clone();
+    let names: Vec<String> = pending.iter().map(|m| m.name.clone()).collect();
+    let mut scripts = Vec::new();
+    let mut new_defaults = 0;
+    interp.system += 1;
+    let cause = match (label, names.is_empty()) {
+        (Some(l), true) => l.to_string(),
+        (Some(l), false) => format!("{l} (migrations: {})", names.join(", ")),
+        (None, true) => "schema migration".to_string(),
+        (None, false) => format!("schema migration: {}", names.join(", ")),
+    };
+    interp.whole_data = true;
+    interp.violations.clear();
+    let r = interp.with_cause(cause.clone(), |i| {
+        i.transaction(|i| {
+            for m in &pending {
+                let lines = i.run_migration(m, Some(root)).map_err(|e| Flow::Fail(flow(&format!("migration {}", m.name), e)))?;
+                scripts.push((m.name.clone(), lines));
+            }
+            // new fields with a default get it on every existing record
+            let missing: Vec<(u64, String)> = i
+                .store
+                .records
+                .values()
+                .flat_map(|r| {
+                    model
+                        .entity(&r.ent)
+                        .map(|e| {
+                            model.all_fields(e).into_iter().filter(|f| f.default.is_some() && f.formula.is_none() && !f.per_company && !r.fields.contains_key(&f.name)).map(|f| (r.id, f.name.clone())).collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect();
+            new_defaults = missing.len();
+            for (id, f) in missing {
+                if let Some(r) = i.store.records.get_mut(&id) {
+                    r.pending_defaults.push(f);
+                }
+            }
+            Ok(())
+        })
+    });
+    interp.whole_data = false;
+    if !interp.violations.is_empty() {
+        // the report says it all, without the generic prefix
+        return Err(interp.violations_report());
+    }
+    r.map_err(|e| flow("the existing data does not satisfy the new model", e))?;
+    out.scripts = scripts;
+    out.new_defaults = new_defaults;
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.materialize_formulas();
+    if !dry {
+        let old = crate::deploy::Catalog::read(&mut db)?;
+        db.apply_migration(model, &before, &interp.store, &cause, interp.clock)?;
+        crate::deploy::Catalog::of(model, &db.schema, old.as_ref()).write(&mut db)?;
+    }
+    Ok(Some(out))
+}
+
+// ---- changes ------------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ChangeStatus {
+    pub name: String,
+    pub meta: ScriptMeta,
+    pub applied_tx: Option<u64>,
+    pub reverted_tx: Option<u64>,
+}
+
+pub fn list_changes(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<Vec<ChangeStatus>, String> {
+    let mut db = Database::open(url, model, report)?;
+    let mut interp = loaded(&mut db, model, time)?;
+    Ok(model
+        .changes
+        .iter()
+        .map(|c| ChangeStatus {
+            name: c.name.clone(),
+            meta: interp.script_meta(c),
+            applied_tx: interp.store.applied.get(&format!("change:{}", c.name)).copied(),
+            reverted_tx: interp.store.applied.get(&format!("revert:{}", c.name)).copied(),
+        })
+        .collect())
+}
+
+#[derive(Debug)]
+pub struct ChangeOutcome {
+    pub meta: ScriptMeta,
+    pub diff: ChangeDiff,
+    /// certified metrics that read a changed field (directly or through formulas)
+    pub metrics: Vec<String>,
+    /// the transaction written (None for a preview)
+    pub tx: Option<u64>,
+}
+
+fn find_change<'m>(model: &'m Model, name: &str) -> Result<&'m Block, String> {
+    model.changes.iter().find(|c| c.name == name).ok_or_else(|| {
+        let names: Vec<&str> = model.changes.iter().map(|c| c.name.as_str()).collect();
+        format!("unknown change `{name}` (changes: {})", if names.is_empty() { "none".into() } else { names.join(", ") })
+    })
+}
+
+fn user_by_login(interp: &mut Interp, login: &str) -> Option<u64> {
+    let ids = interp.ids("User", None);
+    ids.into_iter().find(|id| interp.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login))
+}
+
+/// The user holds `role`, directly or through a role that inherits it (`role Director is
+/// Manager`).
+fn has_role(interp: &mut Interp, user: u64, role: &str) -> bool {
+    interp.roles_of(user).iter().any(|r| r == role)
+}
+
+/// "a Manager", "an Accountant".
+fn article(word: &str) -> String {
+    let an = word.chars().next().map_or(false, |c| "AEIOUaeiou".contains(c));
+    format!("{} {word}", if an { "an" } else { "a" })
+}
+
+/// Requester and approver: the requester runs the change; the approver must hold the role
+/// named by `approved_by` and must not be the requester.
+fn authorize(interp: &mut Interp, meta: &ScriptMeta, approver: Option<&str>) -> Result<(Option<u64>, String), String> {
+    let requester = match &meta.requested_by {
+        Some(login) => Some(user_by_login(interp, login).ok_or_else(|| format!("the requester `{login}` is not a user"))?),
+        None => None,
+    };
+    let mut signed = String::new();
+    if let Some(role) = &meta.approved_by_role {
+        let Some(login) = approver else {
+            return Err(format!("this change needs the approval of {}: pass --approved-by <login>", article(role)));
+        };
+        let id = user_by_login(interp, login).ok_or_else(|| format!("the approver `{login}` is not a user"))?;
+        if !has_role(interp, id, role) {
+            return Err(format!("`{login}` is not {}: the change needs the approval of {}", article(role), article(role)));
+        }
+        if Some(id) == requester {
+            return Err(format!("`{login}` requested the change and cannot approve it too"));
+        }
+        signed = format!(", approved by {login}");
+    }
+    let user = requester.or_else(|| approver.and_then(|a| user_by_login(interp, a)));
+    Ok((user, signed))
+}
+
+/// Metrics that read one of `fields`, following formulas.
+fn metrics_touched(model: &Model, report: &Report, fields: &HashSet<(String, String)>) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in &model.metrics {
+        let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut stack = vec![("metric".to_string(), m.name.clone())];
+        let mut hit = false;
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n.clone()) {
+                continue;
+            }
+            if fields.contains(&n) {
+                hit = true;
+                break;
+            }
+            for (r, _) in report.reads.get(&n).map(|v| v.as_slice()).unwrap_or(&[]) {
+                stack.push(r.clone());
+            }
+        }
+        if hit {
+            out.push(m.name.clone());
+        }
+    }
+    out
+}
+
+/// Run a change: as a preview (nothing written) or for real (`apply`).
+pub fn run_change(url: &str, model: &Model, report: &Report, name: &str, approver: Option<&str>, time: NaiveDateTime, apply: bool) -> Result<ChangeOutcome, String> {
+    let change = find_change(model, name)?;
+    let mut db = Database::open(url, model, report)?;
+    let mut interp = loaded(&mut db, model, time)?;
+    let meta = interp.script_meta(change);
+    if let Some(tx) = interp.store.applied.get(&format!("change:{name}")) {
+        return Err(format!("change `{name}` was already applied (transaction {tx})"));
+    }
+    if apply {
+        if let Some(d) = meta.effective {
+            if time.date() < d {
+                return Err(format!("change `{name}` is effective from {d}: it can be applied on or after that date"));
+            }
+        }
+    }
+    let (user, signed) = if apply { authorize(&mut interp, &meta, approver)? } else { (meta.requested_by.as_deref().and_then(|l| user_by_login(&mut interp, l)), String::new()) };
+    interp.user = user;
+    let before: Store = interp.store.clone();
+    if apply {
+        interp.materialize = materialized_formulas(&db.schema);
+        interp.sink = Some(Box::new(Sink { db, model }));
+    }
+    let requested = meta.requested_by.as_deref().map(|r| format!(", requested by {r}")).unwrap_or_default();
+    let cause = format!("change {name}: {}{requested}{signed}", meta.reason.clone().unwrap_or_default());
+    let mut diff = ChangeDiff::default();
+    interp
+        .with_cause(cause, |i| {
+            i.transaction(|i| {
+                i.run_change(change)?;
+                Ok(())
+            })?;
+            diff = i.diff_since(&before);
+            Ok(())
+        })
+        .map_err(|e| flow(&format!("change {name}"), e))?;
+    let fields: HashSet<(String, String)> = diff.changed.iter().map(|(e, _, f, _, _)| (e.clone(), f.split('@').next().unwrap_or(f).to_string())).collect();
+    let metrics = metrics_touched(model, report, &fields);
+    Ok(ChangeOutcome { meta, diff, metrics, tx: if apply { Some(interp.store.tx) } else { None } })
+}
+
+/// Undo an applied change with a new transaction (same approval rules). Returns the
+/// number of values restored.
+pub fn revert_change(url: &str, model: &Model, report: &Report, name: &str, approver: Option<&str>, time: NaiveDateTime) -> Result<usize, String> {
+    let change = find_change(model, name)?;
+    let mut db = Database::open(url, model, report)?;
+    let mut interp = loaded(&mut db, model, time)?;
+    let meta = interp.script_meta(change);
+    let (user, signed) = authorize(&mut interp, &meta, approver)?;
+    interp.user = user;
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(Box::new(Sink { db, model }));
+    interp.system += 1;
+    let mut n = 0;
+    interp
+        .with_cause(format!("revert of change {name}{signed}"), |i| {
+            i.transaction(|i| {
+                n = i.revert_change(name)?;
+                Ok(())
+            })
+        })
+        .map_err(|e| flow("", e))?;
+    Ok(n)
+}
+
+/// Provisional values: (entity, id, field, reason, until).
+pub fn provisional(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<Vec<(String, u64, String, String, Option<chrono::NaiveDate>)>, String> {
+    let mut db = Database::open(url, model, report)?;
+    let interp = loaded(&mut db, model, time)?;
+    Ok(interp.provisional_values())
+}
+
+/// Re-evaluate the rules that read the clock (`today()`, `now()`) on every record: automatic
+/// transitions, `becomes` reactions, postings. Loading on demand evaluates rules only where
+/// data changed, so time-driven ones need this periodic pass. Returns the transaction
+/// written, if anything changed.
+pub fn sweep(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<Option<u64>, String> {
+    let mut db = Database::open(url, model, report)?;
+    // when the previous sweep ran: a `becomes` condition that reads the clock is compared with
+    // what it was then
+    let last = db.meta("last_sweep")?.and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok());
+    let schema = db.schema.clone();
+    let src = crate::source::DbSource::open(url, schema, None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(Box::new(Sink { db, model }));
+    interp.sweep = true;
+    interp.last_sweep = last;
+    interp.system += 1;
+    let before = interp.store.tx;
+    interp.with_cause("periodic sweep of time-driven rules".into(), |i| i.transaction(|_| Ok(()))).map_err(|e| flow("sweep", e))?;
+    let written = if interp.store.tx > before && !interp.store.dirty.is_empty() { Some(interp.store.tx) } else { None };
+    drop(interp);
+    Database::open(url, model, report)?.set_meta("last_sweep", &time.format("%Y-%m-%dT%H:%M:%S%.f").to_string())?;
+    Ok(written)
+}
+
+/// Load a fixture of the tests (with the fixtures it extends) into a database, as one
+/// transaction: demo and development data.
+pub fn fixture(url: &str, model: &Model, report: &Report, name: &str, time: NaiveDateTime) -> Result<u64, String> {
+    let mut chain = Vec::new();
+    let mut cur = Some(name.to_string());
+    while let Some(n) = cur {
+        let f = model.fixtures.iter().find(|f| f.name == n).ok_or_else(|| format!("unknown fixture `{n}`"))?;
+        chain.push(f);
+        cur = f.extends.clone();
+    }
+    chain.reverse();
+    let mut db = Database::open(url, model, report)?;
+    let mut interp = loaded(&mut db, model, time)?;
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(Box::new(Sink { db, model }));
+    interp.system += 1;
+    let mut ctx = Ctx::default();
+    ctx.scopes.push(Default::default());
+    interp
+        .with_cause(format!("fixture {name}"), |i| {
+            i.transaction(|i| {
+                for f in &chain {
+                    for st in &f.body {
+                        match &st.kind {
+                            quadra_ir::StmtKind::Clock(_) => {}
+                            _ => i.stmt(st, &mut ctx)?,
+                        }
+                    }
+                }
+                Ok(())
+            })
+        })
+        .map_err(|e| flow(&format!("fixture {name}"), e))?;
+    Ok(interp.store.tx)
+}
+
+/// `quadra dev`: a user to sign in with, when the database has none (`Admin` role if the
+/// project defines one). Whether it was created.
+pub fn ensure_user(url: &str, model: &Model, report: &Report, login: &str, time: NaiveDateTime) -> Result<bool, String> {
+    let mut db = Database::open(url, model, report)?;
+    let mut interp = loaded(&mut db, model, time)?;
+    if !interp.ids("User", None).is_empty() {
+        return Ok(false);
+    }
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(Box::new(Sink { db, model }));
+    interp.system += 1;
+    let roles: Vec<V> = model.roles.iter().filter(|r| r.name == "Admin").map(|r| V::Role(std::rc::Rc::from(r.name.as_str()))).collect();
+    interp
+        .with_cause(format!("quadra dev: user {login}"), |i| {
+            i.transaction(|i| {
+                i.create("User", vec![("login".to_string(), V::Text(std::rc::Rc::from(login))), ("roles".to_string(), V::Set(std::rc::Rc::new(roles)))])?;
+                Ok(())
+            })
+        })
+        .map_err(|e| flow("the dev user", e))?;
+    Ok(true)
+}
+
+/// Number of tables of the schema (for messages).
+pub fn table_count(model: &Model, report: &Report) -> usize {
+    schema::build(model, report).tables.len()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn article_before_a_role() {
+        assert_eq!(super::article("Manager"), "a Manager");
+        assert_eq!(super::article("Accountant"), "an Accountant");
+        assert_eq!(super::article("Editor"), "an Editor");
+    }
+}

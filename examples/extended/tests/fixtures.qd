@@ -1,0 +1,95 @@
+# Dati di prova condivisi. Nei file di test tutti i moduli dello spec sono visibili.
+# Una fixture è UNA transazione (i dati di base possono riferirsi l'uno all'altro);
+# in un test ogni istruzione di primo livello è una transazione (come un clic).
+# `clock` fissa now()/today(); `as utente:` esegue con i permessi di quell'utente.
+
+fixture italy:
+    clock 2026-11-02 09:00
+
+    ExchangeRate(base=USD, quote=EUR, date=2026-11-01, rate=0.92)
+    ExchangeRate(base=USD, quote=EUR, date=2026-11-20, rate=0.95)
+
+    let it = Country(code="IT", name="Italia", in_eu=true)
+    let us = Country(code="US", name="Stati Uniti")
+    let milano = Address(street="Via Roma 1", city="Milano", zip="20100", province="MI", country=it)
+
+    # I test girano come `admin` (ruolo Admin: tutti i permessi, ma le regole `deny` valgono
+    # anche per lui). I blocchi `as giulia:` ecc. verificano i permessi dei ruoli veri.
+    User(login="admin",  roles={Admin})
+    User(login="giulia", roles={Salesperson, Buyer})
+    User(login="marco",  roles={PurchaseApprover, SalesManager})
+    User(login="anna",   roles={Accountant, Warehouseman, Production})
+
+    let acme = Company(name="Acme Srl", vat_number="IT01234567890", address=milano, currency=EUR,
+                       po_approval_limit=10_000.00 EUR)
+    login("admin", company=acme)
+
+    # Piano dei conti minimo
+    let crediti   = Account(code="1200", name="Crediti verso clienti",  type=Receivable)
+    let banca     = Account(code="1300", name="Banca c/c",              type=Bank)
+    let banca_usd = Account(code="1310", name="Banca c/c USD",          type=Bank, currency=USD)
+    let iva_cred  = Account(code="1600", name="IVA a credito",          type=CurrentAsset)
+    let debiti    = Account(code="2200", name="Debiti verso fornitori", type=Payable)
+    let iva_deb   = Account(code="2600", name="IVA a debito",           type=CurrentLiability)
+    let ricavi    = Account(code="4000", name="Ricavi di vendita",      type=Income)
+    let utili_c   = Account(code="4900", name="Utili su cambi",         type=OtherIncome)
+    let acquisti  = Account(code="5000", name="Acquisti",               type=CostOfSales)
+    let perdite_c = Account(code="6900", name="Perdite su cambi",       type=Expense)
+    acme.receivable = crediti
+    acme.payable = debiti
+    acme.income = ricavi
+    acme.expense = acquisti
+    acme.fx_gain = utili_c
+    acme.fx_loss = perdite_c
+
+    Sequence(code="VEN", pattern="FT/{year}/{n:05}", gapless=true)
+    let ven     = Journal(code="VEN",    name="Vendite",    type=Sale)
+    let acq     = Journal(code="ACQ",    name="Acquisti",   type=Purchase)
+    let bnk     = Journal(code="BNK",    name="Banca",      type=Bank, account=banca)
+    let bnk_usd = Journal(code="BNKUSD", name="Banca USD",  type=Bank, account=banca_usd)
+
+    let iva22v = Tax(name="IVA 22% vendite",  scope=Sale,     rate=22%, account=iva_deb)
+    let iva22a = Tax(name="IVA 22% acquisti", scope=Purchase, rate=22%, account=iva_cred)
+    let export = Tax(name="Non imponibile art. 8", scope=Sale, rate=0%, account=iva_deb, exemption="N3.1")
+
+    let subito = PaymentTerm(name="Rimessa diretta", lines=[PaymentTermLine(percent=100%)])
+    let t3060  = PaymentTerm(name="30/60", lines=[PaymentTermLine(percent=50%, days=30 days),
+                                                  PaymentTermLine(percent=50%, days=60 days)])
+
+    let rossi = Partner(name="Rossi Spa", vat_number="IT09876543210", address=milano,
+                        as_customer=CustomerRole(credit_limit=5_000.00 EUR, payment_term=t3060))
+    let acme_inc = Partner(name="Acme Inc", currency=USD,
+                           address=Address(street="1 Main St", city="Boston", zip="02108", country=us),
+                           as_customer=CustomerRole(payment_term=subito))
+    let bianchi = Partner(name="Bianchi Forniture Srl", vat_number="IT11122233344", address=milano,
+                          as_vendor=VendorRole(payment_term=subito, lead_time=5 days))
+
+    let ferramenta = Category(name="Ferramenta")
+    let widget = Product(code="W-01", name="Widget", category=ferramenta, hs_code="73269098", uom=pcs,
+                         list_price=10.00 EUR/pcs, standard_cost=6.00 EUR/pcs, weight=0.5 kg,
+                         sale_tax=iva22v, purchase_tax=iva22a)
+    SupplierInfo(product=widget, vendor=bianchi, price=5.50 EUR/pcs)
+
+    let main = Warehouse(code="WH", name="Magazzino centrale", address=milano)
+
+    # Giacenza iniziale: 100 pezzi a 6,00 €
+    StockMove(product=widget, qty=100 pcs, source=virtual_location(Inventory), dest=main.stock).done()
+
+
+# Tavolo = 1 piano + 4 gambe; gamba = 0,5 kg di legno (+5% scarto) tornita.
+fixture bom_example extends italy:
+    let lathe = WorkCenter(code="TORNIO", name="Tornio", cost_per_hour=60.00 EUR/h)
+    let bench = WorkCenter(code="BANCO", name="Banco di montaggio", cost_per_hour=60.00 EUR/h)
+    let wood  = Product(code="LEGNO", name="Legno", category=ferramenta, hs_code="44072999", uom=kg,
+                        list_price=6.00 EUR/kg, standard_cost=4.00 EUR/kg)
+    let top   = Product(code="PIANO", name="Piano", category=ferramenta, hs_code="94039030", uom=pcs,
+                        list_price=30.00 EUR/pcs, standard_cost=20.00 EUR/pcs)
+    let leg   = Product(code="GAMBA", name="Gamba", category=ferramenta, hs_code="94039030", uom=pcs,
+                        list_price=8.00 EUR/pcs, standard_cost=5.10 EUR/pcs)
+    let table = Product(code="TAVOLO", name="Tavolo", category=ferramenta, hs_code="94036010", uom=pcs,
+                        list_price=90.00 EUR/pcs, sale_tax=iva22v)
+
+    Bom(product=leg, lines=[BomLine(product=wood, qty=0.5 kg, scrap=5%)],
+        operations=[Operation(seq=10, name="Tornitura", work_center=lathe, run=3 min)])
+    Bom(product=table, lines=[BomLine(product=top, qty=1 pcs), BomLine(product=leg, qty=4 pcs)],
+        operations=[Operation(seq=10, name="Montaggio", work_center=bench, run=10 min)])

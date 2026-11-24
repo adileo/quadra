@@ -1,0 +1,18 @@
+[package]
+name = "quadra-lsp"
+description = "Language server for Quadra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quadra-syntax.workspace = true
+quadra-sema.workspace = true
+quadra-analysis.workspace = true
+quadra-qdi.workspace = true
+quadra-ir.workspace = true
+rowan.workspace = true
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread"] }
+serde_json = "1"

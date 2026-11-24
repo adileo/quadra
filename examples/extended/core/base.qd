@@ -1,0 +1,35 @@
+# Fondamenta: paesi, indirizzi, estensioni di Company, eventi, trait Document.
+# Valute, unità, Company, User, Sequence e next_number vengono dalla libreria standard.
+# Su ogni entity sono impliciti: id, created_at/by, updated_at/by, version, storico, causa.
+
+
+entity Country:
+    code: Code where c => c.len() == 2 unique         # ISO 3166-1
+    name: Text
+    in_eu: Bool default false
+
+
+record Address:
+    street: Text
+    city: Text
+    zip: Text
+    province: Code? required when country.code == "IT"
+    country: Country
+
+
+extend Company:
+    vat_number: VatNumber unique
+    address: Address
+    po_approval_limit: Money<currency>?             # oltre questa soglia gli acquisti vanno approvati
+
+
+trait Document:
+    company: Company default current.company
+    number: Code?
+    date: Date default today()
+    notes: Text?
+    unique (company, number)
+
+
+# Messaggi verso l'esterno: partono dopo il commit (outbox). Tipizzati per l'SDK delle integrazioni.
+event SendEmail(to: Email, template: Text, document: Document)

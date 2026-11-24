@@ -1,0 +1,30 @@
+[package]
+name = "quadra-server"
+description = "HTTP API for Quadra: authenticated, idempotent, with optimistic concurrency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quadra-sema.workspace = true
+quadra-syntax.workspace = true
+quadra-ir.workspace = true
+quadra-types.workspace = true
+quadra-analysis.workspace = true
+quadra-runtime.workspace = true
+quadra-store.workspace = true
+quadra-api.workspace = true
+quadra-qdi.workspace = true
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+futures-util = "0.3"
+serde_json = "1"
+chrono = "0.4"
+rust_decimal = "1"
+rust_xlsxwriter = { version = "0.104.0", features = ["chrono"] }
+
+[dev-dependencies]
+calamine = "0.38.0"
+quadra-analysis.workspace = true

@@ -1,0 +1,11 @@
+# An instant seen in a time zone: what `dt.in(tz)` gives (`dt.in("America/New_York").date`).
+# A DateTime is an instant (UTC); its date, hour and weekday depend on the zone it is read in.
+
+record ZonedTime:
+    instant: DateTime                               # the instant itself
+    timezone: Text                                  # the IANA name of the zone (`Europe/Rome`)
+    date: Date                                      # the day of the calendar there
+    hour: Int                                       # 0–23
+    minute: Int                                     # 0–59
+    weekday: Int                                    # 1 Monday … 7 Sunday
+    offset: Duration                                # from UTC: 1 hour in Rome in winter

@@ -1,0 +1,13 @@
+[package]
+name = "quadra-types"
+description = "Type checker for Quadra: currencies, units, rounding, optionals, cardinality, purity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quadra-syntax.workspace = true
+quadra-sema.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+quadra-ir.workspace = true

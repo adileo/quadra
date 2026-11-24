@@ -1,0 +1,51 @@
+# Punti di riordino e riordino automatico (acquisto o produzione).
+
+from products import Product
+from partners import Partner
+from inventory import Warehouse, Stock, StockMove
+from purchasing import PurchaseOrder, PurchaseLine
+from manufacturing import ProductionOrder
+
+
+entity ReorderRule:
+    product: Product where p => p.type is Storable
+    warehouse: Warehouse
+    min: Qty<product.uom> where >= 0
+    max: Qty<product.uom> where m => m >= min
+    route: enum(Buy, Make) default (Make if product.bom != none else Buy)
+    vendor: Partner? where v => v.as_vendor != none
+        required when route is Buy
+        default product.suppliers.sort_by(s => s.lead_time).first()?.vendor
+    unique (product, warehouse)
+
+    on_hand = Stock.where(s => s.product == product and s.location in warehouse.locations).sum(s => s.qty)
+
+    incoming =
+        StockMove.where(m => m.product == product and m.dest in warehouse.locations
+                             and m.state in {Draft, Ready}).sum(m => m.qty_base)
+      + PurchaseLine.where(l => l.product == product and l.order.warehouse == warehouse
+                                and l.order.state in {Draft, Sent, ToApprove}).sum(l => l.qty.to(product.uom))
+      + ProductionOrder.where(o => o.product == product and o.warehouse == warehouse
+                                   and o.state is Draft).sum(o => o.qty)
+
+    outgoing = StockMove.where(m => m.product == product and m.source in warehouse.locations
+                                    and m.state in {Draft, Ready}).sum(m => m.qty_base)
+
+    forecast = on_hand + incoming - outgoing
+    to_order = max - forecast if forecast < min else 0
+
+
+# Automazione: quando la previsione scende sotto il minimo, prepara un documento in bozza.
+# È un ciclo (il documento aumenta `incoming`, quindi `to_order` torna a 0): il compilatore
+# lo rileva e chiede di dichiararlo `converges`.
+on ReorderRule becomes to_order > 0 as r converges:
+    match r.route:
+        Buy =>
+            # qui r.vendor è Partner e non Partner?: `required when route is Buy`
+            let po = PurchaseOrder.find(p => p.vendor == r.vendor and p.warehouse == r.warehouse and p.state is Draft)
+                     ?? PurchaseOrder(vendor=r.vendor, warehouse=r.warehouse, notes="Riordino automatico")
+            PurchaseLine(order=po, product=r.product, uom=r.product.purchase_uom,
+                         qty=r.to_order.to(r.product.purchase_uom).round_up())
+        Make =>
+            ProductionOrder(product=r.product, qty=r.to_order, warehouse=r.warehouse,
+                            due=today() + 7 days)

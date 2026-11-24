@@ -1,0 +1,43 @@
+# MIGRAZIONE DI SCHEMA: accompagna una modifica ai file .qd.
+#
+# Modifica in products.qd (stesso commit):
+#     hs_code: Code where c => c.len() == 8      # NUOVO, obbligatorio: nomenclatura doganale
+#     type: ProductType                           # prima si chiamava `product_kind` ed era Text
+#
+# Il deploy rifiuta qualsiasi modifica di schema che lascerebbe dati invalidi senza una
+# migrazione che li sistemi. La migrazione:
+#   1. gira prima su una copia dei dati (dry run) e produce un report;
+#   2. in produzione gira in una sola transazione, insieme al cambio di versione;
+#   3. resta nello storico come CAUSA di ogni valore che ha scritto.
+
+migration customs_code:
+    reason: "Codice doganale obbligatorio per le spedizioni extra UE"
+
+    # Rinomina e cambio di tipo: `old` è la versione precedente dello schema.
+    rename Product.product_kind -> Product.type
+    convert Product.type from old.Text:
+        "merce"    => Storable
+        "consumo"  => Consumable
+        "servizio" => Service
+        other      => fail f"Tipo prodotto sconosciuto: {other}"     # il dry run elenca i casi
+
+    # Campo nuovo obbligatorio: si riempie dai dati esistenti dove possibile…
+    backfill Product.hs_code:
+        for p in Product.all():
+            if let code = CategoryCustomsCode.find(c => c.category == p.category)?.code:
+                p.hs_code = code
+            else:
+                # …e dove non si può, un valore PROVVISORIO: soddisfa il tipo (lo schema è
+                # valido), ma è marcato, elencato in `quadra db provisional` e, scaduto `until`,
+                # diventa un errore bloccante su quel record.
+                p.hs_code = provisional("00000000", reason="Da classificare", until=2027-01-31)
+
+    verify:
+        Product.count(p => p.hs_code.is_provisional) < 200      # oltre, il deploy si ferma
+
+
+# Tabella d'appoggio usata solo dalla migrazione: dati temporanei che spariscono dopo.
+temporary entity CategoryCustomsCode:
+    category: Category
+    code: Code where c => c.len() == 8
+    load from "seed/customs_codes.csv"

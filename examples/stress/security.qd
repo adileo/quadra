@@ -1,0 +1,48 @@
+# Roles whose row rules go through several relations: the cases a SQL translation of the
+# permissions has to handle.
+
+from catalog import Category, Product, Tag
+from sales import Region, Customer, Order, OrderLine, Shipment
+
+
+role Admin:
+    all *
+
+
+role Salesperson:
+    read Region, Category, Product, Tag
+    # through one relation, or two (the region's manager), or a many-to-many (its team)
+    read, edit Customer where c => c.salesperson == me or c.region.manager == me or c.region.team.contains(me)
+    read, create, edit Order where o => o.customer.salesperson == me or o.customer.region.manager == me
+    run Order.confirm, Order.cancel where o => o.customer.salesperson == me
+    hide Customer.credit_limit, Product.cost, Product.margin
+
+
+role RegionalManager is Salesperson:
+    read, edit Region where r => r.manager == me
+    run Order.ship where o => o.customer.region.manager == me
+    show Customer.credit_limit
+
+
+role Logistics:
+    read Region, Product
+    # four relations away: shipment → line → order → customer → region
+    read, create Shipment where s => s.line.order.customer.region.logistics == me
+    hide Product.cost, Product.margin
+
+
+role Auditor:
+    read *
+    read history *
+
+
+# reads everything but the orders of a locked region (2 relations away), until they are audited
+role Controller:
+    read *
+    deny read Order where o => o.customer.region.locked
+
+
+# books closed: nobody changes the orders and customers of a locked region (3 and 2 relations)
+deny edit Order where o => o.customer.region.locked
+deny edit Customer where c => c.region.locked
+deny create Shipment where s => s.line.order.customer.region.locked

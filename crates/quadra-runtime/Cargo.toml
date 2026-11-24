@@ -1,0 +1,19 @@
+[package]
+name = "quadra-runtime"
+description = "In-memory interpreter and test runner for Quadra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustc-hash = "1"
+quadra-syntax.workspace = true
+quadra-sema.workspace = true
+quadra-ir.workspace = true
+quadra-analysis.workspace = true
+quadra-types.workspace = true
+rust_decimal = "1"
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"

@@ -1,0 +1,183 @@
+# Magazzini, ubicazioni, lotti, movimenti, trasferimenti, inventario fisico.
+# La giacenza NON è un campo: è una lettura del ledger Stock, alimentato dai movimenti evasi.
+
+from core.base import Address, Document
+from products import Product, Tracking, CostMethod
+from partners import Partner
+
+enum LocationKind: Internal, Supplier, Customer, Production, Inventory, Transit, Scrap
+
+
+entity Location:
+    name: Text
+    kind: LocationKind
+    parent: Location?
+    children: [Location] via parent
+    full_name = f"{parent.full_name}/{name}" if parent != none else name
+    is_internal = kind is Internal
+    allow_negative: Bool default not is_internal    # le ubicazioni virtuali possono andare sotto zero
+    tree = {self} + self.closure(l => l.children)   # l'ubicazione e tutte le sotto-ubicazioni
+    check not self.closure(l => l.parent).contains(self), "Ubicazioni cicliche"
+
+
+# Ubicazioni virtuali: una per tipo, senza padre.
+seed:
+    Location(name="Fornitori", kind=Supplier)
+    Location(name="Clienti", kind=Customer)
+    Location(name="Produzione", kind=Production)
+    Location(name="Rettifiche inventario", kind=Inventory)
+    Location(name="Scarti", kind=Scrap)
+
+fn virtual_location(k: LocationKind) -> Location:
+    return Location.single(l => l.parent == none and l.kind == k and not l.is_internal)
+
+
+entity Warehouse:
+    company: Company default current.company
+    name: Text
+    code: Code default name.initials().upper().take(4)    # prefisso dei numeri (WH/OUT/…): modificabile
+    address: Address
+    stock: Location where l => l.is_internal default Location(name=code, kind=Internal)
+    locations = stock.tree
+    unique (company, code)
+
+
+entity Lot:
+    product: Product where p => p.tracking is not Untracked
+    name: Code
+    expiry: Date?
+    unique (product, name)
+    on_hand = Stock.where(s => s.lot == self and s.product == product and s.location.is_internal).sum(s => s.qty)
+    check product.tracking is not BySerial or on_hand <= Qty(1, product.uom), "Un numero di serie vale un pezzo"
+
+
+entity StockMove:
+    company: Company default current.company
+    product: Product where p => p.type is not Service
+    qty: Qty<uom> where > 0
+    uom: Uom where u => u.category == product.uom.category default product.uom
+    qty_base = qty.to(product.uom)
+    source: Location
+    dest: Location
+    lot: Lot? where l => l.product == product
+        required when product.tracking is not Untracked and state is Done
+    date: DateTime default now()
+    transfer: Transfer?
+    origin: Document? where d => d.company == company     # vendita, acquisto, produzione, inventario…
+
+    # `default` e non `=`: product.cost (costo medio) dipende dal valore dei movimenti, che
+    # dipende da unit_cost. Con una formula il compilatore rifiuterebbe il ciclo; con `default`
+    # il costo è fotografato alla creazione e il ciclo si spezza. Acquisti e produzione lo
+    # impostano esplicitamente.
+    unit_cost: Price<company.currency, product.uom> default product.cost[company].round()
+    value = (qty_base * unit_cost).round()
+
+    state: enum(Draft, Ready, Done, Cancelled) default Draft
+
+    check source != dest, "Origine e destinazione coincidono"
+    frozen when state in {Done, Cancelled}
+
+    flow state:
+        Draft -> Ready                  by reserve
+        Draft | Ready -> Done           by done
+        Draft | Ready -> Cancelled      by cancel
+
+    action reserve:
+        require not source.is_internal or product.available(source) >= qty_base,
+            f"Disponibilità insufficiente di {product.code} in {source.full_name}"
+
+    post to Stock when state is Done:
+        add(company=company, product=product, location=source, lot=lot, qty=-qty_base, value=-value)
+        add(company=company, product=product, location=dest, lot=lot, qty=qty_base, value=value)
+
+
+ledger Stock:
+    key company: Company
+    key product: Product
+    key location: Location
+    key lot: Lot?
+    measure qty: Qty<product.uom>
+    measure value: Money<company.currency>
+
+    check per (product, location, lot): g => g.sum(r => r.qty) >= 0 or g.key.location.allow_negative,
+        "Giacenza negativa"
+
+
+extend Product:
+    on_hand: Qty<uom> = Stock.where(s => s.product == self and s.location.is_internal).sum(s => s.qty)
+    stock_qty: Qty<uom> per company =
+        Stock.where(s => s.product == self and s.company == company and s.location.is_internal).sum(s => s.qty)
+    stock_value: Money<company.currency> per company =
+        Stock.where(s => s.product == self and s.company == company and s.location.is_internal).sum(s => s.value)
+    avg_cost: Exact<Price<company.currency, uom>> per company =
+        stock_value / stock_qty if stock_qty > 0 else standard_cost
+    cost: Exact<Price<company.currency, uom>> per company = match cost_method:
+        Standard => standard_cost
+        Average  => avg_cost
+
+    fn available(at: Location) -> Qty<uom>:
+        let here = Stock.where(s => s.product == self and s.location in at.tree).sum(s => s.qty)
+        let reserved = StockMove
+            .where(m => m.product == self and m.state is Ready and m.source in at.tree)
+            .sum(m => m.qty_base)
+        return here - reserved
+
+
+entity Transfer is Document:
+    kind: enum(Receipt, Delivery, Internal)
+    warehouse: Warehouse
+    partner: Partner? required when kind is not Internal
+    origin: Document?
+    scheduled: DateTime default now()
+    moves: [StockMove]
+    prefix: Text = match kind:
+        Receipt  => "IN"
+        Delivery => "OUT"
+        Internal => "INT"
+    number default next_number(company, f"{warehouse.code}/{prefix}")
+
+    # Stato riepilogativo dei figli: il tipo dichiara i valori possibili.
+    state: enum(Empty, Cancelled, Done, Ready, Waiting) = when:
+        moves.count() == 0                                    => Empty
+        moves.all(m => m.state is Cancelled)                  => Cancelled
+        moves.all(m => m.state in {Done, Cancelled})          => Done
+        moves.all(m => m.state in {Ready, Done, Cancelled})   => Ready
+        else                                                  => Waiting
+
+    action validate:
+        require state is Ready or kind is Receipt, "Merce non ancora riservata"
+        for m in moves.where(m => m.state in {Draft, Ready}):
+            m.done()
+
+    action cancel:
+        for m in moves.where(m => m.state is not Done):
+            m.cancel()
+
+
+entity InventoryCount is Document:
+    location: Location where l => l.is_internal
+    lines: [InventoryCountLine]
+    state: enum(Draft, Done) default Draft
+    frozen when state is Done
+
+    flow state:
+        Draft -> Done by apply
+
+    action apply:
+        let adj = virtual_location(Inventory)
+        for l in lines.where(l => l.difference != 0):
+            StockMove(product=l.product, lot=l.lot, qty=l.difference.abs(), uom=l.product.uom,
+                      source=adj if l.difference > 0 else location,
+                      dest=location if l.difference > 0 else adj,
+                      origin=self).done()
+
+
+entity InventoryCountLine:
+    count: InventoryCount parent
+    product: Product
+    lot: Lot? where l => l.product == product
+    # fotografia della giacenza al momento della conta: non deve inseguire i movimenti successivi
+    expected: Qty<product.uom> default
+        Stock.where(s => s.product == product and s.location == count.location and s.lot == lot).sum(s => s.qty)
+    counted: Qty<product.uom>
+    difference = counted - expected

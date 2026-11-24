@@ -1,0 +1,70 @@
+# Partner: un'unica anagrafica con ruoli (come il Business Partner SAP o res.partner di Odoo).
+# Lo stesso soggetto può essere cliente e fornitore.
+
+from core.base import Address
+
+
+entity PaymentTerm:
+    name: Text unique                               # "Rimessa diretta", "30/60 DFFM"
+    lines: [PaymentTermLine]
+    check lines.sum(l => l.percent) == 100%, "Le rate devono sommare al 100%"
+
+    # Rate di pagamento: la somma delle rate è sempre esattamente `amount`.
+    fn split(amount: Money, start: Date) -> [(due: Date, amount: Money<amount.currency>)]:
+        return lines
+            .allocate(amount, by=l => l.percent)
+            .map(a => (due: a.item.due_from(start), amount: a.share))
+
+
+entity PaymentTermLine:
+    term: PaymentTerm parent
+    percent: Percent where > 0%
+    days: Duration default 0 days
+    end_of_month: Bool default false
+
+    fn due_from(start: Date) -> Date:
+        let d = start + days
+        return d.end_of_month() if end_of_month else d
+
+
+entity Partner:
+    name: Text
+    kind: enum(Organization, Person) default Organization
+    parent: Partner?                                # referente di un'azienda
+    contacts: [Partner] via parent
+    address: Address
+    delivery_addresses: [Address]
+    email: Email?
+    phone: Phone?
+    vat_number: VatNumber? required when kind is Organization and address.country.in_eu
+    tax_code: Code? required when kind is Person and address.country.code == "IT"
+    currency: Currency default current.company.currency
+    tags: {PartnerTag}                              # molti-a-molti semplice
+
+    as_customer: CustomerRole?
+    as_vendor: VendorRole?
+    is_customer = as_customer != none
+    is_vendor = as_vendor != none
+
+    unique (vat_number) when kind is Organization
+    # dopo `parent == none or`, il compilatore sa che parent non è none
+    check parent == none or parent.kind is Organization, "Il referente deve appartenere a un'azienda"
+    check not self.closure(p => p.parent).contains(self), "Gerarchia di contatti ciclica"
+
+
+record CustomerRole:
+    payment_term: PaymentTerm?
+    credit_limit: Money<owner.currency>?            # none = nessun fido. `owner` = il Partner
+    salesperson: User?
+    blocked: Bool default false
+
+
+record VendorRole:
+    payment_term: PaymentTerm?
+    our_code: Code?                                 # il nostro codice cliente presso il fornitore
+    lead_time: Duration default 7 days
+
+
+entity PartnerTag:
+    name: Text unique
+    partners: {Partner} via tags                    # inverso del molti-a-molti

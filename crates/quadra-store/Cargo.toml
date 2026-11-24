@@ -1,0 +1,26 @@
+[package]
+name = "quadra-store"
+description = "SQLite and PostgreSQL storage for Quadra: generated schema, signed commit log, migrations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustc-hash = "1"
+quadra-sema.workspace = true
+quadra-ir.workspace = true
+quadra-types.workspace = true
+quadra-runtime.workspace = true
+quadra-analysis.workspace = true
+rusqlite = { version = "0.32", features = ["bundled", "functions", "collation", "hooks"] }
+postgres = "0.19"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+rust_decimal = "1"
+getrandom = "0.4"
+
+[dev-dependencies]
+quadra-analysis.workspace = true

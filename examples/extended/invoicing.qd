@@ -1,0 +1,296 @@
+# Fatture attive e passive, note di credito, incassi e pagamenti, differenze cambio, fido.
+
+from core.base import Document
+from partners import Partner, PaymentTerm
+from products import Product
+from accounting import Account, Journal, Tax, JournalEntry, JournalLine, GL, InvoiceableLine
+from sales import SalesOrder, SalesLine
+from purchasing import PurchaseOrder, PurchaseLine
+
+enum InvoiceKind: CustomerInvoice, CustomerCredit, VendorBill, VendorCredit
+
+
+entity Invoice is Document:
+    kind: InvoiceKind
+    direction: enum(In, Out) = match kind:
+        CustomerInvoice | CustomerCredit => Out
+        VendorBill | VendorCredit        => In
+    sign: Int = 1 if kind in {CustomerInvoice, VendorBill} else -1     # le note di credito stornano
+
+    partner: Partner where p => (p.as_customer != none) if direction is Out else (p.as_vendor != none)
+    journal: Journal where j => j.type is (Sale if direction is Out else Purchase)
+    currency: Currency default partner.currency
+    rate: Decimal? required when state is not Draft                    # cambio fissato alla registrazione
+    payment_term: PaymentTerm? default
+        partner.as_customer?.payment_term if direction is Out else partner.as_vendor?.payment_term
+    vendor_ref: Text? required when direction is In                    # numero della fattura del fornitore
+    reverses: Invoice? required when kind in {CustomerCredit, VendorCredit}
+    lines: [InvoiceLine]
+    entries: [JournalEntry] via source
+    allocations: [PaymentAllocation] via invoice
+    state: enum(Draft, Posted, Cancelled) default Draft
+
+    unique (partner, vendor_ref) when direction is In                    # niente doppia registrazione
+
+    partner_account: Account =
+        (partner.as_customer?.account ?? company.receivable) if direction is Out
+        else (partner.as_vendor?.account ?? company.payable)
+
+    # IVA calcolata per aliquota sul totale imponibile (regola italiana), non riga per riga.
+    tax_lines = lines.group_by(l => l.tax).map(g => (
+        tax: g.key,
+        base: g.items.sum(l => l.subtotal),
+        amount: (g.items.sum(l => l.subtotal) * g.key.rate).round(),
+        items: g.items))
+
+    untaxed = lines.sum(l => l.subtotal)
+    tax = tax_lines.sum(t => t.amount)
+    total = untaxed + tax
+    total_company: Money<company.currency> =
+        convert(total, to=company.currency, rate=rate ?? exchange_rate(currency, company.currency, date)).round()
+    installments = payment_term?.split(total, start=date) ?? [(due: date, amount: total)]
+
+    paid = allocations.where(a => a.payment.state is Posted).sum(a => a.amount)
+    due = total - paid
+    payment_state: enum(NotApplicable, Paid, Partial, NotPaid) = when:
+        state is not Posted   => NotApplicable
+        due == 0              => Paid
+        paid > 0              => Partial
+        else                  => NotPaid
+
+    check due >= 0, "Incassato o pagato più del totale"
+    # Una fattura registrata vede il mondo com'era alla registrazione (aliquote, anagrafica,
+    # prezzi), tranne i pagamenti, che restano vivi.
+    frozen when state is not Draft live paid, due, payment_state
+
+    flow state:
+        Draft -> Posted         by post
+        Draft -> Cancelled      by cancel
+        Posted -> Cancelled     by cancel  unless paid > 0
+
+    action post:
+        require lines.count() > 0, "Fattura senza righe"
+        rate = exchange_rate(currency, company.currency, date)
+        number = next_number(company, journal.code)   # sequenza gapless: nessun numero saltato
+
+    action cancel:
+        for e in entries.where(e => e.state is Posted and not e.reversed):
+            e.reverse()
+
+    action credit_note(reason: Text) -> Invoice:
+        require state is Posted and kind in {CustomerInvoice, VendorBill}, "Si storna solo una fattura registrata"
+        return self.copy(
+            kind=CustomerCredit if kind is CustomerInvoice else VendorCredit,
+            reverses=self, date=today(), notes=reason,
+            vendor_ref=f"NC-{vendor_ref}" if vendor_ref != none else none)
+
+    fn overdue(on: Date) -> Bool:
+        return state is Posted and due > 0 and installments.any(i => i.due < on)
+
+
+entity InvoiceLine:
+    invoice: Invoice parent
+    origin: InvoiceableLine?                        # riga d'ordine di vendita o d'acquisto
+    product: Product?
+    description: Text default product?.name ?? ""
+    account: Account default
+        (product?.income_account ?? invoice.company.income) if invoice.direction is Out
+        else (product?.expense_account ?? invoice.company.expense)
+    qty: Qty<uom> where > 0
+    uom: Uom default product?.uom ?? pcs
+    price: Price<invoice.currency, uom>
+    discount: Percent where 0%..100% default 0%
+    tax: Tax where t => t.scope is (Sale if invoice.direction is Out else Purchase)
+
+    subtotal = (qty * price * (1 - discount)).round()
+
+    # Quota di IVA della riga per la contabilità analitica: l'IVA per aliquota viene
+    # ridistribuita sulle righe e la somma delle quote torna esattamente al centesimo.
+    tax_share =
+        let g = invoice.tax_lines.single(t => t.tax == tax)
+        g.items.allocate(g.amount, by=l => l.subtotal.raw).single(a => a.item == self).share
+
+    check origin is not SalesLine or invoice.direction is Out, "Riga di vendita su una fattura passiva"
+    check origin is not PurchaseLine or invoice.direction is In, "Riga d'acquisto su una fattura attiva"
+
+    # Three-way match: ordine ↔ ricevimento ↔ fattura del fornitore
+    three_way_ok: Bool = match origin:
+        PurchaseLine(pl) => pl.product.type is Service or pl.billed <= pl.received
+        _                => true
+    check three_way_ok, "Fatturato più del ricevuto (three-way match)"
+
+    price_gap: Decimal = match origin:
+        PurchaseLine(pl) => ((convert(price, to=pl.order.currency, on=invoice.date).to(pl.uom) - pl.price).abs() / pl.price).raw
+        _                => 0
+    warn price_gap <= 0.05, "Prezzo diverso dall'ordine oltre il 5%"
+
+
+# --- Collegamenti con vendite e acquisti ------------------------------------------------
+
+extend SalesLine:
+    live invoiced, to_invoice
+    invoice_lines: [InvoiceLine] via origin
+    invoiced = invoice_lines.where(i => i.invoice.state is Posted).sum(i => i.qty.to(uom) * i.invoice.sign)
+    to_invoice = (delivered if product.type is not Service else qty) - invoiced
+
+
+extend SalesOrder:
+    # l'ordine è congelato alla conferma, le fatture arrivano dopo: questi seguono i dati
+    live invoices, invoice_status
+    invoices = lines.flat_map(l => l.invoice_lines).map(i => i.invoice).distinct()
+    invoice_status: enum(Nothing, Invoiced, ToInvoice) = when:
+        state not in {Confirmed, Locked}       => Nothing
+        lines.all(l => l.to_invoice <= 0)      => Invoiced
+        else                                   => ToInvoice
+
+    action create_invoice -> Invoice:
+        require state in {Confirmed, Locked}, "Si fattura solo un ordine confermato"
+        let todo = lines.where(l => l.to_invoice > 0)
+        require todo.any(), "Niente da fatturare"
+        return Invoice(kind=CustomerInvoice, partner=customer, currency=currency,
+            journal=Journal.single(j => j.company == company and j.type is Sale),
+            payment_term=payment_term,
+            lines=todo.map(l => InvoiceLine(origin=l, product=l.product, description=l.description,
+                qty=l.to_invoice, uom=l.uom, price=l.price, discount=l.discount, tax=l.tax)))
+
+
+extend PurchaseLine:
+    live billed, to_bill
+    invoice_lines: [InvoiceLine] via origin
+    billed = invoice_lines.where(i => i.invoice.state is Posted).sum(i => i.qty.to(uom) * i.invoice.sign)
+    to_bill = (received if product.type is not Service else qty) - billed
+
+
+extend PurchaseOrder:
+    live bills
+    bills = lines.flat_map(l => l.invoice_lines).map(i => i.invoice).distinct()
+
+    action create_bill(vendor_ref: Text, on: Date = today()) -> Invoice:
+        let todo = lines.where(l => l.to_bill > 0)
+        require todo.any(), "Niente da registrare"
+        return Invoice(kind=VendorBill, partner=vendor, currency=currency, date=on,
+            vendor_ref=vendor_ref, payment_term=payment_term,
+            journal=Journal.single(j => j.company == company and j.type is Purchase),
+            lines=todo.map(l => InvoiceLine(origin=l, product=l.product,
+                qty=l.to_bill, uom=l.uom, price=l.price, tax=l.tax)))
+
+
+# --- Scrittura contabile della fattura ---------------------------------------------------
+
+on Invoice enters Posted as inv:
+    # +1: il conto del partner va in dare (fattura attiva, nota di credito passiva)
+    let s = inv.sign if inv.direction is Out else -inv.sign
+
+    # 1) righe in valuta documento
+    let parts = [
+        *inv.installments.map(i => (account: inv.partner_account, partner: inv.partner, due: i.due, amount: s * i.amount)),
+        *inv.lines.group_by(l => l.account).map(g =>
+            (account: g.key, partner: inv.partner, due: none, amount: -s * g.items.sum(l => l.subtotal))),
+        *inv.tax_lines.map(t => (account: t.tax.account, partner: none, due: none, amount: -s * t.amount)),
+    ]
+
+    # 2) conversione bilanciata: si converte il totale UNA volta e lo si ripartisce sia sul dare
+    #    sia sull'avere. Convertire riga per riga può sbilanciare la scrittura di un centesimo.
+    #    inv.rate qui è Decimal, non Decimal?: `required when state is not Draft` + stato Posted
+    let total_company = convert(inv.total, to=inv.company.currency, rate=inv.rate).round()
+    fn line(p, amount_company: Money<inv.company.currency>) -> JournalLine:
+        return JournalLine(account=p.account, partner=p.partner, due=p.due,
+                           currency=inv.currency, amount_currency=p.amount, balance=amount_company)
+
+    JournalEntry(journal=inv.journal, date=inv.date, source=inv,
+        lines = parts.where(p => p.amount > 0).allocate(total_company, by=p => p.amount.raw).map(a => line(a.item, a.share))
+              + parts.where(p => p.amount < 0).allocate(-total_company, by=p => -p.amount.raw).map(a => line(a.item, a.share))
+    ).post()
+
+
+# --- Incassi e pagamenti -----------------------------------------------------------------
+
+entity Payment is Document:
+    direction: enum(Inbound, Outbound)
+    partner: Partner
+    journal: Journal where j => j.type in {Bank, Cash}
+    currency: Currency default journal.account?.currency ?? partner.currency
+    amount: Money<currency> where > 0
+    rate: Decimal? required when state is not Draft
+    allocations: [PaymentAllocation]
+    entries: [JournalEntry] via source
+    state: enum(Draft, Posted, Cancelled) default Draft
+
+    amount_company: Money<company.currency> =
+        convert(amount, to=company.currency, rate=rate ?? exchange_rate(currency, company.currency, date)).round()
+
+    check allocations.sum(a => a.amount) == amount,
+        "Il pagamento va allocato per intero (l'eccedenza come acconto, senza fattura)"
+    frozen when state is not Draft
+
+    flow state:
+        Draft -> Posted         by post
+        Posted -> Cancelled     by cancel
+
+    action post:
+        rate = exchange_rate(currency, company.currency, date)
+
+    action cancel:
+        for e in entries.where(e => e.state is Posted and not e.reversed):
+            e.reverse()
+
+
+# Molti-a-molti con attributi: un pagamento chiude più fatture, una fattura più pagamenti.
+entity PaymentAllocation:
+    payment: Payment parent
+    invoice: Invoice? where i => i.partner == payment.partner and i.state is Posted
+                                 and i.currency == payment.currency
+                                 and i.direction is (Out if payment.direction is Inbound else In)
+    amount: Money<payment.currency> where > 0
+
+    # Il controvalore del pagamento si ripartisce sulle allocazioni: la somma torna al centesimo.
+    amount_company: Money<payment.company.currency> =
+        payment.allocations.allocate(payment.amount_company, by=a => a.amount.raw).single(x => x.item == self).share
+
+    # Differenza cambio realizzata: stesso importo in valuta, cambio della fattura diverso
+    # da quello del pagamento. inv.rate non è opzionale: la fattura è Posted (vedi where).
+    fx_diff: Money<payment.company.currency> = match invoice:
+        some(inv) => amount_company - convert(amount, to=payment.company.currency, rate=inv.rate).round()
+        none      => 0
+
+
+on Payment enters Posted as p:
+    let s = 1 if p.direction is Inbound else -1                  # +1: la banca va in dare
+    let fallback =
+        (p.partner.as_customer?.account ?? p.company.receivable) if p.direction is Inbound
+        else (p.partner.as_vendor?.account ?? p.company.payable)
+
+    # Bilanciata per costruzione: banca = Σ amount_company (garantito da allocate)
+    #                              = Σ (amount_company − fx_diff) + Σ fx_diff
+    JournalEntry(journal=p.journal, date=p.date, source=p, lines=[
+        JournalLine(account=p.journal.account, currency=p.currency,
+                    amount_currency=s * p.amount, balance=s * p.amount_company),
+        *p.allocations.map(a => JournalLine(
+                    account=a.invoice?.partner_account ?? fallback, partner=p.partner, due=p.date,
+                    currency=p.currency, amount_currency=-s * a.amount, balance=-s * (a.amount_company - a.fx_diff))),
+        *p.allocations.where(a => a.fx_diff != 0).map(a => JournalLine(
+                    account=p.company.fx_gain if s * a.fx_diff > 0 else p.company.fx_loss,
+                    currency=p.company.currency, amount_currency=-s * a.fx_diff, balance=-s * a.fx_diff)),
+    ]).post()
+
+
+# --- Fido cliente ------------------------------------------------------------------------
+
+fn credit_exposure(p: Partner, company: Company, on: Date) -> Money<company.currency>:
+    # rate è non-opzionale grazie al filtro state is Posted (required when + narrowing)
+    let open_invoices = Invoice
+        .where(i => i.partner == p and i.company == company and i.direction is Out and i.state is Posted)
+        .sum(i => convert(i.due * i.sign, to=company.currency, rate=i.rate).round())
+    let open_orders = SalesLine
+        .where(l => l.order.customer == p and l.order.company == company
+                    and l.order.state in {Confirmed, Locked} and l.to_invoice > 0)
+        .sum(l => convert(l.to_invoice * l.price * (1 - l.discount), to=company.currency, on=on).round())
+    return open_invoices + open_orders
+
+
+# Il controllo vive qui e non in sales.qd perché dipende dalle fatture aperte.
+before SalesOrder.confirm as o:
+    if let limit = o.customer.as_customer?.credit_limit:
+        let limit_company = convert(limit, to=o.company.currency, on=o.date).round()
+        let exposure = credit_exposure(o.customer, o.company, o.date) + o.total_company
+        require exposure <= limit_company, f"Fido superato: esposizione {exposure}, fido {limit_company}"

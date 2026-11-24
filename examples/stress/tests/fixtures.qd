@@ -1,0 +1,27 @@
+# A small world with the shape of the generated data (`quadra bench gen`): two regions, a
+# category tree, products, customers with tags, and the users of every role.
+
+fixture world:
+    clock 2026-03-02 09:00
+
+    let admin = User(login="admin", roles={Admin})
+    let giulia = User(login="giulia", roles={Salesperson})
+    let paolo = User(login="paolo", roles={Salesperson})
+    let marta = User(login="marta", roles={RegionalManager})
+    let luca = User(login="luca", roles={Logistics})
+    let vera = User(login="vera", roles={Auditor})
+    let carlo = User(login="carlo", roles={Controller})
+
+    let north = Region(code="N", name="North", manager=marta, logistics=luca, team={paolo})
+    let south = Region(code="S", name="South", manager=marta)
+
+    let tools = Category(code="T", name="Tools")
+    let hand = Category(code="TH", name="Hand tools", parent=tools)
+    let hammer = Product(sku="HAM", name="Hammer", category=hand, price=12.00 EUR/pcs, cost=7.00 EUR)
+    let saw = Product(sku="SAW", name="Saw", category=hand, price=20.00 EUR/pcs, cost=11.00 EUR)
+
+    let vip = Tag(name="VIP", color=Red)
+    let new = Tag(name="NEW")
+
+    let rossi = Customer(code="C1", name="Rossi Spa", region=north, salesperson=giulia, tags={vip, new})
+    let bianchi = Customer(code="C2", name="Bianchi Srl", region=south, salesperson=paolo, tags={new})

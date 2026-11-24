@@ -1,0 +1,15 @@
+[package]
+name = "quadra-api"
+description = "The Quadra API without HTTP: model, queries, records, transactions on an interpreter (server and browser)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quadra-ir.workspace = true
+quadra-types.workspace = true
+quadra-runtime.workspace = true
+serde_json = "1"
+rust_decimal = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }

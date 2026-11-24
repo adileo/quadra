@@ -1,0 +1,10 @@
+from main import TimeLog
+
+migration no_future_time_logs:
+    reason: "Time logs cannot be dated in the future: those already entered move to today"
+
+    for t in TimeLog.all().where(t => t.date > today()):
+        t.date = today()
+
+    verify:
+        TimeLog.count(t => t.date > today()) == 0

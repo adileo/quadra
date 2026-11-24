@@ -1,0 +1,20 @@
+# Version 2: the kind becomes an enum (renamed to `type`), customs codes are required.
+
+enum ProductType: Storable, Consumable, Service
+
+entity Product:
+    code: Code unique
+    name: Text
+    type: ProductType
+    hs_code: Code where c => c.len() == 8
+    list_price: Money<EUR>
+
+
+role Admin:
+    all *
+
+role Manager:
+    all *
+
+role Director is Manager:
+    read *

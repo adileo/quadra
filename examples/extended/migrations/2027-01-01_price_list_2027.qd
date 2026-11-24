@@ -1,0 +1,42 @@
+# MODIFICA MASSIVA DI DATI (nessun cambio di schema).
+#
+# Un `change` è uno script di dati con motivazione, richiedente e approvazione.
+#   quadra change preview price_list_2027   → differenze record per record, vincoli verificati,
+#                                             metriche certificate toccate
+#   quadra change apply price_list_2027     → una transazione; ogni valore scritto ha come causa
+#                                             questo change (visibile in why() e nello storico)
+#   quadra change revert price_list_2027    → un NUOVO change che riporta i valori precedenti:
+#                                             lo storico non si riscrive mai
+
+change price_list_2027:
+    reason: "Listino 2027: +4% sulla ferramenta, arrotondato a 5 centesimi"
+    requested_by: "m.rossi"
+    approved_by: role SalesManager                  # serve l'approvazione di qualcuno con quel ruolo
+    effective: 2027-01-01                           # valido da quella data (tempo di validità)
+
+    for p in Product.where(p => p.category.path.starts_with("Ferramenta") and p.active):
+        p.list_price = (p.list_price * 1.04).round(step=0.05)
+
+    expect:
+        affected(Product) <= 500                    # rete di sicurezza contro filtri sbagliati
+
+
+# CORREZIONE DI DOCUMENTI REGISTRATI.
+# Le fatture registrate sono frozen: il compilatore RIFIUTA un'assegnazione diretta come
+#     inv.lines.first().tax = vat22          # errore: Invoice è frozen quando state is Posted
+# La correzione passa dalle azioni previste dal processo (nota di credito + nuova fattura),
+# così contabilità, numerazione e metriche certificate restano coerenti.
+
+change fix_wrong_vat_november:
+    reason: "Fatture di novembre emesse con IVA 10% invece del 22% (ticket 1432)"
+    requested_by: "a.gialli"
+    approved_by: role Accountant
+
+    let vat22 = Tax.single(t => t.scope is Sale and t.rate == 22%)
+    for inv in Invoice.where(i => i.direction is Out and i.state is Posted
+                                  and i.date.month == 2026-11 and i.lines.any(l => l.tax.rate == 10%)):
+        let credit = inv.credit_note(reason="IVA errata")        # storna l'originale
+        credit.post()
+        # copy(): nuovo record in bozza con gli stessi campi memorizzati (figli inclusi)
+        let fixed = inv.copy(lines=inv.lines.map(l => l.copy(tax=vat22)))
+        fixed.post()

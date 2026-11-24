@@ -1,0 +1,266 @@
+# Golden output of the analyses on this example (crates/quadra-analysis/tests/golden.rs).
+# Regenerate with: UPDATE_GOLDEN=1 cargo test -p quadra-analysis --test golden
+
+$ quadra trace Invoice.due
+
+Invoice.due : (inferred)    formula · invoicing.qd:54
+  = total - paid
+
+Constraints
+  check due >= 0    invoicing.qd:61
+  frozen when state is not Draft  (this formula stays live)
+
+Depends on
+  Invoice.paid  = allocations.where(a => a.payment.state is Posted).sum(a => a.amount)
+    Invoice.allocations  stored
+    Payment.state  stored · default Draft
+    PaymentAllocation.amount  stored
+    PaymentAllocation.payment  stored
+  Invoice.total  = untaxed + tax
+    Invoice.tax  = tax_lines.sum(t => t.amount)
+      Invoice.tax_lines  = lines.group_by(l => l.tax).map(g => (tax: g.key, base: g.items.sum(l => l.subtotal), amount: (g.items.sum(l => l.subtotal) * g.key.rate).round(), items: g.items))
+        Invoice.lines  stored
+        InvoiceLine.subtotal  = ((qty * price) * (1 - discount)).round()
+          InvoiceLine.discount  stored · default 0%
+          InvoiceLine.price  stored
+          InvoiceLine.qty  stored
+        InvoiceLine.tax  stored
+        Tax.rate  stored
+    Invoice.untaxed  = lines.sum(l => l.subtotal)
+      InvoiceLine.subtotal  (see above)
+
+Stored values underneath, and who writes them
+  Invoice.allocations
+      user, through forms and API
+  Invoice.lines
+      user, through forms and API
+      action PurchaseOrder.create_bill             invoicing.qd:174
+      action SalesOrder.create_invoice             invoicing.qd:153
+  InvoiceLine.discount
+      user, through forms and API
+      action SalesOrder.create_invoice             invoicing.qd:154
+  InvoiceLine.price
+      user, through forms and API
+      action PurchaseOrder.create_bill             invoicing.qd:175
+      action SalesOrder.create_invoice             invoicing.qd:154
+  InvoiceLine.qty
+      user, through forms and API
+      action PurchaseOrder.create_bill             invoicing.qd:175
+      action SalesOrder.create_invoice             invoicing.qd:154
+  InvoiceLine.tax
+      user, through forms and API
+      action PurchaseOrder.create_bill             invoicing.qd:175
+      action SalesOrder.create_invoice             invoicing.qd:154
+  Payment.state
+      flow Draft → Posted by post                  invoicing.qd:227
+      flow Posted → Cancelled by cancel            invoicing.qd:228
+  PaymentAllocation.amount
+      user, through forms and API
+  PaymentAllocation.payment
+      user, through forms and API
+  Tax.rate
+      user, through forms and API
+
+Read by
+  Invoice.payment_state
+  metric receivables_subledger
+
+$ quadra trace SalesOrder.state
+
+SalesOrder.state : enum(Draft, Sent, Confirmed, Locked, Cancelled)    stored field · sales.qd:26
+  default Draft
+
+Constraints
+  frozen when state in {Confirmed, Locked, Cancelled}
+
+Stored values underneath, and who writes them
+  SalesOrder.state
+      flow Confirmed → Locked by lock              sales.qd:47
+      flow Draft | Sent | Confirmed → Cancelled by cancel sales.qd:48
+      flow Draft | Sent → Confirmed by confirm     sales.qd:46
+      flow Draft → Sent by send                    sales.qd:45
+
+Read by
+  SalesOrder.invoice_status
+
+$ quadra trace Product.on_hand
+
+Product.on_hand : Qty<uom>    formula · inventory.qd:107
+  = Stock.where(s => (s.product == self) and s.location.is_internal).sum(s => s.qty)
+
+Depends on
+  Location.is_internal  = kind is Internal
+    Location.kind  stored
+  Stock (ledger)  ← posted by StockMove when state is Done, LandedCost when state is Posted
+    LandedCost.company  stored · default current.company
+    LandedCost.state  stored · default Draft
+    StockMove.company  stored · default current.company
+    StockMove.dest  stored
+    StockMove.lot  stored
+    StockMove.product  stored
+    StockMove.qty_base  = qty.to(product.uom)
+      Product.uom  stored
+      StockMove.qty  stored
+    StockMove.source  stored
+    StockMove.state  stored · default Draft
+    StockMove.value  = (qty_base * unit_cost).round()
+      StockMove.qty_base  (see above)
+      StockMove.unit_cost  stored · default product.cost[company].round()
+  Stock.location  ledger column
+  Stock.product  ledger column
+  Stock.qty  ledger column
+
+Stored values underneath, and who writes them
+  LandedCost.company
+      user, through forms and API
+  LandedCost.state
+      flow Draft → Posted by post                  purchasing.qd:129
+  Location.kind
+      user, through forms and API
+      post JournalEntry → GL                       inventory.qd:40
+  Product.uom
+      user, through forms and API
+  Stock.location
+  Stock.product
+  Stock.qty
+  StockMove.company
+      user, through forms and API
+  StockMove.dest
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:171
+      action ProductionOrder.confirm               manufacturing.qd:109
+      on PurchaseOrder enters Confirmed            purchasing.qd:98
+      on SalesOrder enters Confirmed               sales.qd:101
+  StockMove.lot
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:169
+  StockMove.product
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:169
+      action ProductionOrder.confirm               manufacturing.qd:108
+      on PurchaseOrder enters Confirmed            purchasing.qd:97
+      on SalesOrder enters Confirmed               sales.qd:100
+  StockMove.qty
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:169
+      action ProductionOrder.confirm               manufacturing.qd:108
+      on PurchaseOrder enters Confirmed            purchasing.qd:97
+      on SalesOrder enters Confirmed               sales.qd:100
+  StockMove.source
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:170
+      action ProductionOrder.confirm               manufacturing.qd:109
+      on PurchaseOrder enters Confirmed            purchasing.qd:98
+      on SalesOrder enters Confirmed               sales.qd:101
+  StockMove.state
+      flow Draft | Ready → Cancelled by cancel     inventory.qd:83
+      flow Draft | Ready → Done by done            inventory.qd:82
+      flow Draft → Ready by reserve                inventory.qd:81
+  StockMove.unit_cost
+      user, through forms and API
+      action ProductionOrder.finish                manufacturing.qd:122
+      on PurchaseOrder enters Confirmed            purchasing.qd:101
+
+$ quadra trace Product.avg_cost
+
+Product.avg_cost : Exact<Price<company.currency, uom>>    formula · inventory.qd:112
+  = { (stock_value / stock_qty) if (stock_qty > 0) else standard_cost }
+  per company
+
+Depends on
+  Product.standard_cost  stored · default 0
+  Product.stock_qty  = { Stock.where(s => ((s.product == self) and (s.company == company)) and s.location.is_internal).sum(s => s.qty) }
+    Location.is_internal  = kind is Internal
+      Location.kind  stored
+    Stock (ledger)  ← posted by StockMove when state is Done, LandedCost when state is Posted
+      LandedCost.company  stored · default current.company
+      LandedCost.state  stored · default Draft
+      StockMove.company  stored · default current.company
+      StockMove.dest  stored
+      StockMove.lot  stored
+      StockMove.product  stored
+      StockMove.qty_base  = qty.to(product.uom)
+        Product.uom  stored
+        StockMove.qty  stored
+      StockMove.source  stored
+      StockMove.state  stored · default Draft
+      StockMove.value  = (qty_base * unit_cost).round()
+        StockMove.qty_base  (see above)
+        StockMove.unit_cost  stored · default product.cost[company].round()
+    Stock.company  ledger column
+    Stock.location  ledger column
+    Stock.product  ledger column
+    Stock.qty  ledger column
+  Product.stock_value  = { Stock.where(s => ((s.product == self) and (s.company == company)) and s.location.is_internal).sum(s => s.value) }
+    Location.is_internal  (see above)
+    Stock (ledger)  (see above)
+    Stock.value  ledger column
+
+Stored values underneath, and who writes them
+  LandedCost.company
+      user, through forms and API
+  LandedCost.state
+      flow Draft → Posted by post                  purchasing.qd:129
+  Location.kind
+      user, through forms and API
+      post JournalEntry → GL                       inventory.qd:40
+  Product.standard_cost
+      user, through forms and API
+  Product.uom
+      user, through forms and API
+  Stock.company
+  Stock.location
+  Stock.product
+  Stock.qty
+  Stock.value
+  StockMove.company
+      user, through forms and API
+  StockMove.dest
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:171
+      action ProductionOrder.confirm               manufacturing.qd:109
+      on PurchaseOrder enters Confirmed            purchasing.qd:98
+      on SalesOrder enters Confirmed               sales.qd:101
+  StockMove.lot
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:169
+  StockMove.product
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:169
+      action ProductionOrder.confirm               manufacturing.qd:108
+      on PurchaseOrder enters Confirmed            purchasing.qd:97
+      on SalesOrder enters Confirmed               sales.qd:100
+  StockMove.qty
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:169
+      action ProductionOrder.confirm               manufacturing.qd:108
+      on PurchaseOrder enters Confirmed            purchasing.qd:97
+      on SalesOrder enters Confirmed               sales.qd:100
+  StockMove.source
+      user, through forms and API
+      action InventoryCount.apply                  inventory.qd:170
+      action ProductionOrder.confirm               manufacturing.qd:109
+      on PurchaseOrder enters Confirmed            purchasing.qd:98
+      on SalesOrder enters Confirmed               sales.qd:101
+  StockMove.state
+      flow Draft | Ready → Cancelled by cancel     inventory.qd:83
+      flow Draft | Ready → Done by done            inventory.qd:82
+      flow Draft → Ready by reserve                inventory.qd:81
+  StockMove.unit_cost
+      user, through forms and API
+      action ProductionOrder.finish                manufacturing.qd:122
+      on PurchaseOrder enters Confirmed            purchasing.qd:101
+
+Read by
+  Product.cost
+
+$ quadra certify (fingerprints)
+
+revenue                 sha256:14c221ff12831093  14 dependencies
+gross_margin            sha256:e69d077845c9d3c0  42 dependencies
+open_receivables        sha256:a8b0c058a7ce57f1  15 dependencies
+dso                     sha256:b1bcd51790371cd3  30 dependencies
+inventory_value         sha256:bd3f8d98768b3376  27 dependencies
+trial_balance           sha256:12f98ad0e1cee931  13 dependencies
+receivables_subledger   sha256:3f08bb717d10ea6f  39 dependencies
+invoice_numbering       sha256:bb1b9c30e5364537  6 dependencies

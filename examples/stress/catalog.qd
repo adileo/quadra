@@ -1,0 +1,36 @@
+# The catalog: a category tree of any depth, products, tags for customers.
+# Sales (sales.qd) extends Product with the rollups of what was sold.
+
+
+entity Category:
+    code: Code unique
+    name: Text
+    parent: Category?
+    active: Bool default true
+    children: [Category] via parent
+    products: [Product]
+
+    # recursion over the tree: allowed because the `check` below proves it acyclic
+    depth: Int = parent.depth + 1 if parent != none else 0
+    path: Text = f"{parent.path}/{name}" if parent != none else name
+    product_count = products.count()
+    active_products = products.count(p => p.active)
+
+    check not self.closure(c => c.parent).contains(self), "Cyclic category tree"
+    check active or children.all(c => not c.active), "An inactive category with active subcategories"
+
+
+entity Product:
+    sku: Code unique
+    name: Text
+    category: Category
+    price: Price<EUR, pcs> where > 0
+    cost: Money<EUR>                                    # hidden from salespeople
+    active: Bool default true
+
+    margin: Money<EUR> = (1 pcs * price - cost).round()
+
+
+entity Tag:
+    name: Code unique
+    color: enum(Grey, Red, Green, Blue) default Grey

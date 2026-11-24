@@ -1,0 +1,138 @@
+# Scenari procure-to-pay, produzione, pianificazione, catena delle cause.
+
+from tests.fixtures import italy, bom_example
+
+
+test "acquisto sopra soglia: approvazione e separazione dei compiti":
+    use italy
+    let po = as giulia: PurchaseOrder(vendor=bianchi, lines=[PurchaseLine(product=widget, qty=2_000 pcs)])
+    expect po.lines.single().price == 5.50 EUR/pcs             # dal listino del fornitore
+    expect po.total_company == 13_420.00 EUR                    # 11.000 + IVA 22%
+
+    as giulia: po.confirm()
+    expect po.state is ToApprove                                # sopra i 10.000 € della società
+
+    expect_error "permission denied":
+        as giulia: po.approve()
+    as marco: po.approve()
+    expect po.state is Confirmed
+    expect po.approved_by.login == "marco"
+    expect po.receipts.count() == 1
+
+
+test "three-way match: non si registra più di quanto ricevuto":
+    use italy
+    let po = PurchaseOrder(vendor=bianchi, lines=[PurchaseLine(product=widget, qty=100 pcs)])
+    po.confirm()
+    expect po.state is Confirmed                                # 671 €: sotto soglia
+
+    let pl = po.lines.single()
+    let bill = Invoice(kind=VendorBill, partner=bianchi, journal=acq, vendor_ref="F-881",
+                       lines=[InvoiceLine(origin=pl, product=widget, qty=100 pcs, price=5.90 EUR/pcs, tax=iva22a)])
+    expect_error "Fatturato più del ricevuto (three-way match)":
+        bill.post()
+    expect bill.state is Draft
+
+    po.receipts.single().validate()
+    expect pl.received == 100 pcs
+    expect widget.on_hand == 200 pcs
+
+    bill.post()
+    expect bill.state is Posted
+    expect bill.warnings == ["Prezzo diverso dall'ordine oltre il 5%"]     # 5,90 contro 5,50: +7,3%
+
+    expect_error "unique (partner, vendor_ref)":
+        Invoice(kind=VendorBill, partner=bianchi, journal=acq, vendor_ref="F-881")
+
+
+test "costi accessori ripartiti al centesimo":
+    use italy
+    let p = (1..3).map(i => Product(code=f"P{i}", name=f"Articolo {i}", category=ferramenta, hs_code="73269098",
+                                     uom=pcs, list_price=15.00 EUR/pcs, purchase_tax=iva22a, cost_method=Average))
+    let po = PurchaseOrder(vendor=bianchi,
+                           lines=p.map(x => PurchaseLine(product=x, qty=10 pcs, price=10.00 EUR/pcs)))
+    po.confirm()
+    let receipt = po.receipts.single()
+    receipt.validate()
+
+    let lc = LandedCost(receipts={receipt}, description="Trasporto", amount=100.00 EUR)
+    expect lc.shares.map(a => a.share) == [33.34 EUR, 33.33 EUR, 33.33 EUR]
+    expect lc.shares.sum(a => a.share) == 100.00 EUR
+    lc.post()
+    expect p[0].stock_value == 133.34 EUR
+    expect p[0].avg_cost == 13.334 EUR/pcs
+
+
+test "distinta multilivello: costo, esplosione, ciclo":
+    use bom_example
+
+    # product.bom è opzionale (non tutti i prodotti hanno una distinta): qui sappiamo che c'è
+    let leg_bom = leg.bom ?? fail "manca la distinta della gamba"
+    let table_bom = table.bom ?? fail "manca la distinta del tavolo"
+
+    # gamba: 0,525 kg × 4,00 = 2,10  +  3 min a 60 €/h = 3,00   → 5,10
+    expect leg_bom.unit_cost == 5.10 EUR/pcs
+    # tavolo: 20,00 + 4 × 5,10 = 40,40  +  10 min a 60 €/h = 10,00 → 50,40
+    expect table_bom.unit_cost == 50.40 EUR/pcs
+    expect table_bom.depth == 2
+
+    expect table_bom.explode(2 pcs) == [(product: top, qty: 2 pcs), (product: leg, qty: 8 pcs)]
+    leg_bom.kind = Kit                                          # la gamba diventa fantasma
+    expect table_bom.explode(2 pcs) == [(product: top, qty: 2 pcs), (product: wood, qty: 4.2 kg)]
+    leg_bom.kind = Manufacture
+
+    expect_error "Distinta ciclica: il prodotto contiene se stesso":
+        BomLine(bom=leg_bom, product=table, qty=1 pcs)
+
+
+test "ordine di produzione: il costo effettivo rientra nel valore del prodotto finito":
+    use bom_example
+    StockMove(product=top, qty=10 pcs, source=virtual_location(Inventory), dest=main.stock).done()
+    StockMove(product=leg, qty=40 pcs, source=virtual_location(Inventory), dest=main.stock).done()
+
+    let mo = as anna: ProductionOrder(product=table, qty=2 pcs, due=2026-11-30)
+    as anna: mo.confirm()
+    expect mo.components.map(m => (product: m.product, qty: m.qty)) == [(product: top, qty: 2 pcs), (product: leg, qty: 8 pcs)]
+    let wo = mo.work_orders.single()
+    expect wo.planned == 20 min
+
+    clock 2026-11-21 09:00
+    as anna: wo.start()
+    expect mo.state is InProgress                               # transizione automatica
+    clock 2026-11-21 09:25
+    as anna: wo.finish()
+    expect wo.worked == 25 min
+    expect wo.actual_cost == 25.00 EUR
+
+    as anna: mo.finish()
+    expect mo.actual_cost == 105.80 EUR                         # 2×20,00 + 8×5,10 + 25,00
+    expect mo.planned_cost == 100.80 EUR
+    expect mo.variance == 5.00 EUR
+    expect mo.finished?.unit_cost == 52.90 EUR/pcs
+    expect table.stock_value == 105.80 EUR
+
+
+test "riordino automatico e catena delle cause":
+    use italy
+    let gadget = Product(code="G-01", name="Gadget", category=ferramenta, hs_code="73269098", uom=pcs,
+                         list_price=8.00 EUR/pcs, standard_cost=4.00 EUR/pcs,
+                         sale_tax=iva22v, purchase_tax=iva22a)
+    SupplierInfo(product=gadget, vendor=bianchi, price=3.80 EUR/pcs)
+    StockMove(product=gadget, qty=25 pcs, source=virtual_location(Inventory), dest=main.stock).done()
+    let rule = ReorderRule(product=gadget, warehouse=main, min=20 pcs, max=50 pcs, vendor=bianchi)
+    expect rule.to_order == 0 pcs
+
+    let so = as giulia: SalesOrder(customer=rossi, lines=[SalesLine(product=gadget, qty=15 pcs)])
+    as giulia: so.confirm()
+
+    # la consegna in bozza porta la previsione a 25 − 15 = 10 < 20 → si riordina fino a 50
+    let po = PurchaseOrder.single(p => p.state is Draft)
+    expect po.lines.single().qty == 40 pcs
+    expect rule.to_order == 0 pcs                               # converge: l'ordine è ora "in arrivo"
+    expect PurchaseOrder.count(p => p.state is Draft) == 1      # la reazione non è ripartita
+
+    let chain = why(po)
+    expect chain.contains("on ReorderRule becomes to_order > 0")
+    expect chain.contains("on SalesOrder enters Confirmed")
+    expect chain.contains("SalesOrder.confirm")
+    expect chain.contains("giulia")

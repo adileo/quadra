@@ -1,0 +1,43 @@
+# Welcome to the Quadra sandbox!
+# This is a tiny billing app. Try:
+#   • change a rule below and watch the Problems panel;
+#   • run the tests (▶ Tests);
+#   • open Data: load the `demo` fixture, then type in the console
+#       let inv = Invoice(customer=acme, lines=[InvoiceLine(description="Consulting", qty=2, price=500.00 EUR)])
+#       inv.post()
+
+entity Customer:
+    name: Text
+    credit_limit: Money<EUR>
+    invoices: [Invoice] via customer
+
+    # a rollup: always up to date
+    open_balance = invoices.where(i => i.state is Posted).sum(i => i.due)
+
+entity Invoice:
+    customer: Customer
+    lines: [InvoiceLine]
+    payments: [Payment] via invoice
+    state: enum(Draft, Posted, Paid) default Draft
+
+    # formulas: always up to date, never stored by hand
+    total = lines.sum(l => l.subtotal)
+    due = total - payments.sum(p => p.amount)
+
+    check total <= customer.credit_limit, "Over the credit limit"
+    frozen when state is not Draft live due
+
+    flow state:
+        Draft -> Posted by post
+        Posted -> Paid when due == 0
+
+entity InvoiceLine:
+    invoice: Invoice parent
+    description: Text
+    qty: Decimal
+    price: Money<EUR>
+    subtotal = (qty * price).round()
+
+entity Payment:
+    invoice: Invoice
+    amount: Money<EUR>

@@ -1,0 +1,37 @@
+migration customs:
+    reason: "Customs codes are required for shipping outside the EU"
+
+    rename Product.product_kind -> Product.type
+    convert Product.type from old.Text:
+        "merce"    => Storable
+        "consumo"  => Consumable
+        "servizio" => Service
+        other      => fail f"Unknown product kind: {other}"
+
+    backfill Product.hs_code:
+        for p in Product.all():
+            if let code = CustomsCode.find(c => c.product_code == p.code)?.code:
+                p.hs_code = code
+            else:
+                p.hs_code = provisional("00000000", reason="To classify", until=2027-01-31)
+
+    verify:
+        Product.count(p => p.hs_code.is_provisional) < 2
+
+
+temporary entity CustomsCode:
+    product_code: Text
+    code: Code where c => c.len() == 8
+    load from "customs.csv"
+
+
+change raise_prices:
+    reason: "Price list 2027: +10%"
+    requested_by: "mario"
+    approved_by: role Manager
+
+    for p in Product.all():
+        p.list_price = (p.list_price * 1.10).round()
+
+    expect:
+        affected(Product) <= 3

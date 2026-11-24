@@ -1,0 +1,28 @@
+# A custom form: an order and its line in one step, confirmed at once.
+app "Order desk":
+    description: "Take an order in one step, then follow it."
+    share: role Admin change, role Salesperson use
+
+    page desk "Desk":
+        row height 10:
+            form quick "Quick order" width 10:
+                field number "Number": Code
+                field customer: Customer
+                field product: Product
+                field qty "Quantity": Qty<pcs> where > 0 default 1 pcs
+                submit "Order and confirm":
+                    let o = Order(number=number, customer=customer, date=today())
+                    OrderLine(order=o, product=product, qty=qty)
+                    o.confirm()
+                    o
+                after: select Order as placed
+                message: f"Order {number}: {qty} of {product.name}"
+            column width 14:
+                markdown last height 2:
+                    "The last order: {= @placed?.number ?? \"none yet\" }, {= @placed?.total ?? 0.00 EUR }"
+                view recent "Recent orders" height 8:
+                    of: Order
+                    type: grid
+                    select: picked
+                    fields: number, customer, date, total, state
+                    sort: date desc

@@ -1,0 +1,138 @@
+# Piano dei conti, registri, IVA, scritture in partita doppia, ledger GL.
+
+from core.base import Document
+from partners import Partner, CustomerRole, VendorRole
+from products import Product
+
+enum AccountType:
+    Receivable, Payable, Bank, Cash, CurrentAsset, Inventory, FixedAsset,
+    CurrentLiability, Equity, Income, OtherIncome, Expense, CostOfSales
+
+
+entity Account:
+    company: Company default current.company
+    code: Code
+    name: Text
+    type: AccountType
+    reconcilable: Bool default type in {Receivable, Payable}
+    currency: Currency?                             # conto vincolato a una valuta (es. banca USD)
+    unique (company, code)
+
+    # il filtro sulla società dice al compilatore che tutte le righe sono nella stessa valuta
+    balance = GL.where(g => g.account == self and g.company == company).sum(g => g.amount)
+
+
+entity Journal:
+    company: Company default current.company
+    code: Code                                      # "VEN", "ACQ", "BNK"
+    name: Text
+    type: enum(Sale, Purchase, Bank, Cash, General)
+    account: Account? required when type in {Bank, Cash}
+    unique (company, code)
+
+
+entity Tax:
+    company: Company default current.company
+    name: Text
+    scope: enum(Sale, Purchase)
+    rate: Percent where 0%..100%
+    account: Account where a => a.type in {CurrentLiability, CurrentAsset}
+    exemption: Code? required when rate == 0%      # natura IVA (N1…N7)
+
+
+extend Company:
+    receivable: Account where a => a.type is Receivable
+    payable: Account where a => a.type is Payable
+    income: Account where a => a.type is Income
+    expense: Account where a => a.type in {Expense, CostOfSales}
+    fx_gain: Account where a => a.type is OtherIncome
+    fx_loss: Account where a => a.type is Expense
+
+
+extend CustomerRole:
+    account: Account? where a => a.type is Receivable      # none = conto clienti dell'azienda
+
+extend VendorRole:
+    account: Account? where a => a.type is Payable
+
+
+extend Product:
+    income_account: Account? where a => a.type is Income
+    expense_account: Account? where a => a.type in {Expense, CostOfSales}
+    sale_tax: Tax? where t => t.scope is Sale
+    purchase_tax: Tax? where t => t.scope is Purchase
+
+
+# Contratto comune alle righe che si possono fatturare (vendite e acquisti).
+# Un riferimento `InvoiceableLine` diventa nello schema SQL una chiave esterna vera
+# per ciascuna entità che lo implementa.
+trait InvoiceableLine:
+    product: Product
+    qty: Qty<uom>
+    uom: Uom
+    tax: Tax
+
+
+entity JournalEntry is Document:
+    journal: Journal where j => j.company == company
+    source: Document?                               # il documento che l'ha generata
+    reversal_of: JournalEntry?
+    lines: [JournalLine]
+    state: enum(Draft, Posted) default Draft
+    reversed = JournalEntry.any(e => e.reversal_of == self)
+
+    frozen when state is Posted live reversed
+    check lines.count() >= 2, "Servono almeno due righe"
+    check lines.sum(l => l.balance) == 0, "Scrittura non bilanciata"
+
+    flow state:
+        Draft -> Posted by post
+
+    action post:
+        number = next_number(company, journal.code)
+
+    action reverse(on: Date = today()) -> JournalEntry:
+        require state is Posted and not reversed, "Si storna solo una scrittura registrata, una volta"
+        let r = JournalEntry(journal=journal, date=on, source=source, reversal_of=self,
+            lines=lines.map(l => JournalLine(account=l.account, partner=l.partner, due=l.due,
+                currency=l.currency, amount_currency=-l.amount_currency, balance=-l.balance)))
+        r.post()
+        return r
+
+    post to GL when state is Posted:
+        for l in lines:
+            add(company=company, account=l.account, partner=l.partner, currency=l.currency, due=l.due,
+                amount=l.balance, amount_currency=l.amount_currency)
+
+
+entity JournalLine:
+    entry: JournalEntry parent
+    account: Account where a => a.company == entry.company
+    partner: Partner? required when account.type in {Receivable, Payable}
+    due: Date? required when account.type in {Receivable, Payable}
+    label: Text?
+    currency: Currency default entry.company.currency
+    amount_currency: Money<currency>
+    balance: Money<entry.company.currency>          # + dare, − avere, in valuta di conto
+    debit = balance if balance > 0 else 0
+    credit = -balance if balance < 0 else 0
+
+    # valute diverse per il compilatore: il confronto avviene sui valori numerici (.raw)
+    check currency == entry.company.currency implies amount_currency.raw == balance.raw,
+        "In valuta di conto i due importi coincidono"
+    check account.currency == none or account.currency == currency,
+        f"Il conto {account.code} accetta solo {account.currency.code}"
+
+
+# Libro mastro: solo-aggiunta, alimentato esclusivamente da JournalEntry.
+# Ogni riga ha implicitamente source, date e causa.
+ledger GL:
+    key company: Company
+    key account: Account
+    key partner: Partner?
+    key currency: Currency
+    attr due: Date?                                 # attributo descrittivo, non chiave
+    measure amount: Money<company.currency>
+    measure amount_currency: Money<currency>
+
+    check per (company, source): g => g.sum(r => r.amount) == 0, "Partita doppia violata"

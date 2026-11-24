@@ -1,0 +1,440 @@
+{
+ "quadra_views": 1,
+ "teams": [],
+ "views": [
+  {
+   "kind": "app",
+   "entity": null,
+   "type": "app",
+   "name": "Sales cockpit",
+   "description": "Filters (region, period, state), KPIs, monthly revenue, top customers, the order board with actions, a new-order form and a region \u00d7 state pivot.",
+   "owner": "admin",
+   "config": {
+    "version": 1,
+    "pages": [
+     {
+      "id": "cockpit",
+      "name": "Cockpit",
+      "components": [
+       {
+        "id": "intro",
+        "type": "markdown",
+        "layout": {
+         "x": 0,
+         "y": 0,
+         "w": 24,
+         "h": 2
+        },
+        "config": {
+         "text": "## Sales cockpit\nRevenue counts confirmed and shipped orders. Every figure follows the filters, as you are allowed to see it ({= Order.count() } orders)."
+        },
+        "bindings": {
+         "filters": {
+          "Order": {
+           "region": "customer.region",
+           "period": "date",
+           "state": "state"
+          }
+         }
+        }
+       },
+       {
+        "id": "filters",
+        "type": "filter",
+        "layout": {
+         "x": 0,
+         "y": 2,
+         "w": 24,
+         "h": 2
+        },
+        "config": {
+         "filters": [
+          {
+           "name": "region",
+           "label": "Region",
+           "entity": "Order",
+           "field": "customer.region",
+           "widget": "multi"
+          },
+          {
+           "name": "period",
+           "label": "Period",
+           "entity": "Order",
+           "field": "date",
+           "widget": "date_range"
+          },
+          {
+           "name": "state",
+           "label": "State",
+           "entity": "Order",
+           "field": "state",
+           "widget": "multi"
+          }
+         ],
+         "layout": "row"
+        },
+        "bindings": {}
+       },
+       {
+        "id": "k_revenue",
+        "type": "kpi",
+        "title": "Revenue",
+        "layout": {
+         "x": 0,
+         "y": 4,
+         "w": 8,
+         "h": 3
+        },
+        "config": {
+         "source": {
+          "type": "expr",
+          "expr": "Order.where(o => o.state in {Confirmed, Shipped}).sum(o => o.total)"
+         },
+         "label": "Revenue (confirmed + shipped)",
+         "format": {
+          "style": "money",
+          "decimals": 0
+         },
+         "compare": {
+          "kind": "previous_period",
+          "filter": "period"
+         },
+         "sparkline": "Order.where(o => o.state in {Confirmed, Shipped}).group_by(o => o.date.start_of_month()).map(g => (month: g.key, revenue: g.items.sum(o => o.total)))"
+        },
+        "bindings": {}
+       },
+       {
+        "id": "k_orders",
+        "type": "kpi",
+        "title": "Orders",
+        "layout": {
+         "x": 8,
+         "y": 4,
+         "w": 6,
+         "h": 3
+        },
+        "config": {
+         "source": {
+          "type": "expr",
+          "expr": "Order.count()"
+         },
+         "label": "Orders",
+         "format": {
+          "style": "number",
+          "decimals": 0
+         },
+         "compare": {
+          "kind": "previous_period",
+          "filter": "period"
+         }
+        },
+        "bindings": {}
+       },
+       {
+        "id": "k_open",
+        "type": "kpi",
+        "title": "Open",
+        "layout": {
+         "x": 14,
+         "y": 4,
+         "w": 5,
+         "h": 3
+        },
+        "config": {
+         "source": {
+          "type": "expr",
+          "expr": "Order.count(o => o.state is Confirmed)"
+         },
+         "label": "Confirmed, to ship",
+         "format": {
+          "style": "number",
+          "decimals": 0
+         },
+         "higher_is_better": false
+        },
+        "bindings": {}
+       },
+       {
+        "id": "k_avg",
+        "type": "kpi",
+        "title": "Average order",
+        "layout": {
+         "x": 19,
+         "y": 4,
+         "w": 5,
+         "h": 3
+        },
+        "config": {
+         "source": {
+          "type": "expr",
+          "expr": "(Order.where(o => o.state in {Confirmed, Shipped}).sum(o => o.total) / Order.where(o => o.state in {Confirmed, Shipped}).count()).round() if Order.where(o => o.state in {Confirmed, Shipped}).count() > 0 else 0.00 EUR"
+         },
+         "label": "Average order",
+         "format": {
+          "style": "money",
+          "decimals": 0
+         },
+         "compare": {
+          "kind": "target",
+          "expr": "2500.00 EUR"
+         }
+        },
+        "bindings": {}
+       },
+       {
+        "id": "c_monthly",
+        "type": "chart",
+        "title": "Monthly revenue",
+        "layout": {
+         "x": 0,
+         "y": 7,
+         "w": 14,
+         "h": 7
+        },
+        "config": {
+         "kind": "area",
+         "stacked": false,
+         "source": {
+          "type": "expr",
+          "expr": "Order.where(o => o.state in {Confirmed, Shipped}).group_by(o => o.date.start_of_month()).map(g => (month: g.key, revenue: g.items.sum(o => o.total)))"
+         },
+         "y_title": "EUR",
+         "format": "currency",
+         "max_points": 500
+        },
+        "bindings": {}
+       },
+       {
+        "id": "c_top",
+        "type": "chart",
+        "title": "Top 10 customers",
+        "layout": {
+         "x": 14,
+         "y": 7,
+         "w": 10,
+         "h": 7
+        },
+        "config": {
+         "kind": "bar",
+         "horizontal": true,
+         "source": {
+          "type": "expr",
+          "expr": "Order.where(o => o.state in {Confirmed, Shipped}).group_by(o => o.customer).sort_by(g => -g.items.sum(o => o.total)).first(10).map(g => (customer: g.key, revenue: g.items.sum(o => o.total)))"
+         },
+         "format": "currency",
+         "legend": false
+        },
+        "bindings": {}
+       },
+       {
+        "id": "v_board",
+        "type": "view",
+        "title": "Orders by state (click a card to select it)",
+        "layout": {
+         "x": 0,
+         "y": 14,
+         "w": 16,
+         "h": 9
+        },
+        "config": {
+         "entity": "Order",
+         "type": "kanban",
+         "view": {
+          "fields": [
+           "number",
+           "customer",
+           "date",
+           "total",
+           "priority"
+          ],
+          "board": true,
+          "kanban": {
+           "field": "state",
+           "cards": [
+            "customer",
+            "total",
+            "date"
+           ],
+           "hidden": [],
+           "collapsed": [],
+           "wip": {},
+           "aggregate": "total"
+          }
+         },
+         "select": "order",
+         "page_size": 20,
+         "edit": {
+          "move": true
+         }
+        },
+        "bindings": {}
+       },
+       {
+        "id": "b_confirm",
+        "type": "button",
+        "layout": {
+         "x": 16,
+         "y": 14,
+         "w": 8,
+         "h": 2
+        },
+        "config": {
+         "label": "Confirm the selected order",
+         "entity": "Order",
+         "action": "confirm",
+         "target": {
+          "from": "param",
+          "name": "order"
+         },
+         "confirm": "Confirm this order? Its customer is told.",
+         "style": "primary"
+        },
+        "bindings": {}
+       },
+       {
+        "id": "b_cancel",
+        "type": "button",
+        "layout": {
+         "x": 16,
+         "y": 16,
+         "w": 8,
+         "h": 2
+        },
+        "config": {
+         "label": "Cancel the selected order",
+         "entity": "Order",
+         "action": "cancel",
+         "target": {
+          "from": "param",
+          "name": "order"
+         },
+         "confirm": "Cancel this order? Its lines are kept as they are.",
+         "style": "danger"
+        },
+        "bindings": {}
+       },
+       {
+        "id": "f_order",
+        "type": "form",
+        "title": "New order",
+        "layout": {
+         "x": 16,
+         "y": 18,
+         "w": 8,
+         "h": 5
+        },
+        "config": {
+         "entity": "Order",
+         "mode": "create",
+         "sections": [
+          {
+           "fields": [
+            "number",
+            "customer",
+            "date",
+            "priority"
+           ]
+          }
+         ],
+         "columns": 2,
+         "submit_label": "Create the order"
+        },
+        "bindings": {}
+       },
+       {
+        "id": "s_pivot",
+        "type": "sheet",
+        "title": "Region \u00d7 state (group_by)",
+        "layout": {
+         "x": 0,
+         "y": 23,
+         "w": 24,
+         "h": 8
+        },
+        "config": {
+         "active": "s1",
+         "sheets": [
+          {
+           "id": "s1",
+           "name": "Pivot",
+           "mode": "free",
+           "rows": 200,
+           "cols": 10,
+           "cells": {
+            "A1": {
+             "v": "Region",
+             "s": {
+              "b": true
+             }
+            },
+            "B1": {
+             "v": "State",
+             "s": {
+              "b": true
+             }
+            },
+            "C1": {
+             "v": "Orders",
+             "s": {
+              "b": true
+             }
+            },
+            "D1": {
+             "v": "Total",
+             "s": {
+              "b": true
+             }
+            },
+            "A2": {
+             "v": "=Order.group_by(o => o.customer.region, o => o.state).map(g => (region: g.key, state: g.key2, orders: g.items.count(), total: g.items.sum(o => o.total)))"
+            },
+            "F1": {
+             "v": "Orders in the filters",
+             "s": {
+              "b": true
+             }
+            },
+            "G1": {
+             "v": "=Order.count()"
+            },
+            "F2": {
+             "v": "Regions chosen",
+             "s": {
+              "b": true
+             }
+            },
+            "G2": {
+             "v": "=@region.count()"
+            }
+           },
+           "cols_w": {
+            "A": 160,
+            "B": 110,
+            "F": 170
+           }
+          }
+         ]
+        },
+        "bindings": {
+         "filters": {
+          "Order": {
+           "region": "customer.region",
+           "period": "date",
+           "state": "state"
+          }
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "shares": [
+    {
+     "type": "everyone",
+     "edit": false
+    }
+   ]
+  }
+ ]
+}
