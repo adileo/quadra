@@ -135,6 +135,9 @@ fn reply(status: u16, body: J) -> Reply {
     Reply { status, body, session: None }
 }
 
+/// How long a session made by the sign-in by email lasts.
+pub const SESSION_DAYS: i64 = 7;
+
 fn error(status: u16, msg: impl Into<String>) -> Reply {
     reply(status, json!({ "error": msg.into() }))
 }
@@ -251,6 +254,22 @@ pub enum Job {
     },
     DevLogin {
         login: String,
+        reply: oneshot::Sender<Reply>,
+    },
+    /// sign-in by email: a code for the user of `login` (or of that email)
+    CodeStart {
+        login: String,
+        reply: oneshot::Sender<Reply>,
+    },
+    CodeVerify {
+        id: String,
+        code: String,
+        reply: oneshot::Sender<Reply>,
+    },
+    /// an admin invites a user: where to write
+    Invite {
+        who: Principal,
+        user: u64,
         reply: oneshot::Sender<Reply>,
     },
     Logout {
@@ -509,6 +528,15 @@ impl Engine {
                 Job::DevLogin { login, reply } => {
                     let _ = reply.send(self.dev_login(&login));
                 }
+                Job::CodeStart { login, reply } => {
+                    let _ = reply.send(self.code_start(&login));
+                }
+                Job::CodeVerify { id, code, reply } => {
+                    let _ = reply.send(self.code_verify(&id, &code));
+                }
+                Job::Invite { who, user, reply } => {
+                    let _ = reply.send(self.invite(&who, user));
+                }
                 Job::Logout { secret } => {
                     let _ = auth::revoke(&mut self.conn, &secret);
                 }
@@ -673,6 +701,87 @@ impl Engine {
         match auth::create(&mut self.conn, "session", user, &format!("dev login {login}"), false, now(), Some(now() + chrono::Duration::hours(12))) {
             Ok((secret, csrf)) => Reply { status: 200, body: json!({ "user": if auto { self.login_of(model, user) } else { login.to_string() }, "csrf": csrf }), session: Some(secret) },
             Err(e) => error(500, e),
+        }
+    }
+
+    /// A user by login or by email, and where their email goes: the `email` field if the
+    /// project's User has one and it is set, else the login when it is an address.
+    fn user_by(&mut self, model: &Model, key: &str) -> Option<(u64, String, Option<String>)> {
+        let key = key.trim().to_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        let has_email = model.entity("User").is_some_and(|e| e.fields.iter().any(|f| f.name == "email"));
+        let mut i = self.interp(model, None, None).ok()?;
+        for id in i.ids("User", None) {
+            let login = i.store.read(id, "login", None).map(|v| v.to_string()).unwrap_or_default();
+            let email = if has_email { i.store.read(id, "email", None).filter(|v| !v.is_none()).map(|v| v.to_string()) } else { None };
+            if login.to_lowercase() == key || email.as_deref().is_some_and(|e| e.to_lowercase() == key) {
+                let to = email.or_else(|| login.contains('@').then(|| login.clone()));
+                return Some((id, login, to));
+            }
+        }
+        None
+    }
+
+    /// The first step of the sign-in by email. The answer does not say whether the user exists:
+    /// without one (or without an address) there is a request id and nothing is sent.
+    fn code_start(&mut self, login: &str) -> Reply {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let Some((user, _, Some(to))) = self.user_by(model, login) else {
+            return Reply { status: 200, body: json!({ "login_id": auth::random_hex(16), "expires_in": auth::CODE_MINUTES * 60 }), session: None };
+        };
+        match auth::code_start(&mut self.conn, user, now()) {
+            Ok(Ok((id, code))) => Reply { status: 200, body: json!({ "login_id": id, "expires_in": auth::CODE_MINUTES * 60, "_send": { "to": to, "code": code } }), session: None },
+            Ok(Err(_)) => error(429, "Too many codes asked for this user. Wait 15 minutes, or use the last one you received."),
+            Err(e) => error(500, e),
+        }
+    }
+
+    fn code_verify(&mut self, id: &str, code: &str) -> Reply {
+        match auth::code_verify(&mut self.conn, id, code, now()) {
+            Ok(Ok(user)) => {
+                let checked = self.checked.clone();
+                let model = checked.model.as_ref().unwrap();
+                let login = self.login_of(model, user);
+                match auth::create(&mut self.conn, "session", user, &format!("email code {login}"), false, now(), Some(now() + chrono::Duration::days(SESSION_DAYS))) {
+                    Ok((secret, csrf)) => Reply { status: 200, body: json!({ "user": login, "csrf": csrf }), session: Some(secret) },
+                    Err(e) => error(500, e),
+                }
+            }
+            Ok(Err((why, left))) => {
+                let msg = match why {
+                    "wrong" => format!("Wrong code. {left} attempt{} left.", if left == 1 { "" } else { "s" }),
+                    "locked" => "Too many wrong attempts with this code. Ask for a new one.".into(),
+                    "used" => "This code was used already. Ask for a new one.".into(),
+                    "expired" => "This code has expired, or a newer one was sent. Ask for a new one.".into(),
+                    _ => "This sign-in request is not known. Ask for a new code.".into(),
+                };
+                Reply { status: 400, body: json!({ "error": msg, "code": why }), session: None }
+            }
+            Err(e) => error(500, e),
+        }
+    }
+
+    /// An admin invites a user: their address, for the host to write to.
+    fn invite(&mut self, who: &Principal, user: u64) -> Reply {
+        let admin = match self.who(who) {
+            Ok(w) => w.admin,
+            Err((s, m)) => return error(s, m),
+        };
+        if !admin {
+            return error(403, "Only an admin can invite users.");
+        }
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let login = self.login_of(model, user);
+        if login.is_empty() {
+            return error(404, "No such user.");
+        }
+        match self.user_by(model, &login) {
+            Some((_, login, Some(to))) => Reply { status: 200, body: json!({ "invited": login, "_send": { "to": to, "invite": true, "login": login } }), session: None },
+            _ => error(400, "This user has no email address: give them an `email`, or a login that is one."),
         }
     }
 

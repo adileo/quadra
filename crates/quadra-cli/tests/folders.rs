@@ -345,7 +345,8 @@ fn folders_on(target: &str) {
     drop(c);
     let mut t = T { local: Local::open(&root, &url, 64).unwrap() };
     let system = Conn::open(&url).unwrap().query("SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'system'", &[]).unwrap()[0][0].clone();
-    assert_eq!(system.as_deref(), Some("8"));
+    assert_eq!(system.as_deref(), Some("9"));
+    assert!(Conn::open(&url).unwrap().query("SELECT t.\"id\" FROM \"_quadra_login_codes\" t WHERE 1 = 0", &[]).is_ok(), "the tables of later versions are added");
     let (apps, folders) = t.tree(s1);
     assert!(apps.iter().all(|a| a.1.is_none()) && folders.iter().all(|f| f.1.is_none()), "everything at the top again");
     let vb = t.get(s1, board)["version"].as_u64().unwrap();

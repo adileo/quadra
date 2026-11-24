@@ -273,11 +273,29 @@ fn engine_thread(id: &str, name: &str, cfg: &Config, first: bool, failed: Option
     slot
 }
 
+/// An email of the sign-in, written by whoever hosts the server (Quadra Cloud): the text is
+/// theirs, the server only says whom and what.
+#[derive(Clone, Debug)]
+pub enum SignInMail {
+    /// the code of a sign-in
+    Code { to: String, code: String },
+    /// an admin invited the user of `login` to the app
+    Invite { to: String, login: String },
+}
+
+/// Sends the sign-in's emails: with it, users sign in with a code sent by email
+/// (`POST /v1/auth/code`, `/v1/auth/code/verify`) and admins invite them (`/v1/auth/invite`).
+/// `tenant` is the tenant's id, `host` the address the request came to (`shop.quadra.run`).
+pub trait SignIn: Send + Sync + 'static {
+    fn send(&self, tenant: &str, host: &str, mail: SignInMail) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+}
+
 struct App {
     resolver: Arc<dyn TenantResolver>,
     running: Mutex<HashMap<String, Arc<Tenant>>>,
     secure_cookies: bool,
     dev_login: bool,
+    sign_in: Option<Arc<dyn SignIn>>,
     /// requests per credential: (tokens, last refill)
     limiter: Mutex<HashMap<String, (f64, Instant)>>,
 }
@@ -669,6 +687,94 @@ async fn dev_login(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>) 
     }
 }
 
+/// How users sign in here: what the web client shows.
+async fn auth_methods(State(app): State<Shared>, Ten(_t): Ten) -> Response {
+    json_response(200, json!({ "dev_login": app.dev_login, "code": app.sign_in.is_some() }))
+}
+
+/// The email's details, taken out of the engine's answer before it goes to the browser.
+fn take_send(body: &mut J) -> Option<J> {
+    body.as_object_mut().and_then(|o| o.remove("_send"))
+}
+
+fn host_of(headers: &HeaderMap) -> String {
+    headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+}
+
+/// `POST /v1/auth/code {login}`: a code by email to the user of that login or address.
+async fn code_start(State(app): State<Shared>, Ten(t): Ten, headers: HeaderMap, Json(body): Json<J>) -> Response {
+    let Some(sign_in) = app.sign_in.clone() else {
+        return fail(404, "not found");
+    };
+    let login = body["login"].as_str().unwrap_or("").trim().to_lowercase();
+    if login.is_empty() || login.len() > 254 {
+        return fail(400, "an email address or a login");
+    }
+    if !app.allow(&format!("{}/code:{login}", t.id)) || !app.allow(&format!("{}/code", t.id)) {
+        return fail(429, "too many requests");
+    }
+    let Some(mut r) = t.ask(|reply| Job::CodeStart { login, reply }).await else {
+        return fail(503, "the engine is not available");
+    };
+    if let Some(send) = take_send(&mut r.body) {
+        let mail = SignInMail::Code { to: send["to"].as_str().unwrap_or("").into(), code: send["code"].as_str().unwrap_or("").into() };
+        if let Err(e) = sign_in.send(&t.id, &host_of(&headers), mail).await {
+            eprintln!("quadra: the sign-in email of {} could not be sent: {e}", t.id);
+            return fail(503, "the email could not be sent: try again in a moment");
+        }
+    }
+    json_response(r.status, r.body)
+}
+
+/// `POST /v1/auth/code/verify {login_id, code}`: the session, as a cookie of this address only.
+async fn code_verify(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>) -> Response {
+    if app.sign_in.is_none() {
+        return fail(404, "not found");
+    }
+    let id = body["login_id"].as_str().unwrap_or("").to_string();
+    let code = body["code"].as_str().unwrap_or("").to_string();
+    if !app.allow(&format!("{}/verify:{id}", t.id)) {
+        return fail(429, "too many requests");
+    }
+    match t.ask(|reply| Job::CodeVerify { id, code, reply }).await {
+        Some(Reply { status, body, session }) => {
+            let mut r = json_response(status, body);
+            if let Some(s) = session {
+                let secure = if app.secure_cookies { "; Secure" } else { "" };
+                let c = format!("{COOKIE}={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}", engine::SESSION_DAYS * 86400);
+                r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
+            }
+            r
+        }
+        None => fail(503, "the engine is not available"),
+    }
+}
+
+/// `POST /v1/auth/invite {user_id}`: an admin sends a user the invitation to sign in.
+async fn invite(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+    let Some(sign_in) = app.sign_in.clone() else {
+        return fail(404, "not found");
+    };
+    let who = match authenticate(&app, &t, &method, &headers).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let Some(user) = body["user_id"].as_u64() else {
+        return fail(400, "user_id");
+    };
+    let Some(mut r) = t.ask(|reply| Job::Invite { who, user, reply }).await else {
+        return fail(503, "the engine is not available");
+    };
+    if let Some(send) = take_send(&mut r.body) {
+        let mail = SignInMail::Invite { to: send["to"].as_str().unwrap_or("").into(), login: send["login"].as_str().unwrap_or("").into() };
+        if let Err(e) = sign_in.send(&t.id, &host_of(&headers), mail).await {
+            eprintln!("quadra: the invitation of {} could not be sent: {e}", t.id);
+            return fail(503, "the invitation could not be sent: try again in a moment");
+        }
+    }
+    json_response(r.status, r.body)
+}
+
 async fn logout(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
     if let Err(r) = authenticate(&app, &t, &method, &headers).await {
         return r;
@@ -852,6 +958,8 @@ pub struct HostOptions {
     pub secure_cookies: bool,
     /// the web client from this folder instead of the one built into the binary
     pub web: Option<std::path::PathBuf>,
+    /// the sign-in by email, when the host sends the emails
+    pub sign_in: Option<Arc<dyn SignIn>>,
 }
 
 /// A running tenant, as its host sees it.
@@ -878,7 +986,7 @@ pub struct Host {
 
 impl Host {
     pub fn new(options: HostOptions, resolver: Arc<dyn TenantResolver>) -> Host {
-        let app = Arc::new(App { resolver, running: Mutex::new(HashMap::new()), secure_cookies: options.secure_cookies, dev_login: options.dev_login, limiter: Mutex::new(HashMap::new()) });
+        let app = Arc::new(App { resolver, running: Mutex::new(HashMap::new()), secure_cookies: options.secure_cookies, dev_login: options.dev_login, sign_in: options.sign_in, limiter: Mutex::new(HashMap::new()) });
         Host { app, web: options.web }
     }
 
@@ -901,6 +1009,10 @@ impl Host {
             .route("/v1/eval", post(views_api))
             .route("/v1/complete", post(views_api))
             .route("/v1/apps/{*rest}", get(views_api).post(views_api))
+            .route("/v1/auth", get(auth_methods))
+            .route("/v1/auth/code", post(code_start))
+            .route("/v1/auth/code/verify", post(code_verify))
+            .route("/v1/auth/invite", post(invite))
             .route("/v1/auth/dev-login", post(dev_login))
             .route("/v1/auth/logout", post(logout))
             .route("/v1/dev/files", get(dev_files))
@@ -993,7 +1105,7 @@ impl Host {
 pub fn serve(cfg: Config) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async move {
-        let options = HostOptions { dev_login: cfg.dev_login, secure_cookies: cfg.secure_cookies, web: cfg.web.clone() };
+        let options = HostOptions { dev_login: cfg.dev_login, secure_cookies: cfg.secure_cookies, web: cfg.web.clone(), sign_in: None };
         let host = Host::new(options, Arc::new(Single(TenantSpec { id: "default".into(), config: cfg.clone() })));
         host.start("").await?;
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.port));

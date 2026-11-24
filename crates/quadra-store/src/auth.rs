@@ -85,3 +85,136 @@ pub fn idempotent(conn: &mut Conn, user_id: u64, key: &str) -> Result<Option<(St
         conn.query("SELECT \"request_hash\", \"response\", CAST(\"tx\" AS TEXT) FROM \"_quadra_idempotency\" WHERE \"user_id\" = ?bigint AND \"key\" = ?text", &[Sql::Int(user_id as i64), Sql::Text(key.into())])?;
     Ok(rows.first().map(|r| (r[0].clone().unwrap_or_default(), r[1].clone().unwrap_or_default(), r[2].as_deref().and_then(|t| t.parse().ok()).unwrap_or(0))))
 }
+
+// ---- sign-in with a code sent by email ----------------------------------------------------
+//
+// A code of 8 letters and digits (Crockford's base32: no I, L, O, U; 40 bits) for one user, valid
+// for CODE_MINUTES, once, CODE_ATTEMPTS wrong tries at most; a new one replaces the user's
+// open ones; CODES_PER_15_MIN per user. Only a hash is kept, salted with the request's id, which
+// the browser holds: the code works only with the request it was sent for.
+
+pub const CODE_MINUTES: i64 = 10;
+pub const CODE_ATTEMPTS: i64 = 5;
+pub const CODES_PER_15_MIN: i64 = 5;
+const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// A code as a person types it: `7KQ3-M9XD`.
+pub fn new_code() -> String {
+    let mut out = String::new();
+    let mut got = 0;
+    while got < 8 {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).expect("system random generator");
+        for x in b {
+            if got == 8 {
+                break;
+            }
+            if x >= 224 {
+                continue; // 224 = 7 × 32: every symbol equally likely
+            }
+            if got == 4 {
+                out.push('-');
+            }
+            out.push(ALPHABET[(x % 32) as usize] as char);
+            got += 1;
+        }
+    }
+    out
+}
+
+/// What was typed, as it is compared: upper case, no separators, O as 0, I and L as 1.
+pub fn normalize_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| !matches!(c, '-' | ' ' | '\t'))
+        .map(|c| match c.to_ascii_uppercase() {
+            'O' => '0',
+            'I' | 'L' => '1',
+            c => c,
+        })
+        .collect()
+}
+
+fn code_hash(id: &str, code: &str) -> String {
+    sha256_hex(&format!("{id}:{}", normalize_code(code)))
+}
+
+/// A new code for a user: Ok((request id, code)), or Err(why not) when they asked too often.
+pub fn code_start(conn: &mut Conn, user_id: u64, now: NaiveDateTime) -> Result<Result<(String, String), &'static str>, String> {
+    let since = ts(now - chrono::Duration::minutes(15));
+    let n: i64 = conn
+        .query("SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_login_codes\" WHERE \"user_id\" = ?bigint AND \"created_at\" > ?text", &[Sql::Int(user_id as i64), Sql::Text(since)])?
+        .first()
+        .and_then(|r| r[0].as_deref().and_then(|v| v.parse().ok()))
+        .unwrap_or(0);
+    if n >= CODES_PER_15_MIN {
+        return Ok(Err("too_many_codes"));
+    }
+    // the open ones are replaced
+    conn.exec(
+        "UPDATE \"_quadra_login_codes\" SET \"expires_at\" = ?text WHERE \"user_id\" = ?bigint AND \"used\" = ?boolean AND \"expires_at\" > ?text",
+        &[Sql::Text(ts(now)), Sql::Int(user_id as i64), Sql::Bool(false), Sql::Text(ts(now))],
+    )?;
+    let id = random_hex(16);
+    let code = new_code();
+    conn.exec(
+        "INSERT INTO \"_quadra_login_codes\" (\"id\", \"user_id\", \"code_hash\", \"attempts\", \"created_at\", \"expires_at\", \"used\") VALUES (?text, ?bigint, ?text, ?bigint, ?text, ?text, ?boolean)",
+        &[
+            Sql::Text(id.clone()),
+            Sql::Int(user_id as i64),
+            Sql::Text(code_hash(&id, &code)),
+            Sql::Int(0),
+            Sql::Text(ts(now)),
+            Sql::Text(ts(now + chrono::Duration::minutes(CODE_MINUTES))),
+            Sql::Bool(false),
+        ],
+    )?;
+    Ok(Ok((id, code)))
+}
+
+/// A code typed for a request: Ok(user) once, or Err(why): `unknown`, `used`, `locked`,
+/// `expired`, `wrong` (with the attempts left).
+pub fn code_verify(conn: &mut Conn, id: &str, code: &str, now: NaiveDateTime) -> Result<Result<u64, (&'static str, i64)>, String> {
+    let rows = conn.query(
+        "SELECT CAST(\"user_id\" AS TEXT), \"code_hash\", CAST(\"attempts\" AS TEXT), \"expires_at\", CAST(\"used\" AS TEXT) FROM \"_quadra_login_codes\" WHERE \"id\" = ?text",
+        &[Sql::Text(id.into())],
+    )?;
+    let Some(r) = rows.first() else {
+        return Ok(Err(("unknown", 0)));
+    };
+    let truthy = |s: &Option<String>| matches!(s.as_deref(), Some("1") | Some("true") | Some("t"));
+    let attempts: i64 = r[2].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if truthy(&r[4]) {
+        return Ok(Err(("used", 0)));
+    }
+    if attempts >= CODE_ATTEMPTS {
+        return Ok(Err(("locked", 0)));
+    }
+    if r[3].as_deref().unwrap_or("") <= ts(now).as_str() {
+        return Ok(Err(("expired", 0)));
+    }
+    let want = r[1].clone().unwrap_or_default();
+    let got = code_hash(id, code);
+    let same = want.len() == got.len() && want.bytes().zip(got.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
+    if !same {
+        conn.exec("UPDATE \"_quadra_login_codes\" SET \"attempts\" = \"attempts\" + 1 WHERE \"id\" = ?text", &[Sql::Text(id.into())])?;
+        let left = CODE_ATTEMPTS - attempts - 1;
+        return Ok(Err(if left > 0 { ("wrong", left) } else { ("locked", 0) }));
+    }
+    conn.exec("UPDATE \"_quadra_login_codes\" SET \"used\" = ?boolean WHERE \"id\" = ?text", &[Sql::Bool(true), Sql::Text(id.into())])?;
+    Ok(Ok(r[0].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0)))
+}
+
+#[cfg(test)]
+mod code_tests {
+    use super::*;
+
+    #[test]
+    fn codes_are_crockford_and_typed_loosely() {
+        for _ in 0..100 {
+            let c = new_code();
+            assert_eq!(c.len(), 9);
+            assert!(normalize_code(&c).bytes().all(|b| ALPHABET.contains(&b)));
+        }
+        assert_eq!(normalize_code("o1il-abcd"), "0111ABCD");
+    }
+}

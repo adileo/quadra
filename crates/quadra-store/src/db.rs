@@ -41,6 +41,9 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_view_prefs\" (\"user_id\" BIGINT NOT NULL, \"view_id\" BIGINT NOT NULL, \"favourite\" BOOLEAN NOT NULL, \"position\" BIGINT, \"is_default\" BOOLEAN NOT NULL, \"state\" TEXT, PRIMARY KEY (\"user_id\", \"view_id\"))",
     "CREATE TABLE \"_quadra_teams\" (\"id\" BIGINT PRIMARY KEY, \"name\" TEXT NOT NULL, \"description\" TEXT NOT NULL, \"version\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"updated_at\" TEXT NOT NULL, \"updated_by\" BIGINT, \"deleted_at\" TEXT, \"deleted_by\" BIGINT)",
     "CREATE TABLE \"_quadra_team_members\" (\"team_id\" BIGINT NOT NULL, \"user_id\" BIGINT NOT NULL, \"owner\" BOOLEAN NOT NULL, PRIMARY KEY (\"team_id\", \"user_id\"))",
+    // sign-in with a code sent by email (crate::auth::code_start): its hash, salted with the
+    // request's id; attempts, expiry, use
+    "CREATE TABLE \"_quadra_login_codes\" (\"id\" TEXT PRIMARY KEY, \"user_id\" BIGINT NOT NULL, \"code_hash\" TEXT NOT NULL, \"attempts\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"expires_at\" TEXT NOT NULL, \"used\" BOOLEAN NOT NULL)",
     "CREATE TABLE \"_quadra_view_log\" (\"object\" TEXT NOT NULL, \"object_id\" BIGINT NOT NULL, \"version\" BIGINT NOT NULL, \"at\" TEXT NOT NULL, \"user_id\" BIGINT, \"action\" TEXT NOT NULL, \"detail\" TEXT NOT NULL, PRIMARY KEY (\"object\", \"object_id\", \"version\"))",
 ];
 
@@ -70,7 +73,8 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// 7: `_quadra_views.parent_id`, the folder an app or a folder is in (crate::views).
 /// 8: `_quadra_views.origin` and `path`: apps, views and folders installed from the project's
 /// interface files (`interfaces/**/*.qdi`), by their path there.
-const SYSTEM_VERSION: &str = "8";
+/// 9: `_quadra_login_codes`, the codes of the sign-in by email (crate::auth).
+const SYSTEM_VERSION: &str = "9";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
