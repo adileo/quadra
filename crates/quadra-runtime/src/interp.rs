@@ -1116,6 +1116,14 @@ impl<'m> Interp<'m> {
     /// `Entity(field=value, …)`: a new record (or a value, for `record` types).
     pub fn create(&mut self, ent: &str, args: Vec<(String, V)>) -> R<V> {
         let e = self.entity(ent)?;
+        if ent == "User" {
+            if let Some(max) = crate::limits::current().max_users {
+                if self.ids("User", None).len() as u64 >= max {
+                    crate::limits::hit(crate::limits::too_many_users(max));
+                    return fail(crate::limits::too_many_users(max));
+                }
+            }
+        }
         if self.viewing() && e.kind != EntityKind::Record {
             return fail(format!("{ent}(…): a record cannot be created in a formula of an app (it only reads)"));
         }
@@ -1493,6 +1501,7 @@ impl<'m> Interp<'m> {
     // ---- expressions ------------------------------------------------------------------
 
     pub fn eval(&mut self, e: &Expr, ctx: &mut Ctx) -> R<V> {
+        crate::limits::count_step();
         if let Some(d) = self.deadline {
             self.ticks = self.ticks.wrapping_add(1);
             if self.ticks % 1024 == 0 && std::time::Instant::now() > d {

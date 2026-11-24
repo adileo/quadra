@@ -102,6 +102,63 @@ struct Tenant {
     /// jobs sent to its engines and not answered yet, and how many may wait
     pending: Arc<std::sync::atomic::AtomicUsize>,
     max_queue: Option<usize>,
+    usage: Arc<Meter>,
+}
+
+/// What a tenant's engines used, added after each job and taken by the host
+/// (`Host::take_usage`).
+#[derive(Default)]
+pub(crate) struct Meter {
+    requests: std::sync::atomic::AtomicU64,
+    steps: std::sync::atomic::AtomicU64,
+    rows_read: std::sync::atomic::AtomicU64,
+    rows_written: std::sync::atomic::AtomicU64,
+    engine_us: std::sync::atomic::AtomicU64,
+}
+
+impl Meter {
+    pub(crate) fn add(&self, u: quadra_runtime::limits::Usage, request: bool, took: Duration) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.requests.fetch_add(request as u64, Relaxed);
+        self.steps.fetch_add(u.steps, Relaxed);
+        self.rows_read.fetch_add(u.rows_read, Relaxed);
+        self.rows_written.fetch_add(u.rows_written, Relaxed);
+        self.engine_us.fetch_add(took.as_micros() as u64, Relaxed);
+    }
+
+    fn take(&self) -> Usage {
+        use std::sync::atomic::Ordering::Relaxed;
+        Usage {
+            requests: self.requests.swap(0, Relaxed),
+            steps: self.steps.swap(0, Relaxed),
+            rows_read: self.rows_read.swap(0, Relaxed),
+            rows_written: self.rows_written.swap(0, Relaxed),
+            engine_ms: self.engine_us.swap(0, Relaxed) / 1000,
+        }
+    }
+}
+
+/// What a tenant used since the host last asked: its API requests and their compute. Steps
+/// and rows do not depend on the machine or its load (the same request on the same data
+/// counts the same); `engine_ms` is the time its engines worked, for the host's own checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub requests: u64,
+    /// expressions evaluated
+    pub steps: u64,
+    pub rows_read: u64,
+    pub rows_written: u64,
+    pub engine_ms: u64,
+}
+
+impl Usage {
+    fn plus(self, o: Usage) -> Usage {
+        Usage { requests: self.requests + o.requests, steps: self.steps + o.steps, rows_read: self.rows_read + o.rows_read, rows_written: self.rows_written + o.rows_written, engine_ms: self.engine_ms + o.engine_ms }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        *self == Usage::default()
+    }
 }
 
 /// One job waiting for an engine: counted while it waits.
@@ -201,8 +258,8 @@ impl Tenant {
             return;
         }
         let shape = self.shape();
-        let new_readers: Vec<Arc<Slot>> = (0..shape.readers).map(|n| engine_thread(&self.id, &format!("r{n}"), &self.config, false, None, None)).collect();
-        let new_writers: Vec<Arc<Slot>> = (1..shape.writers).map(|n| engine_thread(&self.id, &format!("w{n}"), &self.config, false, None, None)).collect();
+        let new_readers: Vec<Arc<Slot>> = (0..shape.readers).map(|n| engine_thread(&self.id, &format!("r{n}"), &self.config, false, None, None, self.usage.clone())).collect();
+        let new_writers: Vec<Arc<Slot>> = (1..shape.writers).map(|n| engine_thread(&self.id, &format!("w{n}"), &self.config, false, None, None, self.usage.clone())).collect();
         let old_readers = std::mem::replace(&mut *self.readers.lock().unwrap(), new_readers);
         let old_writers = {
             let mut w = self.writers.lock().unwrap();
@@ -240,7 +297,7 @@ impl Tenant {
 /// An engine on a thread of its own (it owns state that is not thread-safe). The first engine
 /// of a tenant (`first`) brings the database up to date with the project; it reports whether
 /// the project reads the clock, and why it could not start.
-fn engine_thread(id: &str, name: &str, cfg: &Config, first: bool, failed: Option<Arc<Mutex<Option<String>>>>, reads_clock: Option<Arc<std::sync::atomic::AtomicBool>>) -> Arc<Slot> {
+fn engine_thread(id: &str, name: &str, cfg: &Config, first: bool, failed: Option<Arc<Mutex<Option<String>>>>, reads_clock: Option<Arc<std::sync::atomic::AtomicBool>>, usage: Arc<Meter>) -> Arc<Slot> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let (jobs, rx) = mpsc::channel::<Job>();
     let slot = Arc::new(Slot { jobs: Mutex::new(jobs), pending: Arc::new(AtomicUsize::new(0)), ready: Arc::new(AtomicBool::new(false)) });
@@ -256,7 +313,7 @@ fn engine_thread(id: &str, name: &str, cfg: &Config, first: bool, failed: Option
                     c.store(engine.reads_clock(), Ordering::Relaxed);
                 }
                 ready.store(true, Ordering::Relaxed);
-                engine.run(rx);
+                engine.run(rx, &usage);
             }
             Err(e) => {
                 eprintln!("{label}: the project cannot start: {e}");
@@ -298,6 +355,8 @@ struct App {
     sign_in: Option<Arc<dyn SignIn>>,
     /// requests per credential: (tokens, last refill)
     limiter: Mutex<HashMap<String, (f64, Instant)>>,
+    /// what tenants stopped since the host last asked had used
+    used: Mutex<HashMap<String, Usage>>,
 }
 
 type Shared = Arc<App>;
@@ -878,7 +937,8 @@ fn start(spec: TenantSpec) -> Arc<Tenant> {
     let cfg = Config { web: None, ..spec.config.clone() };
     let failed = Arc::new(Mutex::new(None));
     let reads_clock = Arc::new(AtomicBool::new(false));
-    let first = engine_thread(&spec.id, "w0", &cfg, true, Some(failed.clone()), Some(reads_clock.clone()));
+    let usage = Arc::new(Meter::default());
+    let first = engine_thread(&spec.id, "w0", &cfg, true, Some(failed.clone()), Some(reads_clock.clone()), usage.clone());
     let t = Arc::new(Tenant {
         id: spec.id.clone(),
         config: cfg.clone(),
@@ -894,6 +954,7 @@ fn start(spec: TenantSpec) -> Arc<Tenant> {
         last_sweep: Mutex::new(Instant::now()),
         pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         max_queue: cfg.limits.max_queue,
+        usage,
     });
     let (watch, root) = (cfg.watch, cfg.root.clone());
 
@@ -986,7 +1047,7 @@ pub struct Host {
 
 impl Host {
     pub fn new(options: HostOptions, resolver: Arc<dyn TenantResolver>) -> Host {
-        let app = Arc::new(App { resolver, running: Mutex::new(HashMap::new()), secure_cookies: options.secure_cookies, dev_login: options.dev_login, sign_in: options.sign_in, limiter: Mutex::new(HashMap::new()) });
+        let app = Arc::new(App { resolver, running: Mutex::new(HashMap::new()), secure_cookies: options.secure_cookies, dev_login: options.dev_login, sign_in: options.sign_in, limiter: Mutex::new(HashMap::new()), used: Mutex::new(HashMap::new()) });
         Host { app, web: options.web }
     }
 
@@ -1056,7 +1117,35 @@ impl Host {
         };
         t.halt();
         t.stop_engines().await;
+        let u = t.usage.take();
+        if !u.is_zero() {
+            let mut used = self.app.used.lock().unwrap();
+            let e = used.entry(t.id.clone()).or_default();
+            *e = e.plus(u);
+        }
         true
+    }
+
+    /// What each tenant used since the last call (running or stopped meanwhile); tenants that
+    /// used nothing are left out. A host calls it now and then and keeps the totals.
+    pub fn take_usage(&self) -> Vec<(String, Usage)> {
+        let mut all: HashMap<String, Usage> = std::mem::take(&mut *self.app.used.lock().unwrap());
+        let running: Vec<Arc<Tenant>> = self.app.running.lock().unwrap().values().cloned().collect();
+        for t in running {
+            let u = t.usage.take();
+            if !u.is_zero() {
+                let e = all.entry(t.id.clone()).or_default();
+                *e = e.plus(u);
+            }
+        }
+        all.into_iter().collect()
+    }
+
+    /// The number of users (`User` records) of the project of an address. Starts it if needed.
+    pub async fn user_count(&self, host: &str) -> Result<u64, String> {
+        let t = self.app.tenant(host).map_err(|_| format!("no project is served at `{host}`"))?;
+        let r = t.ask(|reply| Job::People { reply }).await.ok_or("the engine is not available")?;
+        r.body["total"].as_u64().ok_or_else(|| r.body["error"].as_str().unwrap_or("failed").to_string())
     }
 
     /// Runs a pass of the rules that read the clock of the tenant of an address now, starting

@@ -107,12 +107,14 @@ pub struct Limits {
     /// SQLite: the size the database file may grow to; past it a write fails and the
     /// database stays as it was (`None`: no limit). PostgreSQL: not enforced here.
     pub max_bytes: Option<u64>,
+    /// users (`User` records): creating one more fails (`None`: no limit)
+    pub max_users: Option<u64>,
 }
 
 impl Limits {
     /// No limits: the engine runs in the process of a command of one's own.
     pub fn none() -> Limits {
-        Limits { job: None, background: None, max_rows: None, max_list: None, max_queue: None, max_bytes: None }
+        Limits { job: None, background: None, max_rows: None, max_list: None, max_queue: None, max_bytes: None, max_users: None }
     }
 }
 
@@ -120,7 +122,7 @@ impl Default for Limits {
     /// For a server of one's own: two minutes per request, an hour for the long operations,
     /// no caps on rows and lists, at most 1000 requests waiting, no limit on the size.
     fn default() -> Self {
-        Limits { job: Some(std::time::Duration::from_secs(120)), background: Some(std::time::Duration::from_secs(3600)), max_rows: None, max_list: None, max_queue: Some(1000), max_bytes: None }
+        Limits { job: Some(std::time::Duration::from_secs(120)), background: Some(std::time::Duration::from_secs(3600)), max_rows: None, max_list: None, max_queue: Some(1000), max_bytes: None, max_users: None }
     }
 }
 
@@ -475,8 +477,10 @@ impl Engine {
         Ok(engine)
     }
 
-    pub fn run(mut self, rx: mpsc::Receiver<Job>) {
+    pub fn run(mut self, rx: mpsc::Receiver<Job>, usage: &crate::Meter) {
         use quadra_runtime::limits;
+        // opening (migrations, the cache filled) is the host's work, not a request's
+        limits::take_usage();
         for job in rx {
             if let Job::Stop { reply } = job {
                 self.close();
@@ -490,11 +494,20 @@ impl Engine {
                 _ => false,
             };
             let limit = if long { self.limits.background } else { self.limits.job };
-            let _limits = limits::begin(limits::Limits { deadline: limit.map(|d| std::time::Instant::now() + d), max_rows: self.limits.max_rows, max_list: self.limits.max_list });
+            let _limits = limits::begin(limits::Limits { deadline: limit.map(|d| std::time::Instant::now() + d), max_rows: self.limits.max_rows, max_list: self.limits.max_list, max_users: self.limits.max_users });
+            let request = matches!(job, Job::Call { .. });
+            // a request's or a sweep's work is the tenant's; the rest (sign-in, the stream of
+            // commits) is the host's bookkeeping
+            let counted = request || matches!(job, Job::Sweep { .. });
+            let started = std::time::Instant::now();
             // a bug met by one request: it fails, the engine goes on serving the others
             if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(job))) {
                 eprintln!("engine: a request failed with an internal error ({}): caches and connections are reset", panic_message(&*panic));
                 self.reset();
+            }
+            let used = limits::take_usage();
+            if counted {
+                usage.add(used, request, started.elapsed());
             }
         }
     }
@@ -648,26 +661,29 @@ impl Engine {
         if self.snapshot {
             conn.begin_read().map_err(e500)?;
         }
-        let latest = head(&mut conn).map_err(e500)?;
-        let base = base.unwrap_or(latest);
-        if base > latest {
-            return Err((400, format!("base {base} is ahead of the latest commit ({latest})")));
-        }
-        // the cache catching up with commits is bookkeeping, not a request reading too much
-        let renamed = quadra_runtime::limits::without_row_cap(|| self.cache.borrow_mut().sync(&mut conn, base)).map_err(e500)?;
-        if renamed || self.renames.is_none() {
-            self.renames = Some(load_renames(&mut conn).map_err(e500)?);
-            self.units = None;
-        }
-        // units, currencies and the company: kept while none of those records is written
-        let current = base == latest;
-        if let (true, Some((_, _, at))) = (current, &self.units) {
-            let changed =
-                conn.query("SELECT '1' FROM \"_quadra_records\" WHERE \"last_tx\" > ?bigint AND \"entity\" IN ('Uom', 'Currency', 'Company') LIMIT 1", &[quadra_store::conn::Sql::Int(*at as i64)]).map_err(e500)?;
-            if !changed.is_empty() {
+        // the caches catching up with commits: bookkeeping, neither limited nor counted
+        let (base, latest) = quadra_runtime::limits::uncounted(|| -> Result<(u64, u64), Fail> {
+            let latest = head(&mut conn).map_err(e500)?;
+            let base = base.unwrap_or(latest);
+            if base > latest {
+                return Err((400, format!("base {base} is ahead of the latest commit ({latest})")));
+            }
+            let renamed = quadra_runtime::limits::without_row_cap(|| self.cache.borrow_mut().sync(&mut conn, base)).map_err(e500)?;
+            if renamed || self.renames.is_none() {
+                self.renames = Some(load_renames(&mut conn).map_err(e500)?);
                 self.units = None;
             }
-        }
+            // units, currencies and the company: kept while none of those records is written
+            if let (true, Some((_, _, at))) = (base == latest, &self.units) {
+                let changed =
+                    conn.query("SELECT '1' FROM \"_quadra_records\" WHERE \"last_tx\" > ?bigint AND \"entity\" IN ('Uom', 'Currency', 'Company') LIMIT 1", &[quadra_store::conn::Sql::Int(*at as i64)]).map_err(e500)?;
+                if !changed.is_empty() {
+                    self.units = None;
+                }
+            }
+            Ok((base, latest))
+        })?;
+        let current = base == latest;
         let renames = self.renames.clone().unwrap_or_default();
         let src = DbSource::with_renames(conn, base, self.schema.clone(), Some(self.cache.clone()), renames).map_err(e500)?;
         let mut i = Interp::new(model);
@@ -1221,7 +1237,7 @@ mod limit_tests {
             drop(setup);
             let engine = Engine::new(&run_cfg).unwrap();
             ready_tx.send(()).unwrap();
-            engine.run(rx);
+            engine.run(rx, &crate::Meter::default());
         }).unwrap();
         ready.recv().unwrap();
         Running { jobs, dir }

@@ -221,6 +221,14 @@ impl Conn {
     }
 
     pub fn exec(&mut self, sql: &str, params: &[Sql]) -> Result<u64, String> {
+        let r = self.exec_counted(sql, params);
+        if let Ok(n) = &r {
+            limits::count_written(*n);
+        }
+        r
+    }
+
+    fn exec_counted(&mut self, sql: &str, params: &[Sql]) -> Result<u64, String> {
         STATEMENTS.fetch_add(1, Ordering::Relaxed);
         let _t = timed(sql);
         let sql = self.rewrite(sql);
@@ -242,6 +250,14 @@ impl Conn {
 
     /// Rows of text values (`CAST(col AS TEXT)` in the query).
     pub fn query(&mut self, sql: &str, params: &[Sql]) -> Result<Vec<Vec<Option<String>>>, String> {
+        let r = self.query_counted(sql, params);
+        if let Ok(rows) = &r {
+            limits::count_read(rows.len() as u64);
+        }
+        r
+    }
+
+    fn query_counted(&mut self, sql: &str, params: &[Sql]) -> Result<Vec<Vec<Option<String>>>, String> {
         STATEMENTS.fetch_add(1, Ordering::Relaxed);
         let _t = timed(sql);
         let sql = self.rewrite(sql);

@@ -83,7 +83,8 @@ fn http(port: u16, host: &str, method: &str, path: &str, body: Option<J>, sessio
 fn sign_in_by_email_code_on_two_tenants() {
     let base = std::env::temp_dir().join(format!("quadra-signin-{}", std::process::id()));
     let a = project(&base.join("a"));
-    let b = project(&base.join("b"));
+    let mut b = project(&base.join("b"));
+    b.limits.max_users = Some(3);
     let outbox = Arc::new(Outbox::default());
     let resolver = Map([("a.test".to_string(), TenantSpec { id: "ta".into(), config: a }), ("b.test".to_string(), TenantSpec { id: "tb".into(), config: b })].into_iter().collect());
     let host = Host::new(HostOptions { sign_in: Some(outbox.clone()), ..Default::default() }, Arc::new(resolver));
@@ -204,7 +205,31 @@ fn sign_in_by_email_code_on_two_tenants() {
     assert_eq!(rt.block_on(host.add_user("a.test", "dana@example.com", vec!["Boss".into()])).unwrap_err().0, 400);
     assert_eq!(rt.block_on(host.add_user("a.test", "not an address", vec![])).unwrap_err().0, 400);
     assert_eq!(rt.block_on(host.add_user("nowhere.test", "dana@example.com", vec![])).unwrap_err().0, 404);
-    // the other tenant has none of them
+    // the other tenant has none of them, and it is at its limit of users
     assert_eq!(rt.block_on(host.people("b.test")).unwrap()["total"], json!(3));
+    let (s, m) = rt.block_on(host.add_user("b.test", "dana@example.com", vec![])).unwrap_err();
+    assert_eq!(s, 422, "{m}");
+    assert!(m.contains("too many users"), "{m}");
+    assert_eq!(rt.block_on(host.user_count("b.test")).unwrap(), 3);
+
+    // usage: what each tenant's requests used, taken once; the same request counts the same
+    let q = json!({ "entity": "User", "fields": ["login"] });
+    // once to warm the caches: a request served from the cache reads fewer rows
+    http(port, "a.test", "POST", "/v1/query", Some(q.clone()), Some(&session));
+    host.take_usage();
+    http(port, "a.test", "POST", "/v1/query", Some(q.clone()), Some(&session));
+    let one: HashMap<String, quadra_server::Usage> = host.take_usage().into_iter().collect();
+    let a1 = one["ta"];
+    assert!(!one.contains_key("tb"), "b did nothing: {one:?}");
+    assert_eq!(a1.requests, 1, "{a1:?}");
+    assert!(a1.rows_read > 0, "{a1:?}");
+    assert!(host.take_usage().is_empty(), "taken once");
+    http(port, "a.test", "POST", "/v1/query", Some(q), Some(&session));
+    let a2 = host.take_usage().into_iter().find(|(t, _)| t == "ta").unwrap().1;
+    assert_eq!((a2.requests, a2.steps, a2.rows_read, a2.rows_written), (a1.requests, a1.steps, a1.rows_read, a1.rows_written));
+    // a stopped tenant's usage is kept for the next call
+    http(port, "a.test", "POST", "/v1/query", Some(json!({ "entity": "Note", "fields": ["text"] })), Some(&session));
+    assert!(rt.block_on(host.stop("ta")));
+    assert_eq!(host.take_usage().into_iter().find(|(t, _)| t == "ta").map(|(_, u)| u.requests), Some(1));
     std::fs::remove_dir_all(&base).ok();
 }
