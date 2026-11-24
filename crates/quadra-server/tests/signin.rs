@@ -210,7 +210,7 @@ fn sign_in_by_email_code_on_two_tenants() {
     let (s, m) = rt.block_on(host.add_user("b.test", "dana@example.com", vec![])).unwrap_err();
     assert_eq!(s, 422, "{m}");
     assert!(m.contains("too many users"), "{m}");
-    assert_eq!(rt.block_on(host.user_count("b.test")).unwrap(), 3);
+    assert_eq!(rt.block_on(host.user_count("b.test")).unwrap(), Some(3));
 
     // usage: what each tenant's requests used, taken once; the same request counts the same
     let q = json!({ "entity": "User", "fields": ["login"] });
@@ -230,6 +230,9 @@ fn sign_in_by_email_code_on_two_tenants() {
     // a stopped tenant's usage is kept for the next call
     http(port, "a.test", "POST", "/v1/query", Some(json!({ "entity": "Note", "fields": ["text"] })), Some(&session));
     assert!(rt.block_on(host.stop("ta")));
+    // counting users never starts a tenant
+    assert_eq!(rt.block_on(host.user_count("a.test")).unwrap(), None);
+    assert!(host.running().iter().all(|t| t.id != "ta"), "still stopped");
     assert_eq!(host.take_usage().into_iter().find(|(t, _)| t == "ta").map(|(_, u)| u.requests), Some(1));
     std::fs::remove_dir_all(&base).ok();
 }

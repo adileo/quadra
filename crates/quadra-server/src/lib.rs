@@ -1141,12 +1141,26 @@ impl Host {
         all.into_iter().collect()
     }
 
-    /// The number of users (`User` records) of the project of an address. Starts it if needed.
-    pub async fn user_count(&self, host: &str) -> Result<u64, String> {
-        let t = self.app.tenant(host).map_err(|_| format!("no project is served at `{host}`"))?;
-        let r = t.ask(|reply| Job::People { reply }).await.ok_or("the engine is not available")?;
-        r.body["total"].as_u64().ok_or_else(|| r.body["error"].as_str().unwrap_or("failed").to_string())
+    /// The number of users (`User` records) of the project of an address, if it is running:
+    /// it never starts a tenant (a host measuring its tenants must not wake one that is going
+    /// to sleep). `None`: not running.
+    pub async fn user_count(&self, host: &str) -> Result<Option<u64>, String> {
+        let host = host.split(':').next().unwrap_or("");
+        let Some(spec) = self.app.resolver.resolve(host) else {
+            return Ok(None);
+        };
+        let Some(t) = self.app.running.lock().unwrap().get(&spec.id).cloned() else {
+            return Ok(None);
+        };
+        if t.stopped() {
+            return Ok(None);
+        }
+        let Some(r) = t.ask(|reply| Job::People { reply }).await else {
+            return Ok(None);
+        };
+        r.body["total"].as_u64().map(Some).ok_or_else(|| r.body["error"].as_str().unwrap_or("failed").to_string())
     }
+
 
     /// Runs a pass of the rules that read the clock of the tenant of an address now, starting
     /// it if needed, and waits for it: the transaction written, if anything changed. A host
