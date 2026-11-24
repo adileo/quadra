@@ -1075,6 +1075,37 @@ impl Host {
         }
     }
 
+    /// The roles of the project of an address and its users (`{roles, users: [{id, login,
+    /// email, roles}], total}`), for the host's own console. Starts it if needed.
+    pub async fn people(&self, host: &str) -> Result<J, (u16, String)> {
+        let t = self.app.tenant(host).map_err(|_| (404, format!("no project is served at `{host}`")))?;
+        let r = t.ask(|reply| Job::People { reply }).await.ok_or((503, "the engine is not available".to_string()))?;
+        if r.status != 200 {
+            return Err((r.status, r.body["error"].as_str().unwrap_or("failed").to_string()));
+        }
+        Ok(r.body)
+    }
+
+    /// Adds a user to the project of an address, as the system, with these roles and the
+    /// address as login, and sends them an invitation (with the host's SignIn, if any). An
+    /// existing user of that address is invited again, unchanged. `{id, login, created, invited}`.
+    pub async fn add_user(&self, host: &str, email: &str, roles: Vec<String>) -> Result<J, (u16, String)> {
+        let t = self.app.tenant(host).map_err(|_| (404, format!("no project is served at `{host}`")))?;
+        let email = email.to_string();
+        let mut r = t.ask(|reply| Job::AddUser { email, roles, reply }).await.ok_or((503, "the engine is not available".to_string()))?;
+        if r.status != 200 {
+            return Err((r.status, r.body["error"].as_str().unwrap_or("failed").to_string()));
+        }
+        let mut invited = false;
+        if let (Some(send), Some(sign_in)) = (take_send(&mut r.body).filter(|s| !s.is_null()), self.app.sign_in.clone()) {
+            let mail = SignInMail::Invite { to: send["to"].as_str().unwrap_or("").into(), login: send["login"].as_str().unwrap_or("").into() };
+            sign_in.send(&t.id, host, mail).await.map_err(|e| (503, format!("the user is added, but the invitation could not be sent: {e}")))?;
+            invited = true;
+        }
+        r.body["invited"] = json!(invited);
+        Ok(r.body)
+    }
+
     /// The tenants running now.
     pub fn running(&self) -> Vec<TenantStatus> {
         let now = Instant::now();

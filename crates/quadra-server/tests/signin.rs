@@ -174,5 +174,37 @@ fn sign_in_by_email_code_on_two_tenants() {
     assert_eq!(s, 403);
     // every email named the tenant and the address it was asked at
     assert!(outbox.0.lock().unwrap().iter().all(|(t, h, _)| t == "ta" && h == "a.test"));
+
+    // the host (a console) lists the roles and the users, and adds a user who is invited
+    let people = rt.block_on(host.people("a.test")).unwrap();
+    assert_eq!(people["roles"], json!(["Admin", "Clerk"]), "{people}");
+    assert_eq!(people["total"], json!(3));
+    let bob_row = people["users"].as_array().unwrap().iter().find(|u| u["login"] == "bob").unwrap().clone();
+    assert_eq!((bob_row["email"].as_str(), &bob_row["roles"]), (Some("bob@example.com"), &json!(["Clerk"])));
+    let added = rt.block_on(host.add_user("a.test", " Carl@Example.com ", vec!["Clerk".into()])).unwrap();
+    assert_eq!((added["login"].as_str(), added["created"].as_bool(), added["invited"].as_bool()), (Some("carl@example.com"), Some(true), Some(true)), "{added}");
+    assert!(added.get("_send").is_none());
+    assert!(matches!(&outbox.0.lock().unwrap().last().unwrap().2, SignInMail::Invite { to, .. } if to == "carl@example.com"));
+    // carl signs in with a code and has his role: he reads notes, he cannot invite
+    let (_, r, _) = http(port, "a.test", "POST", "/v1/auth/code", Some(json!({ "login": "carl@example.com" })), None);
+    let id = r["login_id"].as_str().unwrap().to_string();
+    let (s, r, carl) = http(port, "a.test", "POST", "/v1/auth/code/verify", Some(json!({ "login_id": id, "code": last("carl@example.com") })), None);
+    assert_eq!(s, 200, "{r}");
+    let (s, _, _) = http(port, "a.test", "POST", "/v1/query", Some(json!({ "entity": "Note", "fields": ["text"] })), carl.as_deref());
+    assert_eq!(s, 200);
+    let (s, _, _) = http(port, "a.test", "POST", "/v1/auth/invite", Some(json!({ "user_id": bob_id })), carl.as_deref());
+    assert_eq!(s, 403);
+    // again: the same user, invited again; by the email field too
+    let again = rt.block_on(host.add_user("a.test", "carl@example.com", vec!["Admin".into()])).unwrap();
+    assert_eq!((again["created"].as_bool(), again["id"].clone()), (Some(false), added["id"].clone()));
+    let bob_again = rt.block_on(host.add_user("a.test", "bob@example.com", vec![])).unwrap();
+    assert_eq!((bob_again["login"].as_str(), bob_again["created"].as_bool()), (Some("bob"), Some(false)));
+    assert_eq!(rt.block_on(host.people("a.test")).unwrap()["total"], json!(4));
+    // what is refused
+    assert_eq!(rt.block_on(host.add_user("a.test", "dana@example.com", vec!["Boss".into()])).unwrap_err().0, 400);
+    assert_eq!(rt.block_on(host.add_user("a.test", "not an address", vec![])).unwrap_err().0, 400);
+    assert_eq!(rt.block_on(host.add_user("nowhere.test", "dana@example.com", vec![])).unwrap_err().0, 404);
+    // the other tenant has none of them
+    assert_eq!(rt.block_on(host.people("b.test")).unwrap()["total"], json!(3));
     std::fs::remove_dir_all(&base).ok();
 }

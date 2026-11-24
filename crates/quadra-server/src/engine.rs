@@ -272,6 +272,16 @@ pub enum Job {
         user: u64,
         reply: oneshot::Sender<Reply>,
     },
+    /// the host (a console): the roles of the project and its users
+    People {
+        reply: oneshot::Sender<Reply>,
+    },
+    /// the host adds a user (as the system: no one's permissions apply) and invites them
+    AddUser {
+        email: String,
+        roles: Vec<String>,
+        reply: oneshot::Sender<Reply>,
+    },
     Logout {
         secret: String,
     },
@@ -537,6 +547,12 @@ impl Engine {
                 Job::Invite { who, user, reply } => {
                     let _ = reply.send(self.invite(&who, user));
                 }
+                Job::People { reply } => {
+                    let _ = reply.send(self.people());
+                }
+                Job::AddUser { email, roles, reply } => {
+                    let _ = reply.send(self.add_user(&email, &roles));
+                }
                 Job::Logout { secret } => {
                     let _ = auth::revoke(&mut self.conn, &secret);
                 }
@@ -722,6 +738,82 @@ impl Engine {
             }
         }
         None
+    }
+
+    /// The roles a user can have here and the users (at most 1000), for the host.
+    fn people(&mut self) -> Reply {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let roles: Vec<&str> = model.roles.iter().map(|r| r.name.as_str()).collect();
+        let has_email = model.entity("User").is_some_and(|e| e.fields.iter().any(|f| f.name == "email"));
+        let mut i = match self.interp(model, None, None) {
+            Ok(i) => i,
+            Err((s, m)) => return error(s, m),
+        };
+        let ids = i.ids("User", None);
+        let total = ids.len();
+        let users: Vec<J> = ids
+            .into_iter()
+            .take(1000)
+            .map(|id| {
+                let login = i.store.read(id, "login", None).map(|v| v.to_string()).unwrap_or_default();
+                let email = if has_email { i.store.read(id, "email", None).filter(|v| !v.is_none()).map(|v| v.to_string()) } else { None };
+                let roles: Vec<String> = match i.store.read(id, "roles", None) {
+                    Some(V::Set(items)) => items.iter().map(|r| match r {
+                        V::Role(n) => n.to_string(),
+                        other => other.to_string(),
+                    }).collect(),
+                    _ => vec![],
+                };
+                json!({ "id": id, "login": login, "email": email, "roles": roles })
+            })
+            .collect();
+        reply(200, json!({ "roles": roles, "users": users, "total": total }))
+    }
+
+    /// The host adds a user with these roles, their login the address, and asks to invite them.
+    /// A user who has that login or email already is invited again, unchanged.
+    fn add_user(&mut self, email: &str, roles: &[String]) -> Reply {
+        let email = email.trim().to_lowercase();
+        let valid = email.len() <= 254 && !email.contains(char::is_whitespace) && email.split_once('@').is_some_and(|(a, d)| !a.is_empty() && d.contains('.') && !d.starts_with('.') && !d.ends_with('.'));
+        if !valid {
+            return error(400, "Not an email address.");
+        }
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        if let Some(r) = roles.iter().find(|r| !model.roles.iter().any(|m| &m.name == *r)) {
+            return error(400, format!("This project has no role `{r}`."));
+        }
+        if let Some((id, login, to)) = self.user_by(model, &email) {
+            let send = to.map(|to| json!({ "to": to, "invite": true, "login": login }));
+            return reply(200, json!({ "id": id, "login": login, "created": false, "_send": send }));
+        }
+        let mut i = match self.interp(model, None, None) {
+            Ok(i) => i,
+            Err((s, m)) => return error(s, m),
+        };
+        let conn = match Pooled::take(&self.pool, &self.url) {
+            Ok(c) => c,
+            Err(e) => return error(500, e),
+        };
+        let db = Database::with(conn, self.schema.clone());
+        i.materialize = materialized_formulas(&db.schema);
+        i.sink = Some(Box::new(Sink { db, model }));
+        i.system += 1;
+        let set: Vec<V> = roles.iter().map(|r| V::Role(Rc::from(r.as_str()))).collect();
+        let created = RefCell::new(0u64);
+        let r = i.with_cause(format!("added by the host: user {email}"), |i| {
+            i.transaction(|i| {
+                if let V::Ref { id, .. } = i.create("User", vec![("login".to_string(), V::Text(Rc::from(email.as_str()))), ("roles".to_string(), V::Set(Rc::new(set)))])? {
+                    *created.borrow_mut() = id;
+                }
+                Ok(())
+            })
+        });
+        match r {
+            Ok(()) => reply(200, json!({ "id": created.into_inner(), "login": email, "created": true, "_send": { "to": email, "invite": true, "login": email } })),
+            Err(e) => error(422, describe(e)),
+        }
     }
 
     /// The first step of the sign-in by email. The answer does not say whether the user exists:
