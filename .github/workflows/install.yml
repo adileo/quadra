@@ -1,0 +1,63 @@
+name: install
+
+# The installers as people run them, on clean machines without Rust: after every release, by
+# hand, and every week (a change of the runners or of the download path shows up here).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: curl -fsSL https://quadra.run/install.sh | sh
+        run: |
+          test -z "$(command -v cargo)" || echo "(cargo is on this runner; the installer does not use it)"
+          curl -fsSL https://quadra.run/install.sh | SHELL=/bin/bash sh
+      - name: a new terminal finds quadra
+        shell: bash
+        run: |
+          # a login shell reads the line the installer added
+          out=$(bash -lic 'quadra --version' 2>/dev/null)
+          echo "$out"
+          case "$out" in "quadra "*) ;; *) echo "quadra is not on the PATH of a new shell"; exit 1 ;; esac
+      - name: it works
+        shell: bash
+        run: |
+          export PATH="$HOME/.quadra/bin:$PATH"
+          mkdir app && cd app
+          quadra init --name demo --yes --no-git
+          quadra check
+          quadra test
+          quadra upgrade
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: irm https://quadra.run/install.ps1 | iex
+        shell: pwsh
+        run: irm https://quadra.run/install.ps1 | iex
+      - name: a new terminal finds quadra
+        shell: pwsh
+        run: |
+          # a new process reads the user PATH the installer set
+          $path = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $out = powershell -NoProfile -Command "`$env:Path = '$path;' + `$env:Path; quadra --version"
+          Write-Host $out
+          if ($out -notlike 'quadra *') { throw 'quadra is not on the PATH of a new terminal' }
+      - name: it works
+        shell: pwsh
+        run: |
+          $env:Path = "$env:USERPROFILE\.quadra\bin;$env:Path"
+          mkdir app; cd app
+          quadra init --name demo --yes --no-git
+          quadra check
+          quadra test
+          quadra upgrade
