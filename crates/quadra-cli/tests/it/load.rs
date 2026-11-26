@@ -6,7 +6,7 @@
 //! Not run by `cargo test` (it needs a loaded world and takes minutes):
 //!
 //!   quadra bench run examples/stress --url sqlite:/tmp/medium.db --scale medium --only load
-//!   QUADRA_LOAD_URL=sqlite:/tmp/medium.db cargo test --release -p quadra-cli --test load -- --ignored --nocapture
+//!   QUADRA_LOAD_URL=sqlite:/tmp/medium.db cargo test --release -p quadra-cli --test it load -- --ignored --nocapture
 //!
 //! QUADRA_LOAD_USERS (300), QUADRA_LOAD_SECONDS (30), QUADRA_LOAD_THINK_MS (2000, the mean
 //! pause), QUADRA_LOAD_READERS (`0,2,4`), QUADRA_LOAD_WRITERS (1; more only on PostgreSQL).

@@ -116,7 +116,7 @@ fn confirmed_commits_survive_being_killed_at_random() {
     let started = Instant::now();
     for run in 0..crashes {
         let mut child = Command::new(&exe)
-            .args(["crash_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .args(["crash::crash_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
             .env("QUADRA_CRASH_ID", &id)
             .env("QUADRA_CRASH_RUN", run.to_string())
             .stdout(std::process::Stdio::null())

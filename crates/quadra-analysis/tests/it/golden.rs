@@ -1,5 +1,5 @@
 //! `examples/extended/tests/trace.expected` is the golden output of the analyses.
-//! Regenerate with: UPDATE_GOLDEN=1 cargo test -p quadra-analysis --test golden
+//! Regenerate with: UPDATE_GOLDEN=1 cargo test -p quadra-analysis --test it golden
 
 use quadra_sema::{Project, Severity};
 use std::path::Path;
@@ -16,7 +16,7 @@ fn trace_output_matches_golden_file() {
 
     let mut out = String::from(
         "# Golden output of the analyses on this example (crates/quadra-analysis/tests/golden.rs).\n\
-         # Regenerate with: UPDATE_GOLDEN=1 cargo test -p quadra-analysis --test golden\n",
+         # Regenerate with: UPDATE_GOLDEN=1 cargo test -p quadra-analysis --test it golden\n",
     );
     for target in ["Invoice.due", "SalesOrder.state", "Product.on_hand", "Product.avg_cost"] {
         out.push_str(&format!("\n$ quadra trace {target}\n\n"));

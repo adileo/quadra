@@ -1,5 +1,5 @@
 # Golden output of the analyses on this example (crates/quadra-analysis/tests/golden.rs).
-# Regenerate with: UPDATE_GOLDEN=1 cargo test -p quadra-analysis --test golden
+# Regenerate with: UPDATE_GOLDEN=1 cargo test -p quadra-analysis --test it golden
 
 $ quadra trace Invoice.due
 
