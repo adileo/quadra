@@ -1473,7 +1473,7 @@ impl<'m> Run<'m> {
         let mut payload = Vec::new();
         let r = self.with_db(|db| {
             db.write_scripts(&commit, &mut payload, &|t| t)?;
-            db.write_outbox(&commit, tx)?;
+            db.write_outbox(&commit, tx, None)?;
             Ok(())
         });
         let next_id = store.next_id;

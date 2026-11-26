@@ -38,7 +38,22 @@ pub(crate) struct Parser<'s> {
     last_bumped: SyntaxKind,
     /// Inside a `when:` arm condition, `name =>` ends the condition instead of starting a lambda.
     pub(crate) no_bare_lambda: bool,
+    /// For each node being built, the height of the tallest child completed so far: what a
+    /// node completed now measures (`CompletedMarker::height`).
+    heights: Vec<u32>,
+    /// Expressions, types, blocks and patterns being parsed inside one another.
+    nest: u32,
+    /// The current line was already reported as too deeply nested.
+    deep: bool,
 }
+
+/// How many expressions, types, blocks and patterns may be parsed inside one another. Every
+/// later pass (names, types, lowering, the interpreter) walks the tree recursively, so its depth
+/// must stay well within a thread's stack: past this the line is an error instead.
+pub(crate) const MAX_NEST: u32 = 64;
+/// How tall a tree may grow by chaining (`a + b + c …`, `x.f.g …`, `T???`), which builds nested
+/// nodes without recursion in the parser.
+pub(crate) const MAX_HEIGHT: u32 = 256;
 
 impl<'s> Parser<'s> {
     fn new(src: &'s str, tokens: Vec<(SyntaxKind, TextRange)>) -> Parser<'s> {
@@ -51,7 +66,52 @@ impl<'s> Parser<'s> {
             fuel: std::cell::Cell::new(256),
             last_bumped: NEWLINE,
             no_bare_lambda: false,
+            heights: Vec::new(),
+            nest: 0,
+            deep: false,
         }
+    }
+
+    // ---- depth ----------------------------------------------------------------------
+
+    /// One level deeper (an expression, a type, a block, a pattern inside another): false, with
+    /// the rest of the line skipped as an error, when that is too deep.
+    pub(crate) fn enter(&mut self) -> bool {
+        if self.nest >= MAX_NEST {
+            self.too_deep();
+            return false;
+        }
+        self.nest += 1;
+        true
+    }
+
+    pub(crate) fn leave(&mut self) {
+        self.nest -= 1;
+    }
+
+    /// Nested too deeply here: one error for the line, and what is nested here skipped as a
+    /// whole (up to the bracket, comma or line end that belongs to the enclosing construct),
+    /// so that the constructs around it end normally.
+    pub(crate) fn too_deep(&mut self) {
+        if !self.deep {
+            self.error("nested too deeply: split it into smaller expressions or functions");
+            self.deep = true;
+        }
+        let m = self.start();
+        let mut open = 0usize;
+        loop {
+            match self.current() {
+                NEWLINE | INDENT | DEDENT => break,
+                _ if self.at_eof() => break,
+                L_PAREN | L_BRACK | L_BRACE => open += 1,
+                R_PAREN | R_BRACK | R_BRACE if open == 0 => break,
+                R_PAREN | R_BRACK | R_BRACE => open -= 1,
+                COMMA if open == 0 => break,
+                _ => {}
+            }
+            self.bump();
+        }
+        m.complete(self, ERROR);
     }
 
     fn finish(self) -> (Vec<Event>, Vec<(usize, String)>) {
@@ -117,6 +177,9 @@ impl<'s> Parser<'s> {
         }
         self.fuel.set(256);
         self.last_bumped = self.tokens[self.pos].0;
+        if self.last_bumped == NEWLINE {
+            self.deep = false;
+        }
         self.pos += 1;
         self.events.push(Event::Token { kind });
     }
@@ -159,7 +222,15 @@ impl<'s> Parser<'s> {
     pub(crate) fn start(&mut self) -> Marker {
         let pos = self.events.len() as u32;
         self.events.push(Event::Tombstone);
+        self.heights.push(0);
         Marker { pos, completed: false }
+    }
+
+    /// A node of `height` completed: the node being built around it is at least one taller.
+    fn completed(&mut self, height: u32) {
+        if let Some(top) = self.heights.last_mut() {
+            *top = (*top).max(height);
+        }
     }
 }
 
@@ -173,7 +244,9 @@ impl Marker {
         self.completed = true;
         p.events[self.pos as usize] = Event::Start { kind, forward_parent: None };
         p.events.push(Event::Finish);
-        CompletedMarker { pos: self.pos }
+        let height = p.heights.pop().unwrap_or(0) + 1;
+        p.completed(height);
+        CompletedMarker { pos: self.pos, height }
     }
 
     pub(crate) fn abandon(mut self, p: &mut Parser) {
@@ -181,6 +254,9 @@ impl Marker {
         if self.pos as usize == p.events.len() - 1 {
             p.events.pop();
         }
+        // what it held belongs to the node around it
+        let held = p.heights.pop().unwrap_or(0);
+        p.completed(held);
     }
 }
 
@@ -195,6 +271,8 @@ impl Drop for Marker {
 #[derive(Clone, Copy)]
 pub(crate) struct CompletedMarker {
     pos: u32,
+    /// Nodes from this one down to its deepest leaf.
+    height: u32,
 }
 
 impl CompletedMarker {
@@ -204,7 +282,15 @@ impl CompletedMarker {
         if let Event::Start { forward_parent, .. } = &mut p.events[self.pos as usize] {
             *forward_parent = Some(m.pos - self.pos);
         }
+        if let Some(top) = p.heights.last_mut() {
+            *top = self.height;
+        }
         m
+    }
+
+    /// Too tall to wrap in another node: chaining more onto it is an error.
+    pub(crate) fn too_tall(self) -> bool {
+        self.height >= MAX_HEIGHT
     }
 }
 

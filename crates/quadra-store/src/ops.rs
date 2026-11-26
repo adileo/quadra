@@ -413,6 +413,11 @@ pub fn provisional(url: &str, model: &Model, report: &Report, time: NaiveDateTim
 /// data changed, so time-driven ones need this periodic pass. Returns the transaction
 /// written, if anything changed.
 pub fn sweep(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<Option<u64>, String> {
+    sweep_with(url, model, report, time, None)
+}
+
+/// `sweep`, committed through the project's sequencer when it has one running.
+pub fn sweep_with(url: &str, model: &Model, report: &Report, time: NaiveDateTime, sequencer: Option<&crate::Sequencer>) -> Result<Option<u64>, String> {
     let mut db = Database::open(url, model, report)?;
     // when the previous sweep ran: a `becomes` condition that reads the clock is compared with
     // what it was then
@@ -424,7 +429,10 @@ pub fn sweep(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> 
     interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
     interp.load_units();
     interp.materialize = materialized_formulas(&db.schema);
-    interp.sink = Some(Box::new(Sink { db, model }));
+    interp.sink = Some(match sequencer {
+        Some(s) => Box::new(crate::SequencedSink { db, model, sequencer: s.clone(), tickets: None }),
+        None => Box::new(Sink { db, model }),
+    });
     interp.sweep = true;
     interp.last_sweep = last;
     interp.system += 1;

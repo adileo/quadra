@@ -5,6 +5,9 @@ use super::name;
 use crate::syntax_kind::SyntaxKind::*;
 
 pub(crate) fn type_(p: &mut Parser) {
+    if !p.enter() {
+        return;
+    }
     let first = postfix_type(p);
     if p.at(PIPE) {
         let m = first.precede(p);
@@ -13,11 +16,16 @@ pub(crate) fn type_(p: &mut Parser) {
         }
         m.complete(p, TYPE_UNION);
     }
+    p.leave();
 }
 
 fn postfix_type(p: &mut Parser) -> super::super::CompletedMarker {
     let mut t = primary_type(p);
     while p.at(QUESTION) {
+        if t.too_tall() {
+            p.too_deep();
+            break;
+        }
         let m = t.precede(p);
         p.bump();
         t = m.complete(p, TYPE_OPTIONAL);

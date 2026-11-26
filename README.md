@@ -63,7 +63,7 @@ quadra trace Invoice.due examples/extended
 | `quadra db sweep [path]` | re-evaluates the rules that read the clock (run periodically; `serve` does it hourly) |
 | `quadra db fixture <name> [path]` | loads a test fixture into a database (demo data) |
 | `quadra change list \| preview <name> \| apply <name> --approved-by <login> \| revert <name> --approved-by <login>` | data changes with reason, requester and approval; reverting writes a new transaction |
-| `quadra serve [path] [--port 8080] [--web dir] [--dev-login] [--editors login,…]` | the HTTP API ([reference](https://quadra.run/reference/http-api)) and the studio (or the one in `--web`); `--editors` enables the code editor (the project must be a git repository) |
+| `quadra serve [path] [--port 8080] [--web dir] [--dev-login] [--editors login,…] [--log-dir dir]` | the HTTP API ([reference](https://quadra.run/reference/http-api)) and the studio (or the one in `--web`); `--editors` enables the code editor (the project must be a git repository); `--log-dir` keeps every committed batch as a file in that folder (another disk) before the commit is confirmed |
 | `quadra token create <login> [--read-only] [--days 90] \| revoke <name>` | API tokens for programs |
 | `quadra cloud login \| deploy \| deploys \| rollback \| link \| projects \| token` | Quadra Cloud |
 | `quadra upgrade` | the latest official binary in place of this one |

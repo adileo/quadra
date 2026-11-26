@@ -66,9 +66,9 @@ pub struct Engines {
     /// engines that only read: grids, records, searches, reports, the formulas of apps. They
     /// see every commit made before the request reached them.
     pub readers: usize,
-    /// engines that write. On SQLite always one (the file takes one writer at a time); on
-    /// PostgreSQL several prepare their transactions at once, and only the final write
-    /// waits for the others.
+    /// engines that prepare writes. The tenant's sequencer orders and writes the commits, so
+    /// several may prepare at once on SQLite too; one is usually best (several bring conflicts
+    /// on shared totals rather than speed).
     pub writers: usize,
 }
 
@@ -131,6 +131,18 @@ pub struct Reply {
     pub body: J,
     /// a new session secret to set as cookie
     pub session: Option<String>,
+}
+
+/// The answer to a request whose commit failed after it was handed to the sequencer.
+fn committed_late(e: quadra_runtime::CommitError) -> Reply {
+    match e {
+        quadra_runtime::CommitError::Conflict(c) => {
+            let list: Vec<J> = c.iter().map(|x| json!({ "tx": x.tx, "at": x.at, "user": x.user, "cause": x.cause, "what": x.what })).collect();
+            reply(409, json!({ "error": "changed by others while it was being saved: try again", "conflicts": list }))
+        }
+        quadra_runtime::CommitError::Failed(m) if m.starts_with("too large:") => error(422, m.lines().next().unwrap_or(&m).to_string()),
+        quadra_runtime::CommitError::Failed(m) => error(500, format!("database: {m}")),
+    }
 }
 
 fn reply(status: u16, body: J) -> Reply {
@@ -229,6 +241,13 @@ impl Job {
             Job::Call { req, .. } => req.reads(),
             _ => false,
         }
+    }
+}
+
+impl Job {
+    /// A write of the project's data: any engine may run it, the sequencer orders the commits.
+    pub(crate) fn writes_data(&self) -> bool {
+        matches!(self, Job::Call { req: Req::Tx { .. } | Req::Views { .. }, .. })
     }
 }
 
@@ -371,6 +390,15 @@ pub struct Engine {
     cache_mb: usize,
     /// the request being served only reads: its interpreters read one moment of the database
     snapshot: bool,
+    /// the tenant's sequencer: commits go through it (none: written directly, as the
+    /// command line does)
+    sequencer: Option<quadra_store::Sequencer>,
+    /// the analysis of each model in use (the project's, an app's), shared by the requests: kept
+    /// with the model it is of, so that it never outlives it
+    statics: Vec<(Rc<Checked>, Rc<quadra_runtime::Statics>)>,
+    /// commits of the request being served handed to the sequencer without waiting: its client
+    /// is answered once they are durable, while the engine serves the next request
+    tickets: Rc<RefCell<Vec<std::sync::Arc<quadra_store::sequencer::Ticket>>>>,
 }
 
 type Fail = (u16, String);
@@ -466,6 +494,9 @@ impl Engine {
             limits: cfg.limits,
             cache_mb: cfg.cache_mb,
             snapshot: false,
+            sequencer: None,
+            statics: Vec::new(),
+            tickets: Rc::new(RefCell::new(Vec::new())),
         };
         if first {
             // the apps and views of the interface files, as the files say
@@ -475,6 +506,50 @@ impl Engine {
         }
         engine.seen_interfaces = Some(interface_texts(&project));
         Ok(engine)
+    }
+
+    /// The shared analysis of `model` (one of the models this engine holds).
+    fn statics_of(&mut self, model: &quadra_ir::Model) -> Rc<quadra_runtime::Statics> {
+        let is = |c: &Rc<Checked>| c.model.as_ref().is_some_and(|m| std::ptr::eq(m, model));
+        if let Some((_, s)) = self.statics.iter().find(|(c, _)| is(c)) {
+            return s.clone();
+        }
+        let owner = std::iter::once(&self.checked).chain(self.overlays.values()).find(|c| is(c)).cloned();
+        let s = Rc::new(quadra_runtime::Statics::default());
+        if let Some(c) = owner {
+            if self.statics.len() >= 8 {
+                self.statics.remove(0);
+            }
+            self.statics.push((c, s.clone()));
+        }
+        s
+    }
+
+    pub fn set_sequencer(&mut self, s: Option<quadra_store::Sequencer>) {
+        self.sequencer = s;
+    }
+
+    /// Where an interpreter's commits go: the tenant's sequencer, or the database directly.
+    pub(crate) fn sink<'m>(&self, db: Database, model: &'m quadra_ir::Model) -> Box<dyn quadra_runtime::CommitSink + 'm> {
+        match &self.sequencer {
+            Some(s) => Box::new(quadra_store::SequencedSink { db, model, sequencer: s.clone(), tickets: None }),
+            None => Box::new(Sink { db, model }),
+        }
+    }
+
+    /// `sink`, without waiting for durability: the request's answer waits instead (`tickets`).
+    pub(crate) fn sink_then<'m>(&self, db: Database, model: &'m quadra_ir::Model) -> Box<dyn quadra_runtime::CommitSink + 'm> {
+        match &self.sequencer {
+            Some(s) => Box::new(quadra_store::SequencedSink { db, model, sequencer: s.clone(), tickets: Some(self.tickets.clone()) }),
+            None => Box::new(Sink { db, model }),
+        }
+    }
+
+    /// The database was written past the sequencer (a deploy, a migration): it reads it again.
+    pub(crate) fn sequencer_reload(&self) {
+        if let Some(s) = &self.sequencer {
+            s.reload();
+        }
     }
 
     pub fn run(mut self, rx: mpsc::Receiver<Job>, usage: &crate::Meter) {
@@ -572,7 +647,19 @@ impl Engine {
                 Job::Call { who, req, reply } => {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(&who, req))) {
                         Ok(r) => {
-                            let _ = reply.send(r);
+                            let tickets = std::mem::take(&mut *self.tickets.borrow_mut());
+                            match tickets.last() {
+                                // answered once the commit is durable; the engine goes on
+                                Some(t) if r.status < 300 => t.then(move |res| {
+                                    let _ = reply.send(match res {
+                                        Ok(_) => r,
+                                        Err(e) => committed_late(e),
+                                    });
+                                }),
+                                _ => {
+                                    let _ = reply.send(r);
+                                }
+                            }
                         }
                         Err(panic) => {
                             let _ = reply.send(error(500, "internal error: the request could not be completed"));
@@ -600,7 +687,7 @@ impl Engine {
                 Job::Stop { .. } => unreachable!("handled by `run`"),
                 Job::Sweep { reply } => {
                     let checked = self.checked.clone();
-                    let r = quadra_store::ops::sweep(&self.url, checked.model.as_ref().unwrap(), &checked.report, now());
+                    let r = quadra_store::ops::sweep_with(&self.url, checked.model.as_ref().unwrap(), &checked.report, now(), self.sequencer.as_ref());
                     if let Err(e) = &r {
                         eprintln!("sweep: {e}");
                     }
@@ -617,6 +704,20 @@ impl Engine {
     fn call(&mut self, who: &Principal, req: Req) -> Reply {
         let who = who.clone();
         self.snapshot = req.reads();
+        // saved views, apps, folders and teams are written past the sequencer: the log gets them
+        // with a snapshot shortly after (the batches carry only the data)
+        let config = match &req {
+            Req::Views { method, path, .. } if method != "GET" => {
+                let first = path.trim_matches('/').split('/').nth(1).unwrap_or("");
+                matches!(first, "views" | "teams" | "folders" | "apps") && !path.ends_with("/submit")
+            }
+            _ => false,
+        };
+        if config {
+            if let Some(s) = &self.sequencer {
+                s.snapshot_soon(std::time::Duration::from_secs(60));
+            }
+        }
         let r = match req {
             Req::Me => self.me(&who),
             Req::Model => self.model(&who),
@@ -685,8 +786,11 @@ impl Engine {
         })?;
         let current = base == latest;
         let renames = self.renames.clone().unwrap_or_default();
-        let src = DbSource::with_renames(conn, base, self.schema.clone(), Some(self.cache.clone()), renames).map_err(e500)?;
+        let mut src = DbSource::with_renames(conn, base, self.schema.clone(), Some(self.cache.clone()), renames).map_err(e500)?;
+        // ids come from the sequencer: no write of the engine's own
+        src.sequencer = self.sequencer.clone();
         let mut i = Interp::new(model);
+        i.statics = self.statics_of(model);
         i.set_clock(now());
         i.store = Store::over(Rc::new(RefCell::new(src)));
         match (&self.units, current) {
@@ -814,7 +918,7 @@ impl Engine {
         };
         let db = Database::with(conn, self.schema.clone());
         i.materialize = materialized_formulas(&db.schema);
-        i.sink = Some(Box::new(Sink { db, model }));
+        i.sink = Some(self.sink(db, model));
         i.system += 1;
         let set: Vec<V> = roles.iter().map(|r| V::Role(Rc::from(r.as_str()))).collect();
         let created = RefCell::new(0u64);
@@ -1090,7 +1194,7 @@ impl Engine {
             let conn = Pooled::take(&self.pool, &self.url).map_err(|e| (500, e))?;
             let db = Database::with(conn, self.schema.clone());
             i.materialize = materialized_formulas(&db.schema);
-            i.sink = Some(Box::new(Sink { db, model }));
+            i.sink = Some(self.sink_then(db, model));
             let created: RefCell<serde_json::Map<String, J>> = RefCell::new(serde_json::Map::new());
             let user = who.user_id;
             let r = i.with_cause(format!("API request {key}"), |i| {
@@ -1124,6 +1228,12 @@ impl Engine {
     fn changed_since(&mut self, model: &Model, records: &[u64], base: u64) -> Result<Vec<J>, Fail> {
         if records.is_empty() {
             return Ok(Vec::new());
+        }
+        // the sequencer remembers the recent writes: nothing written since is the usual answer
+        if let Some(s) = &self.sequencer {
+            if s.written_since(base, records.to_vec()) == Some(false) {
+                return Ok(Vec::new());
+            }
         }
         let ids = records.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
         let rows = self
@@ -1163,13 +1273,18 @@ impl Engine {
     /// Commits after `since`: (latest transaction, events).
     fn commits(&mut self, since: u64) -> Result<(u64, Vec<J>), String> {
         use quadra_store::conn::Sql;
-        let latest = head(&mut self.conn)?;
+        let mut latest = head(&mut self.conn)?;
+        // only what is confirmed: a commit still on its way to durability is not announced
+        if let Some(s) = &self.sequencer {
+            latest = latest.min(s.durable()?);
+        }
         if latest <= since {
             return Ok((latest, Vec::new()));
         }
-        let rows = self
-            .conn
-            .query("SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\" FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint ORDER BY \"_quadra_commits\".\"tx\" LIMIT 100", &[Sql::Int(since as i64)])?;
+        let rows = self.conn.query(
+            "SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\" FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint AND \"tx\" <= ?bigint ORDER BY \"_quadra_commits\".\"tx\" LIMIT 100",
+            &[Sql::Int(since as i64), Sql::Int(latest as i64)],
+        )?;
         let mut out = Vec::new();
         let mut last = since;
         for r in rows {

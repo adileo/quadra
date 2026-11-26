@@ -587,6 +587,8 @@ pub struct DbSource {
     /// queries over whole entities may be answered in SQL (off: the interpreter scans, the
     /// reference the tests compare SQL with)
     pub sql: bool,
+    /// the project's sequencer, when it runs: it gives the ids (no write here)
+    pub sequencer: Option<crate::Sequencer>,
     /// records are read from their projection rows when they can be, with the values of their
     /// incremental formulas (off: from the history, every formula computed: the reference)
     pub rows: bool,
@@ -635,6 +637,7 @@ impl DbSource {
             queries: 0,
             in_tx: false,
             sql: true,
+            sequencer: None,
             rows: std::env::var("QUADRA_NO_ROWS").is_err(),
             fields_from_rows: true,
             patch: HashMap::new(),
@@ -890,7 +893,11 @@ impl Source for DbSource {
     }
 
     fn reserve_ids(&mut self, n: u64) -> Id {
-        let r = if self.in_tx { reserve_in(&mut self.conn, n) } else { reserve_ids(&mut self.conn, n) };
+        let r = match &self.sequencer {
+            Some(s) if !self.in_tx => s.ids(n),
+            _ if self.in_tx => reserve_in(&mut self.conn, n),
+            _ => reserve_ids(&mut self.conn, n),
+        };
         self.note(r).unwrap_or(0)
     }
 

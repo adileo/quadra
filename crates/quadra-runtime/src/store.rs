@@ -200,11 +200,24 @@ pub struct ReadSet {
     pub formulas: BTreeSet<Id>,
     /// entities whose materialized formula columns a query read in SQL
     pub formula_scans: BTreeSet<String>,
+    /// the same reads as `formulas`, by field: the sequencer tells a change of another
+    /// formula of the record from one of these (the database's check knows only records)
+    pub formula_fields: BTreeSet<(Id, String)>,
+    /// (entity, field, value as `value_keys` says it) looked up by value: only a write of that
+    /// value (to it, or from it) changes the answer. The database's check takes them by
+    /// (entity, field), as `finds`.
+    pub find_values: BTreeSet<(String, String, String)>,
 }
 
 impl ReadSet {
+    /// The stored value of formula `field` of record `id` was read.
+    pub fn formula(&mut self, id: Id, field: &str) {
+        self.formulas.insert(id);
+        self.formula_fields.insert((id, field.to_string()));
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty() && self.scans.is_empty() && self.finds.is_empty() && self.ledgers.is_empty() && self.counters.is_empty() && self.formulas.is_empty() && self.formula_scans.is_empty()
+        self.records.is_empty() && self.find_values.is_empty() && self.scans.is_empty() && self.finds.is_empty() && self.ledgers.is_empty() && self.counters.is_empty() && self.formulas.is_empty() && self.formula_scans.is_empty()
     }
 }
 
@@ -254,6 +267,13 @@ pub struct Store {
     pub thawed: BTreeSet<Id>,
     /// (user, key, request hash, response): an API request committed with this transaction
     pub idempotency: Option<(Id, String, String, String)>,
+    /// Rollups this transaction changed by delta while committing: (record, field) → (value
+    /// stored before, value now). Written as an addition to whatever value the database holds
+    /// then, so they commute with other transactions' (no read of the stored value).
+    pub deltas: BTreeMap<(Id, String), (V, V)>,
+    /// Rules on such rollups (`total <= limit`): held again on the value the database holds
+    /// when the commit is written.
+    pub guards: Vec<Guard>,
 
     // ---- loading on demand ----
     /// What a record loaded from the source was when loaded (frozen at, warnings, cause): a
@@ -309,6 +329,38 @@ pub struct Store {
     pub formula_overrides: Rc<HashMap<Id, Vec<(String, V)>>>,
 }
 
+/// A rule on a rollup changed by delta: `field OP bound` must hold on the record's latest value.
+#[derive(Clone, Debug)]
+pub struct Guard {
+    pub id: Id,
+    pub field: String,
+    pub op: quadra_ir::BinOp,
+    pub bound: V,
+}
+
+/// The change from `old` to `new` of a value that can be added to (an integer, a decimal, an
+/// amount of money in the same currency, a quantity in the same unit).
+pub fn delta_amount(old: &V, new: &V) -> Option<rust_decimal::Decimal> {
+    match (old, new) {
+        (V::Int(a), V::Int(b)) => Some(rust_decimal::Decimal::from(*b) - rust_decimal::Decimal::from(*a)),
+        (V::Dec(a), V::Dec(b)) => Some(*b - *a),
+        (V::Money { amt: a, cur: x }, V::Money { amt: b, cur: y }) if x == y => Some(*b - *a),
+        (V::Qty { v: a, unit: x }, V::Qty { v: b, unit: y }) if x == y => Some(*b - *a),
+        _ => None,
+    }
+}
+
+/// The amount of a value `delta_amount` adds to, and what it is in (the currency, the unit).
+pub fn amount_of(v: &V) -> Option<(rust_decimal::Decimal, String)> {
+    match v {
+        V::Int(i) => Some(((*i).into(), String::new())),
+        V::Dec(d) => Some((*d, String::new())),
+        V::Money { amt, cur } => Some((*amt, cur.to_string())),
+        V::Qty { v, unit } => Some((*v, unit.to_string())),
+        _ => None,
+    }
+}
+
 /// Equality for lookups: references compare by id, a set matches when it contains the value.
 pub fn same(stored: Option<&V>, value: &V) -> bool {
     match (stored, value) {
@@ -325,6 +377,16 @@ pub fn ref_ids(v: &V) -> Vec<Id> {
         V::Ref { id, .. } => vec![*id],
         V::Set(items) | V::List(items) => items.iter().filter_map(|i| i.as_ref_id()).collect(),
         _ => Vec::new(),
+    }
+}
+
+/// The keys of a value as lookups by value see it: a reference by its id, a set or a list by
+/// each of its items, nothing for no value.
+pub fn value_keys(v: &V) -> Vec<String> {
+    match v {
+        V::None => Vec::new(),
+        V::Set(items) | V::List(items) => items.iter().map(json_key).collect(),
+        other => vec![json_key(other)],
     }
 }
 
@@ -799,7 +861,9 @@ impl Store {
             None => src.borrow_mut().find(ent, field, value)?,
         };
         if !self.untracked {
-            self.reads.finds.insert((ent.to_string(), field.to_string()));
+            for k in value_keys(value) {
+                self.reads.find_values.insert((ent.to_string(), field.to_string(), k));
+            }
         }
         let mut out = Vec::with_capacity(candidates.len());
         self.prefetch_as(ent, &candidates);

@@ -12,14 +12,18 @@ pub mod db;
 pub mod deploy;
 pub mod hints;
 pub mod schema;
+pub mod segments;
+pub mod sequencer;
 pub mod source;
 pub mod sqlq;
 pub mod verify;
 pub mod views;
+pub mod writer;
 
 pub use conn::{Conn, Dialect};
 pub mod ops;
 pub use db::{materialized_formulas, Database, OutboxEvent, Sink, Status};
+pub use sequencer::{Sequencer, SequencedSink};
 pub use source::{Cache, DbSource};
 
 mod testing;

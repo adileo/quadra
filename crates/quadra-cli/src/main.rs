@@ -415,6 +415,7 @@ fn db(args: &[String]) -> ExitCode {
     use quadra_store::ops;
     finish((|| match cmd {
         "init" => {
+            let _writer = quadra_store::writer::acquire(&url)?;
             let tables = ops::init(&url, model, report, now())?;
             println!("✓ initialized {url}: {tables} tables, seeds committed");
             Ok(())
@@ -452,6 +453,7 @@ fn db(args: &[String]) -> ExitCode {
         }
         "migrate" => {
             let dry = rest.iter().any(|a| a == "--dry-run");
+            let _writer = if dry { None } else { Some(quadra_store::writer::acquire(&url)?) };
             let Some(r) = ops::migrate(&url, model, report, &root, now(), dry)? else {
                 println!("schema up to date, no pending migrations: nothing to migrate");
                 return Ok(());
@@ -517,6 +519,7 @@ fn db(args: &[String]) -> ExitCode {
         }
         "fixture" => {
             let Some(name) = &fixture_name else { return Err("usage: quadra db fixture <name> [path]".into()) };
+            let _writer = quadra_store::writer::acquire(&url)?;
             let tx = ops::fixture(&url, model, report, name, now())?;
             println!("✓ fixture {name} loaded in transaction {tx}");
             Ok(())
@@ -527,6 +530,7 @@ fn db(args: &[String]) -> ExitCode {
                 Some(n) => Some(n.parse::<usize>().map_err(|_| format!("--commit-size: `{n}` is not a number"))?),
                 None => None,
             };
+            let _writer = quadra_store::writer::acquire(&url)?;
             println!("importing {dir} into {url}");
             let r = quadra_store::bulk::import_dir(&url, model, report, Path::new(dir), now(), per_commit, &mut |l| println!("{l}"))?;
             for (e, n) in &r.entities {
@@ -572,6 +576,7 @@ fn db(args: &[String]) -> ExitCode {
             }
         }
         "sweep" => {
+            let _writer = quadra_store::writer::acquire(&url)?;
             match ops::sweep(&url, model, report, now())? {
                 Some(tx) => println!("✓ time-driven rules applied in transaction {tx}"),
                 None => println!("✓ nothing changed"),
@@ -643,7 +648,7 @@ fn outbox(args: &[String]) -> ExitCode {
     })())
 }
 
-const SERVE_FLAGS: &[&str] = &["--url", "--port", "--web", "--cache-mb", "--prewarm-days", "--sweep-every", "--editors", "--job-timeout", "--max-rows", "--max-list", "--max-queue", "--readers", "--writers"];
+const SERVE_FLAGS: &[&str] = &["--url", "--port", "--web", "--cache-mb", "--prewarm-days", "--sweep-every", "--editors", "--job-timeout", "--max-rows", "--max-list", "--max-queue", "--readers", "--writers", "--log-dir"];
 
 /// `--job-timeout <seconds>` (0: none), `--max-rows <n>`, `--max-list <n>`, `--max-queue <n>`
 /// (0: none): the limits of the server's requests, on top of the defaults (two minutes, no
@@ -684,7 +689,9 @@ fn serve(args: &[String]) -> ExitCode {
         engines: quadra_server::Engines { readers: num("--readers", 2) as usize, writers: num("--writers", 1).max(1) as usize },
         root,
     };
-    finish(quadra_server::serve(cfg))
+    // every commit also kept as a file in this folder (another disk) before it is confirmed
+    let log_dir = flag(args, "--log-dir").map(std::path::PathBuf::from);
+    finish(quadra_server::serve_with(cfg, log_dir))
 }
 
 fn token(args: &[String]) -> ExitCode {
@@ -767,6 +774,7 @@ fn change(args: &[String]) -> ExitCode {
         }
         "preview" | "apply" => {
             let apply = cmd == "apply";
+            let _writer = if apply { Some(quadra_store::writer::acquire(&url)?) } else { None };
             let o = ops::run_change(&url, model, report, &name, approver.as_deref(), now(), apply)?;
             if let Some(r) = &o.meta.reason {
                 println!("{name}: {r}");
@@ -799,6 +807,7 @@ fn change(args: &[String]) -> ExitCode {
             Ok(())
         }
         "revert" => {
+            let _writer = quadra_store::writer::acquire(&url)?;
             let n = ops::revert_change(&url, model, report, &name, approver.as_deref(), now())?;
             println!("✓ reverted {name}: {n} values restored in a new transaction");
             Ok(())

@@ -44,6 +44,8 @@ const SYSTEM_DDL: &[&str] = &[
     // sign-in with a code sent by email (crate::auth::code_start): its hash, salted with the
     // request's id; attempts, expiry, use
     "CREATE TABLE \"_quadra_login_codes\" (\"id\" TEXT PRIMARY KEY, \"user_id\" BIGINT NOT NULL, \"code_hash\" TEXT NOT NULL, \"attempts\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"expires_at\" TEXT NOT NULL, \"used\" BOOLEAN NOT NULL)",
+    // the batches of the sequencer (crate::sequencer): one database transaction each
+    "CREATE TABLE \"_quadra_batches\" (\"number\" BIGINT PRIMARY KEY, \"first_tx\" BIGINT NOT NULL, \"last_tx\" BIGINT NOT NULL, \"hash\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_view_log\" (\"object\" TEXT NOT NULL, \"object_id\" BIGINT NOT NULL, \"version\" BIGINT NOT NULL, \"at\" TEXT NOT NULL, \"user_id\" BIGINT, \"action\" TEXT NOT NULL, \"detail\" TEXT NOT NULL, PRIMARY KEY (\"object\", \"object_id\", \"version\"))",
 ];
 
@@ -74,7 +76,8 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// 8: `_quadra_views.origin` and `path`: apps, views and folders installed from the project's
 /// interface files (`interfaces/**/*.qdi`), by their path there.
 /// 9: `_quadra_login_codes`, the codes of the sign-in by email (crate::auth).
-const SYSTEM_VERSION: &str = "9";
+/// 10: `_quadra_batches`, the batches of the sequencer (crate::sequencer).
+const SYSTEM_VERSION: &str = "10";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
@@ -107,6 +110,10 @@ pub struct Database {
     /// writes of a commit held to be sent together (PostgreSQL: one statement of
     /// data-modifying `WITH`s, one round trip): see `wexec`, `flush`
     deferred: Option<Vec<(String, Vec<Sql>)>>,
+    /// writes of a commit kept instead of sent: the sequencer sends them (`prepare`)
+    recording: Option<Vec<(String, Vec<Sql>)>>,
+    /// with them, the additions to formula columns (rollups changed by delta)
+    delta_ops: Vec<crate::sequencer::DeltaOp>,
     /// the URL it was opened with (`open`), for the helper connections of a bulk import
     pub(crate) url: Option<String>,
 }
@@ -177,7 +184,7 @@ impl Database {
                 _ => None,
             })
             .collect();
-        Database { conn, schema, entity_tables, seq: 0, prev_hash: "0".repeat(64), deferred: None, url: None }
+        Database { conn, schema, entity_tables, seq: 0, prev_hash: "0".repeat(64), deferred: None, recording: None, delta_ops: Vec::new(), url: None }
     }
 
     /// Databases created by an older version get the system tables and indexes added since.
@@ -545,6 +552,10 @@ impl Database {
 
     /// A write: sent now, or held with the other writes of the commit (`deferred`).
     pub(crate) fn wexec(&mut self, sql: String, params: Vec<Sql>) -> Result<(), String> {
+        if let Some(list) = &mut self.recording {
+            list.push((sql, params));
+            return Ok(());
+        }
         match &mut self.deferred {
             Some(list) => {
                 list.push((sql, params));
@@ -560,6 +571,9 @@ impl Database {
     /// The writes held, in one statement: `WITH q1 AS (…), q2 AS (…) SELECT 1` (they touch
     /// different rows; PostgreSQL runs every data-modifying `WITH`).
     pub(crate) fn flush(&mut self) -> Result<(), String> {
+        if self.recording.is_some() {
+            return Ok(());
+        }
         let Some(list) = self.deferred.as_mut() else {
             return Ok(());
         };
@@ -616,6 +630,10 @@ impl Database {
             if fm.formula && !store.materialized.contains_key(&(id, fm.field.clone())) {
                 continue;
             }
+            // a rollup changed by delta is added to, not set (`delta_ops`)
+            if fm.formula && self.recording.is_some() && store.deltas.contains_key(&(id, fm.field.clone())) {
+                continue;
+            }
             let v = Self::field_value(store, rec, fm);
             for c in &fm.columns {
                 cols.push((c.name.clone(), c.ty, self.encode(c, &v)));
@@ -657,7 +675,12 @@ impl Database {
         for t in extra {
             match &t.source {
                 Source::Join(_, field) => {
-                    self.conn.exec(&format!("DELETE FROM {} WHERE \"owner_id\" = ?bigint", q(&t.name)), &[Sql::Int(id as i64)])?;
+                    let delete = format!("DELETE FROM {} WHERE \"owner_id\" = ?bigint", q(&t.name));
+                    if self.recording.is_some() {
+                        self.wexec(delete, vec![Sql::Int(id as i64)])?;
+                    } else {
+                        self.conn.exec(&delete, &[Sql::Int(id as i64)])?;
+                    }
                     let items = rec.fields.get(field).and_then(|v| v.items().map(|i| i.to_vec())).unwrap_or_default();
                     // one row per reference, at its last position (a reference given twice
                     // would be the same row twice in one statement)
@@ -842,6 +865,29 @@ impl Database {
     }
 
     fn write_tx_inner(&mut self, model: &Model, c: &Commit, tx: u64, stored_next: u64) -> Result<(), String> {
+        let mut payload = self.write_effects(model, c, tx, None)?;
+        self.write_scripts(c, &mut payload, &|t: u64| if t == c.tx { tx } else { t })?;
+        self.flush()?;
+        let state = json!({ "next_id": stored_next.max(c.after.next_id), "tx": tx }).to_string();
+        self.wexec("INSERT INTO \"_quadra_meta\" (\"key\", \"value\") VALUES ('state', ?text) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\"".into(), vec![Sql::Text(state)])?;
+        // signed commit row
+        let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let hash = commit_hash(&self.prev_hash, tx, &at, c.user, &c.cause, &payload);
+        self.wexec(
+            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)".into(),
+            vec![Sql::Int(tx as i64), Sql::Text(at), c.user.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null), Sql::Text(c.cause.clone()), Sql::Text(self.prev_hash.clone()), Sql::Text(hash.clone())],
+        )?;
+        self.flush()?;
+        self.prev_hash = hash;
+        Ok(())
+    }
+
+    /// The writes of a transaction numbered `tx` (its history, records, projections, ledger
+    /// rows, postings, counters, idempotency key, outbox events), without its commit row and
+    /// the state; returns the entries of its hash (the scripts' come after, `write_scripts`).
+    /// `outbox_from`: the outbox ids start after it (the sequencer reserved them); None: after
+    /// the last one in the database.
+    fn write_effects(&mut self, model: &Model, c: &Commit, tx: u64, outbox_from: Option<i64>) -> Result<Vec<J>, String> {
         let local = c.tx;
         let map = |t: u64| if t == local { tx } else { t };
         let mut payload: Vec<J> = Vec::new();
@@ -895,9 +941,18 @@ impl Database {
         // projections: the rows of the records touched, the formula columns of the records
         // whose materialized formulas changed (compared with the database's values)
         let mut changed_formulas: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
+        let mut added_to: std::collections::BTreeSet<u64> = Default::default();
         for (k, v) in &c.after.materialized {
             let stored = c.after.records.get(&k.0).and_then(|r| r.formulas.get(&k.1)).or_else(|| c.before.materialized.get(k));
             if stored != Some(v) {
+                // through the sequencer, a rollup changed by delta is an addition
+                if self.recording.is_some() && c.after.deltas.contains_key(k) {
+                    if let Some(op) = self.delta_op(c.after, k.0, &k.1, v) {
+                        self.delta_ops.extend(op);
+                        added_to.insert(k.0);
+                        continue;
+                    }
+                }
                 changed_formulas.entry(k.0).or_default().push(k.1.clone());
             }
         }
@@ -949,6 +1004,12 @@ impl Database {
         for ((table, _), (cols, vals)) in updates {
             self.update_rows(&table, &cols, &vals)?;
         }
+        // rows added to by delta changed too
+        for id in added_to {
+            if !touched.contains(&id) && !bumped.contains(&id) {
+                bumped.push(id);
+            }
+        }
         // their rows changed: caches and snapshot checks see it (`last_tx`)
         for chunk in bumped.chunks(500) {
             let list: Vec<String> = chunk.iter().map(|i| i.to_string()).collect();
@@ -984,8 +1045,6 @@ impl Database {
                 self.upsert("_quadra_counters", &[("key".into(), ColType::Text, Sql::Text(k.clone())), ("n".into(), ColType::BigInt, Sql::Int(*n as i64))], &["key"])?;
             }
         }
-        self.flush()?;
-        self.write_scripts(c, &mut payload, &map)?;
         // an API request with an idempotency key: remembered with the commit it produced
         if let Some((user, key, hash, response)) = &c.after.idempotency {
             self.wexec(
@@ -994,30 +1053,141 @@ impl Database {
             )?;
         }
         self.flush()?;
-        self.write_outbox(c, tx)?;
-        let state = json!({ "next_id": stored_next.max(c.after.next_id), "tx": tx }).to_string();
-        self.wexec("INSERT INTO \"_quadra_meta\" (\"key\", \"value\") VALUES ('state', ?text) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\"".into(), vec![Sql::Text(state)])?;
-        // signed commit row
-        let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
-        let hash = commit_hash(&self.prev_hash, tx, &at, c.user, &c.cause, &payload);
-        self.wexec(
-            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)".into(),
-            vec![Sql::Int(tx as i64), Sql::Text(at), c.user.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null), Sql::Text(c.cause.clone()), Sql::Text(self.prev_hash.clone()), Sql::Text(hash.clone())],
-        )?;
-        self.flush()?;
-        self.prev_hash = hash;
-        Ok(())
+        self.write_outbox(c, tx, outbox_from)?;
+        Ok(payload)
+    }
+
+    /// What a transaction writes, for the sequencer's window, with how many history rows and
+    /// outbox events it writes.
+    pub(crate) fn write_set(&self, c: &Commit) -> (crate::sequencer::WriteSet, u64, u64) {
+        let local = c.tx;
+        let mut ws = crate::sequencer::WriteSet::default();
+        let mut history = 0u64;
+        let mut rows: std::collections::BTreeMap<u64, String> = Default::default();
+        for r in c.after.records.values() {
+            for (t, f, v) in &r.history {
+                if *t == local {
+                    history += 1;
+                    ws.fields.push((r.id, r.ent.to_string(), f.clone()));
+                    rows.insert(r.id, r.ent.to_string());
+                    // the value it was written to, and the one it was written from
+                    let old = r.before(local, f).unwrap_or(V::None);
+                    for k in quadra_runtime::store::value_keys(v).into_iter().chain(quadra_runtime::store::value_keys(&old)) {
+                        ws.field_values.push((r.ent.to_string(), f.clone(), k));
+                    }
+                }
+            }
+            if r.created_tx == local {
+                ws.created.push((r.id, r.ent.to_string()));
+                rows.insert(r.id, r.ent.to_string());
+            }
+            let changed = match (c.before.records.get(&r.id), c.after.origin.get(&r.id)) {
+                (Some(b), _) => b.frozen_at != r.frozen_at || b.warnings != r.warnings || !Rc::ptr_eq(&b.cause, &r.cause),
+                (None, Some((frozen, warnings, cause))) => *frozen != r.frozen_at || *warnings != r.warnings || !Rc::ptr_eq(cause, &r.cause),
+                (None, None) => false,
+            };
+            if changed {
+                rows.insert(r.id, r.ent.to_string());
+            }
+        }
+        for (k, v) in &c.after.materialized {
+            let stored = c.after.records.get(&k.0).and_then(|r| r.formulas.get(&k.1)).or_else(|| c.before.materialized.get(k));
+            if stored != Some(v) {
+                if let Some(r) = c.after.records.get(&k.0) {
+                    rows.insert(r.id, r.ent.to_string());
+                }
+                ws.formula_fields.push(k.clone());
+            }
+        }
+        ws.rows = rows.into_iter().collect();
+        let before_rows: HashSet<u64> = c.before.rows.iter().map(|r| r.id).collect();
+        for row in c.after.rows.iter().filter(|r| r.tx == local && !before_rows.contains(&r.id)) {
+            let cols = row
+                .cols
+                .iter()
+                .map(|(k, v)| {
+                    let key = match v {
+                        V::Ref { id, .. } => format!("#{id}"),
+                        other => other.to_string(),
+                    };
+                    (k.clone(), key)
+                })
+                .collect();
+            ws.ledger_rows.push((row.ledger.to_string(), cols));
+        }
+        for (k, n) in &c.after.counters {
+            if c.before.counters.get(k) != Some(n) {
+                ws.counters.push((k.clone(), *n));
+            }
+        }
+        ws.idempotency = c.after.idempotency.as_ref().map(|(user, key, _, _)| (*user, key.clone()));
+        for ((id, field), (old, _)) in &c.after.deltas {
+            let now = c.after.materialized.get(&(*id, field.clone()));
+            if let Some(d) = now.and_then(|now| quadra_runtime::store::delta_amount(old, now)) {
+                ws.deltas.push((*id, field.clone(), d));
+            }
+        }
+        let outbox = c.after.outbox.iter().filter(|v| matches!(v, V::Event { .. })).count() as u64;
+        (ws, history, outbox)
+    }
+
+    /// The additions that bring the columns of a rollup from the value stored before the
+    /// transaction to `now` (None: it is not one that adds up).
+    fn delta_op(&self, store: &Store, id: u64, field: &str, now: &V) -> Option<Vec<crate::sequencer::DeltaOp>> {
+        let (old, _) = store.deltas.get(&(id, field.to_string()))?;
+        quadra_runtime::store::delta_amount(old, now)?;
+        let rec = store.records.get(&id)?;
+        let &ti = self.entity_tables.get(&*rec.ent)?;
+        let table = &self.schema.tables[ti];
+        let fm = table.fields.iter().find(|f| f.formula && f.field == field)?;
+        let mut ops = Vec::new();
+        for col in &fm.columns {
+            match (col.part, encode(col, old), encode(col, now)) {
+                (Part::Amount | Part::Scalar, Sql::Int(a), Sql::Int(b)) => ops.push(crate::sequencer::DeltaOp { table: table.name.clone(), id, column: col.name.clone(), int: true, amount: (b - a).to_string(), param: col.ty.param().to_string() }),
+                (Part::Amount | Part::Scalar, Sql::Text(a), Sql::Text(b)) => {
+                    let (a, b) = (a.parse::<rust_decimal::Decimal>().ok()?, b.parse::<rust_decimal::Decimal>().ok()?);
+                    ops.push(crate::sequencer::DeltaOp { table: table.name.clone(), id, column: col.name.clone(), int: false, amount: (b - a).to_string(), param: col.ty.param().to_string() });
+                }
+                // the currency, the unit: the same before and after
+                (_, a, b) if a == b => {}
+                _ => return None,
+            }
+        }
+        Some(ops)
+    }
+
+    /// The writes of a transaction the sequencer numbered, kept instead of sent: the sequencer
+    /// sends them in its batch, with the commit row. Migrations and changes (scripts) do not go
+    /// through the sequencer: they run with the project paused.
+    pub(crate) fn prepare(&mut self, model: &Model, c: &Commit, r: &crate::sequencer::Reservation) -> Result<crate::sequencer::Prepared, String> {
+        let (applied, renames) = script_payload(c.before, c.after);
+        if !applied.is_empty() || !renames.is_empty() {
+            return Err("migrations and changes run with the project paused, not while it serves".into());
+        }
+        self.recording = Some(Vec::new());
+        self.delta_ops.clear();
+        self.seq = r.seq;
+        let res = self.write_effects(model, c, r.tx, Some(r.outbox));
+        let statements = self.recording.take().unwrap_or_default();
+        let deltas = std::mem::take(&mut self.delta_ops);
+        let payload = res?;
+        Ok(crate::sequencer::Prepared { statements, deltas, payload: payload.iter().map(|p| p.to_string()).collect(), next_id: c.after.next_id })
     }
 
     /// The events the transaction emitted, in the order of `emit`: pending until an
     /// integration marks them delivered. Not part of the commit hash (the outbox is an
     /// operational queue: its `delivered` column changes).
-    pub(crate) fn write_outbox(&mut self, c: &Commit, tx: u64) -> Result<(), String> {
+    pub(crate) fn write_outbox(&mut self, c: &Commit, tx: u64, from: Option<i64>) -> Result<(), String> {
         if c.after.outbox.is_empty() {
             return Ok(());
         }
-        let last = self.conn.query("SELECT CAST(MAX(\"id\") AS TEXT) FROM \"_quadra_outbox\"", &[])?;
-        let mut id = last.first().map(|r| num(&r[0])).unwrap_or(0);
+        let mut id = match from {
+            Some(id) => id,
+            None => {
+                let last = self.conn.query("SELECT CAST(MAX(\"id\") AS TEXT) FROM \"_quadra_outbox\"", &[])?;
+                last.first().map(|r| num(&r[0])).unwrap_or(0)
+            }
+        };
         let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
         for v in &c.after.outbox {
             let V::Event { name, fields } = v else {
@@ -1025,10 +1195,13 @@ impl Database {
             };
             id += 1;
             let fields: serde_json::Map<String, J> = fields.iter().map(|(n, v)| (n.clone(), to_json(v))).collect();
-            self.conn.exec(
-                "INSERT INTO \"_quadra_outbox\" (\"id\", \"tx\", \"event\", \"fields\", \"created_at\", \"delivered\", \"delivered_at\") VALUES (?bigint, ?bigint, ?text, ?text, ?text, ?boolean, ?text)",
-                &[Sql::Int(id), Sql::Int(tx as i64), Sql::Text(name.to_string()), Sql::Text(J::Object(fields).to_string()), Sql::Text(at.clone()), Sql::Bool(false), Sql::Null],
-            )?;
+            let insert = "INSERT INTO \"_quadra_outbox\" (\"id\", \"tx\", \"event\", \"fields\", \"created_at\", \"delivered\", \"delivered_at\") VALUES (?bigint, ?bigint, ?text, ?text, ?text, ?boolean, ?text)";
+            let params = vec![Sql::Int(id), Sql::Int(tx as i64), Sql::Text(name.to_string()), Sql::Text(J::Object(fields).to_string()), Sql::Text(at.clone()), Sql::Bool(false), Sql::Null];
+            if self.recording.is_some() {
+                self.wexec(insert.into(), params)?;
+            } else {
+                self.conn.exec(insert, &params)?;
+            }
         }
         Ok(())
     }
@@ -1073,116 +1246,12 @@ impl Database {
 
     /// Commits after `base` that touched what a transaction read.
     fn find_conflicts(&mut self, base: u64, reads: &ReadSet) -> Result<Vec<Conflict>, String> {
-        let b = Sql::Int(base as i64);
-        let mut what: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
-        let ids: Vec<String> = reads.records.iter().map(|i| i.to_string()).collect();
-        for chunk in ids.chunks(400) {
-            for r in self.conn.query(
-                &format!(
-                    "SELECT CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT), h.\"field\", r.\"entity\" FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE h.\"tx\" > ?bigint AND h.\"record_id\" IN ({})",
-                    chunk.join(", ")
-                ),
-                &[b.clone()],
-            )? {
-                what.entry(num(&r[0]) as u64).or_default().push(format!("{}#{}.{}", r[3].clone().unwrap_or_default(), num(&r[1]), r[2].clone().unwrap_or_default()));
-            }
-        }
-        // materialized formulas read (not computed): their rows changed since (`last_tx`)
-        let fids: Vec<String> = reads.formulas.iter().map(|i| i.to_string()).collect();
-        for chunk in fids.chunks(400) {
-            for r in
-                self.conn.query(&format!("SELECT CAST(\"last_tx\" AS TEXT), CAST(\"id\" AS TEXT), \"entity\" FROM \"_quadra_records\" WHERE \"last_tx\" > ?bigint AND \"id\" IN ({})", chunk.join(", ")), &[b.clone()])?
-            {
-                let (tx, id) = (num(&r[0]) as u64, num(&r[1]));
-                let ent = r[2].clone().unwrap_or_default();
-                let w = what.entry(tx).or_default();
-                if !w.iter().any(|x| x.starts_with(&format!("{ent}#{id}."))) {
-                    w.push(format!("{ent}#{id} (its computed values)"));
-                }
-            }
-        }
-        for ent in &reads.formula_scans {
-            for r in
-                self.conn.query("SELECT CAST(\"last_tx\" AS TEXT), CAST(\"id\" AS TEXT) FROM \"_quadra_records\" WHERE \"entity\" = ?text AND \"last_tx\" > ?bigint LIMIT 100", &[Sql::Text(ent.clone()), b.clone()])?
-            {
-                what.entry(num(&r[0]) as u64).or_default().push(format!("{ent}#{} (its computed values)", num(&r[1])));
-            }
-        }
-        for ent in &reads.scans {
-            for r in self.conn.query("SELECT CAST(\"created_tx\" AS TEXT), CAST(\"id\" AS TEXT) FROM \"_quadra_records\" WHERE \"entity\" = ?text AND \"created_tx\" > ?bigint", &[Sql::Text(ent.clone()), b.clone()])? {
-                what.entry(num(&r[0]) as u64).or_default().push(format!("new {ent}#{}", num(&r[1])));
-            }
-        }
-        for (ent, field) in &reads.finds {
-            for r in self.conn.query(
-                "SELECT CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT) FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE h.\"tx\" > ?bigint AND r.\"entity\" = ?text AND h.\"field\" = ?text",
-                &[b.clone(), Sql::Text(ent.clone()), Sql::Text(field.clone())],
-            )? {
-                what.entry(num(&r[0]) as u64).or_default().push(format!("{ent}#{}.{field}", num(&r[1])));
-            }
-        }
-        for (ledger, filter) in &reads.ledgers {
-            for r in self.conn.query(&format!("SELECT {} FROM \"_quadra_ledger_rows\" WHERE \"ledger\" = ?text AND \"tx\" > ?bigint", crate::source::ROW_COLS), &[Sql::Text(ledger.clone()), b.clone()])? {
-                let row = crate::source::decode_row(&r);
-                let hit = match filter {
-                    None => true,
-                    Some((col, key)) => row.cols.get(col).map_or(false, |v| match v {
-                        V::Ref { id, .. } => format!("#{id}") == *key,
-                        other => other.to_string() == *key,
-                    }),
-                };
-                if hit {
-                    let label = match filter {
-                        Some((col, key)) => format!("{ledger} rows with {col} = {key}"),
-                        None => format!("{ledger} rows"),
-                    };
-                    let w = what.entry(row.tx).or_default();
-                    if !w.contains(&label) {
-                        w.push(label);
-                    }
-                }
-            }
-        }
-        for (key, seen) in &reads.counters {
-            let r = self.conn.query("SELECT CAST(\"n\" AS TEXT) FROM \"_quadra_counters\" WHERE \"key\" = ?text", &[Sql::Text(key.clone())])?;
-            let now = r.first().map(|r| num(&r[0]) as u64).unwrap_or(0);
-            if now != *seen {
-                // the counter has no transaction: attribute it to the last commit
-                let head = crate::source::head(&mut self.conn)?;
-                what.entry(head).or_default().push(format!("counter {key}"));
-            }
-        }
-        self.describe_commits(what)
+        find_conflicts(&mut self.conn, base, reads)
     }
 
     /// Every commit after `base` (a working set loaded in full relies on everything).
     fn commits_after(&mut self, base: u64) -> Result<Vec<Conflict>, String> {
-        let mut what: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
-        for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT) FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint", &[Sql::Int(base as i64)])? {
-            what.entry(num(&r[0]) as u64).or_default().push("data read by this transaction".into());
-        }
-        self.describe_commits(what)
-    }
-
-    fn describe_commits(&mut self, what: std::collections::BTreeMap<u64, Vec<String>>) -> Result<Vec<Conflict>, String> {
-        let mut out = Vec::new();
-        for (tx, mut items) in what {
-            items.sort();
-            items.dedup();
-            let r = self.conn.query("SELECT \"at\", CAST(\"user_id\" AS TEXT), \"cause\" FROM \"_quadra_commits\" WHERE \"tx\" = ?bigint", &[Sql::Int(tx as i64)])?;
-            let Some(r) = r.first() else { continue };
-            let user = match r[1].as_deref().and_then(|u| u.parse::<i64>().ok()) {
-                Some(uid) => self
-                    .conn
-                    .query("SELECT \"value\" FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"field\" = 'login' ORDER BY \"_quadra_history\".\"seq\" DESC", &[Sql::Int(uid)])?
-                    .first()
-                    .and_then(|x| x[0].clone())
-                    .map(|v| from_json(&serde_json::from_str(&v).unwrap_or(J::Null)).to_string()),
-                None => None,
-            };
-            out.push(Conflict { tx, at: r[0].clone().unwrap_or_default(), user, cause: r[2].clone().unwrap_or_default(), what: items });
-        }
-        Ok(out)
+        commits_after(&mut self.conn, base)
     }
 
     /// Migrations and changes applied, and renames, in this transaction.
@@ -1275,7 +1344,7 @@ impl Database {
             }
         }
         self.write_scripts(c, &mut payload, &|t| t)?;
-        self.write_outbox(c, tx)?;
+        self.write_outbox(c, tx, None)?;
         let state = json!({ "next_id": c.after.next_id, "tx": c.after.tx }).to_string();
         self.set_meta("state", &state)?;
         let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -1554,6 +1623,121 @@ fn script_payload(before: &Store, after: &Store) -> (Vec<(String, u64)>, Vec<(St
     let renames = after.renames.iter().skip(before.renames.len()).cloned().collect();
     (applied, renames)
 }
+
+/// Commits after `base` that touched what a transaction read.
+pub(crate) fn find_conflicts(conn: &mut Conn, base: u64, reads: &ReadSet) -> Result<Vec<Conflict>, String> {
+    let b = Sql::Int(base as i64);
+    let mut what: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
+    let ids: Vec<String> = reads.records.iter().map(|i| i.to_string()).collect();
+    for chunk in ids.chunks(400) {
+        for r in conn.query(
+            &format!(
+                "SELECT CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT), h.\"field\", r.\"entity\" FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE h.\"tx\" > ?bigint AND h.\"record_id\" IN ({})",
+                chunk.join(", ")
+            ),
+            &[b.clone()],
+        )? {
+            what.entry(num(&r[0]) as u64).or_default().push(format!("{}#{}.{}", r[3].clone().unwrap_or_default(), num(&r[1]), r[2].clone().unwrap_or_default()));
+        }
+    }
+    // materialized formulas read (not computed): their rows changed since (`last_tx`)
+    let fids: Vec<String> = reads.formulas.iter().map(|i| i.to_string()).collect();
+    for chunk in fids.chunks(400) {
+        for r in
+            conn.query(&format!("SELECT CAST(\"last_tx\" AS TEXT), CAST(\"id\" AS TEXT), \"entity\" FROM \"_quadra_records\" WHERE \"last_tx\" > ?bigint AND \"id\" IN ({})", chunk.join(", ")), &[b.clone()])?
+        {
+            let (tx, id) = (num(&r[0]) as u64, num(&r[1]));
+            let ent = r[2].clone().unwrap_or_default();
+            let w = what.entry(tx).or_default();
+            if !w.iter().any(|x| x.starts_with(&format!("{ent}#{id}."))) {
+                w.push(format!("{ent}#{id} (its computed values)"));
+            }
+        }
+    }
+    for ent in &reads.formula_scans {
+        for r in
+            conn.query("SELECT CAST(\"last_tx\" AS TEXT), CAST(\"id\" AS TEXT) FROM \"_quadra_records\" WHERE \"entity\" = ?text AND \"last_tx\" > ?bigint LIMIT 100", &[Sql::Text(ent.clone()), b.clone()])?
+        {
+            what.entry(num(&r[0]) as u64).or_default().push(format!("{ent}#{} (its computed values)", num(&r[1])));
+        }
+    }
+    for ent in &reads.scans {
+        for r in conn.query("SELECT CAST(\"created_tx\" AS TEXT), CAST(\"id\" AS TEXT) FROM \"_quadra_records\" WHERE \"entity\" = ?text AND \"created_tx\" > ?bigint", &[Sql::Text(ent.clone()), b.clone()])? {
+            what.entry(num(&r[0]) as u64).or_default().push(format!("new {ent}#{}", num(&r[1])));
+        }
+    }
+    let by_value: std::collections::BTreeSet<(String, String)> = reads.find_values.iter().map(|(e, f, _)| (e.clone(), f.clone())).collect();
+    for (ent, field) in reads.finds.iter().chain(by_value.iter().filter(|k| !reads.finds.contains(*k))) {
+        for r in conn.query(
+            "SELECT CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT) FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE h.\"tx\" > ?bigint AND r.\"entity\" = ?text AND h.\"field\" = ?text",
+            &[b.clone(), Sql::Text(ent.clone()), Sql::Text(field.clone())],
+        )? {
+            what.entry(num(&r[0]) as u64).or_default().push(format!("{ent}#{}.{field}", num(&r[1])));
+        }
+    }
+    for (ledger, filter) in &reads.ledgers {
+        for r in conn.query(&format!("SELECT {} FROM \"_quadra_ledger_rows\" WHERE \"ledger\" = ?text AND \"tx\" > ?bigint", crate::source::ROW_COLS), &[Sql::Text(ledger.clone()), b.clone()])? {
+            let row = crate::source::decode_row(&r);
+            let hit = match filter {
+                None => true,
+                Some((col, key)) => row.cols.get(col).map_or(false, |v| match v {
+                    V::Ref { id, .. } => format!("#{id}") == *key,
+                    other => other.to_string() == *key,
+                }),
+            };
+            if hit {
+                let label = match filter {
+                    Some((col, key)) => format!("{ledger} rows with {col} = {key}"),
+                    None => format!("{ledger} rows"),
+                };
+                let w = what.entry(row.tx).or_default();
+                if !w.contains(&label) {
+                    w.push(label);
+                }
+            }
+        }
+    }
+    for (key, seen) in &reads.counters {
+        let r = conn.query("SELECT CAST(\"n\" AS TEXT) FROM \"_quadra_counters\" WHERE \"key\" = ?text", &[Sql::Text(key.clone())])?;
+        let now = r.first().map(|r| num(&r[0]) as u64).unwrap_or(0);
+        if now != *seen {
+            // the counter has no transaction: attribute it to the last commit
+            let head = crate::source::head(conn)?;
+            what.entry(head).or_default().push(format!("counter {key}"));
+        }
+    }
+    describe_commits(conn, what)
+}
+
+/// Every commit after `base` (a working set loaded in full relies on everything).
+pub(crate) fn commits_after(conn: &mut Conn, base: u64) -> Result<Vec<Conflict>, String> {
+    let mut what: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
+    for r in conn.query("SELECT CAST(\"tx\" AS TEXT) FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint", &[Sql::Int(base as i64)])? {
+        what.entry(num(&r[0]) as u64).or_default().push("data read by this transaction".into());
+    }
+    describe_commits(conn, what)
+}
+
+fn describe_commits(conn: &mut Conn, what: std::collections::BTreeMap<u64, Vec<String>>) -> Result<Vec<Conflict>, String> {
+    let mut out = Vec::new();
+    for (tx, mut items) in what {
+        items.sort();
+        items.dedup();
+        let r = conn.query("SELECT \"at\", CAST(\"user_id\" AS TEXT), \"cause\" FROM \"_quadra_commits\" WHERE \"tx\" = ?bigint", &[Sql::Int(tx as i64)])?;
+        let Some(r) = r.first() else { continue };
+        let user = match r[1].as_deref().and_then(|u| u.parse::<i64>().ok()) {
+            Some(uid) => conn
+                .query("SELECT \"value\" FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"field\" = 'login' ORDER BY \"_quadra_history\".\"seq\" DESC", &[Sql::Int(uid)])?
+                .first()
+                .and_then(|x| x[0].clone())
+                .map(|v| from_json(&serde_json::from_str(&v).unwrap_or(J::Null)).to_string()),
+            None => None,
+        };
+        out.push(Conflict { tx, at: r[0].clone().unwrap_or_default(), user, cause: r[2].clone().unwrap_or_default(), what: items });
+    }
+    Ok(out)
+}
+
 
 fn commit_hash(prev: &str, tx: u64, at: &str, user: Option<u64>, cause: &str, payload: &[J]) -> String {
     let mut h = CommitHasher::new(prev, tx, at, user, cause);

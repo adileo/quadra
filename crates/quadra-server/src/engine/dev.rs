@@ -440,7 +440,7 @@ impl Engine {
         steps.push(json!({ "step": "commit", "ok": true, "detail": sha }));
         // 5. apply
         let label = format!("deploy {}: {message} ({login})", &sha[..sha.len().min(10)]);
-        if let Err(e) = quadra_store::ops::deploy(&self.url, model, &checked.report, &self.root, now(), false, &label) {
+        if let Err(e) = quadra_store::ops::deploy(&self.url, model, &checked.report, &self.root, now(), false, &label).inspect(|_| self.sequencer_reload()) {
             let _ = git(&self.root, &["-c", &name, "-c", &email, "revert", "--no-edit", "HEAD"]);
             return fail(steps, "apply", format!("{e} — the commit was reverted"), J::Null);
         }
@@ -493,7 +493,7 @@ impl Engine {
             return Some(self.set_problems(json!({ "kind": "code", "errors": errors })));
         }
         let model = checked.model.as_ref().unwrap();
-        if let Err(e) = quadra_store::ops::deploy(&self.url, model, &checked.report, &self.root, now(), false, "dev: the files changed") {
+        if let Err(e) = quadra_store::ops::deploy(&self.url, model, &checked.report, &self.root, now(), false, "dev: the files changed").inspect(|_| self.sequencer_reload()) {
             return Some(self.set_problems(json!({ "kind": "data", "message": e })));
         }
         if let Err(e) = self.reload(project, checked) {

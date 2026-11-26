@@ -35,9 +35,6 @@ fn count(c: &std::sync::atomic::AtomicU64) {
 
 #[derive(Default)]
 pub(super) struct Inc<'m> {
-    /// (entity, field) → incremental
-    trusted: HashMap<(String, String), bool>,
-    trusted_ptr: HashMap<(usize, usize), bool>,
     /// the rollups recognized among them
     rollups: HashMap<(String, String), Option<Rc<Rollup<'m>>>>,
     /// the sums of a ledger's rows posted to the record recognized among them
@@ -190,11 +187,11 @@ impl<'m> Interp<'m> {
     /// `trusted` of a field of an entity of the model, without allocating (the hot path).
     pub(super) fn trusted_field(&mut self, e: &'m Entity, f: &'m Field) -> bool {
         let key = (e as *const Entity as usize, f as *const Field as usize);
-        if let Some(t) = self.inc.trusted_ptr.get(&key) {
+        if let Some(t) = self.statics.trusted_ptr.borrow().get(&key) {
             return *t;
         }
         let t = self.trusted(&e.name, &f.name);
-        self.inc.trusted_ptr.insert(key, t);
+        self.statics.trusted_ptr.borrow_mut().insert(key, t);
         t
     }
 
@@ -202,11 +199,11 @@ impl<'m> Interp<'m> {
     /// is materialized (a record loaded from the database then holds its stored value).
     pub(super) fn trusted(&mut self, ent: &str, field: &str) -> bool {
         let key = (ent.to_string(), field.to_string());
-        if let Some(t) = self.inc.trusted.get(&key) {
+        if let Some(t) = self.statics.trusted.borrow().get(&key) {
             return *t;
         }
         let t = quadra_analysis::deps::incremental(self.m, ent, field).is_ok();
-        self.inc.trusted.insert(key, t);
+        self.statics.trusted.borrow_mut().insert(key, t);
         t
     }
 
@@ -386,7 +383,23 @@ impl<'m> Interp<'m> {
         }
         self.fresh_valid();
         if let Some(v) = self.inc.fresh.get(&(id, f.name.as_str())) {
-            return Ok(Some(v.clone()));
+            let v = v.clone();
+            // a rollup this transaction changed by delta, read again: by a rule (a guard, or a
+            // read), by its own materialization or a parent's change (free), or by a formula
+            // computed in full (a read: its value depends on it)
+            if self.store.deltas.contains_key(&(id, f.name.clone())) {
+                let own = self.materializing.as_ref().is_some_and(|(i, n)| *i == id && *n == f.name);
+                match &mut self.capture {
+                    Some(c) => c.push((id, f.name.clone())),
+                    None if own || self.in_delta > 0 => {}
+                    None => {
+                        if !self.store.untracked {
+                            self.store.reads.formula(id, &f.name);
+                        }
+                    }
+                }
+            }
+            return Ok(Some(v));
         }
         // (an empty column: no value, or the formula failed: computed, which tells them apart)
         let Some(stored) = self.store.records.get(&id).and_then(|r| r.formulas.get(&f.name)).filter(|v| !v.is_none()).cloned() else {
@@ -395,15 +408,31 @@ impl<'m> Interp<'m> {
         // a record frozen before this transaction reads the world as of then: its value holds
         if frozen || !self.is_stale(ent, &f.name, id) {
             if !self.store.untracked {
-                self.store.reads.formulas.insert(id);
+                self.store.reads.formula(id, &f.name);
             }
             count(&STORED);
             return Ok(Some(stored));
         }
-        if let Some(v) = self.delta(ent, f, id, &stored)? {
+        // what computing the delta reads (the children's values) is not what the rule read
+        let outer = self.capture.take();
+        self.in_delta += 1;
+        let delta = self.delta(ent, f, id, &stored);
+        self.in_delta -= 1;
+        self.capture = outer;
+        if let Some(v) = delta? {
             count(&DELTAS);
-            if !self.store.untracked {
-                self.store.reads.formulas.insert(id);
+            // while committing, a sum changed by delta is a change that commutes with other
+            // transactions' (`Store::deltas`); otherwise its stored value was read
+            let own = self.materializing.as_ref().is_some_and(|(i, n)| *i == id && *n == f.name);
+            if self.delta_free && crate::store::delta_amount(&stored, &v).is_some() && (own || self.in_delta > 0 || self.capture.is_some()) {
+                let key = (id, f.name.clone());
+                let first = self.store.deltas.get(&key).map(|(old, _)| old.clone()).unwrap_or_else(|| stored.clone());
+                self.store.deltas.insert(key.clone(), (first, v.clone()));
+                if let Some(c) = &mut self.capture {
+                    c.push(key);
+                }
+            } else if !self.store.untracked {
+                self.store.reads.formula(id, &f.name);
             }
             self.remember(id, f.name.as_str(), &v);
             return Ok(Some(v));
@@ -419,8 +448,11 @@ impl<'m> Interp<'m> {
         }
         match self.store.records.get(&id).and_then(|r| r.formulas.get(&f.name)).filter(|v| !v.is_none()).cloned() {
             Some(v) => {
-                if !self.store.untracked {
-                    self.store.reads.formulas.insert(id);
+                // while committing, the old value only measures a change: the change is the
+                // same whatever others added meanwhile (the new value, computed, is read or
+                // added to on its own)
+                if !self.store.untracked && !self.delta_free {
+                    self.store.reads.formula(id, &f.name);
                 }
                 Ok(v)
             }

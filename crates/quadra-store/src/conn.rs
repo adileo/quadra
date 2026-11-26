@@ -153,6 +153,11 @@ impl Conn {
         if let Some(path) = url.strip_prefix("sqlite:") {
             let c = if path == ":memory:" { rusqlite::Connection::open_in_memory() } else { rusqlite::Connection::open(path) }.map_err(|e| e.to_string())?;
             c.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;").map_err(|e| e.to_string())?;
+            // the file mapped in memory: every connection (every engine of a project) reads the
+            // same pages from the system's cache instead of copying them into its own
+            if path != ":memory:" {
+                c.execute_batch("PRAGMA mmap_size = 1073741824").map_err(|e| e.to_string())?;
+            }
             if let Some(max) = MAX_BYTES.with(|m| m.get()) {
                 let page: u64 = c.query_row("PRAGMA page_size", [], |r| r.get(0)).map_err(|e| e.to_string())?;
                 // a database already larger keeps its size: SQLite never lowers the count below it

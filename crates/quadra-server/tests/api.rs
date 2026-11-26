@@ -95,6 +95,17 @@ fn the_api_is_authenticated_idempotent_and_refuses_stale_writes() {
     let (s, me, head) = http.call("GET", "/v1/me", &auth, None);
     assert_eq!((s, me["user"].clone()), (200, json!("giulia")));
     assert!(head.to_lowercase().contains("x-frame-options: deny"), "{head}");
+    // a flood of wrong credentials is refused before it reaches the engine, and a credential
+    // seen valid lately still gets in
+    let mut refused = 0;
+    for i in 0..120 {
+        let forged = format!("Bearer qd_t_forged{i}");
+        if http.call("GET", "/v1/me", &[("Authorization", forged.as_str())], None).0 == 429 {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "wrong credentials are never refused before the engine");
+    assert_eq!(http.call("GET", "/v1/me", &auth, None).0, 200);
     // the custom forms of apps are reached over HTTP (an unknown app: 404, not 405)
     let (s, _, _) = http.call("POST", "/v1/apps/999999/forms/f/submit", &auth, Some(&json!({ "values": {}, "idempotency_key": "k" })));
     assert_eq!(s, 404);

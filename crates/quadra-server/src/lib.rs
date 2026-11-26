@@ -103,6 +103,10 @@ struct Tenant {
     pending: Arc<std::sync::atomic::AtomicUsize>,
     max_queue: Option<usize>,
     usage: Arc<Meter>,
+    /// the one place its commits are ordered and written (`quadra_store::sequencer`): started
+    /// by its first engine, used by all of them
+    sequencer: Arc<Mutex<Option<quadra_store::Sequencer>>>,
+    durability: Option<Arc<dyn Durability>>,
 }
 
 /// What a tenant's engines used, added after each job and taken by the host
@@ -191,6 +195,13 @@ impl Tenant {
                 return Some(r);
             }
         }
+        // writes of data run on any engine once the sequencer orders the commits
+        if job.writes_data() && self.sequencer.lock().unwrap().is_some() {
+            let all: Vec<Arc<Slot>> = self.readers.lock().unwrap().iter().chain(self.writers.lock().unwrap().iter()).cloned().collect();
+            if let Some(s) = least_busy(&all) {
+                return Some(s);
+            }
+        }
         let writers = self.writers.lock().unwrap();
         // the first writer takes jobs even while it starts: they wait in its queue (none:
         // the tenant was stopped)
@@ -240,13 +251,13 @@ impl Tenant {
     }
 
     /// How many engines it may have: one when the files are watched (`quadra dev` applies
-    /// them to its engine), one writer on SQLite.
+    /// them to its engine).
     fn shape(&self) -> Engines {
         if self.config.watch {
             return Engines::one();
         }
-        let postgres = !self.config.url.starts_with("sqlite:");
-        Engines { readers: self.config.engines.readers, writers: if postgres { self.config.engines.writers.max(1) } else { 1 } }
+        // the sequencer orders the commits: any number of engines may prepare them, on SQLite too
+        Engines { readers: self.config.engines.readers, writers: self.config.engines.writers.max(1) }
     }
 
     /// The engines besides the first, started (again) now: after the first one is up, and
@@ -258,8 +269,8 @@ impl Tenant {
             return;
         }
         let shape = self.shape();
-        let new_readers: Vec<Arc<Slot>> = (0..shape.readers).map(|n| engine_thread(&self.id, &format!("r{n}"), &self.config, false, None, None, self.usage.clone())).collect();
-        let new_writers: Vec<Arc<Slot>> = (1..shape.writers).map(|n| engine_thread(&self.id, &format!("w{n}"), &self.config, false, None, None, self.usage.clone())).collect();
+        let new_readers: Vec<Arc<Slot>> = (0..shape.readers).map(|n| engine_thread(&self.id, &format!("r{n}"), &self.config, false, None, None, self.usage.clone(), self.sequencer.clone(), self.durability.clone())).collect();
+        let new_writers: Vec<Arc<Slot>> = (1..shape.writers).map(|n| engine_thread(&self.id, &format!("w{n}"), &self.config, false, None, None, self.usage.clone(), self.sequencer.clone(), self.durability.clone())).collect();
         let old_readers = std::mem::replace(&mut *self.readers.lock().unwrap(), new_readers);
         let old_writers = {
             let mut w = self.writers.lock().unwrap();
@@ -286,6 +297,11 @@ impl Tenant {
                 let _ = rx.await;
             }
         }
+        // what the sequencer holds is written before the database is handed back
+        let sequencer = self.sequencer.lock().unwrap().take();
+        if let Some(s) = sequencer {
+            let _ = tokio::task::spawn_blocking(move || s.stop()).await;
+        }
     }
 
     /// Its engines that are serving.
@@ -297,16 +313,42 @@ impl Tenant {
 /// An engine on a thread of its own (it owns state that is not thread-safe). The first engine
 /// of a tenant (`first`) brings the database up to date with the project; it reports whether
 /// the project reads the clock, and why it could not start.
-fn engine_thread(id: &str, name: &str, cfg: &Config, first: bool, failed: Option<Arc<Mutex<Option<String>>>>, reads_clock: Option<Arc<std::sync::atomic::AtomicBool>>, usage: Arc<Meter>) -> Arc<Slot> {
+#[allow(clippy::too_many_arguments)]
+fn engine_thread(
+    id: &str,
+    name: &str,
+    cfg: &Config,
+    first: bool,
+    failed: Option<Arc<Mutex<Option<String>>>>,
+    reads_clock: Option<Arc<std::sync::atomic::AtomicBool>>,
+    usage: Arc<Meter>,
+    sequencer: Arc<Mutex<Option<quadra_store::Sequencer>>>,
+    durability: Option<Arc<dyn Durability>>,
+) -> Arc<Slot> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let (jobs, rx) = mpsc::channel::<Job>();
     let slot = Arc::new(Slot { jobs: Mutex::new(jobs), pending: Arc::new(AtomicUsize::new(0)), ready: Arc::new(AtomicBool::new(false)) });
     let ready = slot.ready.clone();
     let (cfg, label) = (Config { web: None, ..cfg.clone() }, format!("{id}/{name}"));
+    let tenant = id.to_string();
     let thread_label = label.clone();
     let spawned = std::thread::Builder::new().name(format!("quadra-engine-{label}")).stack_size(engine::ENGINE_STACK).spawn(move || {
         let label = thread_label;
         let engine = if first { Engine::new(&cfg) } else { Engine::follower(&cfg) };
+        // the first engine has brought the database up to date: its sequencer starts there
+        let engine = engine.and_then(|mut engine| {
+            let mut slot = sequencer.lock().unwrap();
+            if first || slot.is_none() {
+                if let Some(old) = slot.take() {
+                    old.stop();
+                }
+                let (destinations, rule) = durability.as_ref().map(|d| d.destinations(&tenant)).unwrap_or((Vec::new(), quadra_store::sequencer::Rule::Local));
+                let options = quadra_store::sequencer::Options { max_bytes: cfg.limits.max_bytes, statement_timeout: cfg.limits.job, destinations, rule, ..Default::default() };
+                *slot = Some(quadra_store::Sequencer::start(&cfg.url, options)?);
+            }
+            engine.set_sequencer(slot.clone());
+            Ok(engine)
+        });
         match engine {
             Ok(engine) => {
                 if let Some(c) = &reads_clock {
@@ -343,6 +385,28 @@ pub enum SignInMail {
 /// Sends the sign-in's emails: with it, users sign in with a code sent by email
 /// (`POST /v1/auth/code`, `/v1/auth/code/verify`) and admins invite them (`/v1/auth/invite`).
 /// `tenant` is the tenant's id, `host` the address the request came to (`shop.quadra.run`).
+/// Where a tenant's commits are kept besides its database, and when they are confirmed to the
+/// client (`quadra_store::sequencer`): the host decides it per tenant (its plan).
+pub trait Durability: Send + Sync + 'static {
+    fn destinations(&self, tenant: &str) -> (Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>, quadra_store::sequencer::Rule);
+}
+
+/// Every batch as a file in a folder of its own per tenant (`quadra serve --log-dir`): a
+/// commit is confirmed once its batch is in the folder too.
+pub struct LogFolder(pub std::path::PathBuf);
+
+impl Durability for LogFolder {
+    fn destinations(&self, tenant: &str) -> (Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>, quadra_store::sequencer::Rule) {
+        match quadra_store::segments::Folder::new(self.0.join(tenant)) {
+            Ok(f) => (vec![Box::new(f)], quadra_store::sequencer::Rule::All),
+            Err(e) => {
+                eprintln!("log folder: {e}");
+                (Vec::new(), quadra_store::sequencer::Rule::Local)
+            }
+        }
+    }
+}
+
 pub trait SignIn: Send + Sync + 'static {
     fn send(&self, tenant: &str, host: &str, mail: SignInMail) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
 }
@@ -353,8 +417,16 @@ struct App {
     secure_cookies: bool,
     dev_login: bool,
     sign_in: Option<Arc<dyn SignIn>>,
-    /// requests per credential: (tokens, last refill)
+    /// requests per second a credential may make
+    rate: f64,
+    durability: Option<Arc<dyn Durability>>,
+    /// requests per valid credential (`tenant/hash`): (tokens, last refill)
     limiter: Mutex<HashMap<String, (f64, Instant)>>,
+    /// failed authentications per tenant: (tokens, last refill)
+    failures: Mutex<HashMap<String, (f64, Instant)>>,
+    /// credentials found valid lately (`tenant/hash` → who, until when): a request with one
+    /// does not wait for the engine, and still gets in while a flood of wrong ones is refused
+    known: Mutex<HashMap<String, (Principal, Instant)>>,
     /// what tenants stopped since the host last asked had used
     used: Mutex<HashMap<String, Usage>>,
 }
@@ -381,8 +453,42 @@ impl axum::extract::FromRequestParts<Shared> for Ten {
 }
 
 const COOKIE: &str = "quadra_session";
-const RATE: f64 = 30.0; // requests per second
+const RATE: f64 = 30.0; // requests per second, per credential
 const BURST: f64 = 120.0;
+/// Failed authentications per second, per tenant: past them, a credential not seen valid lately
+/// is refused without asking the engine.
+const FAIL_RATE: f64 = 5.0;
+const FAIL_BURST: f64 = 50.0;
+/// How long a credential found valid is trusted without asking the engine again (a revoked token
+/// or a session signed out elsewhere works at most this long more; signing out here is at once).
+const KNOWN_FOR: Duration = Duration::from_secs(10);
+/// Entries a limiter or the known credentials keep before the idle ones are forgotten.
+const MAX_ENTRIES: usize = 10_000;
+
+/// Takes one token from the bucket of `key` (refilled at `rate` per second up to `burst`);
+/// false when it is empty. Past `MAX_ENTRIES` keys, the full buckets (idle ones) are forgotten.
+fn take(buckets: &Mutex<HashMap<String, (f64, Instant)>>, key: &str, rate: f64, burst: f64) -> bool {
+    let mut m = buckets.lock().unwrap();
+    let now = Instant::now();
+    if m.len() >= MAX_ENTRIES && !m.contains_key(key) {
+        m.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
+    }
+    let e = m.entry(key.to_string()).or_insert((burst, now));
+    e.0 = (e.0 + now.duration_since(e.1).as_secs_f64() * rate).min(burst);
+    e.1 = now;
+    if e.0 >= 1.0 {
+        e.0 -= 1.0;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the bucket of `key` has a token left, without taking it.
+fn has_token(buckets: &Mutex<HashMap<String, (f64, Instant)>>, key: &str, rate: f64) -> bool {
+    let m = buckets.lock().unwrap();
+    m.get(key).map_or(true, |(tokens, at)| tokens + Instant::now().duration_since(*at).as_secs_f64() * rate >= 1.0)
+}
 
 fn json_response(status: u16, body: J) -> Response {
     let mut r = (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(body)).into_response();
@@ -417,23 +523,44 @@ impl App {
                 Some(_) => t.halt(),
             }
         }
-        let t = start(spec);
+        let t = start(spec, self.durability.clone());
         running.insert(t.id.clone(), t.clone());
         Ok(t)
     }
 
+    /// One request more for `key` (a sign-in attempt, a code asked): false past the rate.
     fn allow(&self, key: &str) -> bool {
-        let mut m = self.limiter.lock().unwrap();
+        take(&self.limiter, key, RATE, BURST)
+    }
+
+    /// One request more of a valid credential: false past the host's rate.
+    fn allow_credential(&self, key: &str) -> bool {
+        take(&self.limiter, key, self.rate, self.rate * BURST / RATE)
+    }
+
+    /// The key of a credential of a tenant: its hash, never the secret itself.
+    fn credential(t: &Tenant, secret: &str) -> String {
+        format!("{}/{}", t.id, quadra_store::auth::sha256_hex(secret))
+    }
+
+    fn known(&self, key: &str) -> Option<Principal> {
+        let m = self.known.lock().unwrap();
+        m.get(key).filter(|(_, until)| *until > Instant::now()).map(|(p, _)| p.clone())
+    }
+
+    fn remember(&self, key: String, who: &Principal) {
+        let mut m = self.known.lock().unwrap();
         let now = Instant::now();
-        let e = m.entry(key.to_string()).or_insert((BURST, now));
-        e.0 = (e.0 + now.duration_since(e.1).as_secs_f64() * RATE).min(BURST);
-        e.1 = now;
-        if e.0 >= 1.0 {
-            e.0 -= 1.0;
-            true
-        } else {
-            false
+        if m.len() >= MAX_ENTRIES {
+            m.retain(|_, (_, until)| *until > now);
         }
+        if m.len() < MAX_ENTRIES {
+            m.insert(key, (who.clone(), now + KNOWN_FOR));
+        }
+    }
+
+    fn forget(&self, key: &str) {
+        self.known.lock().unwrap().remove(key);
     }
 }
 
@@ -452,10 +579,29 @@ async fn authenticate(app: &App, t: &Tenant, method: &Method, headers: &HeaderMa
         (None, Some(c)) => (c, true),
         (None, None) => return Err(fail(401, "authentication required")),
     };
-    if !app.allow(&format!("{}/{}", t.id, &secret[..secret.len().min(24)])) {
+    let key = App::credential(t, &secret);
+    let who = match app.known(&key) {
+        Some(who) => who,
+        None => {
+            // a flood of wrong credentials stops here instead of filling the engine's queue
+            if !has_token(&app.failures, &t.id, FAIL_RATE) {
+                return Err(fail(429, "too many failed sign-ins on this project: try again in a moment"));
+            }
+            match t.ask(|reply| Job::Auth { secret, reply }).await.flatten() {
+                Some(who) => {
+                    app.remember(key.clone(), &who);
+                    who
+                }
+                None => {
+                    take(&app.failures, &t.id, FAIL_RATE, FAIL_BURST);
+                    return Err(fail(401, "invalid or expired credentials"));
+                }
+            }
+        }
+    };
+    if !app.allow_credential(&key) {
         return Err(fail(429, "too many requests"));
     }
-    let who = t.ask(|reply| Job::Auth { secret, reply }).await.flatten().ok_or_else(|| fail(401, "invalid or expired credentials"))?;
     if from_cookie && method != Method::GET {
         // a browser session: the CSRF token must come back in a header, and the request
         // must come from this site
@@ -839,6 +985,7 @@ async fn logout(State(app): State<Shared>, Ten(t): Ten, method: Method, headers:
         return r;
     }
     if let Some(secret) = cookie(&headers, COOKIE) {
+        app.forget(&App::credential(&t, &secret));
         t.send(Job::Logout { secret });
     }
     let mut r = json_response(200, json!({ "ok": true }));
@@ -931,14 +1078,15 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
 
 /// A tenant's engine on a thread of its own, and its background tasks: live events from new
 /// commits, the periodic sweep, and with `watch` the files of the project.
-fn start(spec: TenantSpec) -> Arc<Tenant> {
+fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenant> {
     use std::sync::atomic::AtomicBool;
     let (events, _) = broadcast::channel::<J>(256);
     let cfg = Config { web: None, ..spec.config.clone() };
     let failed = Arc::new(Mutex::new(None));
     let reads_clock = Arc::new(AtomicBool::new(false));
     let usage = Arc::new(Meter::default());
-    let first = engine_thread(&spec.id, "w0", &cfg, true, Some(failed.clone()), Some(reads_clock.clone()), usage.clone());
+    let sequencer = Arc::new(Mutex::new(None));
+    let first = engine_thread(&spec.id, "w0", &cfg, true, Some(failed.clone()), Some(reads_clock.clone()), usage.clone(), sequencer.clone(), durability.clone());
     let t = Arc::new(Tenant {
         id: spec.id.clone(),
         config: cfg.clone(),
@@ -955,6 +1103,8 @@ fn start(spec: TenantSpec) -> Arc<Tenant> {
         pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         max_queue: cfg.limits.max_queue,
         usage,
+        sequencer,
+        durability,
     });
     let (watch, root) = (cfg.watch, cfg.root.clone());
 
@@ -1021,6 +1171,10 @@ pub struct HostOptions {
     pub web: Option<std::path::PathBuf>,
     /// the sign-in by email, when the host sends the emails
     pub sign_in: Option<Arc<dyn SignIn>>,
+    /// requests per second a credential may make (bursts of four times as many); None: 30
+    pub requests_per_second: Option<f64>,
+    /// where commits are kept besides each tenant's database (None: only there)
+    pub durability: Option<Arc<dyn Durability>>,
 }
 
 /// A running tenant, as its host sees it.
@@ -1047,7 +1201,7 @@ pub struct Host {
 
 impl Host {
     pub fn new(options: HostOptions, resolver: Arc<dyn TenantResolver>) -> Host {
-        let app = Arc::new(App { resolver, running: Mutex::new(HashMap::new()), secure_cookies: options.secure_cookies, dev_login: options.dev_login, sign_in: options.sign_in, limiter: Mutex::new(HashMap::new()), used: Mutex::new(HashMap::new()) });
+        let app = Arc::new(App { resolver, running: Mutex::new(HashMap::new()), secure_cookies: options.secure_cookies, dev_login: options.dev_login, sign_in: options.sign_in, rate: options.requests_per_second.unwrap_or(RATE), durability: options.durability.clone(), limiter: Mutex::new(HashMap::new()), failures: Mutex::new(HashMap::new()), known: Mutex::new(HashMap::new()), used: Mutex::new(HashMap::new()) });
         Host { app, web: options.web }
     }
 
@@ -1237,9 +1391,16 @@ impl Host {
 
 /// Start the engine and serve one project until the process stops (`quadra serve`).
 pub fn serve(cfg: Config) -> Result<(), String> {
+    serve_with(cfg, None)
+}
+
+/// `serve`, with every commit also kept in `log_dir` (one folder per tenant) before it is
+/// confirmed.
+pub fn serve_with(cfg: Config, log_dir: Option<std::path::PathBuf>) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async move {
-        let options = HostOptions { dev_login: cfg.dev_login, secure_cookies: cfg.secure_cookies, web: cfg.web.clone(), sign_in: None };
+        let durability: Option<Arc<dyn Durability>> = log_dir.map(|d| Arc::new(LogFolder(d)) as Arc<dyn Durability>);
+        let options = HostOptions { dev_login: cfg.dev_login, secure_cookies: cfg.secure_cookies, web: cfg.web.clone(), sign_in: None, requests_per_second: None, durability };
         let host = Host::new(options, Arc::new(Single(TenantSpec { id: "default".into(), config: cfg.clone() })));
         host.start("").await?;
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.port));

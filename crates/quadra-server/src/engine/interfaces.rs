@@ -304,7 +304,7 @@ impl Engine {
         let conn = Pooled::take(&self.pool, &self.url).map_err(|e| (500, e))?;
         let db = Database::with(conn, self.schema.clone());
         i.materialize = materialized_formulas(&db.schema);
-        i.sink = Some(Box::new(Sink { db, model: omodel }));
+        i.sink = Some(self.sink(db, omodel));
         let body_stmts = f.body.clone().unwrap_or_default();
         let result: RefCell<(V, Option<String>)> = RefCell::new((V::None, None));
         let user = who.id;

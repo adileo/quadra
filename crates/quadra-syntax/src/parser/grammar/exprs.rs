@@ -38,9 +38,22 @@ fn infix_bp(p: &Parser) -> Option<(u8, u8)> {
 }
 
 fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
+    if !p.enter() {
+        return None;
+    }
+    let r = expr_bp_inner(p, min_bp);
+    p.leave();
+    r
+}
+
+fn expr_bp_inner(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
     let mut lhs = lhs(p)?;
     while let Some((l, r)) = infix_bp(p) {
         if l < min_bp {
+            break;
+        }
+        if lhs.too_tall() {
+            p.too_deep();
             break;
         }
         let m = lhs.precede(p);
@@ -146,6 +159,10 @@ fn lambda(p: &mut Parser) -> CompletedMarker {
 
 fn postfix(p: &mut Parser, mut lhs: CompletedMarker) -> CompletedMarker {
     loop {
+        if lhs.too_tall() && matches!(p.current(), DOT | QUESTION_DOT | L_PAREN | L_BRACK) {
+            p.too_deep();
+            return lhs;
+        }
         match p.current() {
             DOT | QUESTION_DOT => {
                 let m = lhs.precede(p);
@@ -420,6 +437,14 @@ pub(crate) fn arms(p: &mut Parser) {
 }
 
 fn pattern(p: &mut Parser) {
+    if !p.enter() {
+        return;
+    }
+    pattern_inner(p);
+    p.leave();
+}
+
+fn pattern_inner(p: &mut Parser) {
     let m = p.start();
     match p.current() {
         IDENT => {

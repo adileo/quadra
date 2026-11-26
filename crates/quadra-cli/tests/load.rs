@@ -418,7 +418,10 @@ fn writers_at_full_speed() {
                 limits: Limits { job: Some(Duration::from_secs(30)), max_queue: None, ..Limits::default() },
                 engines: Engines { readers: 0, writers },
             };
-            let host = Host::new(HostOptions::default(), Arc::new(One(TenantSpec { id: "writers".into(), config })));
+            // the engine at full speed: no limit per credential; QUADRA_LOAD_SINK_MS: every batch
+            // also kept somewhere that takes that long (object storage), before it is confirmed
+            let durability: Option<Arc<dyn quadra_server::Durability>> = std::env::var("QUADRA_LOAD_SINK_MS").ok().and_then(|v| v.parse().ok()).map(|ms| Arc::new(Slow(ms)) as Arc<dyn quadra_server::Durability>);
+            let host = Host::new(HostOptions { requests_per_second: Some(1e9), durability, ..Default::default() }, Arc::new(One(TenantSpec { id: "writers".into(), config })));
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
             let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
             let h = host.clone();
@@ -480,5 +483,23 @@ fn writers_at_full_speed() {
                 println!("        {v:>7} × {k}");
             }
         }
+    }
+}
+
+/// A destination that takes `ms` milliseconds per batch, as object storage does.
+struct Slow(u64);
+
+struct SlowSink(u64);
+
+impl quadra_store::sequencer::DurabilitySink for SlowSink {
+    fn persist(&mut self, _: &quadra_store::sequencer::Batch) -> Result<(), String> {
+        std::thread::sleep(Duration::from_millis(self.0));
+        Ok(())
+    }
+}
+
+impl quadra_server::Durability for Slow {
+    fn destinations(&self, _: &str) -> (Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>, quadra_store::sequencer::Rule) {
+        (vec![Box::new(SlowSink(self.0))], quadra_store::sequencer::Rule::All)
     }
 }

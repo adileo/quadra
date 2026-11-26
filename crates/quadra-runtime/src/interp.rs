@@ -125,6 +125,16 @@ pub trait CommitSink {
     fn commit(&mut self, commit: &Commit) -> Result<u64, CommitError>;
 }
 
+/// The analysis of a model that interpreters look up while they run, kept once computed:
+/// dependencies of rules and formulas by key, and which formulas are incremental (by name, and
+/// by the address of the entity and field in the model). Valid for one model only.
+#[derive(Default)]
+pub struct Statics {
+    pub(crate) deps: std::cell::RefCell<HashMap<String, Rc<deps::Deps>>>,
+    pub(crate) trusted: std::cell::RefCell<HashMap<(String, String), bool>>,
+    pub(crate) trusted_ptr: std::cell::RefCell<HashMap<(usize, usize), bool>>,
+}
+
 pub struct Interp<'m> {
     /// Persistence of committed transactions (None = in memory only).
     pub sink: Option<Box<dyn CommitSink + 'm>>,
@@ -152,7 +162,9 @@ pub struct Interp<'m> {
     local_fns: HashMap<String, (FnDef, Vec<(String, V)>)>,
     depth: usize,
     /// dependencies of rules, for incremental evaluation with storage on demand
-    deps_cache: HashMap<String, Rc<deps::Deps>>,
+    /// what the model's analysis says (dependencies, incremental formulas): the same for every
+    /// interpreter of one model, so an engine shares it between its requests (`Statics`)
+    pub statics: Rc<Statics>,
     /// re-evaluate the rules that read the clock on every record (a periodic sweep)
     pub sweep: bool,
     /// when the previous sweep ran: what a `becomes` condition that reads the clock was then
@@ -168,6 +180,17 @@ pub struct Interp<'m> {
     /// The incremental formulas: kept up to date by each commit, their stored values are read
     /// instead of computing them (`rollup.rs`)
     inc: rollup::Inc<'m>,
+    /// While the commit checks the rules and writes the formulas: a rollup computed by delta
+    /// then is a commutative change (`Store::deltas`) instead of a read of its stored value.
+    pub(crate) delta_free: bool,
+    /// The rollups computed by delta while a rule is evaluated (to tell a guard from a read).
+    pub(crate) capture: Option<Vec<(Id, String)>>,
+    /// The formula being materialized: a rollup of its own computed by delta is a change that
+    /// adds up; the same value read by another formula computed in full is a read.
+    pub(crate) materializing: Option<(Id, String)>,
+    /// > 0 while a rollup's change is being computed: the children's values it reads only
+    /// measure that change (the change is the same whatever others added meanwhile).
+    pub(crate) in_delta: usize,
     /// Expressions written by a user (cells of an app) evaluated as that user: queries keep
     /// the rows they may read, hidden fields and records they may not read fail, the
     /// interpreter reads at most `viewer::ENGINE_ROWS` rows of an entity (viewer.rs).
@@ -283,13 +306,17 @@ impl<'m> Interp<'m> {
             currency_ids: HashMap::new(),
             local_fns: HashMap::new(),
             depth: 0,
-            deps_cache: HashMap::new(),
+            statics: Rc::new(Statics::default()),
             sweep: false,
             last_sweep: None,
             whole_data: false,
             violations: Vec::new(),
             formula_memo: None,
             inc: rollup::Inc::default(),
+            delta_free: false,
+            capture: None,
+            materializing: None,
+            in_delta: 0,
             viewer: false,
             viewer_pause: 0,
             viewer_seen: HashMap::new(),
@@ -3713,7 +3740,8 @@ impl<'m> Interp<'m> {
                 continue;
             }
             let mut ctx = Ctx::for_record(&rec, &e.name);
-            if !self.eval(&c.cond, &mut ctx)?.truthy() {
+            let held = self.eval_rule(e, id, &rec, &c.cond, &mut ctx)?;
+            if !held.truthy() {
                 let msg = self.eval(&c.message, &mut ctx).map(|m| m.to_string()).unwrap_or_else(|_| print::expr(&c.cond));
                 if c.warn {
                     if let Some(r) = self.store.records.get_mut(&id) {
@@ -3727,6 +3755,88 @@ impl<'m> Interp<'m> {
             }
         }
         Ok(())
+    }
+
+    /// A rule of a record, evaluated while committing: a rollup it reads that this transaction
+    /// changed by delta makes it a guard (`rollup OP value`, checked again by whoever orders
+    /// the commits, on the latest value) when it has that shape, and a read otherwise.
+    fn eval_rule(&mut self, e: &'m Entity, id: Id, rec: &V, cond: &Expr, ctx: &mut Ctx) -> R<V> {
+        let outer = self.capture.replace(Vec::new());
+        let was = std::mem::replace(&mut self.delta_free, true);
+        let v = self.eval(cond, ctx);
+        let captured = std::mem::replace(&mut self.capture, outer).unwrap_or_default();
+        let v = match v {
+            Ok(v) => v,
+            Err(err) => {
+                self.delta_free = was;
+                return Err(err);
+            }
+        };
+        if !captured.is_empty() {
+            let guard = if v.truthy() { self.guard_of(e, id, rec, cond, &captured, ctx) } else { None };
+            match guard {
+                Some(g) => self.store.guards.push(g),
+                None => {
+                    if !self.store.untracked {
+                        for (cid, f) in &captured {
+                            self.store.reads.formula(*cid, f);
+                        }
+                    }
+                }
+            }
+            if let Some(c) = &mut self.capture {
+                c.extend(captured);
+            }
+        }
+        self.delta_free = was;
+        Ok(v)
+    }
+
+    /// `cond` as a guard: a comparison of one of the record's own rollups changed by delta
+    /// (the only one it read) with a value that reads none.
+    fn guard_of(&mut self, e: &'m Entity, id: Id, rec: &V, cond: &Expr, captured: &[(Id, String)], ctx: &mut Ctx) -> Option<crate::store::Guard> {
+        let ExprKind::Binary { op, lhs, rhs } = &cond.kind else {
+            return None;
+        };
+        let op = *op;
+        if !matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            return None;
+        }
+        let own = |x: &Expr| match &x.kind {
+            ExprKind::Name(n) => Some(n.clone()),
+            ExprKind::Field { base, name, .. } if matches!(base.kind, ExprKind::SelfRef) => Some(name.clone()),
+            _ => None,
+        };
+        let field = captured.first().map(|(_, f)| f.clone())?;
+        if captured.iter().any(|(i, f)| *i != id || *f != field) {
+            return None;
+        }
+        let (bound, op) = if own(lhs).as_deref() == Some(field.as_str()) {
+            (rhs, op)
+        } else if own(rhs).as_deref() == Some(field.as_str()) {
+            let flipped = match op {
+                BinOp::Lt => BinOp::Gt,
+                BinOp::Le => BinOp::Ge,
+                BinOp::Gt => BinOp::Lt,
+                _ => BinOp::Le,
+            };
+            (lhs, flipped)
+        } else {
+            return None;
+        };
+        if !self.m.all_fields(e).iter().any(|f| f.name == field && f.formula.is_some()) {
+            return None;
+        }
+        // the other side, on its own: it may read no rollup changed by delta
+        let outer = self.capture.replace(Vec::new());
+        let value = self.eval(bound, ctx);
+        let read = std::mem::replace(&mut self.capture, outer).unwrap_or_default();
+        let value = value.ok()?;
+        if !read.is_empty() {
+            return None;
+        }
+        let _ = rec;
+        Some(crate::store::Guard { id, field, op, bound: value })
     }
 
     /// A deploy changed `frozen when`: freeze the record if it holds now, unfreeze it if it
@@ -4135,6 +4245,8 @@ impl<'m> Interp<'m> {
         self.store.posted.clear();
         self.store.posted_rows.clear();
         self.store.thawed.clear();
+        self.store.deltas.clear();
+        self.store.guards.clear();
         // the events of this transaction only: the commit writes them to the outbox
         self.store.outbox.clear();
         let r = f(self).and_then(|v| {
@@ -4190,6 +4302,12 @@ impl<'m> Interp<'m> {
 
     /// Recompute the materialized formulas; changed values are written by the sink.
     pub fn materialize_formulas(&mut self) {
+        let was = std::mem::replace(&mut self.delta_free, true);
+        self.materialize_formulas_inner();
+        self.delta_free = was;
+    }
+
+    fn materialize_formulas_inner(&mut self) {
         let targets = self.materialize.clone();
         for (ent, field) in targets {
             let ids = if self.store.lazy() && self.store.uid != 0 && self.trusted(&ent, &field) {
@@ -4207,7 +4325,9 @@ impl<'m> Interp<'m> {
             };
             for id in ids {
                 let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+                self.materializing = Some((id, field.clone()));
                 let v = self.get(&rec, &field, None, None).unwrap_or(V::None);
+                self.materializing = None;
                 let key = (id, field.clone());
                 if self.store.materialized.get(&key) != Some(&v) {
                     self.store.materialized.insert(key, v);

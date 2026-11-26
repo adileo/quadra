@@ -7,6 +7,14 @@ use crate::syntax_kind::SyntaxKind::*;
 /// A block after `:`. Either an indented block on the following lines or a single
 /// statement on the same line (`as anna: inv.post()`).
 pub(crate) fn block(p: &mut Parser) {
+    if !p.enter() {
+        return;
+    }
+    block_inner(p);
+    p.leave();
+}
+
+fn block_inner(p: &mut Parser) {
     let m = p.start();
     if p.at(NEWLINE) && p.nth(1) == INDENT {
         p.bump();

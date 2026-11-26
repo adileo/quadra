@@ -36,11 +36,11 @@ fn ref_ids(v: &V) -> Vec<Id> {
 impl<'m> Interp<'m> {
     /// Dependencies of a rule, computed once.
     pub(super) fn deps(&mut self, key: &str, root: &str, exprs: &[&Expr], stmts: &[&[Stmt]]) -> Rc<Deps> {
-        if let Some(d) = self.deps_cache.get(key) {
+        if let Some(d) = self.statics.deps.borrow().get(key) {
             return d.clone();
         }
         let d = Rc::new(analyze(self.m, root, exprs, stmts));
-        self.deps_cache.insert(key.to_string(), d.clone());
+        self.statics.deps.borrow_mut().insert(key.to_string(), d.clone());
         d
     }
 
@@ -235,7 +235,7 @@ impl<'m> Interp<'m> {
             }
         }
         let key = format!("checks:{}", e.name);
-        if let Some(d) = self.deps_cache.get(&key) {
+        if let Some(d) = self.statics.deps.borrow().get(&key) {
             return d.clone();
         }
         let mut d = (*self.deps(&key, &e.name, &exprs, &[])).clone();
@@ -279,7 +279,7 @@ impl<'m> Interp<'m> {
             }
         }
         let d = Rc::new(d);
-        self.deps_cache.insert(key, d.clone());
+        self.statics.deps.borrow_mut().insert(key, d.clone());
         d
     }
 
@@ -291,11 +291,11 @@ impl<'m> Interp<'m> {
 
     pub fn formula_deps(&mut self, ent: &str, field: &str) -> Rc<Deps> {
         let key = format!("formula:{ent}:{field}");
-        if let Some(d) = self.deps_cache.get(&key) {
+        if let Some(d) = self.statics.deps.borrow().get(&key) {
             return d.clone();
         }
         let d = Rc::new(super::deps::analyze_formula(self.m, ent, field));
-        self.deps_cache.insert(key, d.clone());
+        self.statics.deps.borrow_mut().insert(key, d.clone());
         d
     }
 }
