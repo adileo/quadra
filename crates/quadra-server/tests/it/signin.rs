@@ -220,7 +220,8 @@ fn sign_in_by_email_code_on_two_tenants() {
     http(port, "a.test", "POST", "/v1/query", Some(q.clone()), Some(&session));
     let one: HashMap<String, quadra_server::Usage> = host.take_usage().into_iter().collect();
     let a1 = one["ta"];
-    assert!(!one.contains_key("tb"), "b did nothing: {one:?}");
+    // (b may still finish the work of its start in the background: it had no request)
+    assert_eq!(one.get("tb").map_or(0, |u| u.requests), 0, "b had no request: {one:?}");
     assert_eq!(a1.requests, 1, "{a1:?}");
     assert!(a1.rows_read > 0, "{a1:?}");
     assert!(host.take_usage().is_empty(), "taken once");
