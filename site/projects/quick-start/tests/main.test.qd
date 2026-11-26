@@ -1,0 +1,20 @@
+from main import Customer, Product, Order, OrderLine
+
+# Demo data: `quadra dev` loads it into a new database.
+fixture demo:
+    let acme = Customer(name="ACME Inc.", email="buyer@acme.test")
+    let mug = Product(name="Mug", price=8.50 EUR)
+    let tea = Product(name="Green tea", price=4.20 EUR)
+    Order(customer=acme, lines=[OrderLine(product=mug, qty=2), OrderLine(product=tea)])
+
+test "an order adds up its lines":
+    use demo
+    let o = Order(customer=acme, lines=[OrderLine(product=mug, qty=3)])
+    expect o.total == 25.50 EUR
+    o.confirm()
+    expect acme.open_total == 25.50 EUR
+
+test "the credit limit is a rule":
+    use demo
+    expect_error "Over the credit limit":
+        Order(customer=acme, lines=[OrderLine(product=mug, qty=200)])

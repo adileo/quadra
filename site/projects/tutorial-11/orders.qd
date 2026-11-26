@@ -1,0 +1,104 @@
+# Orders: a document with lines, a life cycle, and the numbers we compute from them.
+
+from customers import Customer, Address
+from catalog import Product, Category
+from stock import Stock
+
+const FREE_SHIPPING_FROM: Money<EUR> = 50.00 EUR
+const SHIPPING_FEE: Money<EUR> = 4.90 EUR
+
+# A message to the outside world: it leaves only after the transaction commits.
+event ShippingNotice(to: Email, order: Order)
+
+
+entity Order:
+    number: Code? unique
+    customer: Customer
+    date: Date default today()
+    deliver_by: Date default date + 3 days
+    ship_to: Address? default customer.address
+    notes: Text?
+    lines: [OrderLine]
+
+    state: enum(Draft, Confirmed, Shipped, Cancelled) default Draft
+    confirmed_at: DateTime? required when state in {Confirmed, Shipped}
+    cancel_reason: Text? required when state is Cancelled
+
+    subtotal = lines.sum(l => l.amount)
+    vat_summary = lines.group_by(l => l.vat).map(g => (
+        rate: g.key,
+        base: g.items.sum(l => l.amount),
+        vat: (g.items.sum(l => l.amount) * g.key).round()))
+    vat = vat_summary.sum(v => v.vat)
+    shipping: Money<EUR> = when:
+        lines.count() == 0                  => 0 EUR
+        subtotal >= FREE_SHIPPING_FROM      => 0 EUR
+        else                                => SHIPPING_FEE
+    total = subtotal + vat + shipping
+
+    check deliver_by >= date, "The delivery date is before the order date"
+    warn total <= customer.credit_limit, "This order is over the customer's credit limit"
+
+    # Once confirmed, the order is a fact: it sees the world as it was at that moment.
+    frozen when state is not Draft except notes, cancel_reason
+
+    flow state:
+        Draft -> Confirmed                  by confirm
+        Confirmed -> Shipped                by ship
+        Draft | Confirmed -> Cancelled      by cancel
+
+    action confirm:
+        require lines.count() > 0, "An order needs at least one line"
+        require lines.all(l => l.product.active), "The order contains products we no longer sell"
+        number = next_number(current.company, "SO")
+        confirmed_at = now()
+
+    action ship:
+        if let email = customer.email:
+            emit ShippingNotice(to=email, order=self)
+
+    action cancel(reason: Text):
+        cancel_reason = reason
+
+    # Shipping takes the goods out of stock.
+    post to Stock when state is Shipped:
+        for l in lines:
+            add(product=l.product, qty=-l.qty)
+
+
+entity OrderLine:
+    order: Order parent
+    product: Product
+    qty: Qty<product.uom> where > 0
+    price: Price<EUR, product.uom> default product.price
+    discount: Percent where 0%..50% default order.customer.discount
+    vat: Percent default product.vat
+
+    amount = (qty * price * (1 - discount)).round()
+
+    unique (order, product)
+
+
+extend Customer:
+    orders: [Order]
+    lifetime_value = orders.where(o => o.state in {Confirmed, Shipped}).sum(o => o.total)
+    open_total = orders.where(o => o.state is Confirmed).sum(o => o.total)
+    categories = orders.flat_map(o => o.lines).flat_map(l => l.product.category).distinct()
+    tier: enum(Standard, Silver, Gold) = when:
+        lifetime_value >= 1_000.00 EUR      => Gold
+        lifetime_value >= 250.00 EUR        => Silver
+        else                                => Standard
+
+    check open_total <= credit_limit, "Credit limit exceeded"
+
+
+extend Product:
+    order_lines: [OrderLine] via product
+    sold = order_lines.sum(l => l.qty)
+    revenue = order_lines.sum(l => l.amount)
+    reserved: Qty<uom> = order_lines.where(l => l.order.state is Confirmed).sum(l => l.qty)
+    available = on_hand - reserved
+
+
+extend Category:
+    revenue = products.sum(p => p.revenue)

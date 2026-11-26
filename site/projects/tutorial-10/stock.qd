@@ -1,0 +1,31 @@
+# Stock is not a field that someone updates: it is the sum of what came in and went out.
+
+from catalog import Product, Supplier
+
+
+# An append-only register. Rows are written only by `post to Stock`.
+ledger Stock:
+    key product: Product
+    measure qty: Qty<product.uom>
+
+    check per (product): g => g.sum(r => r.qty) >= 0, "Not enough stock"
+
+
+# Goods arriving from a supplier.
+entity Restock:
+    supplier: Supplier?
+    date: Date default today()
+    product: Product
+    qty: Qty<product.uom> where > 0
+    state: enum(Draft, Received) default Draft
+
+    frozen when state is Received
+    flow state:
+        Draft -> Received by receive
+
+    post to Stock when state is Received:
+        add(product=product, qty=qty)
+
+
+extend Product:
+    on_hand: Qty<uom> = Stock.where(s => s.product == self).sum(s => s.qty)

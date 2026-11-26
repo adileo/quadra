@@ -1,0 +1,25 @@
+# Our shop: the people we sell to and the things we sell.
+
+entity Customer:
+    name: Text unique
+    email: Email?
+    city: Text?
+    since: Date default today()
+    discount: Percent default 0%
+    credit_limit: Money<EUR> default 500.00 EUR
+
+
+entity Product:
+    code: Code unique
+    name: Text
+    description: Text?
+    active: Bool default true
+    uom: Uom default pcs                    # the unit we sell it in: pcs, kg, l…
+    price: Price<EUR, uom>                  # EUR per unit: 7.50 EUR/pcs, 18.00 EUR/kg
+    cost: Price<EUR, uom> default 0         # what we pay for it
+    weight: Qty<kg>?                        # always in kilograms, whatever we sell it in
+    vat: Percent default 22%
+
+    # What `qty` of this product costs, rounded to the cent.
+    fn price_for(qty: Qty<uom>) -> Money<EUR>:
+        return (qty * price).round()

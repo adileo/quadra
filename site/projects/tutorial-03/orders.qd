@@ -1,0 +1,25 @@
+# Orders: a document with lines.
+
+from customers import Customer, Address
+from catalog import Product
+
+
+entity Order:
+    customer: Customer
+    date: Date default today()
+    ship_to: Address? default customer.address
+    notes: Text?
+    lines: [OrderLine]
+
+
+entity OrderLine:
+    order: Order parent                     # the line lives and dies with its order
+    product: Product
+    qty: Qty<product.uom>
+    price: Price<EUR, product.uom> default product.price
+
+
+# Customer is declared in customers.qd, which cannot import this module (no cycles):
+# we add the inverse of Order.customer from here.
+extend Customer:
+    orders: [Order]

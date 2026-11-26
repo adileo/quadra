@@ -1,0 +1,27 @@
+{
+  "name": "quadra-site",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "wasm": "sh scripts/build-wasm.sh",
+    "projects": "node scripts/bundle-projects.mjs",
+    "dev": "npm run projects && vitepress dev",
+    "build": "npm run projects && npm run app && vitepress build",
+    "preview": "vitepress preview",
+    "app": "sh scripts/build-app.sh"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "6.20.4",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/lint": "6.9.8",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@lezer/highlight": "1.2.5",
+    "codemirror": "6.0.2",
+    "fflate": "0.8.2",
+    "vitepress": "1.6.4",
+    "vue": "3.5.13"
+  }
+}

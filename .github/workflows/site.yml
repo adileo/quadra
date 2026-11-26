@@ -1,0 +1,82 @@
+name: site
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: ["site/**", "crates/quadra-wasm/**", "editors/vscode/syntaxes/**", "examples/extended/**"]
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The website (homepage, docs, sandbox): built on the runner with the caches of the previous
+  # runs (the engine in WebAssembly, npm), then an image that only copies the files, published
+  # to GHCR on main and deployed by Quadra Cloud at quadra.run.
+  #
+  # The demo under /app is the studio, private (github.com/adileo/quadra-studio): read with a
+  # deploy key (secret STUDIO_DEPLOY_KEY). Without it (pull requests from forks) the site is
+  # built without the demo and nothing is published.
+  site:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      STUDIO_KEY: ${{ secrets.STUDIO_DEPLOY_KEY }}
+      STUDIO_SRC: ${{ github.workspace }}/studio
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        if: env.STUDIO_KEY != ''
+        with:
+          repository: adileo/quadra-studio
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          path: studio
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.129
+      - name: wasm-opt
+        run: sudo apt-get install -y -q --no-install-recommends binaryen
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: The site
+        run: |
+          sh site/scripts/build-wasm.sh
+          (cd site && npm ci && npm run build)
+      - uses: docker/setup-buildx-action@v3
+      - name: The image (published on main, with the demo)
+        env:
+          IMAGE: ghcr.io/adileo/quadra-site
+        run: |
+          push=""
+          if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ] && [ -n "$STUDIO_KEY" ]; then
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            push="--push"
+          fi
+          docker buildx build --platform linux/amd64,linux/arm64 $push \
+            -f site/Dockerfile.release -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:main" site
+      # Quadra Cloud serves the website: its compose is deployed again (only the site changes)
+      - name: Deploy on Dokploy (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.STUDIO_KEY != ''
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+        run: |
+          if [ -z "$DOKPLOY_URL" ] || [ -z "$DOKPLOY_API_KEY" ]; then echo "no Dokploy secrets: not deployed"; exit 0; fi
+          code=$(curl -sS -o /tmp/dokploy.json -w '%{http_code}' -X POST "${DOKPLOY_URL%/}/api/compose.deploy" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'content-type: application/json' \
+            -d '{"composeId":"xFL_CrVwYVpUFco-d-IuV","title":"CI site ${{ github.sha }}"}')
+          echo "Dokploy answered $code: $(head -c 200 /tmp/dokploy.json)"
+          # the panel's own page answers 200 to any path: only a JSON answer is a deploy
+          test "$code" = 200 && grep -q '^{' /tmp/dokploy.json

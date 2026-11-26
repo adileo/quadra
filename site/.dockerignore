@@ -1,0 +1,4 @@
+# the context of Dockerfile.release: only what it copies
+*
+!Caddyfile
+!.vitepress/dist

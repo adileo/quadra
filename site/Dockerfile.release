@@ -1,0 +1,9 @@
+# The image the CI publishes: the site it has just built (.vitepress/dist), served by Caddy.
+# Nothing is built here. The context is site/:
+#
+#   docker buildx build --platform linux/amd64,linux/arm64 -f site/Dockerfile.release site
+#
+# site/Dockerfile builds everything from the sources instead.
+FROM caddy:2.11.9
+COPY Caddyfile /etc/caddy/Caddyfile
+COPY .vitepress/dist /srv

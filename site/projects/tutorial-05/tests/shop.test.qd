@@ -1,0 +1,10 @@
+test "a new customer":
+    let anna = Customer(name="Anna Rossi", email="anna@example.com")
+    expect anna.name == "Anna Rossi"
+    expect anna.address == none
+    expect anna.credit_limit == 500.00 EUR
+
+test "new products are active":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    expect mug.active
+    expect Product.count() == 1

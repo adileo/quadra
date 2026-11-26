@@ -98,12 +98,13 @@ With the official binary, open http://localhost:8091 and sign in as `admin`, `gi
 
 - [std/](std): the standard library (currencies, units, companies, users, numbering, time zones)
 - [editors/vscode](editors/vscode/README.md): the extension for VS Code and Cursor
+- [site/](site/README.md): quadra.run, the documentation and the sandbox (the engine in WebAssembly)
 
 ## License
 
 The code of this repository is under the [Apache License 2.0](LICENSE): the language, the type
 checker, the analyses and the formatter, the language server, the runtime, the storage, the
-API server, the command line and the editor extension.
+API server, the command line, the editor extension and the website.
 
 Quadra Studio, the web interface embedded in the official binaries, has its own license: free
 to use, also for work, but not to sell or to redistribute on its own. A build from these

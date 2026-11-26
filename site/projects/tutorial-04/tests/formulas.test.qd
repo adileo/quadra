@@ -1,0 +1,54 @@
+test "order totals":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let beans = Product(code="BEANS-01", name="House blend", uom=kg, price=18.00 EUR/kg, vat=10%)
+    let anna = Customer(name="Anna Rossi", discount=10%)
+    let o = Order(customer=anna, lines=[
+        OrderLine(product=mug, qty=2 pcs),
+        OrderLine(product=beans, qty=500 g),
+    ])
+    expect o.lines.map(l => l.amount) == [13.50 EUR, 8.10 EUR]     # 10% off for Anna
+    expect o.subtotal == 21.60 EUR
+    expect o.vat_summary.map(v => v.vat) == [2.97 EUR, 0.81 EUR]    # 22% and 10%
+    expect o.vat == 3.78 EUR
+    expect o.shipping == 4.90 EUR                                   # under 50 EUR
+    expect o.total == 30.28 EUR
+
+    # formulas are always up to date: change a quantity and everything follows
+    o.lines[1].qty = 3 kg
+    expect o.subtotal == 62.10 EUR
+    expect o.shipping == 0 EUR
+    expect o.total == 69.93 EUR
+
+
+test "rollups across several hops":
+    let mugs = Category(name="Mugs")
+    let coffee = Category(name="Coffee")
+    let mug = Product(code="MUG-01", name="Espresso mug", category=mugs, price=7.50 EUR/pcs, cost=3.00 EUR/pcs)
+    let beans = Product(code="BEANS-01", name="House blend", category=coffee, uom=kg, price=18.00 EUR/kg)
+    let anna = Customer(name="Anna Rossi")
+    Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    Order(customer=anna, lines=[OrderLine(product=mug, qty=1 pcs), OrderLine(product=beans, qty=1 kg)])
+
+    expect mug.label == "MUG-01 · Espresso mug"
+    expect mug.margin == 4.50 EUR/pcs
+    expect mug.sold == 3 pcs
+    expect mug.revenue == 22.50 EUR
+    expect mugs.revenue == 22.50 EUR
+    expect anna.categories == [mugs, coffee]
+    expect anna.tier is Standard
+
+
+test "a customer's tier follows their orders":
+    let beans = Product(code="BEANS-01", name="House blend", uom=kg, price=18.00 EUR/kg, vat=10%)
+    let anna = Customer(name="Anna Rossi")
+    let o = Order(customer=anna, lines=[OrderLine(product=beans, qty=10 kg)])
+    expect anna.lifetime_value == 198.00 EUR
+    expect anna.tier is Standard
+    o.lines[0].qty = 20 kg
+    expect anna.tier is Silver
+
+
+test "formulas must be pure":
+    expect_compile_error "today() is not allowed in a formula":
+        extend Order:
+            age = today() - date

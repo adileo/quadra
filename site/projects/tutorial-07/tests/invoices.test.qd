@@ -1,0 +1,65 @@
+test "order → invoice → payments":
+    clock 2026-11-21 10:00
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let anna = Customer(name="Anna Rossi")
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    expect o.invoice_status is ToInvoice
+
+    let inv = o.create_invoice()
+    expect inv.total == 23.20 EUR                   # same lines, same shipping
+    inv.post()
+    expect inv.number == "INV/2026/00001"
+
+    # the order is frozen, but `live` formulas follow the new invoice
+    expect o.invoices == [inv]
+    expect o.invoice_status is Invoiced
+    expect anna.posted_invoices == 1
+
+    Payment(invoice=inv, amount=20.00 EUR)
+    expect inv.payment_status is Partial
+    expect inv.due == 3.20 EUR
+    expect_error "Paid more than the invoice total":
+        Payment(invoice=inv, amount=5.00 EUR)
+    Payment(invoice=inv, amount=3.20 EUR, method="cash")
+    expect inv.payment_status is Paid
+
+
+test "a posted invoice does not change":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let o = Order(customer=Customer(name="Anna Rossi"), lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    let inv = o.create_invoice()
+    inv.post()
+    expect_error "is frozen":
+        inv.lines[0].discount = 50%
+    expect_error "Nothing left to invoice":
+        o.create_invoice()
+
+
+test "a paid invoice cannot be cancelled":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let o = Order(customer=Customer(name="Anna Rossi"), lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    let inv = o.create_invoice()
+    inv.post()
+    Payment(invoice=inv, amount=10.00 EUR)
+    expect_error "Invoice.cancel is not allowed":
+        inv.cancel()
+
+
+test "partial invoicing":
+    let beans = Product(code="BEANS-01", name="House blend", uom=kg, price=18.00 EUR/kg, vat=10%)
+    let o = Order(customer=Customer(name="Anna Rossi"), lines=[OrderLine(product=beans, qty=2 kg)])
+    o.confirm()
+    let first = o.create_invoice()
+    first.lines[0].qty = 500 g                      # the first invoice covers half a kilo
+    first.post()
+    expect o.lines[0].to_invoice == 1.5 kg
+    expect o.invoice_status is ToInvoice
+    let second = o.create_invoice()
+    expect second.lines[0].qty == 1.5 kg
+    expect second.shipping == 0 EUR                 # shipping goes on the first invoice only
+    second.post()
+    expect o.invoice_status is Invoiced
+    expect o.invoices == [first, second]

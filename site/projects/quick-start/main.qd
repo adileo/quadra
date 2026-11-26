@@ -1,0 +1,32 @@
+# The model of your business. `quadra dev` applies every change as soon as you save.
+
+entity Customer:
+    name: Text
+    email: Text?
+    credit_limit: Money<EUR> default 1000.00 EUR
+    orders: [Order] via customer
+
+    # a rollup across relations: always up to date
+    open_total = orders.where(o => o.state is Confirmed).sum(o => o.total)
+
+entity Product:
+    name: Text
+    price: Money<EUR>
+
+entity Order:
+    customer: Customer
+    lines: [OrderLine]
+    state: enum(Draft, Confirmed) default Draft
+
+    total = lines.sum(l => l.subtotal)
+
+    check total <= customer.credit_limit, "Over the credit limit"
+
+    flow state:
+        Draft -> Confirmed by confirm
+
+entity OrderLine:
+    order: Order parent
+    product: Product
+    qty: Int where > 0 default 1
+    subtotal = (product.price * qty).round()

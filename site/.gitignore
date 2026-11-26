@@ -1,0 +1,8 @@
+node_modules
+.vitepress/cache
+.vitepress/dist
+public/projects
+.vitepress/theme/sandbox/wasm
+public/app
+public/install.sh
+public/install.ps1

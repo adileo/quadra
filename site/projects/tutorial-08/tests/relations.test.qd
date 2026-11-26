@@ -1,0 +1,38 @@
+test "categories, suppliers and tags":
+    let mugs = Category(name="Mugs")
+    let mug = Product(code="MUG-01", name="Espresso mug", category=mugs, price=7.50 EUR/pcs)
+    let beans = Product(code="BEANS-01", name="House blend", uom=kg, price=18.00 EUR/kg)
+    expect mugs.products == [mug]                   # inverse, kept up to date for us
+
+    # optionals: `?.` reads through a value that may be none, `??` gives a fallback
+    expect mug.category?.name == "Mugs"
+    let label = beans.category?.name ?? "Uncategorized"
+    expect label == "Uncategorized"
+
+    let roastery = Supplier(name="Roastery Bros")
+    SupplierOffer(product=beans, supplier=roastery, cost=9.00 EUR/kg)
+    expect beans.suppliers == {roastery}            # straight through SupplierOffer
+    expect roastery.offers.single().lead_time == 7 days
+
+    let gift = Tag(name="gift idea")
+    mug.tags = {gift}
+    expect gift.products == {mug}
+
+
+test "an order with lines":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let beans = Product(code="BEANS-01", name="House blend", uom=kg, price=18.00 EUR/kg)
+    let anna = Customer(name="Anna Rossi",
+                        address=Address(street="Via Roma 1", city="Milano", zip="20121"))
+    let bob = Customer(name="Bob Smith", referred_by=anna)
+    expect anna.referrals == [bob]
+
+    let o = Order(customer=anna, lines=[
+        OrderLine(product=mug, qty=2 pcs),
+        OrderLine(product=beans, qty=500 g),
+    ])
+    expect o.ship_to?.city == "Milano"              # copied from the customer
+    expect o.lines.count() == 2
+    expect o.lines[1].qty == 0.5 kg                 # stored in the product's unit
+    expect o.lines[1].price == 18.00 EUR/kg         # copied from the product
+    expect anna.orders == [o]

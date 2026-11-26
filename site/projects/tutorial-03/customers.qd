@@ -1,0 +1,18 @@
+# The people we sell to.
+
+record Address:
+    street: Text
+    city: Text
+    zip: Text
+
+
+entity Customer:
+    name: Text unique
+    email: Email?
+    address: Address?                       # a record: stored inside the customer
+    since: Date default today()
+    discount: Percent default 0%
+    credit_limit: Money<EUR> default 500.00 EUR
+
+    referred_by: Customer?                  # who brought them to us
+    referrals: [Customer] via referred_by   # the customers they brought

@@ -1,0 +1,43 @@
+# Shared test data. A fixture runs as ONE transaction, so its records can refer to each other.
+# After `use shop`, a test sees every `let` below as a local name: mug, beans, anna…
+
+fixture shop:
+    clock 2026-11-02 09:00
+
+    User(login="olivia", name="Olivia", roles={Owner})
+    User(login="sam", name="Sam", roles={Clerk})
+    User(login="kim", name="Kim", roles={Clerk})
+    User(login="wes", name="Wes", roles={Warehouse})
+    User(login="alex", name="Alex", roles={Accountant})
+
+    let mugs = Category(name="Mugs")
+    let coffee = Category(name="Coffee")
+    let tea = Category(name="Tea")
+
+    let mug = Product(code="MUG-01", name="Espresso mug", category=mugs,
+                      price=7.50 EUR/pcs, cost=3.20 EUR/pcs, weight=0.2 kg)
+    let beans = Product(code="BEANS-01", name="House blend", category=coffee, uom=kg,
+                        price=18.00 EUR/kg, cost=9.00 EUR/kg, vat=10%)
+    let sencha = Product(code="TEA-01", name="Sencha", category=tea, uom=kg,
+                         price=42.00 EUR/kg, cost=20.00 EUR/kg, vat=10%)
+
+    let roastery = Supplier(name="Roastery Bros", email="orders@roastery.example")
+    SupplierOffer(product=beans, supplier=roastery, cost=9.00 EUR/kg, lead_time=3 days)
+
+    Restock(product=mug, qty=50 pcs).receive()
+    Restock(product=beans, supplier=roastery, qty=20 kg).receive()
+    Restock(product=sencha, qty=5 kg).receive()
+
+    let anna = Customer(name="Anna Rossi", email="anna@example.com",
+                        address=Address(street="Via Roma 1", city="Milano", zip="20121"))
+    let cafe = Customer(name="Caffè Centrale", kind=Business, vat_number="IT01234567890",
+                        discount=10%, credit_limit=2_000.00 EUR, referred_by=anna)
+
+
+# A fixture can extend another one: everything in `shop`, plus a confirmed order.
+fixture shop_with_orders extends shop:
+    let order = Order(customer=cafe, lines=[
+        OrderLine(product=beans, qty=5 kg),
+        OrderLine(product=mug, qty=12 pcs),
+    ])
+    order.confirm()

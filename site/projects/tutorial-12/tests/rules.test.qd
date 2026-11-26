@@ -1,0 +1,42 @@
+test "required when and conditional unique":
+    expect_error "Customer.vat_number is required":
+        Customer(name="Caffè Centrale", kind=Business)
+    Customer(name="Caffè Centrale", kind=Business, vat_number="IT01234567890")
+    expect_error "unique (vat_number): IT01234567890 already exists":
+        Customer(name="Bar Sport", kind=Business, vat_number="IT01234567890")
+    # people don't need a VAT number
+    Customer(name="Anna Rossi")
+
+
+test "field domains":
+    expect_error "Customer.name = Z: does not satisfy its `where`":
+        Customer(name="Z")
+    let anna = Customer(name="Anna Rossi")
+    expect_error "Customer.discount = 40%: does not satisfy its `where`":
+        anna.discount = 40%
+    expect_error "Product.vat = 5%: does not satisfy its `where`":
+        Product(sku="MUG-01", origin="IT", name="Espresso mug", price=7.50 EUR/pcs, vat=5%)
+
+
+test "checks block, warnings don't":
+    let mug = Product(sku="MUG-01", origin="IT", name="Espresso mug", price=7.50 EUR/pcs)
+    let anna = Customer(name="Anna Rossi")
+    expect_error "A customer cannot refer themselves":
+        anna.referred_by = anna
+    expect_error "The delivery date is before the order date":
+        Order(customer=anna, date=2026-11-21, deliver_by=2026-11-20)
+
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=100 pcs)])
+    expect o.total == 915.00 EUR
+    expect o.warnings == ["This order is over the customer's credit limit"]
+    o.lines[0].qty = 10 pcs
+    expect o.warnings == []
+
+
+test "one line per product":
+    let mug = Product(sku="MUG-01", origin="IT", name="Espresso mug", price=7.50 EUR/pcs)
+    let o = Order(customer=Customer(name="Anna Rossi"), lines=[OrderLine(product=mug, qty=1 pcs)])
+    expect_error "unique (order, product)":
+        OrderLine(order=o, product=mug, qty=2 pcs)
+    expect_error "OrderLine.qty = 0 pcs: does not satisfy its `where`":
+        o.lines[0].qty = 0 pcs

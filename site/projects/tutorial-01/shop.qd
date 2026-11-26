@@ -1,0 +1,13 @@
+# Our shop: the people we sell to and the things we sell.
+
+entity Customer:
+    name: Text unique
+    email: Email?
+    city: Text?
+
+
+entity Product:
+    code: Code unique
+    name: Text
+    description: Text?
+    active: Bool default true

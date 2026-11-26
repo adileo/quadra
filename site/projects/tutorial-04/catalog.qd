@@ -1,0 +1,49 @@
+# What we sell, and who we buy it from.
+
+entity Category:
+    name: Text unique
+    products: [Product]                     # the inverse of Product.category
+
+
+entity Product:
+    code: Code unique
+    name: Text
+    description: Text?
+    category: Category?
+    active: Bool default true
+    uom: Uom default pcs
+    price: Price<EUR, uom>
+    cost: Price<EUR, uom> default 0
+    weight: Qty<kg>?
+    vat: Percent default 22%
+    tags: {Tag}                             # a set: many-to-many
+
+    offers: [SupplierOffer]
+    suppliers: {Supplier} through SupplierOffer
+
+    label = f"{code} · {name}"
+    margin = price - cost
+    best_offer = offers.sort_by(o => o.cost).first()
+
+    fn price_for(qty: Qty<uom>) -> Money<EUR>:
+        return (qty * price).round()
+
+
+entity Tag:
+    name: Text unique
+    products: {Product} via tags
+
+
+entity Supplier:
+    name: Text unique
+    email: Email?
+    offers: [SupplierOffer]
+
+
+# Many-to-many with data of its own: what a supplier charges us for a product.
+entity SupplierOffer:
+    product: Product
+    supplier: Supplier
+    cost: Price<EUR, product.uom>
+    lead_time: Duration default 7 days
+    unique (product, supplier)

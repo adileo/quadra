@@ -1,0 +1,17 @@
+# The website, served behind the platform's edge (which terminates TLS).
+:80 {
+	root * /srv
+	encode zstd gzip
+	# VitePress clean URLs: /guide/start is guide/start.html
+	try_files {path} {path}.html {path}/index.html
+	header /assets/* Cache-Control "public, max-age=31536000, immutable"
+	# the installers: text, never cached for long (a fix reaches everyone at once)
+	@installers path /install.sh /install.ps1
+	header @installers Content-Type "text/plain; charset=utf-8"
+	header @installers Cache-Control "public, max-age=300"
+	file_server
+	handle_errors {
+		rewrite * /404.html
+		file_server
+	}
+}

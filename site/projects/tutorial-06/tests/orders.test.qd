@@ -1,0 +1,83 @@
+test "an order's life: draft, confirmed, shipped":
+    clock 2026-11-21 10:30
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let anna = Customer(name="Anna Rossi", email="anna@example.com")
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    expect o.state is Draft
+    expect o.number == none
+
+    o.confirm()
+    expect o.state is Confirmed
+    expect o.number == "SO/2026/00001"
+    expect o.confirmed_at == 2026-11-21 10:30
+    expect anna.open_total == 23.20 EUR
+
+    o.ship()
+    expect o.state is Shipped
+    expect anna.open_total == 0 EUR
+    expect anna.lifetime_value == 23.20 EUR
+
+
+test "actions refuse what the flow doesn't allow":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let anna = Customer(name="Anna Rossi")
+    let empty = Order(customer=anna)
+    expect_error "An order needs at least one line":
+        empty.confirm()
+    expect empty.state is Draft                     # the transaction was rolled back
+
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    expect_error "Order.confirm is not allowed in state Confirmed":
+        o.confirm()
+    o.ship()
+    expect_error "Order.cancel is not allowed in state Shipped":
+        o.cancel(reason="Changed my mind")
+
+
+test "the credit limit is enforced at confirmation":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let anna = Customer(name="Anna Rossi")
+    let big = Order(customer=anna, lines=[OrderLine(product=mug, qty=100 pcs)])
+    expect big.warnings == ["This order is over the customer's credit limit"]
+    expect_error "Credit limit exceeded":
+        big.confirm()
+    expect big.state is Draft
+    big.cancel(reason="Over the credit limit")
+    expect big.state is Cancelled
+
+
+test "a confirmed order is frozen":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let anna = Customer(name="Anna Rossi")
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    expect_error "Order is frozen (state is not Draft): its OrderLine lines cannot change":
+        o.lines[0].qty = 3 pcs
+    o.notes = "Gift wrap, please"                   # listed in `except`
+
+    # the world moves on, the confirmed order does not
+    mug.vat = 10%
+    anna.discount = 10%
+    expect o.total == 23.20 EUR
+    let next = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    expect next.total == 19.75 EUR
+
+
+test "only active products can be confirmed":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let o = Order(customer=Customer(name="Anna Rossi"), lines=[OrderLine(product=mug, qty=1 pcs)])
+    mug.active = false
+    expect_error "The order contains products we no longer sell":
+        o.confirm()
+
+
+test "cancelling a confirmed order":
+    let mug = Product(code="MUG-01", name="Espresso mug", price=7.50 EUR/pcs)
+    let anna = Customer(name="Anna Rossi")
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    o.cancel(reason="The customer called to cancel")
+    expect o.state is Cancelled
+    expect o.cancel_reason == "The customer called to cancel"
+    expect anna.open_total == 0 EUR

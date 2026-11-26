@@ -1,0 +1,24 @@
+# Mistakes the compiler catches before any data is touched.
+# `patch` (tests only) replaces a definition, to show what would happen if we wrote it that way.
+
+test "a formula cannot depend on itself":
+    expect_compile_error "formula cycle: Order.shipping → Order.total → Order.shipping":
+        patch Order:
+            shipping: Money<EUR> = when:
+                total >= FREE_SHIPPING_FROM     => 0 EUR
+                else                            => SHIPPING_FEE
+
+
+test "a match on a state must handle every state":
+    expect_compile_error "missing Cancelled":
+        extend Order:
+            label: Text = match state:
+                Draft       => "Quote"
+                Confirmed   => "To ship"
+                Shipped     => "Done"
+
+
+test "optional values must be handled":
+    expect_compile_error "`o.ship_to` is optional: use `?.`":
+        fn city(o: Order) -> Text:
+            return o.ship_to.city
