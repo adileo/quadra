@@ -217,6 +217,11 @@ impl Conn {
     }
 
     pub fn batch(&mut self, sql: &str) -> Result<(), String> {
+        let sql = match side_batch(sql) {
+            SideBatch::Run(rest) => rest,
+            SideBatch::Skip => return Ok(()),
+        };
+        let sql = sql.as_str();
         STATEMENTS.fetch_add(1, Ordering::Relaxed);
         let _t = timed(sql);
         match self {
@@ -229,6 +234,7 @@ impl Conn {
         let r = self.exec_counted(sql, params);
         if let Ok(n) = &r {
             limits::count_written(*n);
+            side_record(sql, params);
         }
         r
     }
@@ -603,4 +609,73 @@ impl Drop for Pooled {
             }
         }
     }
+}
+
+// --- changes outside the hash chain, run by the sequencer (`Sequencer::side`) ---------------
+//
+// While one runs, on the sequencer's thread, what it writes is recorded (the statements of its
+// batch, for the destinations) and its own transactions are folded into the sequencer's: a
+// `BEGIN` or `COMMIT` does nothing, a `ROLLBACK` marks the change as given up.
+
+/// What a change outside the hash chain wrote.
+#[derive(Default)]
+pub(crate) struct Side {
+    pub statements: Vec<(String, Vec<Sql>)>,
+    pub rolled_back: bool,
+}
+
+thread_local! {
+    static SIDE: std::cell::RefCell<Option<Side>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn side_begin() {
+    SIDE.with(|s| *s.borrow_mut() = Some(Side::default()));
+}
+
+pub(crate) fn side_end() -> Side {
+    SIDE.with(|s| s.borrow_mut().take()).unwrap_or_default()
+}
+
+enum SideBatch {
+    Run(String),
+    Skip,
+}
+
+/// A `batch` during a change outside the hash chain: transaction control folded, the rest run
+/// and recorded.
+fn side_batch(sql: &str) -> SideBatch {
+    SIDE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(side) = s.as_mut() else { return SideBatch::Run(sql.to_string()) };
+        let mut rest = Vec::new();
+        for part in sql.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            let up = part.to_ascii_uppercase();
+            if up.starts_with("BEGIN") || up.starts_with("COMMIT") || up.starts_with("END") {
+                continue;
+            }
+            if up.starts_with("ROLLBACK") {
+                side.rolled_back = true;
+                continue;
+            }
+            if !up.starts_with("LOCK ") && !up.starts_with("SAVEPOINT") && !up.starts_with("RELEASE") && !up.starts_with("SELECT") {
+                side.statements.push((part.to_string(), Vec::new()));
+            }
+            rest.push(part);
+        }
+        if rest.is_empty() {
+            SideBatch::Skip
+        } else {
+            SideBatch::Run(rest.join("; "))
+        }
+    })
+}
+
+fn side_record(sql: &str, params: &[Sql]) {
+    SIDE.with(|s| {
+        if let Some(side) = s.borrow_mut().as_mut() {
+            if !sql.trim_start().to_ascii_uppercase().starts_with("SELECT") {
+                side.statements.push((sql.to_string(), params.to_vec()));
+            }
+        }
+    })
 }

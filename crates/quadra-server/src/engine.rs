@@ -529,6 +529,16 @@ impl Engine {
         self.sequencer = s;
     }
 
+    /// A change of the tables outside the hash chain (sessions, tokens, sign-in codes, saved
+    /// views, apps, folders, teams): through the tenant's sequencer when there is one, so that it
+    /// is in the log with the data and survives the machine; on this connection otherwise.
+    pub(crate) fn side<T: Send + 'static>(&mut self, f: impl FnOnce(&mut quadra_store::Conn) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+        match &self.sequencer {
+            Some(s) => s.side(f),
+            None => f(&mut self.conn),
+        }
+    }
+
     /// Where an interpreter's commits go: the tenant's sequencer, or the database directly.
     pub(crate) fn sink<'m>(&self, db: Database, model: &'m quadra_ir::Model) -> Box<dyn quadra_runtime::CommitSink + 'm> {
         match &self.sequencer {
@@ -642,7 +652,7 @@ impl Engine {
                     let _ = reply.send(self.add_user(&email, &roles));
                 }
                 Job::Logout { secret } => {
-                    let _ = auth::revoke(&mut self.conn, &secret);
+                    let _ = self.side(move |c| auth::revoke(c, &secret));
                 }
                 Job::Call { who, req, reply } => {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(&who, req))) {
@@ -704,20 +714,6 @@ impl Engine {
     fn call(&mut self, who: &Principal, req: Req) -> Reply {
         let who = who.clone();
         self.snapshot = req.reads();
-        // saved views, apps, folders and teams are written past the sequencer: the log gets them
-        // with a snapshot shortly after (the batches carry only the data)
-        let config = match &req {
-            Req::Views { method, path, .. } if method != "GET" => {
-                let first = path.trim_matches('/').split('/').nth(1).unwrap_or("");
-                matches!(first, "views" | "teams" | "folders" | "apps") && !path.ends_with("/submit")
-            }
-            _ => false,
-        };
-        if config {
-            if let Some(s) = &self.sequencer {
-                s.snapshot_soon(std::time::Duration::from_secs(60));
-            }
-        }
         let r = match req {
             Req::Me => self.me(&who),
             Req::Model => self.model(&who),
@@ -834,7 +830,8 @@ impl Engine {
             return error(401, "unknown user");
         };
         drop(i);
-        match auth::create(&mut self.conn, "session", user, &format!("dev login {login}"), false, now(), Some(now() + chrono::Duration::hours(12))) {
+        let name = format!("dev login {login}");
+        match self.side(move |c| auth::create(c, "session", user, &name, false, now(), Some(now() + chrono::Duration::hours(12)))) {
             Ok((secret, csrf)) => Reply { status: 200, body: json!({ "user": if auto { self.login_of(model, user) } else { login.to_string() }, "csrf": csrf }), session: Some(secret) },
             Err(e) => error(500, e),
         }
@@ -944,7 +941,7 @@ impl Engine {
         let Some((user, _, Some(to))) = self.user_by(model, login) else {
             return Reply { status: 200, body: json!({ "login_id": auth::random_hex(16), "expires_in": auth::CODE_MINUTES * 60 }), session: None };
         };
-        match auth::code_start(&mut self.conn, user, now()) {
+        match self.side(move |c| auth::code_start(c, user, now())) {
             Ok(Ok((id, code))) => Reply { status: 200, body: json!({ "login_id": id, "expires_in": auth::CODE_MINUTES * 60, "_send": { "to": to, "code": code } }), session: None },
             Ok(Err(_)) => error(429, "Too many codes asked for this user. Wait 15 minutes, or use the last one you received."),
             Err(e) => error(500, e),
@@ -952,12 +949,14 @@ impl Engine {
     }
 
     fn code_verify(&mut self, id: &str, code: &str) -> Reply {
-        match auth::code_verify(&mut self.conn, id, code, now()) {
+        let (id, code) = (id.to_string(), code.to_string());
+        match self.side(move |c| auth::code_verify(c, &id, &code, now())) {
             Ok(Ok(user)) => {
                 let checked = self.checked.clone();
                 let model = checked.model.as_ref().unwrap();
                 let login = self.login_of(model, user);
-                match auth::create(&mut self.conn, "session", user, &format!("email code {login}"), false, now(), Some(now() + chrono::Duration::days(SESSION_DAYS))) {
+                let name = format!("email code {login}");
+                match self.side(move |c| auth::create(c, "session", user, &name, false, now(), Some(now() + chrono::Duration::days(SESSION_DAYS)))) {
                     Ok((secret, csrf)) => Reply { status: 200, body: json!({ "user": login, "csrf": csrf }), session: Some(secret) },
                     Err(e) => error(500, e),
                 }

@@ -147,7 +147,8 @@ fn commits_from_many_threads_are_batched_and_verified() {
     assert!(batches <= 200, "{batches} batches for 200 commits");
     eprintln!("{batches} batches for 200 commits");
     let kept = kept.0.lock().unwrap();
-    assert_eq!(kept.len() as i64, batches, "every batch reached the destination");
+    // (batches written while one is on its way go together: as many segments at most)
+    assert!(kept.len() as i64 <= batches, "{} segments for {batches} batches", kept.len());
     assert_eq!(kept.iter().map(|(a, b, _)| b - a + 1).sum::<u64>(), 200);
 }
 
@@ -269,7 +270,7 @@ fn a_snapshot_and_the_segments_after_it_give_the_database_back() {
     let _ = std::fs::remove_dir_all(&dir);
     let snap = std::env::temp_dir().join(format!("quadra-seq-{}-segments-snap.db", std::process::id()));
     let at = quadra_store::segments::snapshot(&url, &snap).unwrap();
-    assert_eq!(at, 1, "the snapshot holds the seed");
+    assert_eq!(at, (0, 1), "the snapshot holds the seed, before any batch");
     let folder = quadra_store::segments::Folder::new(&dir).unwrap();
     let options = Options { destinations: vec![Box::new(quadra_store::segments::Folder::new(&dir).unwrap())], rule: Rule::All, ..Default::default() };
     let s = Sequencer::start(&url, options).unwrap();
@@ -618,14 +619,14 @@ impl DurabilitySink for Flaky {
         }
         self.folder.persist(b)
     }
-    fn last_tx(&mut self) -> Result<Option<u64>, String> {
-        self.folder.last_tx()
+    fn last(&mut self) -> Result<Option<(u64, u64)>, String> {
+        self.folder.last()
     }
-    fn segments_after(&mut self, tx: u64) -> Result<Vec<quadra_store::segments::Segment>, String> {
-        self.folder.segments_after(tx)
+    fn segments_after(&mut self, batch: u64) -> Result<Vec<quadra_store::segments::Segment>, String> {
+        self.folder.segments_after(batch)
     }
-    fn snapshot(&mut self, tx: u64, file: &Path) -> Result<(), String> {
-        self.folder.snapshot(tx, file)
+    fn snapshot(&mut self, batch: u64, tx: u64, file: &Path) -> Result<(), String> {
+        self.folder.snapshot(batch, tx, file)
     }
 }
 
@@ -702,11 +703,11 @@ fn the_log_is_compacted_by_its_snapshots() {
     s.stop();
     // one snapshot left, taken along the way, and only the segments after it
     let folder = quadra_store::segments::Folder::new(&dir).unwrap();
-    let (at, _) = folder.latest_snapshot().unwrap().unwrap();
+    let (batch, at, _) = folder.latest_snapshot().unwrap().unwrap();
     assert!(at > 100, "no snapshot along the way (the latest is at {at})");
     let snapshots = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".snapshot.db")).count();
     assert_eq!(snapshots, 1);
-    assert!(folder.segments().unwrap().iter().all(|s| s.first_tx > at));
+    assert!(folder.segments().unwrap().iter().all(|s| s.first > batch && s.first_tx > at));
     let target = std::env::temp_dir().join(format!("quadra-seq-{}-compact-rebuilt.db", std::process::id()));
     quadra_store::segments::Folder::new(&dir).unwrap().restore(&target).unwrap();
     let t = format!("sqlite:{}", target.display());
@@ -775,4 +776,53 @@ fn the_log_gives_the_database_back_as_of_any_transaction() {
         assert_eq!(count(&t, "SELECT CAST(COUNT(*) AS TEXT) FROM \"customer\""), tx as i64);
         assert_eq!(verify(&p, &t), Vec::<String>::new(), "as of {tx}");
     }
+}
+
+#[test]
+fn changes_outside_the_chain_are_in_the_log_in_order() {
+    if std::env::var_os("QUADRA_SEQ_PG").is_some() {
+        return;
+    }
+    let p = project();
+    let url = fresh("outside");
+    init(&p, &url);
+    let dir = std::env::temp_dir().join(format!("quadra-seq-{}-side2-log", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let options = Options { destinations: vec![Box::new(quadra_store::segments::Folder::new(&dir).unwrap())], rule: Rule::All, ..Default::default() };
+    let s = Sequencer::start(&url, options).unwrap();
+    let checked = quadra_analysis::check(&p);
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    let commit = |name: &str| {
+        let mut i = engine(&url, m, r, Some(&s));
+        let c = first(&mut i, "Customer");
+        i.transaction(|i| i.set(&c, "name", V::Text(name.into()), None)).unwrap();
+    };
+    let session = |name: &'static str| s.side(move |c| quadra_store::auth::create(c, "session", 1, name, false, clock(), None)).unwrap();
+    commit("one");
+    let (first_secret, _) = session("first");
+    // a change that gives up writes nothing
+    assert!(s.side(|c| -> Result<(), String> {
+        c.exec("UPDATE \"_quadra_tokens\" SET \"name\" = 'x'", &[])?;
+        Err("given up".into())
+    })
+    .is_err());
+    commit("two");
+    s.snapshot_soon(std::time::Duration::ZERO);
+    session("second");
+    session("third");
+    commit("three");
+    s.stop();
+    let tokens = |u: &str| count(u, "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_tokens\"");
+    assert_eq!(tokens(&url), 3);
+    // the machine is lost: the folder alone gives back the sessions with the data
+    let target = std::env::temp_dir().join(format!("quadra-seq-{}-side2-rebuilt.db", std::process::id()));
+    quadra_store::segments::Folder::new(&dir).unwrap().restore(&target).unwrap();
+    let t = format!("sqlite:{}", target.display());
+    assert_eq!(tokens(&t), 3, "the sessions are in what the log rebuilds");
+    assert_eq!(count(&t, "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_tokens\" WHERE \"name\" = 'x'"), 0);
+    let mut c = quadra_store::Conn::open(&t).unwrap();
+    assert!(quadra_store::auth::authenticate(&mut c, &first_secret, clock()).unwrap().is_some(), "a session signed in before the loss still works");
+    assert_eq!(c.query("SELECT \"name\" FROM \"customer\"", &[]).unwrap()[0][0].as_deref(), Some("three"));
+    assert_eq!(count(&t, "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\""), count(&url, "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\""));
+    assert_eq!(verify(&p, &t), Vec::<String>::new());
 }

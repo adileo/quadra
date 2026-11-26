@@ -109,9 +109,12 @@ pub struct Prepared {
 }
 
 /// A batch made durable in the database: what a durability destination receives. The
-/// statements, run in order on a copy of the database as of `first_tx - 1`, bring it to
-/// `last_tx` (the commit rows included).
+/// statements, run in order on a copy of the database as of batch `first_number - 1`, bring it
+/// to batch `number` and transaction `last_tx` (the commit rows and batch rows included). Several
+/// batches can come as one (`first_number` to `number`); a batch that only wrote outside the hash
+/// chain (`Sequencer::side`) has no transaction of its own (`first_tx = last_tx + 1`).
 pub struct Batch<'a> {
+    pub first_number: u64,
     pub number: u64,
     pub first_tx: u64,
     pub last_tx: u64,
@@ -124,28 +127,32 @@ pub struct Batch<'a> {
 /// machine). The sequencer calls it after the batch is committed in the database.
 pub trait DurabilitySink: Send {
     fn persist(&mut self, batch: &Batch) -> Result<(), String>;
-    /// The last transaction this destination holds (None: nothing, or it cannot tell). A
-    /// destination behind the database (a crash between a commit and its upload) gets a
-    /// snapshot when the sequencer starts, so that what it holds always rebuilds the database.
-    fn last_tx(&mut self) -> Result<Option<u64>, String> {
+    /// The latest position this destination holds: (batch, transaction) (None: nothing, or it
+    /// cannot tell). A destination not at the database's position (a crash between a commit and
+    /// its upload, writes past the sequencer) gets a snapshot when the sequencer starts, so that
+    /// what it holds always rebuilds the database.
+    fn last(&mut self) -> Result<Option<(u64, u64)>, String> {
         Ok(None)
     }
-    /// The segments it holds after transaction `tx`, in order (to bring back a database that
-    /// lost its last commits: a power cut with the batches already kept here).
-    fn segments_after(&mut self, _tx: u64) -> Result<Vec<crate::segments::Segment>, String> {
+    /// The segments it holds after batch `batch`, in order (to bring back a database that lost
+    /// its last commits: a power cut with the batches already kept here).
+    fn segments_after(&mut self, _batch: u64) -> Result<Vec<crate::segments::Segment>, String> {
         Ok(Vec::new())
     }
-    /// Keeps a copy of the whole database as of `tx` (a SQLite file at `file`). A destination
+    /// Keeps a copy of the whole database at a position (a SQLite file at `file`). A destination
     /// that keeps no snapshots (only the batches, for someone else to read) ignores it.
-    fn snapshot(&mut self, _tx: u64, _file: &std::path::Path) -> Result<(), String> {
+    fn snapshot(&mut self, _batch: u64, _tx: u64, _file: &std::path::Path) -> Result<(), String> {
         Ok(())
     }
-    /// Drops what a snapshot it keeps at `tx` makes useless: the segments ending at or before
-    /// it, the older snapshots.
-    fn prune(&mut self, _tx: u64) -> Result<(), String> {
+    /// Drops what a snapshot it keeps at batch `batch` makes useless: the segments ending at or
+    /// before it, the older snapshots.
+    fn prune(&mut self, _batch: u64) -> Result<(), String> {
         Ok(())
     }
 }
+
+/// A change outside the hash chain, run by the sequencer (`Sequencer::side`).
+type SideFn = Box<dyn FnOnce(&mut Conn) -> Result<Box<dyn std::any::Any + Send>, String> + Send>;
 
 /// A file of its own for a snapshot on its way to the destinations (many tenants, and their
 /// sequencers, share a process).
@@ -265,6 +272,7 @@ enum Msg {
     Ids(u64, mpsc::Sender<u64>),
     Snapshot(Duration),
     Written(u64, Vec<u64>, mpsc::Sender<Option<bool>>),
+    Side(SideFn, mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>, Responder),
     Stop(mpsc::Sender<()>),
 }
 
@@ -352,6 +360,25 @@ impl Sequencer {
     /// written). Several requests before it is taken make one snapshot.
     pub fn snapshot_soon(&self, within: Duration) {
         let _ = self.tx.send(Msg::Snapshot(within));
+    }
+
+    /// Runs a change of the tables outside the hash chain (sign-in, tokens, saved views, teams)
+    /// as a batch of its own, with no transaction: in the database and in the destinations in
+    /// the order of the log, confirmed like a commit (under `Rule::All`, once kept). `f` runs on
+    /// the sequencer's connection; its own `BEGIN`/`COMMIT` become part of the batch.
+    pub fn side<T: Send + 'static>(&self, f: impl FnOnce(&mut Conn) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+        let (value, value_rx) = mpsc::channel();
+        let (kept, kept_rx) = mpsc::channel();
+        let f: SideFn = Box::new(move |c| f(c).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>));
+        self.tx.send(Msg::Side(f, value, Responder::Chan(kept))).map_err(|_| gone())?;
+        let v = value_rx.recv().map_err(|_| gone())??;
+        match kept_rx.recv() {
+            Ok(Ok(_)) => {}
+            Ok(Err(CommitError::Failed(e))) => return Err(e),
+            Ok(Err(e)) => return Err(format!("{e:?}")),
+            Err(_) => return Err(gone()),
+        }
+        v.downcast::<T>().map(|v| *v).map_err(|_| "the sequencer answered with another type".into())
     }
 
     /// Gives up a reserved transaction (its writes could not be prepared).
@@ -667,11 +694,11 @@ impl State {
         // a destination ahead of the database (the machine lost its last commits, already kept
         // there and confirmed): the database gets them back before anything else
         for d in destinations.iter_mut() {
-            if let Ok(Some(t)) = d.last_tx() {
-                if t > s.durable {
-                    let segments = d.segments_after(s.durable)?;
+            if let Ok(Some((b, _))) = d.last() {
+                if b > s.batch {
+                    let segments = d.segments_after(s.batch)?;
                     let at = crate::segments::apply(&mut s.conn, &segments)?;
-                    eprintln!("sequencer: the database was at {}, brought back to {at} from a destination", s.durable);
+                    eprintln!("sequencer: the database was at batch {} (transaction {}), brought back to transaction {at} from a destination", s.batch, s.durable);
                     s.reload()?;
                 }
             }
@@ -681,11 +708,11 @@ impl State {
         // (PostgreSQL: no snapshots, it has its own backups)
         let sqlite = s.conn.dialect() == Dialect::Sqlite;
         for d in destinations.iter_mut().filter(|_| sqlite) {
-            match d.last_tx() {
-                Ok(Some(t)) if t == s.durable => {}
+            match d.last() {
+                Ok(Some(p)) if p == (s.batch, s.durable) => {}
                 Ok(_) => {
                     let file = snapshot_file();
-                    let r = crate::segments::snapshot(url, &file).and_then(|tx| d.snapshot(tx, &file));
+                    let r = crate::segments::snapshot(url, &file).and_then(|(b, t)| d.snapshot(b, t, &file));
                     let _ = std::fs::remove_file(&file);
                     if let Err(e) = r {
                         // what it would keep from now on could not rebuild the database
@@ -849,6 +876,11 @@ impl State {
                 let known = base >= self.window.floor;
                 let _ = reply.send(known.then(|| records.iter().any(|id| self.window.fields.get(id).is_some_and(|t| *t > base))));
             }
+            Msg::Side(f, value, kept) => {
+                // in the order of the log: the transactions ready before it are written first
+                self.flush();
+                self.side(f, value, kept);
+            }
             Msg::Snapshot(within) => {
                 let at = Instant::now() + within;
                 self.snapshot_due = Some(self.snapshot_due.map_or(at, |d| d.min(at)));
@@ -1006,6 +1038,8 @@ impl State {
         if let Err(e) = self.reload() {
             eprintln!("sequencer: cannot read the database again: {e}");
         }
+        // what was written past the sequencer is in no batch: the destinations need a snapshot
+        self.snapshot_due = Some(Instant::now());
     }
 
     /// Writes the transactions ready at the front (submitted or given up, in number order) as
@@ -1122,6 +1156,56 @@ impl State {
         out
     }
 
+    /// A change outside the hash chain as a batch of its own (`Sequencer::side`): `f` and the
+    /// batch's row in one transaction (the `BEGIN`/`COMMIT` of `f` are folded into it), then the
+    /// statements to the destinations. No transaction number: `first_tx = last_tx + 1`.
+    fn side(&mut self, f: SideFn, value: mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>, kept: Responder) {
+        let sqlite = self.conn.dialect() == Dialect::Sqlite;
+        let began = self.conn.batch(if sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" });
+        if let Err(e) = began {
+            let _ = value.send(Err(e));
+            let _ = kept.send(Ok(self.durable));
+            return;
+        }
+        crate::conn::side_begin();
+        let r = f(&mut self.conn);
+        let side = crate::conn::side_end();
+        let v = match r {
+            Ok(v) if !side.rolled_back && !side.statements.is_empty() => v,
+            other => {
+                // failed, rolled back by `f`, or nothing written: nothing to keep
+                let _ = self.conn.batch(if other.is_ok() && !side.rolled_back { "COMMIT" } else { "ROLLBACK" });
+                let _ = value.send(other);
+                let _ = kept.send(Ok(self.durable));
+                return;
+            }
+        };
+        let (first, last) = (self.durable + 1, self.durable);
+        let row = (
+            "INSERT INTO \"_quadra_batches\" (\"number\", \"first_tx\", \"last_tx\", \"hash\") VALUES (?bigint, ?bigint, ?bigint, ?text)".to_string(),
+            vec![Sql::Int(self.batch as i64 + 1), Sql::Int(first as i64), Sql::Int(last as i64), Sql::Text(self.prev_hash.clone())],
+        );
+        let mut statements = side.statements;
+        let written = self.conn.exec(&row.0, &row.1).and_then(|_| self.conn.batch("COMMIT"));
+        if let Err(e) = written {
+            let _ = self.conn.batch("ROLLBACK");
+            let _ = value.send(Err(e));
+            let _ = kept.send(Ok(self.durable));
+            return;
+        }
+        statements.push(row);
+        self.batch += 1;
+        let _ = value.send(Ok(v));
+        if self.uploader.is_some() && self.options.rule != Rule::Local {
+            self.upload(first, last, statements, vec![(self.durable, kept)]);
+        } else {
+            if self.uploader.is_some() {
+                self.upload(first, last, statements, Vec::new());
+            }
+            let _ = kept.send(Ok(self.durable));
+        }
+    }
+
     /// A snapshot of the database now, handed to the uploader after the batches before it.
     fn take_snapshot(&mut self) {
         self.snapshot_due = None;
@@ -1129,8 +1213,8 @@ impl State {
         let Some(up) = &self.uploader else { return };
         let file = snapshot_file();
         match crate::segments::snapshot(&self.url, &file) {
-            Ok(tx) => {
-                let u = Upload { snapshot: Some((tx, file)), number: self.batch, first_tx: tx, last_tx: tx, hash: self.prev_hash.clone(), statements: Vec::new(), replies: Vec::new() };
+            Ok((batch, tx)) => {
+                let u = Upload { snapshot: Some((batch, tx, file)), number: batch, first_tx: tx, last_tx: tx, hash: self.prev_hash.clone(), statements: Vec::new(), replies: Vec::new() };
                 let _ = up.tx.send(u);
             }
             Err(e) => eprintln!("sequencer: cannot take a snapshot: {e}"),
@@ -1392,8 +1476,8 @@ fn guard_checks(c: &quadra_runtime::Commit, reads: &mut ReadSet) -> Vec<GuardChe
 
 /// A batch in the database, to be kept at the destinations.
 struct Upload {
-    /// a snapshot of the database to keep instead of a batch: (transaction, file)
-    snapshot: Option<(u64, std::path::PathBuf)>,
+    /// a snapshot of the database to keep instead of a batch: (batch, transaction, file)
+    snapshot: Option<(u64, u64, std::path::PathBuf)>,
     number: u64,
     first_tx: u64,
     last_tx: u64,
@@ -1464,14 +1548,14 @@ impl Uploader {
                         fail_waiting(&mut queue, why);
                     }
                     // the front: a snapshot, or the batches up to the next snapshot as one segment
-                    let result = if let Some((tx, file)) = queue.front().and_then(|u| u.snapshot.clone()) {
-                        let r = destinations.iter_mut().try_for_each(|d| d.snapshot(tx, &file));
+                    let result = if let Some((batch, tx, file)) = queue.front().and_then(|u| u.snapshot.clone()) {
+                        let r = destinations.iter_mut().try_for_each(|d| d.snapshot(batch, tx, &file));
                         if r.is_ok() {
                             let _ = std::fs::remove_file(&file);
                             queue.pop_front();
                             for d in destinations.iter_mut() {
-                                if let Err(e) = d.prune(tx) {
-                                    eprintln!("sequencer: what the snapshot at {tx} holds was not dropped: {e}");
+                                if let Err(e) = d.prune(batch) {
+                                    eprintln!("sequencer: what the snapshot at batch {batch} holds was not dropped: {e}");
                                 }
                             }
                         }
@@ -1481,8 +1565,8 @@ impl Uploader {
                         let group = queue.range(..n);
                         let statements: Vec<(String, Vec<Sql>)> = group.clone().flat_map(|u| u.statements.iter().cloned()).collect();
                         let (number, last_tx, hash) = queue.range(..n).last().map(|l| (l.number, l.last_tx, l.hash.clone())).unwrap();
-                        let first_tx = queue[0].first_tx;
-                        let batch = Batch { number, first_tx, last_tx, hash: &hash, statements: &statements };
+                        let (first_number, first_tx) = (queue[0].number, queue[0].first_tx);
+                        let batch = Batch { first_number, number, first_tx, last_tx, hash: &hash, statements: &statements };
                         let r = keep(&mut destinations, rule, &batch);
                         if r.is_ok() {
                             shared.store(last_tx, std::sync::atomic::Ordering::SeqCst);
@@ -1513,7 +1597,7 @@ impl Uploader {
                                 eprintln!("sequencer: stopped with the commits up to {last} not kept elsewhere: {e}");
                                 fail_waiting(&mut queue, &e);
                                 for u in queue.drain(..) {
-                                    if let Some((_, file)) = u.snapshot {
+                                    if let Some((_, _, file)) = u.snapshot {
                                         let _ = std::fs::remove_file(file);
                                     }
                                 }

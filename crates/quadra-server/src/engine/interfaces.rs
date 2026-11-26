@@ -66,7 +66,7 @@ impl Engine {
             return Err(format!("interface files with errors: {}", skipped.join(", ")));
         }
         let key = self.model_key();
-        let done = store::install_files(&mut self.conn, &items, &at_now(), Some(&key))?;
+        let done = self.side(move |c| store::install_files(c, &items, &at_now(), Some(&key)))?;
         if done.created + done.changed + done.removed > 0 {
             eprintln!("interfaces: {} created, {} changed, {} removed", done.created, done.changed, done.removed);
         }
@@ -147,7 +147,8 @@ impl Engine {
         if dir.join(format!("{to}.qdi")).exists() {
             return Err((409, format!("interfaces/{to}.qdi exists already: rename one of the apps first")));
         }
-        store::move_file(&mut self.conn, &file, &to).map_err(|e| (500, e))?;
+        let (from, into) = (file.clone(), to.clone());
+        self.side(move |c| store::move_file(c, &from, &into)).map_err(|e| (500, e))?;
         self.write_back(&to)?;
         let _ = std::fs::remove_file(dir.join(format!("{file}.qdi")));
         Ok(())

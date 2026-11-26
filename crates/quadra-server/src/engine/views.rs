@@ -722,7 +722,8 @@ impl Engine {
             origin: None,
             path: None,
         };
-        let id = store::create_view(&mut self.conn, &row, &shares, &at_now(), Some(who.id), "create").map_err(|e| (500, e))?;
+        let user = who.id;
+        let id = self.side(move |c| store::create_view(c, &row, &shares, &at_now(), Some(user), "create")).map_err(|e| (500, e))?;
         self.one_view(who, id, 201)
     }
 
@@ -737,7 +738,8 @@ impl Engine {
                 return Err((409, format!("folder `{}` cannot move up to {place}, where a folder of that name is: rename one of them first", c.name)));
             }
         }
-        match store::delete_folder(&mut self.conn, f.id, base, &at_now(), Some(who.id)).map_err(|e| (500, e))? {
+        let (folder, user) = (f.id, who.id);
+        match self.side(move |c| store::delete_folder(c, folder, base, &at_now(), Some(user))).map_err(|e| (500, e))? {
             Ok((v, moved)) => Ok(reply(200, json!({ "deleted": f.id, "version": v, "moved": moved.len(), "to": f.parent }))),
             Err(s) => {
                 let users: Vec<u64> = s.0.iter().filter_map(|e| e.user).collect();
@@ -799,7 +801,8 @@ impl Engine {
             ("POST", ["views"]) => self.view_create(&who, body),
             ("PUT", ["views", "order"]) => {
                 let ids: Vec<u64> = body["ids"].as_array().ok_or_else(|| bad("`ids`: the views in order"))?.iter().filter_map(|x| x.as_u64()).take(1000).collect();
-                store::set_order(&mut self.conn, who.id, &ids).map_err(|e| (500, e))?;
+                let user = who.id;
+                self.side(move |c| store::set_order(c, user, &ids)).map_err(|e| (500, e))?;
                 Ok(reply(200, json!({ "ok": true })))
             }
             ("GET", ["views", v]) => self.one_view(&who, id(v)?, 200),
@@ -818,7 +821,8 @@ impl Engine {
                     Some(f @ J::Object(o)) if view.kind == "app" && o.len() <= 50 && f.to_string().len() <= 20_000 => Some(Some(json!({ "filters": f }))),
                     Some(_) => return Err(bad("`filters`: the values of the app's filters by name (an app only, at most 20 KB)")),
                 };
-                store::set_pref_state(&mut self.conn, who.id, view.id, view.entity.as_deref(), body["favourite"].as_bool(), body["default"].as_bool(), state).map_err(|e| (500, e))?;
+                let (user, id, entity, favourite, default) = (who.id, view.id, view.entity.clone(), body["favourite"].as_bool(), body["default"].as_bool());
+                self.side(move |c| store::set_pref_state(c, user, id, entity.as_deref(), favourite, default, state)).map_err(|e| (500, e))?;
                 self.one_view(&who, view.id, 200)
             }
             ("GET", ["views", v, "qdi"]) => self.view_qdi(&who, id(v)?),
@@ -963,7 +967,8 @@ impl Engine {
             origin: None,
             path: None,
         };
-        let id = store::create_view(&mut self.conn, &row, &shares, &at_now(), Some(who.id), "create").map_err(|e| (500, e))?;
+        let user = who.id;
+        let id = self.side(move |c| store::create_view(c, &row, &shares, &at_now(), Some(user), "create")).map_err(|e| (500, e))?;
         self.one_view(who, id, 201)
     }
 
@@ -1037,7 +1042,8 @@ impl Engine {
             change.owner = Some(o);
         }
         let moved = change.parent.is_some_and(|p| p != v.parent);
-        match store::update_view(&mut self.conn, id, Some(base), &change, &at_now(), Some(who.id), "update").map_err(|e| (500, e))? {
+        let (sent, user) = (change.clone(), who.id);
+        match self.side(move |c| store::update_view(c, id, Some(base), &sent, &at_now(), Some(user), "update")).map_err(|e| (500, e))? {
             Ok(_) => {
                 // `quadra dev`: the file follows (moved to another folder: to its directory)
                 if let Some(path) = v.path.clone().filter(|_| v.origin.as_deref() == Some("file")) {
@@ -1094,7 +1100,8 @@ impl Engine {
             origin: None,
             path: None,
         };
-        let id = store::create_view(&mut self.conn, &row, &shares, &at_now(), Some(who.id), "create").map_err(|e| (500, e))?;
+        let user = who.id;
+        let id = self.side(move |c| store::create_view(c, &row, &shares, &at_now(), Some(user), "create")).map_err(|e| (500, e))?;
         self.one_view(who, id, 201)
     }
 
@@ -1107,7 +1114,8 @@ impl Engine {
         let shares = self.parse_shares(&body["shares"])?;
         self.file_shares_ok(&v, &old, &shares)?;
         let change = ViewChange { shares: Some(shares), ..Default::default() };
-        match store::update_view(&mut self.conn, id, Some(base), &change, &at_now(), Some(who.id), "share").map_err(|e| (500, e))? {
+        let user = who.id;
+        match self.side(move |c| store::update_view(c, id, Some(base), &change, &at_now(), Some(user), "share")).map_err(|e| (500, e))? {
             Ok(_) => {
                 if let Some(path) = v.path.clone().filter(|_| v.origin.as_deref() == Some("file") && self.dev_mode()) {
                     self.write_back(store::file_of(&path))?;
@@ -1132,7 +1140,8 @@ impl Engine {
             return self.folder_delete(who, &v, base);
         }
         let change = ViewChange { delete: true, ..Default::default() };
-        match store::update_view(&mut self.conn, id, Some(base), &change, &at_now(), Some(who.id), "delete").map_err(|e| (500, e))? {
+        let user = who.id;
+        match self.side(move |c| store::update_view(c, id, Some(base), &change, &at_now(), Some(user), "delete")).map_err(|e| (500, e))? {
             Ok(version) => {
                 if let Some(path) = v.path.clone().filter(|_| v.origin.as_deref() == Some("file")) {
                     self.write_back(store::file_of(&path))?;
@@ -1224,7 +1233,8 @@ impl Engine {
             // a team has an owner: whoever creates it, unless they named owners
             members.push((who.id, true));
         }
-        let id = store::create_team(&mut self.conn, &name, &description, &members, &at_now(), Some(who.id), "create").map_err(|e| (500, e))?;
+        let user = who.id;
+        let id = self.side(move |c| store::create_team(c, &name, &description, &members, &at_now(), Some(user), "create")).map_err(|e| (500, e))?;
         self.one_team(who, id, 201)
     }
 
@@ -1243,7 +1253,8 @@ impl Engine {
         }
         let description = text_of(body, "description", 2000, false)?;
         let members = if body["members"].is_null() { None } else { Some(self.parse_members(&body["members"])?) };
-        match store::update_team(&mut self.conn, id, base, name.as_deref(), description.as_deref(), members.as_deref(), delete, &at_now(), Some(who.id)).map_err(|e| (500, e))? {
+        let user = who.id;
+        match self.side(move |c| store::update_team(c, id, base, name.as_deref(), description.as_deref(), members.as_deref(), delete, &at_now(), Some(user))).map_err(|e| (500, e))? {
             Ok(v) if delete => Ok(reply(200, json!({ "deleted": id, "version": v }))),
             Ok(_) => self.one_team(who, id, 200),
             Err(s) => {
@@ -1396,7 +1407,8 @@ impl Engine {
                 "deploy".to_string()
             };
             let change = ViewChange { config: (config != v.config).then_some(config), broken: Some(broken), checked: Some(key.clone()), renames_seq: Some(last.max(v.renames_seq)), ..Default::default() };
-            match store::update_view(&mut self.conn, v.id, None, &change, &at, None, &action) {
+            let (id, at) = (v.id, at.clone());
+            match self.side(move |c| store::update_view(c, id, None, &change, &at, None, &action)) {
                 Ok(Ok(n)) if n != v.version => changed += 1,
                 Ok(_) => {}
                 Err(e) => eprintln!("views: view {}: {e}", v.id),

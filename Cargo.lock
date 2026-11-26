@@ -1439,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-analysis"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "quadra-ir",
  "quadra-qdi",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-api"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "quadra-ir",
@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-cli"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "calamine",
  "chrono",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-ir"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "quadra-sema",
  "quadra-syntax",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-lsp"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "quadra-analysis",
  "quadra-ir",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-qdi"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "quadra-ir",
  "quadra-sema",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-runtime"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-sema"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono-tz",
  "quadra-syntax",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-server"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "axum",
  "calamine",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-store"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
@@ -1601,14 +1601,14 @@ dependencies = [
 
 [[package]]
 name = "quadra-syntax"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "rowan",
 ]
 
 [[package]]
 name = "quadra-types"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "quadra-ir",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "quadra-wasm"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "quadra-analysis",
  "quadra-api",
