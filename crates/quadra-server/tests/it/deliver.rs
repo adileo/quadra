@@ -1063,3 +1063,140 @@ fn a_connection_keeps_to_its_rate_and_pauses_when_it_keeps_failing() {
     assert_eq!(r.got.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const RECEIVING: &str = "entity Order:\n    number: Text\n    total: Decimal\n\nrecord ShopOrder from json:\n    id: Text\n    number: Text at \"name\"\n    total: Decimal at \"total_price\"\n\ninbound OrderIn via hooks path \"/orders\" as m: ShopOrder:\n    key m.id\n    if m.total < 0:\n        fail \"a negative total\"\n    let o = Order(number=m.number, total=m.total)\n";
+
+/// POST /in/hooks/orders signed (or not) with HMAC-SHA256 of the body.
+fn send_in(port: u16, body: &str, secret: Option<&str>) -> (u16, J) {
+    let sig = secret
+        .map(|s| quadra_server::deliver::sign(s, body))
+        .unwrap_or_else(|| "x".into());
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    s.write_all(format!("POST /in/hooks/orders HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\nX-Signature: {sig}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    let (head, rest) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (status, serde_json::from_str(rest).unwrap_or(J::Null))
+}
+
+fn inbox_states(cfg: &Config) -> Vec<String> {
+    Conn::open(&cfg.url)
+        .unwrap()
+        .query(
+            "SELECT \"state\" FROM \"_quadra_inbox\" ORDER BY \"id\"",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r[0].clone().unwrap_or_default())
+        .collect()
+}
+
+fn orders(cfg: &Config) -> Vec<String> {
+    Conn::open(&cfg.url)
+        .unwrap()
+        .query("SELECT \"number\" FROM \"order\" ORDER BY \"id\"", &[])
+        .unwrap()
+        .into_iter()
+        .map(|r| r[0].clone().unwrap_or_default())
+        .collect()
+}
+
+#[test]
+fn a_signed_message_comes_in_once_and_a_bad_one_never_touches_the_data() {
+    let dir = temp("inbound");
+    let (cfg, token) = project_full(
+        &dir,
+        9,
+        RECEIVING,
+        "inbound_signature = \"hmac\"\ninbound_secret = { var = \"HOOK_SECRET\" }\n",
+    );
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    call(port, &token, "GET", "/v1/me", None);
+    let good = "{\"id\": 1001, \"name\": \"#1001\", \"total_price\": \"129.90\"}";
+    // signed: kept, handled; the same again: a duplicate, handled once
+    let (s, v) = send_in(port, good, Some("s3cret"));
+    assert_eq!(s, 202, "{v}");
+    let (s, v) = send_in(port, good, Some("s3cret"));
+    assert_eq!((s, v["duplicate"].clone()), (200, json!(true)), "{v}");
+    // a wrong signature: refused, nothing kept
+    let (s, v) = send_in(
+        port,
+        "{\"id\": 1002, \"name\": \"#1002\", \"total_price\": \"1\"}",
+        Some("wrong"),
+    );
+    assert_eq!(s, 401, "{v}");
+    // not a ShopOrder: kept, rejected; a handler that fails: rejected
+    let (s, _) = send_in(port, "{\"id\": 1003}", Some("s3cret"));
+    assert_eq!(s, 202);
+    let (s, _) = send_in(
+        port,
+        "{\"id\": 1004, \"name\": \"#1004\", \"total_price\": \"-5\"}",
+        Some("s3cret"),
+    );
+    assert_eq!(s, 202);
+    let start = Instant::now();
+    while inbox_states(&cfg)
+        .iter()
+        .filter(|s| *s != "received")
+        .count()
+        < 3
+        && start.elapsed() < Duration::from_secs(15)
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(inbox_states(&cfg), ["done", "rejected", "rejected"]);
+    assert_eq!(orders(&cfg), ["#1001"]);
+    let mut c = Conn::open(&cfg.url).unwrap();
+    let rejected = quadra_store::deliveries::inbox(&mut c, Some("rejected")).unwrap();
+    assert!(
+        rejected[0]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("ShopOrder"),
+        "{rejected:?}"
+    );
+    assert!(
+        rejected[1]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("a negative total"),
+        "{rejected:?}"
+    );
+    // the log of the first: received, a duplicate, handled by a transaction
+    let log = quadra_store::deliveries::inbox_log(&mut c, 1).unwrap();
+    let mut steps: Vec<&str> = log.iter().map(|s| s.step.as_str()).collect();
+    steps.sort();
+    assert_eq!(steps, ["duplicate", "handle", "receive"], "{log:?}");
+    assert_eq!(log[0].step, "receive");
+    // the refused one is in the log too, as message 0
+    let refused = quadra_store::deliveries::inbox_log(&mut c, 0).unwrap();
+    assert_eq!(refused.len(), 1);
+    assert!(refused[0]
+        .error
+        .as_deref()
+        .unwrap_or("")
+        .contains("does not match"));
+    // the cause of the order: the message
+    let causes: Vec<String> = c
+        .query("SELECT \"cause\" FROM \"_quadra_commits\"", &[])
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect();
+    assert!(
+        causes
+            .iter()
+            .any(|c| c.contains("inbound:OrderIn#1 handled")),
+        "{causes:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -512,6 +512,20 @@ it is shown only now: store it in a secret manager
 
 Only a SHA-256 hash of the token is stored in the database.
 
+## Messages received: `quadra inbox`
+
+The messages received by an [`inbound`](/reference/connections#inbound-messages-in), kept
+raw before they are handled:
+
+| Command / flag | Effect |
+|---|---|
+| `inbox list` | every message, oldest first, with its inbound, its key and its state: `received`, `done by tx N`, `rejected: <error>`, `skipped` |
+| `--state S` | only the messages in state `S` |
+| `--json` | one JSON object per line, the raw body included |
+| `inbox log <id…>` | what happened to each, step by step: received, duplicates, handled (by which transaction) or rejected (why), `retry`, `skip` with who and why. Message `0` of an inbound holds the messages refused before they were kept |
+| `inbox retry <id…>` | rejected or skipped messages received again: handled by the code deployed now |
+| `inbox skip <id…> --reason R` | messages not to be handled; the reason is required |
+
 ## Events: `quadra outbox`
 
 The events emitted with [`emit`](/reference/flows-and-actions#the-outbox) are written to the

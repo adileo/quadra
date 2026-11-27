@@ -19,6 +19,7 @@ quadra serve examples/extended --url sqlite:/tmp/demo.db --port 8091 --dev-login
 | `GET /v1/search/{Entity}` | records found by their number, code, name or login, then by full-text search (pickers) |
 | `POST /v1/tx` | a transaction: creates, updates, actions |
 | `GET /v1/stream` | live events, one per committed transaction |
+| `POST /in/<connection>[/<path>]` | a message for an `inbound`, signed by the sender ([Variables and connections](/reference/connections#inbound-messages-in)) |
 | `GET /v1/outbox`, `POST /v1/outbox/ack`, `POST /v1/outbox/nack` | the events no `outbound` delivers, taken with a lease and settled by an integration ([Variables and connections](/reference/connections#without-outbound-an-integration-takes-them)) |
 | `POST /v1/auth/dev-login`, `POST /v1/auth/logout` | development sessions |
 | `/v1/dev/…` | the code of the project, for the browser editor |

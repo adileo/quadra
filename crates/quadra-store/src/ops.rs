@@ -140,6 +140,57 @@ pub fn outbox_skip(
     crate::deliveries::skip(&mut db.conn, ids, &at, by, reason)
 }
 
+/// The messages of the inbox (`quadra inbox list`).
+pub fn inbox(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    state: Option<&str>,
+) -> Result<Vec<crate::deliveries::Message>, String> {
+    let mut db = outbox_db(url, model, report)?;
+    crate::deliveries::inbox(&mut db.conn, state)
+}
+
+/// What happened to a message, step by step (`quadra inbox log`).
+pub fn inbox_log(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    id: u64,
+) -> Result<Vec<crate::deliveries::Step>, String> {
+    let mut db = outbox_db(url, model, report)?;
+    crate::deliveries::inbox_log(&mut db.conn, id)
+}
+
+/// Messages rejected or skipped, handled again by the code deployed now (`quadra inbox retry`).
+pub fn inbox_retry(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    ids: &[u64],
+    time: NaiveDateTime,
+    by: &str,
+) -> Result<usize, String> {
+    let mut db = outbox_db(url, model, report)?;
+    let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+    crate::deliveries::inbox_retry(&mut db.conn, ids, &at, by)
+}
+
+/// Messages not to be handled, with a reason (`quadra inbox skip`).
+pub fn inbox_skip(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    ids: &[u64],
+    time: NaiveDateTime,
+    by: &str,
+    reason: &str,
+) -> Result<usize, String> {
+    let mut db = outbox_db(url, model, report)?;
+    let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+    crate::deliveries::inbox_skip(&mut db.conn, ids, &at, by, reason)
+}
+
 /// What happened to an event, step by step (`quadra outbox log`).
 pub fn outbox_log(
     url: &str,
@@ -842,6 +893,54 @@ pub fn build_request(
         return Err("this outbound has no block".into());
     };
     eval_for_event(url, model, report, time, outbound, body, fields, tx, true)
+}
+
+/// Handles a message of the inbox: the code of its `inbound`, with `binding` its record (`doc`),
+/// in a transaction of its own as the system, with `cause` (`inbound:ShopOrder#12 handled`).
+/// Returns the transaction it committed (none when it wrote nothing).
+#[allow(clippy::too_many_arguments)]
+pub fn handle_inbound(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+    inbound: &quadra_ir::Inbound,
+    doc: V,
+    cause: String,
+) -> Result<Option<u64>, String> {
+    let db = Database::open(url, model, report)?;
+    let schema = db.schema.clone();
+    let src = crate::source::DbSource::open(url, schema, None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(match sequencer {
+        Some(s) => Box::new(crate::SequencedSink {
+            db,
+            model,
+            sequencer: s.clone(),
+            tickets: None,
+        }),
+        None => Box::new(Sink { db, model }),
+    });
+    interp.system += 1;
+    let before = interp.store.tx;
+    interp
+        .with_cause(cause, |i| {
+            i.transaction(|i| {
+                let mut ctx = Ctx::default();
+                ctx.bind(&inbound.binding, doc.clone());
+                match i.stmts(&inbound.body, &mut ctx) {
+                    Err(Flow::Return(_)) => Ok(()),
+                    other => other,
+                }
+            })
+        })
+        .map_err(|e| flow(&format!("inbound {}", inbound.name), e))?;
+    Ok((interp.store.tx > before && !interp.store.dirty.is_empty()).then_some(interp.store.tx))
 }
 
 /// A fixed value of a policy (`3 days`): evaluated without data.

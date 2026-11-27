@@ -14,6 +14,7 @@
 mod engine;
 
 pub mod deliver;
+pub mod inbound;
 pub use engine::{
     app_params, bind_for, open_requests, unhex, AppRequest, Config, Engines, Limits, Local,
     Outside, ENGINE_STACK,
@@ -116,6 +117,8 @@ struct Tenant {
     /// by its first engine, used by all of them
     sequencer: Arc<Mutex<Option<quadra_store::Sequencer>>>,
     durability: Option<Arc<dyn Durability>>,
+    /// a message was kept in the inbox: its task handles it now
+    inbox: Arc<tokio::sync::Notify>,
 }
 
 /// What a tenant's engines used, added after each job and taken by the host
@@ -1799,6 +1802,7 @@ fn start(
         usage,
         sequencer,
         durability,
+        inbox: Arc::new(tokio::sync::Notify::new()),
     });
     let (watch, root) = (cfg.watch, cfg.root.clone());
 
@@ -1920,7 +1924,78 @@ fn start(
     if cfg.outside.deliver {
         tokio::spawn(deliveries(t.clone(), egress));
     }
+    tokio::spawn(inbox(t.clone()));
     t
+}
+
+/// A tenant's inbox (`Engine::handle_inbox`): the messages received handled, a few at a time;
+/// then a wait for the next one (or a minute: a message made pending again by `quadra inbox
+/// retry`). A model without any `inbound` is looked at once a minute.
+async fn inbox(t: Arc<Tenant>) {
+    loop {
+        let (n, serves) = t
+            .ask(|reply| Job::Inbox { limit: 16, reply })
+            .await
+            .unwrap_or((0, true));
+        if n > 0 {
+            if t.stopped() {
+                return;
+            }
+            continue;
+        }
+        let wait = 60;
+        let notified = t.inbox.clone();
+        let mut stop = t.stop.subscribe();
+        if *stop.borrow_and_update() {
+            return;
+        }
+        tokio::select! {
+            _ = notified.notified(), if serves => {}
+            _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+            _ = stop.changed() => return,
+        }
+    }
+}
+
+/// `POST /in/<connection>[/<path>]`: a message for an `inbound`, checked and kept by the engine
+/// (`Engine::receive`), then handled by the tenant's inbox. No session: the sender proves who
+/// it is by the signature of its connection.
+async fn inbound_api(
+    Ten(t): Ten,
+    Path(params): Path<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let connection = params.get("connection").cloned().unwrap_or_default();
+    let path = params
+        .get("rest")
+        .map(|r| format!("/{r}"))
+        .unwrap_or_default();
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
+        .collect();
+    let body = body.to_vec();
+    let Some((status, answer)) = t
+        .ask(|reply| Job::Receive {
+            connection,
+            path,
+            headers,
+            body,
+            reply,
+        })
+        .await
+    else {
+        return fail(503, "the engine is not available");
+    };
+    if status == 202 {
+        t.inbox.notify_one();
+    }
+    (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(answer),
+    )
+        .into_response()
 }
 
 /// The state of a connection of a tenant, as its deliveries go (in memory: a restart starts
@@ -2226,6 +2301,14 @@ impl Host {
                     .delete(views_api),
             )
             .route("/v1/teams", get(views_api).post(views_api))
+            .route(
+                "/in/{connection}",
+                post(inbound_api).layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
+            )
+            .route(
+                "/in/{connection}/{*rest}",
+                post(inbound_api).layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
+            )
             .route("/v1/outbox", get(outbox_api))
             .route("/v1/outbox/ack", post(outbox_api))
             .route("/v1/outbox/nack", post(outbox_api))

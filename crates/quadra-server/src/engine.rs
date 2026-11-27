@@ -393,6 +393,21 @@ pub enum Job {
             >,
         >,
     },
+    /// a message sent to `/in/<connection><path>`: checked and kept in the inbox
+    /// (`crate::inbound`); the answer for the sender
+    Receive {
+        connection: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        reply: oneshot::Sender<(u16, J)>,
+    },
+    /// the host's inbox: up to `limit` messages received handled; how many, and whether the
+    /// model has any `inbound`
+    Inbox {
+        limit: usize,
+        reply: oneshot::Sender<(usize, bool)>,
+    },
     /// event `id` not tried before `at` (its connection is paused), without an attempt
     Defer {
         id: u64,
@@ -1080,6 +1095,206 @@ impl Engine {
         }
     }
 
+    /// A message sent to `/in/<connection><path>`: its inbound found, its size and signature
+    /// checked (refused: only in the log), its body kept raw with its hash, unless one with the
+    /// same key came before. Read as its record when it is kept: one that does not fit is kept
+    /// `rejected`, to be handled again by a deploy that reads it. The answer is sent once it is
+    /// kept where the durability rule wants it.
+    fn receive(
+        &mut self,
+        connection: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> (u16, J) {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return (503, json!({ "error": "the app is not ready" }));
+        };
+        let at = now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let path = if path == "/" { "" } else { path };
+        let Some(i) = model
+            .inbounds
+            .iter()
+            .find(|i| i.connection == connection && i.path.as_deref().unwrap_or("") == path)
+        else {
+            return (
+                404,
+                json!({ "error": format!("no inbound takes the messages of `{connection}` at {}", if path.is_empty() { "/" } else { path }) }),
+            );
+        };
+        let refuse = |s: &mut Self, status: u16, why: String| {
+            let (name, conn, at2, w) = (
+                i.name.clone(),
+                connection.to_string(),
+                at.clone(),
+                why.clone(),
+            );
+            let _ = s.side(move |c| quadra_store::deliveries::refuse(c, &name, &conn, &at2, &w));
+            (status, json!({ "error": why }))
+        };
+        let Some(auth) = model
+            .manifest
+            .connection(connection)
+            .and_then(|c| c.inbound.clone())
+        else {
+            return refuse(
+                self,
+                401,
+                format!("`{connection}` does not say how its messages are signed"),
+            );
+        };
+        if body.len() > auth.max_bytes {
+            return refuse(
+                self,
+                413,
+                format!("the message is larger than {} KB", auth.max_bytes / 1024),
+            );
+        }
+        let mut secrets: Vec<String> = Vec::new();
+        for v in std::iter::once(&auth.secret).chain(auth.previous.iter()) {
+            if let Some(s) = model.manifest.value(&self.env, v) {
+                secrets.push(s.to_string());
+            }
+        }
+        if secrets.is_empty() {
+            return refuse(
+                self,
+                503,
+                format!("the secret of `{connection}` is not set where the app runs"),
+            );
+        }
+        let refs: Vec<&str> = secrets.iter().map(|s| s.as_str()).collect();
+        if let Err(e) = crate::inbound::verify(
+            &auth.preset,
+            &refs,
+            headers,
+            body,
+            chrono::Utc::now().timestamp(),
+        ) {
+            return refuse(self, 401, e);
+        }
+        let Ok(text) = std::str::from_utf8(body) else {
+            return refuse(self, 400, "the message is not text (UTF-8)".into());
+        };
+        let hash = crate::inbound::hash(body);
+        // read as its record; the key from it (else the hash)
+        let parsed = quadra_runtime::formats::parse_json(model, &i.ty, text);
+        let key = match (&parsed, &i.key) {
+            (Ok(doc), Some(k)) => {
+                let mut interp = quadra_runtime::Interp::new(model);
+                let mut ctx = quadra_runtime::Ctx::default();
+                ctx.bind(&i.binding, doc.clone());
+                match interp.eval(k, &mut ctx) {
+                    Ok(quadra_runtime::V::Text(t)) => t.to_string(),
+                    Ok(v) => v.to_string(),
+                    Err(_) => hash.clone(),
+                }
+            }
+            _ => hash.clone(),
+        };
+        let error = parsed.err().map(|e| format!("{}: {e}", i.ty));
+        let (name, conn, at2, body_s) = (
+            i.name.clone(),
+            connection.to_string(),
+            at.clone(),
+            text.to_string(),
+        );
+        let r = self.side(move |c| {
+            quadra_store::deliveries::receive(
+                c,
+                &name,
+                &conn,
+                &key,
+                &hash,
+                &body_s,
+                &at2,
+                error.as_deref(),
+            )
+        });
+        use quadra_store::deliveries::Received;
+        match r {
+            Ok(Received::New(id)) => (202, json!({ "id": id })),
+            Ok(Received::Duplicate(id)) => (200, json!({ "id": id, "duplicate": true })),
+            Ok(Received::Conflict(id)) => (
+                409,
+                json!({ "error": "a message with the same key and a different body was received before", "id": id }),
+            ),
+            Err(e) => (
+                503,
+                json!({ "error": format!("the message could not be kept: {e}") }),
+            ),
+        }
+    }
+
+    /// Up to `limit` messages of the inbox handled, oldest first, each in a transaction of its
+    /// own with the cause `inbound:Name#id handled`; one that fails is `rejected` with the
+    /// error. Returns how many, and whether the model has any inbound.
+    fn handle_inbox(&mut self, limit: usize) -> (usize, bool) {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return (0, false);
+        };
+        if model.inbounds.is_empty() {
+            return (0, false);
+        }
+        let messages = match quadra_store::deliveries::to_handle(&mut self.conn, limit) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("inbox: {e}");
+                return (0, true);
+            }
+        };
+        let n = messages.len();
+        for m in messages {
+            let at = now();
+            let stamp = at.format("%Y-%m-%dT%H:%M:%S").to_string();
+            let name = m.inbound.clone();
+            let result: Result<u64, String> = (|| {
+                let i = model
+                    .inbounds
+                    .iter()
+                    .find(|i| i.name == m.inbound)
+                    .ok_or_else(|| {
+                        format!("no inbound `{}` in the code deployed now", m.inbound)
+                    })?;
+                // handled already (the server stopped before writing it): done
+                if let Some(tx) =
+                    quadra_store::deliveries::handled_by(&mut self.conn, &i.name, m.id)?
+                {
+                    return Ok(tx);
+                }
+                let doc = quadra_runtime::formats::parse_json(model, &i.ty, &m.body)
+                    .map_err(|e| format!("{}: {e}", i.ty))?;
+                quadra_store::ops::handle_inbound(
+                    &self.url,
+                    model,
+                    &checked.report,
+                    at,
+                    self.sequencer.as_ref(),
+                    i,
+                    doc,
+                    format!("inbound:{}#{} handled", i.name, m.id),
+                )
+                .map(|tx| tx.unwrap_or(0))
+            })();
+            if let Err(e) = &result {
+                eprintln!("inbound {name}#{}: {e}", m.id);
+            }
+            let id = m.id;
+            let _ = self.side(move |c| {
+                quadra_store::deliveries::handled(
+                    c,
+                    id,
+                    &name,
+                    &stamp,
+                    result.as_ref().map(|t| *t).map_err(|e| e.as_str()),
+                )
+            });
+        }
+        (n, true)
+    }
+
     /// The reactions to the final outcome of event `id` (`on E delivered as d:`, `on E failed as
     /// f:`), in a transaction of their own with the cause `outbound:E#id`. One that fails leaves
     /// the outcome as it is (it is true: the receiver got it, or not) and goes to the event's log.
@@ -1394,6 +1609,18 @@ impl Engine {
                 }
                 Job::Deliveries { limit, reply } => {
                     let _ = reply.send(self.deliveries(limit));
+                }
+                Job::Receive {
+                    connection,
+                    path,
+                    headers,
+                    body,
+                    reply,
+                } => {
+                    let _ = reply.send(self.receive(&connection, &path, &headers, &body));
+                }
+                Job::Inbox { limit, reply } => {
+                    let _ = reply.send(self.handle_inbox(limit));
                 }
                 Job::Defer { id, at, reply } => {
                     let at = at.format("%Y-%m-%dT%H:%M:%S").to_string();

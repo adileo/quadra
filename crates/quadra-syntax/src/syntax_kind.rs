@@ -130,6 +130,8 @@ pub enum SyntaxKind {
     FORMAT_CLAUSE,
     /// a line of policy at the top of an `outbound … as e:` block: `reply ErpAck`
     OUTBOUND_CLAUSE,
+    /// `inbound ShopOrder via shop path "/orders" as m: ShopOrderDoc:` and its handler
+    INBOUND,
 
     // members
     MEMBER_LIST,

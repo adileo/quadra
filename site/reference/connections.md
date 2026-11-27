@@ -400,6 +400,71 @@ On Quadra Cloud connections only reach public addresses: a name that resolves to
 loopback or link-local address (the clouds' metadata, `169.254.169.254`) is refused, and so
 is a redirect. Previews and forks deliver nothing ([On Quadra Cloud](#on-quadra-cloud)).
 
+## `inbound`: messages in
+
+A system that sends messages (a shop's webhooks, a cash register, a carrier's status updates)
+reaches an `inbound`. Each message is kept raw, then handled by code in a transaction of its
+own:
+
+```toml
+[vars]
+SHOP_WEBHOOK_SECRET = { secret = true }
+
+[connections.shop]
+kind = "http"
+url = "https://acme.myshopify.com/admin/api"
+inbound_signature = "shopify"
+inbound_secret = { var = "SHOP_WEBHOOK_SECRET" }
+```
+
+```quadra
+record ShopOrder from json:
+    id: Text
+    number: Text at "name"
+    total: Decimal at "total_price"
+
+inbound OrderIn via shop path "/orders" as m: ShopOrder:
+    key m.id
+    if m.total < 0:
+        fail "a negative total"
+    let o = Order(number=m.number, total=m.total)
+```
+
+The shop sends to `POST https://<app>/in/shop/orders` (`/in/<connection>` and the inbound's
+`path`). What happens to a message:
+
+| Step | Rule |
+|---|---|
+| Who sent it | checked first, by the connection's `inbound_signature`; a message refused (a wrong signature, too large, no inbound at that path) never touches the data and is in the log |
+| Kept | raw, with its hash, **before** it is handled; the sender gets its `202` only once it is kept where the durability rule wants it |
+| Duplicates | a message whose `key` was received before is not kept again (`200` with `"duplicate": true`); the same key with another body is a conflict (`409`), in the log. Without `key`, the hash of the body tells two messages apart |
+| Read | as its record (`ShopOrder`); one that does not fit is kept `rejected`, with the error, to be handled again by a deploy that reads it |
+| Handled | the code after the policy lines, as in an action, in a transaction with the cause `inbound:OrderIn#12 handled`; one that fails (`fail`, a rule broken) is `rejected` with the error, and the next messages go on |
+| Once | a message is handled once, even if the server stops between its transaction and writing it |
+
+| `inbound_signature` | What the sender adds, with `inbound_secret` |
+|---|---|
+| `quadra` | `Quadra-Signature: t=…,v1=…` (Quadra's own webhooks: [Webhooks](#webhooks)) |
+| `stripe` | `Stripe-Signature: t=…,v1=…` |
+| `hmac` | `X-Signature: <hex HMAC-SHA256 of the body>` |
+| `shopify` | `X-Shopify-Hmac-Sha256: <base64 HMAC-SHA256 of the body>` |
+| `github` | `X-Hub-Signature-256: sha256=<hex>` |
+| `token` | `Authorization: Bearer <the secret>` |
+
+A timestamped signature more than five minutes old is refused. `inbound_secret_previous` is
+also accepted while the sender switches to a new secret; `inbound_max_kb` is the largest body
+(1024 when not given).
+
+The messages, their states (`received`, `done`, `rejected`, `skipped`) and the log of each,
+with the same commands as the outbox:
+
+```bash
+quadra inbox list --state rejected
+quadra inbox log 12
+quadra inbox retry 12                     # handled again by the code deployed now
+quadra inbox skip 13 --reason "a test order from the shop"
+```
+
 ## Formats: `record … from json`
 
 The documents of another system (a shop's order, a carrier's label, the answer of an API) are

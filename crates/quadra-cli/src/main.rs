@@ -14,6 +14,7 @@
 //!     quadra serve [path] [--url URL] [--port 8080] [--dev-login] [--secure-cookies] …
 //!     quadra token create <login> … | revoke <name>
 //!     quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R [path] [--url URL]
+//!     quadra inbox list [--state S] [--json] | log <id…> | retry <id…> | skip <id…> --reason R [path] [--url URL]
 //!     quadra bench gen|run …           the stress benchmark of examples/stress
 //!     quadra parse <file>              print the syntax tree of a file
 //!     quadra lsp                       start the language server on stdin/stdout
@@ -67,6 +68,7 @@ fn main() -> ExitCode {
         Some("dev") => dev::dev(&args[1..]),
         Some("token") => token(&args[1..]),
         Some("outbox") => outbox(&args[1..]),
+        Some("inbox") => inbox(&args[1..]),
         Some("bench") => bench::bench(&args[1..]),
         Some("cloud") => cloud::main(&args[1..]),
         Some("upgrade") => upgrade::main(&args[1..]),
@@ -119,6 +121,7 @@ fn usage() -> ExitCode {
          quadra serve [path] [--url URL] [--port 8080] [--web dir] [--dev-login] [--secure-cookies] [--cache-mb 256] [--prewarm-days N] [--sweep-every secs] [--editors login,…] [--job-timeout 120] [--max-rows N] [--max-list N] [--max-queue 1000] [--readers 2] [--writers 1]\n  \
          quadra token create <login> [--name n] [--read-only] [--days 90] | revoke <name>   [path] [--url URL]\n  \
          quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R   [path] [--url URL]   events emitted by `emit`\n  \
+         quadra inbox list [--state S] [--json] | log <id…> | retry <id…> | skip <id…> --reason R   [path] [--url URL]   messages received by an `inbound`\n  \
          quadra bench gen --scale tiny|small|medium|large --out DIR [--seed N]   stress data as CSV\n  \
          quadra bench run [path] --url URL --scale … [--json file] [--timeout 60] [--reps 5] [--only a,b] [--skip a,b]   the stress benchmark\n  \
          quadra parse <file>                  print the syntax tree of a file\n  \
@@ -825,6 +828,104 @@ fn outbox(args: &[String]) -> ExitCode {
         }
         _ => Err(format!(
             "unknown outbox command `{cmd}` (list, log, delivered, retry, skip)"
+        )),
+    })())
+}
+
+/// `quadra inbox list [--state S] [--json] | log <id…> | retry <id…> | skip <id…> --reason R`:
+/// the messages received by an `inbound`, and what came of each.
+fn inbox(args: &[String]) -> ExitCode {
+    let Some(cmd) = args.first().map(String::as_str) else {
+        return usage();
+    };
+    let mut rest = args[1..].to_vec();
+    let mut ids: Vec<u64> = Vec::new();
+    if matches!(cmd, "retry" | "skip" | "log") {
+        while let (Some(word), others) = take_positional(&rest, VALUE_FLAGS) {
+            let Ok(id) = word.trim_start_matches('#').parse::<u64>() else {
+                break;
+            };
+            ids.push(id);
+            rest = others;
+        }
+        if ids.is_empty() {
+            eprintln!("usage: quadra inbox {cmd} <id…> [path] [--url URL]");
+            return ExitCode::from(2);
+        }
+    }
+    let rest = rest.as_slice();
+    let (_, checked, url) = match open_project(rest) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    let model = checked.model.as_ref().unwrap();
+    let report = &checked.report;
+    use quadra_store::ops;
+    finish((|| match cmd {
+        "list" => {
+            let state = flag(rest, "--state");
+            let messages = ops::inbox(&url, model, report, state.as_deref())?;
+            if rest.iter().any(|a| a == "--json") {
+                for m in &messages {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "id": m.id, "inbound": m.inbound, "connection": m.connection, "key": m.key,
+                            "hash": m.hash, "received_at": m.received_at, "state": m.state,
+                            "attempts": m.attempts, "error": m.error, "done_at": m.done_at, "tx": m.tx,
+                            "body": m.body,
+                        })
+                    );
+                }
+                return Ok(());
+            }
+            if messages.is_empty() {
+                println!("the inbox is empty");
+            }
+            for m in &messages {
+                let state = match (m.state.as_str(), &m.error) {
+                    ("done", _) => format!("done by tx {}", m.tx.unwrap_or(0)),
+                    (s, Some(e)) => format!("{s}: {e}"),
+                    (s, None) => s.to_string(),
+                };
+                println!(
+                    "#{:<5} {}  {}  key {}  ({state})",
+                    m.id, m.received_at, m.inbound, m.key
+                );
+            }
+            Ok(())
+        }
+        "log" => {
+            for id in &ids {
+                for s in ops::inbox_log(&url, model, report, *id)? {
+                    let mut line = format!("#{id}  {}  {:<9} {:<10}", s.at, s.step, s.outcome);
+                    if let Some(e) = &s.error {
+                        line.push_str(&format!("  {e}"));
+                    }
+                    if let Some(b) = &s.by {
+                        line.push_str(&format!("  by {b}"));
+                    }
+                    if let Some(r) = &s.reason {
+                        line.push_str(&format!(": {r}"));
+                    }
+                    println!("{line}");
+                }
+            }
+            Ok(())
+        }
+        "retry" => {
+            let n = ops::inbox_retry(&url, model, report, &ids, now(), &who())?;
+            println!("✓ {n} message(s) received again: handled by the code deployed now");
+            Ok(())
+        }
+        "skip" => {
+            let reason = flag(rest, "--reason").unwrap_or_default();
+            let n = ops::inbox_skip(&url, model, report, &ids, now(), &who(), &reason)?;
+            println!("✓ {n} message(s) skipped: they will not be handled");
+            Ok(())
+        }
+        _ => Err(format!(
+            "unknown inbox command `{cmd}` (list, log, retry, skip)"
         )),
     })())
 }

@@ -275,6 +275,37 @@ impl<'a> Lower<'a> {
                     .unwrap_or_default();
                 self.model.events.push(Event { name, fields, span });
             }
+            INBOUND => {
+                let mut names =
+                    ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());
+                let name = names.next().unwrap_or_default();
+                let connection = names.next().unwrap_or_default();
+                let binding = names.next().unwrap_or_default();
+                let path = item
+                    .children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()));
+                let ty = ast::child(item, PATH)
+                    .map(|p| ast::path_text(&p))
+                    .unwrap_or_default();
+                let key = ast::children(item, OUTBOUND_CLAUSE)
+                    .find(|c| ctx_words(c).first().map(String::as_str) == Some("key"))
+                    .and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                let body = ast::child(item, BLOCK)
+                    .map(|b| self.stmts(&b))
+                    .unwrap_or_default();
+                self.model.inbounds.push(Inbound {
+                    name,
+                    connection,
+                    path,
+                    binding,
+                    ty,
+                    key,
+                    body,
+                    span,
+                });
+            }
             OUTBOUND => {
                 let mut names =
                     ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());

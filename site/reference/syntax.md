@@ -100,7 +100,7 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 
 | Contextual keywords | Where |
 |---|---|
-| `temporary`, `builtin`, `seed`, `event`, `outbound`, `on`, `before`, `role`, `deny`, `allow`, `view`, `report`, `metric`, `control`, `migration`, `change`, `fixture`, `test`, `patch` | at the start of a top-level declaration |
+| `temporary`, `builtin`, `seed`, `event`, `outbound`, `inbound`, `on`, `before`, `role`, `deny`, `allow`, `view`, `report`, `metric`, `control`, `migration`, `change`, `fixture`, `test`, `patch` | at the start of a top-level declaration |
 | `check`, `warn`, `unique`, `frozen`, `live`, `flow`, `action`, `post`, `load`, `key`, `measure`, `attr` | at the start of a member |
 | `default`, `required`, `parent`, `per`, `company`, `via`, `through`, `except` | in a field or a `frozen` line |
 | `by`, `unless` | in a flow transition |
@@ -109,7 +109,7 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 | `rename`, `convert`, `backfill`, `verify` | in a migration |
 | `read`, `create`, `edit`, `run`, `all`, `hide`, `show`, `history` | in a permission rule |
 | `extends` | in a fixture |
-| `via`, `path`, `reply` | in an `outbound` |
+| `via`, `path`, `reply`, `retry`, `times`, `backoff`, `expires`, `after`, `unless`, `delay`, `window`, `key`, `ordered`, `latest`, `by` | in an `outbound` (`via`, `path`, `key` in an `inbound` too) |
 | `at` | in a field of a record `from json` (`from` after a record's name is the reserved word) |
 | `implies` | as a binary operator |
 

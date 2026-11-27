@@ -274,6 +274,8 @@ impl<'m> Checker<'m> {
         }
         self.context = String::new();
         self.check_outbounds();
+        self.check_inbounds();
+        self.context = String::new();
         for r in &m.reactions {
             self.entity = None;
             self.context = match &r.trigger {
@@ -1951,6 +1953,64 @@ impl<'m> Checker<'m> {
                     format!("`reply {r}`: a record `from json`, to read the answer"),
                 );
             }
+        }
+    }
+
+    /// `inbound Name via connection [path "…"] as m: Type:`: a record `from json`, an HTTP
+    /// connection that says how its messages are signed, one handler per connection and path, a
+    /// key of text; the handler is code as in an action.
+    fn check_inbounds(&mut self) {
+        let m = self.m;
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for i in &m.inbounds {
+            if !seen.insert((i.connection.clone(), i.path.clone().unwrap_or_default())) {
+                self.error(
+                    i.span,
+                    format!(
+                        "another inbound already takes the messages of `{}` at {}",
+                        i.connection,
+                        i.path.as_deref().unwrap_or("/")
+                    ),
+                );
+            }
+            match m.manifest.connection(&i.connection) {
+                None => self.error(i.span, format!("no connection `{}` in quadra.toml ([connections.{}])", i.connection, i.connection)),
+                Some(c) if c.kind_name() != "http" => self.error(i.span, format!("`{}` is not an HTTP connection: messages come in over HTTP", i.connection)),
+                Some(c) if c.inbound.is_none() => self.error(i.span, format!("`{}` does not say how its messages are signed (`inbound_signature` and `inbound_secret` in quadra.toml): without it anyone could send them", i.connection)),
+                _ => {}
+            }
+            if let Some(p) = &i.path {
+                if !p.starts_with('/') || p.contains("..") || p.chars().any(|c| c.is_whitespace()) {
+                    self.error(
+                        i.span,
+                        format!("the path `{p}`: from `/`, no spaces, no `..`"),
+                    );
+                }
+            }
+            if !m.entity(&i.ty).is_some_and(|e| e.format.is_some()) {
+                self.error(
+                    i.span,
+                    format!(
+                        "`{}`: a message is read as a record `from json` (`record {} from json:`)",
+                        i.ty, i.ty
+                    ),
+                );
+            }
+            self.entity = None;
+            self.context = format!("inbound {}", i.name);
+            self.push();
+            self.bind(&i.binding, T::Ent(i.ty.clone()));
+            if let Some(k) = &i.key {
+                let t = self.infer(k);
+                if !matches!(t.unopt(), T::Text(_) | T::Num(_) | T::Unknown) {
+                    self.error(
+                        k.span,
+                        "`key` is text (or a number): what tells two messages apart",
+                    );
+                }
+            }
+            self.stmts(&i.body);
+            self.pop();
         }
     }
 

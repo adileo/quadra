@@ -33,6 +33,9 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_applied\" (\"key\" TEXT PRIMARY KEY, \"tx\" BIGINT NOT NULL)",
     "CREATE TABLE \"_quadra_renames\" (\"seq\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"entity\" TEXT NOT NULL, \"old_name\" TEXT NOT NULL, \"new_name\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT, \"state\" TEXT NOT NULL DEFAULT 'pending', \"lease_until\" TEXT, \"lane\" TEXT, \"latest\" TEXT)",
+    // the messages received by an `inbound` (crate::deliveries): raw, with their hash, before
+    // they are handled
+    "CREATE TABLE \"_quadra_inbox\" (\"id\" BIGINT PRIMARY KEY, \"inbound\" TEXT NOT NULL, \"connection\" TEXT NOT NULL, \"key\" TEXT NOT NULL, \"hash\" TEXT NOT NULL, \"body\" TEXT NOT NULL, \"received_at\" TEXT NOT NULL, \"state\" TEXT NOT NULL, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"error\" TEXT, \"done_at\" TEXT, \"tx\" BIGINT)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
     // (crate::deliveries), written with what it records and never changed
     "CREATE TABLE \"_quadra_exchanges\" (\"id\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"message\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"connection\" TEXT, \"step\" TEXT NOT NULL, \"outcome\" TEXT NOT NULL, \"status\" BIGINT, \"duration_ms\" BIGINT, \"error\" TEXT, \"excerpt\" TEXT, \"by\" TEXT, \"reason\" TEXT)",
@@ -57,6 +60,13 @@ const SYSTEM_DDL: &[&str] = &[
 /// of an entity (scans), those written or created after a transaction (the cache, conflicts),
 /// the rows of a ledger.
 pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
+    // the messages of an inbound by their key (duplicates), and those to handle
+    (
+        "qx__quadra_inbox_inbound_key",
+        "_quadra_inbox",
+        &["inbound", "key"],
+    ),
+    ("qx__quadra_inbox_state", "_quadra_inbox", &["state", "id"]),
     // the log of a message (crate::deliveries)
     (
         "qx__quadra_exchanges_message",

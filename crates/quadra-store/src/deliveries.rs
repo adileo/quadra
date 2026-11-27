@@ -294,6 +294,26 @@ fn log_step(
     by: Option<&str>,
     reason: Option<&str>,
 ) -> Result<(), String> {
+    log_dir(
+        conn, "out", id, name, at, step, outcome, attempt, error, by, reason,
+    )
+}
+
+/// Adds a row to the log of a message, out or in.
+#[allow(clippy::too_many_arguments)]
+fn log_dir(
+    conn: &mut Conn,
+    direction: &str,
+    id: u64,
+    name: &str,
+    at: &str,
+    step: &str,
+    outcome: &str,
+    attempt: Option<&Attempt>,
+    error: Option<&str>,
+    by: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), String> {
     let next: i64 = conn
         .query(
             "SELECT CAST(COALESCE(MAX(\"id\"), 0) + 1 AS TEXT) FROM \"_quadra_exchanges\"",
@@ -305,10 +325,11 @@ fn log_step(
         .unwrap_or(1);
     let opt = |v: Option<&str>| v.map(|s| Sql::Text(s.to_string())).unwrap_or(Sql::Null);
     conn.exec(
-        "INSERT INTO \"_quadra_exchanges\" (\"id\", \"at\", \"direction\", \"message\", \"name\", \"connection\", \"step\", \"outcome\", \"status\", \"duration_ms\", \"error\", \"excerpt\", \"by\", \"reason\") VALUES (?bigint, ?text, 'out', ?bigint, ?text, ?text, ?text, ?text, ?bigint, ?bigint, ?text, ?text, ?text, ?text)",
+        "INSERT INTO \"_quadra_exchanges\" (\"id\", \"at\", \"direction\", \"message\", \"name\", \"connection\", \"step\", \"outcome\", \"status\", \"duration_ms\", \"error\", \"excerpt\", \"by\", \"reason\") VALUES (?bigint, ?text, ?text, ?bigint, ?text, ?text, ?text, ?text, ?bigint, ?bigint, ?text, ?text, ?text, ?text)",
         &[
             Sql::Int(next),
             Sql::Text(at.to_string()),
+            Sql::Text(direction.to_string()),
             Sql::Int(id as i64),
             Sql::Text(name.to_string()),
             opt(attempt.map(|a| a.connection.as_str())),
@@ -461,9 +482,18 @@ fn event_name(conn: &mut Conn, id: u64) -> Result<Option<String>, String> {
 
 /// The log of event `id`, oldest first.
 pub fn log(conn: &mut Conn, id: u64) -> Result<Vec<Step>, String> {
+    log_of(conn, "out", id)
+}
+
+/// The log of message `id` of the inbox, oldest first.
+pub fn inbox_log(conn: &mut Conn, id: u64) -> Result<Vec<Step>, String> {
+    log_of(conn, "in", id)
+}
+
+fn log_of(conn: &mut Conn, direction: &str, id: u64) -> Result<Vec<Step>, String> {
     let rows = conn.query(
-        "SELECT \"at\", \"step\", \"outcome\", \"connection\", CAST(\"status\" AS TEXT), CAST(\"duration_ms\" AS TEXT), \"error\", \"excerpt\", \"by\", \"reason\" FROM \"_quadra_exchanges\" WHERE \"direction\" = 'out' AND \"message\" = ?bigint ORDER BY \"_quadra_exchanges\".\"id\"",
-        &[Sql::Int(id as i64)],
+        "SELECT \"at\", \"step\", \"outcome\", \"connection\", CAST(\"status\" AS TEXT), CAST(\"duration_ms\" AS TEXT), \"error\", \"excerpt\", \"by\", \"reason\" FROM \"_quadra_exchanges\" WHERE \"direction\" = ?text AND \"message\" = ?bigint ORDER BY \"_quadra_exchanges\".\"id\"",
+        &[Sql::Text(direction.to_string()), Sql::Int(id as i64)],
     )?;
     Ok(rows
         .into_iter()
@@ -575,6 +605,333 @@ pub fn settle(
         &[Sql::Int(id as i64)],
     )?;
     Ok(changed)
+}
+
+/// What came of a message received by an `inbound`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// kept, to be handled: its id
+    New(u64),
+    /// already received with the same key and the same body: not kept again
+    Duplicate(u64),
+    /// the same key with another body: not kept, said in the log
+    Conflict(u64),
+}
+
+/// A message of the inbox.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub id: u64,
+    pub inbound: String,
+    pub connection: String,
+    pub key: String,
+    pub hash: String,
+    pub body: String,
+    pub received_at: String,
+    pub state: String,
+    pub attempts: u64,
+    pub error: Option<String>,
+    pub done_at: Option<String>,
+    pub tx: Option<u64>,
+}
+
+/// Keeps a message received by `inbound` from `connection`, raw with its hash, unless one with
+/// the same key was received before (`key`: what the inbound says, else the hash). `error`: it
+/// cannot be read as its record (kept all the same, `rejected`, to be handled again after a
+/// deploy that reads it).
+#[allow(clippy::too_many_arguments)]
+pub fn receive(
+    conn: &mut Conn,
+    inbound: &str,
+    connection: &str,
+    key: &str,
+    hash: &str,
+    body: &str,
+    now: &str,
+    error: Option<&str>,
+) -> Result<Received, String> {
+    if let Some(r) = conn
+        .query(
+            "SELECT CAST(\"id\" AS TEXT), \"hash\" FROM \"_quadra_inbox\" WHERE \"inbound\" = ?text AND \"key\" = ?text ORDER BY \"id\" LIMIT 1",
+            &[Sql::Text(inbound.to_string()), Sql::Text(key.to_string())],
+        )?
+        .into_iter()
+        .next()
+    {
+        let id: u64 = r[0].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let same = r[1].as_deref() == Some(hash);
+        let (step, why) = if same {
+            ("duplicate", "the same message, received again: not handled again".to_string())
+        } else {
+            ("conflict", format!("another message with the key `{key}` and a different body: not kept"))
+        };
+        log_dir(conn, "in", id, inbound, now, step, if same { "duplicate" } else { "conflict" }, None, None, None, Some(&why))?;
+        return Ok(if same { Received::Duplicate(id) } else { Received::Conflict(id) });
+    }
+    let id: i64 = conn
+        .query(
+            "SELECT CAST(COALESCE(MAX(\"id\"), 0) + 1 AS TEXT) FROM \"_quadra_inbox\"",
+            &[],
+        )?
+        .first()
+        .and_then(|r| r[0].as_deref())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let state = if error.is_some() {
+        "rejected"
+    } else {
+        "received"
+    };
+    conn.exec(
+        "INSERT INTO \"_quadra_inbox\" (\"id\", \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", \"attempts\", \"error\") VALUES (?bigint, ?text, ?text, ?text, ?text, ?text, ?text, ?text, ?bigint, ?text)",
+        &[
+            Sql::Int(id),
+            Sql::Text(inbound.to_string()),
+            Sql::Text(connection.to_string()),
+            Sql::Text(key.to_string()),
+            Sql::Text(hash.to_string()),
+            Sql::Text(body.to_string()),
+            Sql::Text(now.to_string()),
+            Sql::Text(state.to_string()),
+            Sql::Int(0),
+            error.map(|e| Sql::Text(e.to_string())).unwrap_or(Sql::Null),
+        ],
+    )?;
+    log_dir(
+        conn,
+        "in",
+        id as u64,
+        inbound,
+        now,
+        "receive",
+        state,
+        Some(&Attempt {
+            connection: connection.to_string(),
+            ..Default::default()
+        }),
+        error,
+        None,
+        None,
+    )?;
+    Ok(Received::New(id as u64))
+}
+
+/// A message refused before it was kept (a wrong signature, too large, an unknown path): only
+/// in the log, as message 0 of its inbound.
+pub fn refuse(
+    conn: &mut Conn,
+    inbound: &str,
+    connection: &str,
+    now: &str,
+    error: &str,
+) -> Result<(), String> {
+    log_dir(
+        conn,
+        "in",
+        0,
+        inbound,
+        now,
+        "refuse",
+        "refused",
+        Some(&Attempt {
+            connection: connection.to_string(),
+            ..Default::default()
+        }),
+        Some(error),
+        None,
+        None,
+    )
+}
+
+fn message_of(r: &[Option<String>]) -> Message {
+    let num = |v: &Option<String>| v.as_deref().and_then(|s| s.parse().ok());
+    Message {
+        id: num(&r[0]).unwrap_or(0),
+        inbound: r[1].clone().unwrap_or_default(),
+        connection: r[2].clone().unwrap_or_default(),
+        key: r[3].clone().unwrap_or_default(),
+        hash: r[4].clone().unwrap_or_default(),
+        body: r[5].clone().unwrap_or_default(),
+        received_at: r[6].clone().unwrap_or_default(),
+        state: r[7].clone().unwrap_or_default(),
+        attempts: num(&r[8]).unwrap_or(0),
+        error: r[9].clone(),
+        done_at: r[10].clone(),
+        tx: num(&r[11]),
+    }
+}
+
+const MESSAGE: &str = "SELECT CAST(\"id\" AS TEXT), \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", CAST(\"attempts\" AS TEXT), \"error\", \"done_at\", CAST(\"tx\" AS TEXT) FROM \"_quadra_inbox\"";
+
+/// Messages received and not handled yet, oldest first, at most `limit`.
+pub fn to_handle(conn: &mut Conn, limit: usize) -> Result<Vec<Message>, String> {
+    Ok(conn
+        .query(
+            &format!("{MESSAGE} WHERE \"state\" = 'received' ORDER BY \"_quadra_inbox\".\"id\" LIMIT {limit}"),
+            &[],
+        )?
+        .iter()
+        .map(|r| message_of(r))
+        .collect())
+}
+
+/// The messages of the inbox, oldest first (in `state` only, if given).
+pub fn inbox(conn: &mut Conn, state: Option<&str>) -> Result<Vec<Message>, String> {
+    let (filter, params) = match state {
+        Some(s) => (" WHERE \"state\" = ?text", vec![Sql::Text(s.to_string())]),
+        None => ("", vec![]),
+    };
+    Ok(conn
+        .query(
+            &format!("{MESSAGE}{filter} ORDER BY \"_quadra_inbox\".\"id\""),
+            &params,
+        )?
+        .iter()
+        .map(|r| message_of(r))
+        .collect())
+}
+
+/// What came of handling message `id`: done by transaction `tx`, or rejected with the error.
+pub fn handled(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    now: &str,
+    result: Result<u64, &str>,
+) -> Result<(), String> {
+    match result {
+        Ok(tx) => {
+            conn.exec(
+                "UPDATE \"_quadra_inbox\" SET \"state\" = 'done', \"done_at\" = ?text, \"tx\" = ?bigint, \"attempts\" = \"attempts\" + 1, \"error\" = NULL WHERE \"id\" = ?bigint AND \"state\" = 'received'",
+                &[Sql::Text(now.to_string()), Sql::Int(tx as i64), Sql::Int(id as i64)],
+            )?;
+            log_dir(
+                conn,
+                "in",
+                id,
+                name,
+                now,
+                "handle",
+                "done",
+                None,
+                None,
+                None,
+                Some(&format!("transaction {tx}")),
+            )
+        }
+        Err(e) => {
+            conn.exec(
+                "UPDATE \"_quadra_inbox\" SET \"state\" = 'rejected', \"attempts\" = \"attempts\" + 1, \"error\" = ?text WHERE \"id\" = ?bigint AND \"state\" = 'received'",
+                &[Sql::Text(e.to_string()), Sql::Int(id as i64)],
+            )?;
+            log_dir(
+                conn,
+                "in",
+                id,
+                name,
+                now,
+                "handle",
+                "rejected",
+                None,
+                Some(e),
+                None,
+                None,
+            )
+        }
+    }
+}
+
+/// Messages rejected or skipped, received again to be handled by the code deployed now
+/// (`quadra inbox retry`). Returns how many.
+pub fn inbox_retry(conn: &mut Conn, ids: &[u64], now: &str, by: &str) -> Result<usize, String> {
+    let mut n = 0;
+    for id in ids {
+        let done = conn.exec(
+            "UPDATE \"_quadra_inbox\" SET \"state\" = 'received' WHERE \"id\" = ?bigint AND \"state\" IN ('rejected', 'skipped')",
+            &[Sql::Int(*id as i64)],
+        )?;
+        if done > 0 {
+            let name = inbox_name(conn, *id)?;
+            log_dir(
+                conn,
+                "in",
+                *id,
+                &name,
+                now,
+                "retry",
+                "received",
+                None,
+                None,
+                Some(by),
+                None,
+            )?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Messages not to be handled, with a reason (`quadra inbox skip`). Returns how many.
+pub fn inbox_skip(
+    conn: &mut Conn,
+    ids: &[u64],
+    now: &str,
+    by: &str,
+    reason: &str,
+) -> Result<usize, String> {
+    if reason.trim().is_empty() {
+        return Err("a skip needs a reason (--reason \"…\")".into());
+    }
+    let mut n = 0;
+    for id in ids {
+        let done = conn.exec(
+            "UPDATE \"_quadra_inbox\" SET \"state\" = 'skipped' WHERE \"id\" = ?bigint AND \"state\" IN ('received', 'rejected')",
+            &[Sql::Int(*id as i64)],
+        )?;
+        if done > 0 {
+            let name = inbox_name(conn, *id)?;
+            log_dir(
+                conn,
+                "in",
+                *id,
+                &name,
+                now,
+                "skip",
+                "skipped",
+                None,
+                None,
+                Some(by),
+                Some(reason),
+            )?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+fn inbox_name(conn: &mut Conn, id: u64) -> Result<String, String> {
+    Ok(conn
+        .query(
+            "SELECT \"inbound\" FROM \"_quadra_inbox\" WHERE \"id\" = ?bigint",
+            &[Sql::Int(id as i64)],
+        )?
+        .into_iter()
+        .next()
+        .and_then(|r| r[0].clone())
+        .unwrap_or_default())
+}
+
+/// The transaction that already handled message `id` (`inbound:Name#id`), if one did: a
+/// message is handled once even if the server stopped between the transaction and writing it.
+pub fn handled_by(conn: &mut Conn, name: &str, id: u64) -> Result<Option<u64>, String> {
+    Ok(conn
+        .query(
+            "SELECT CAST(\"tx\" AS TEXT) FROM \"_quadra_commits\" WHERE \"cause\" LIKE ?text ORDER BY \"tx\" DESC LIMIT 1",
+            &[Sql::Text(format!("%inbound:{name}#{id} %"))],
+        )?
+        .into_iter()
+        .next()
+        .and_then(|r| r[0].as_deref().and_then(|v| v.parse().ok())))
 }
 
 /// How long to wait after the `attempts`-th failed attempt: 30 s, doubled each time, at most

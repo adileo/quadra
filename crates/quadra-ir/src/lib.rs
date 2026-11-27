@@ -787,6 +787,22 @@ pub struct Outbound {
     pub span: Span,
 }
 
+/// `inbound ShopOrder via shop path "/orders" as m: ShopOrderDoc:`: the messages a connection
+/// sends to `/in/<connection>/<path>`, read as records of `ty` (a record `from json`), kept raw
+/// in the inbox, then handled one by one in a transaction of their own.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Inbound {
+    pub name: String,
+    pub connection: String,
+    pub path: Option<String>,
+    pub binding: String,
+    pub ty: String,
+    /// `key m.id`: a message with a key already received is not handled again (else its hash)
+    pub key: Option<Expr>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
 /// How an outbound delivers (`outbound … as e:`, its first lines). The durations are fixed
 /// (`3 days`); `unless`, `key`, `ordered by` and `latest by` are read for each event.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -909,6 +925,7 @@ pub struct Model {
     pub consts: Vec<Const>,
     pub events: Vec<Event>,
     pub outbounds: Vec<Outbound>,
+    pub inbounds: Vec<Inbound>,
     pub reactions: Vec<Reaction>,
     pub roles: Vec<Role>,
     /// Top-level `deny` / `allow` rules.

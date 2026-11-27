@@ -133,10 +133,29 @@ pub enum ConnectionKind {
 pub struct Connection {
     pub name: String,
     pub kind: ConnectionKind,
+    /// how the messages it sends in (`inbound … via <name>`) prove they come from it
+    pub inbound: Option<InboundAuth>,
     /// what the other side accepts: requests per second or minute (`rate = "2/s"`), at once
     /// (`concurrency`), and how many failures of transport in a row pause it (`pause_after`)
     pub limits: Limits,
 }
+
+/// How a message received from a connection proves where it comes from: a signature of its
+/// body with a shared secret, in the way of that sender (`preset`), or a token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboundAuth {
+    /// `quadra`, `hmac`, `shopify`, `stripe`, `github` or `token`
+    pub preset: String,
+    /// the secret variable
+    pub secret: String,
+    /// the previous secret, still accepted while the sender switches (rotation)
+    pub previous: Option<String>,
+    /// the largest body, in bytes
+    pub max_bytes: usize,
+}
+
+/// The ways a sender signs what it sends.
+pub const INBOUND_PRESETS: &[&str] = &["quadra", "hmac", "shopify", "stripe", "github", "token"];
 
 /// The limits of a connection: those of the system on the other side, not of an event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +225,12 @@ impl Connection {
                 }
                 if let Some(s) = signing_secret {
                     out.push(s);
+                }
+                if let Some(i) = &self.inbound {
+                    out.push(&i.secret);
+                    if let Some(p) = &i.previous {
+                        out.push(p);
+                    }
                 }
             }
             ConnectionKind::Smtp {
@@ -503,6 +528,10 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             "rate",
             "concurrency",
             "pause_after",
+            "inbound_signature",
+            "inbound_secret",
+            "inbound_secret_previous",
+            "inbound_max_kb",
         ],
         "smtp" => &[
             "kind",
@@ -666,9 +695,59 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
                 .filter(|n| (1..=1000).contains(n))
                 .ok_or(format!("{at}: pause_after is from 1 to 1000"))? as u32;
     }
+    let inbound = match t.get("inbound_signature") {
+        None => {
+            if t.contains_key("inbound_secret") {
+                return Err(format!(
+                    "{at}: inbound_secret goes with inbound_signature (one of {})",
+                    INBOUND_PRESETS.join(", ")
+                ));
+            }
+            None
+        }
+        Some(v) => {
+            let preset = v
+                .as_str()
+                .filter(|p| INBOUND_PRESETS.contains(p))
+                .ok_or(format!(
+                    "{at}: inbound_signature is one of {}",
+                    INBOUND_PRESETS.join(", ")
+                ))?
+                .to_string();
+            let secret = credential(
+                m,
+                &at,
+                "inbound_secret",
+                t.get("inbound_secret").ok_or(format!(
+                    "{at}: inbound_secret is needed: the secret the sender signs with"
+                ))?,
+            )?;
+            let previous = t
+                .get("inbound_secret_previous")
+                .map(|v| credential(m, &at, "inbound_secret_previous", v))
+                .transpose()?;
+            let max_bytes = match t.get("inbound_max_kb") {
+                None => 1 << 20,
+                Some(v) => {
+                    v.as_integer()
+                        .filter(|n| (1..=16_384).contains(n))
+                        .ok_or(format!("{at}: inbound_max_kb is from 1 to 16384"))?
+                        as usize
+                        * 1024
+                }
+            };
+            Some(InboundAuth {
+                preset,
+                secret,
+                previous,
+                max_bytes,
+            })
+        }
+    };
     Ok(Connection {
         name: name.to_string(),
         kind,
+        inbound,
         limits,
     })
 }
