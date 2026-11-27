@@ -831,3 +831,89 @@ fn changes_outside_the_chain_are_in_the_log_in_order() {
     assert_eq!(count(&t, "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\""), count(&url, "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\""));
     assert_eq!(verify(&p, &t), Vec::<String>::new());
 }
+
+#[test]
+fn a_number_given_up_leaves_no_gap_in_the_log() {
+    if std::env::var_os("QUADRA_SEQ_PG").is_some() {
+        return;
+    }
+    let p = project();
+    let url = fresh("givenup");
+    init(&p, &url);
+    let dir = std::env::temp_dir().join(format!("quadra-seq-{}-givenup-log", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let options = Options { destinations: vec![Box::new(quadra_store::segments::Folder::new(&dir).unwrap())], rule: Rule::All, ..Default::default() };
+    let s = Sequencer::start(&url, options).unwrap();
+    let checked = quadra_analysis::check(&p);
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    let commit = |name: &str| {
+        let mut i = engine(&url, m, r, Some(&s));
+        let c = first(&mut i, "Customer");
+        i.transaction(|i| i.set(&c, "name", V::Text(name.into()), None)).unwrap();
+    };
+    commit("one");
+    // a transaction numbered, then given up (its writes could not be prepared)
+    let head = count(&url, "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\"") as u64;
+    let reserved = s
+        .reserve(quadra_store::sequencer::Request { base: head, whole: false, reads: Default::default(), writes: Default::default(), guards: Vec::new(), history: 0, outbox: 0, at: "2026-12-01T10:00:00".into(), user: None, cause: "test".into() })
+        .unwrap();
+    s.cancel(reserved.tx);
+    commit("two");
+    commit("three");
+    s.stop();
+    // the log rebuilds the database across the number given up, and to any transaction
+    let target = std::env::temp_dir().join(format!("quadra-seq-{}-givenup-rebuilt.db", std::process::id()));
+    let folder = quadra_store::segments::Folder::new(&dir).unwrap();
+    folder.restore(&target).unwrap();
+    let t = format!("sqlite:{}", target.display());
+    assert_eq!(count(&t, "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\""), count(&url, "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\""));
+    let mut c = quadra_store::Conn::open(&t).unwrap();
+    assert_eq!(c.query("SELECT \"name\" FROM \"customer\"", &[]).unwrap()[0][0].as_deref(), Some("three"));
+    assert_eq!(verify(&p, &t), Vec::<String>::new());
+    // as of the number given up: the commit before it
+    assert_eq!(folder.restore_to(&target, Some(reserved.tx)).unwrap(), reserved.tx - 1);
+}
+
+#[test]
+fn under_the_local_rule_a_destination_down_still_gets_every_batch() {
+    if std::env::var_os("QUADRA_SEQ_PG").is_some() {
+        return;
+    }
+    let p = project();
+    let url = fresh("localdown");
+    init(&p, &url);
+    let dir = std::env::temp_dir().join(format!("quadra-seq-{}-localdown-log", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flaky = Flaky { folder: quadra_store::segments::Folder::new(&dir).unwrap(), down: down.clone() };
+    let s = Sequencer::start(&url, Options { destinations: vec![Box::new(flaky)], rule: Rule::Local, ..Default::default() }).unwrap();
+    let checked = quadra_analysis::check(&p);
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    let commit = |name: &str| {
+        let mut i = engine(&url, m, r, Some(&s));
+        let c = first(&mut i, "Customer");
+        i.transaction(|i| i.set(&c, "name", V::Text(name.into()), None)).map(|_| ())
+    };
+    commit("one").unwrap();
+    down.store(true, std::sync::atomic::Ordering::SeqCst);
+    // confirmed at once (the local rule), kept later
+    for n in 0..5 {
+        commit(&format!("while down {n}")).unwrap();
+    }
+    let h = s.health().unwrap();
+    assert!(h.kept < h.written, "what is not kept shows: {h:?}");
+    down.store(false, std::sync::atomic::Ordering::SeqCst);
+    commit("back").unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while s.health().unwrap().kept < s.health().unwrap().written {
+        assert!(std::time::Instant::now() < until, "the batches written while it was down never went");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    s.stop();
+    let target = std::env::temp_dir().join(format!("quadra-seq-{}-localdown-rebuilt.db", std::process::id()));
+    quadra_store::segments::Folder::new(&dir).unwrap().restore(&target).unwrap();
+    let t = format!("sqlite:{}", target.display());
+    let mut c = quadra_store::Conn::open(&t).unwrap();
+    assert_eq!(c.query("SELECT \"name\" FROM \"customer\"", &[]).unwrap()[0][0].as_deref(), Some("back"));
+    assert_eq!(verify(&p, &t), Vec::<String>::new());
+}

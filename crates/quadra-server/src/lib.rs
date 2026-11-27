@@ -1302,7 +1302,8 @@ impl Host {
         running
             .into_iter()
             .filter_map(|t| {
-                let s = t.sequencer.lock().unwrap().clone()?;
+                // a tenant whose first engine is starting holds the slot: it is left out this time
+                let s = t.sequencer.try_lock().ok()?.clone()?;
                 Some((t.id.clone(), s.health()?))
             })
             .collect()

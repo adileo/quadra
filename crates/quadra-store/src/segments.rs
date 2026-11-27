@@ -152,11 +152,35 @@ pub fn apply(conn: &mut Conn, segments: &[Segment]) -> Result<u64, String> {
 /// its row of `_quadra_commits`), then the batch's state row (its counters are past every id the
 /// transactions before took): the database as of `tx`. Its batch row is left out: the copy is a
 /// fork, the batches after it do not apply to it.
-fn cut(statements: &[(String, Vec<Sql>)], tx: u64) -> Option<Vec<(String, Vec<Sql>)>> {
-    let end = statements.iter().position(|(sql, ps)| sql.starts_with("INSERT INTO \"_quadra_commits\"") && matches!(ps.first(), Some(Sql::Int(t)) if *t as u64 == tx))?;
+fn cut(statements: &[(String, Vec<Sql>)], tx: u64) -> Option<(Vec<(String, Vec<Sql>)>, u64)> {
+    // the last transaction of the batch at or before `tx` (a number given up has no commit row)
+    let (end, at) = statements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (sql, ps))| match ps.first() {
+            Some(Sql::Int(t)) if sql.starts_with("INSERT INTO \"_quadra_commits\"") && *t as u64 <= tx => Some((i, *t as u64)),
+            _ => None,
+        })
+        .last()?;
     let mut out = statements[..=end].to_vec();
-    out.extend(statements.iter().filter(|(sql, _)| sql.starts_with("INSERT INTO \"_quadra_meta\"") && sql.contains("'state'")).cloned());
-    Some(out)
+    // the state row says where the database is: at the cut
+    for (sql, ps) in statements.iter().filter(|(sql, _)| sql.starts_with("INSERT INTO \"_quadra_meta\"") && sql.contains("'state'")) {
+        let ps = ps
+            .iter()
+            .map(|p| match p {
+                Sql::Text(t) => match serde_json::from_str::<J>(t) {
+                    Ok(mut v) if v.get("tx").is_some() => {
+                        v["tx"] = json!(at);
+                        Sql::Text(v.to_string())
+                    }
+                    _ => p.clone(),
+                },
+                _ => p.clone(),
+            })
+            .collect();
+        out.push((sql.clone(), ps));
+    }
+    Some((out, at))
 }
 
 /// `apply`, stopping at transaction `until` when given (a point in time inside the log): the
@@ -180,10 +204,14 @@ pub fn apply_until(conn: &mut Conn, segments: &[Segment], until: Option<u64>) ->
             }
             let partial;
             let (statements, last) = match until {
-                Some(u) if u < last => {
-                    partial = cut(statements, u).ok_or_else(|| format!("transaction {u} is not in the batch {number} ({first}–{last})"))?;
-                    (&partial[..], u)
-                }
+                Some(u) if u < last => match cut(statements, u) {
+                    Some((p, at)) => {
+                        partial = p;
+                        (&partial[..], at)
+                    }
+                    // no transaction of the batch at or before it: the database is as of `u` already
+                    None => return Ok(at),
+                },
                 _ => (statements, last),
             };
             let begin = if conn.dialect() == Dialect::Sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" };

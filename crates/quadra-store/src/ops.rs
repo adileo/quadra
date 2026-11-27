@@ -483,15 +483,30 @@ pub fn next_due(url: &str, model: &Model, report: &Report, since: NaiveDateTime)
             });
             // a field with no column of its own: only a periodic sweep follows it
             let Some((table, col)) = column else { return Ok(Due::Periodic) };
-            let rows = db.conn.query(&format!("SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" IS NOT NULL"), &[])?;
-            for r in rows {
-                let Some(v) = r[0].as_deref() else { continue };
-                let Some(at) = parse_instant(v) else { continue };
-                let mut due = if t.days != 0 { quadra_runtime::time::add_days(at, t.days, tz) } else { at };
-                due += chrono::Duration::seconds(t.secs + 1);
-                if due > after && best.is_none_or(|b| due < b) {
-                    best = Some(due);
+            // the due instant grows with the column's value: the smallest values past a bound,
+            // in order, give the nearest (days are calendar days of the project's zone: the
+            // bound leaves two days of margin and the exact instant is computed for each)
+            let margin = if t.days != 0 { chrono::Duration::days(t.days + 2) } else { chrono::Duration::zero() };
+            let bound = (after - chrono::Duration::seconds(t.secs + 1) - margin).format("%Y-%m-%d %H:%M:%S").to_string();
+            let mut offset = 0;
+            'scan: loop {
+                let rows = db.conn.query(&format!("SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" > ?text ORDER BY \"{col}\" LIMIT 64 OFFSET {offset}"), &[crate::conn::Sql::Text(bound.clone())])?;
+                let n = rows.len();
+                for r in rows {
+                    let Some(at) = r[0].as_deref().and_then(parse_instant) else { continue };
+                    let mut due = if t.days != 0 { quadra_runtime::time::add_days(at, t.days, tz) } else { at };
+                    due += chrono::Duration::seconds(t.secs + 1);
+                    if due > after {
+                        if best.is_none_or(|b| due < b) {
+                            best = Some(due);
+                        }
+                        break 'scan;
+                    }
                 }
+                if n < 64 {
+                    break;
+                }
+                offset += 64;
             }
         }
     }

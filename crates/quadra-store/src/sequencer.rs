@@ -166,6 +166,17 @@ pub struct Health {
     pub destinations: bool,
 }
 
+/// What `Health` is read from: kept up to date by the sequencer and its uploader, read by anyone
+/// without asking their threads (a sequencer busy with a snapshot still answers at once).
+#[derive(Default)]
+struct HealthCell {
+    written: std::sync::atomic::AtomicU64,
+    kept: std::sync::atomic::AtomicU64,
+    refused: std::sync::atomic::AtomicU64,
+    destinations: std::sync::atomic::AtomicBool,
+    down: std::sync::Mutex<Option<String>>,
+}
+
 /// A change outside the hash chain, run by the sequencer (`Sequencer::side`).
 type SideFn = Box<dyn FnOnce(&mut Conn) -> Result<Box<dyn std::any::Any + Send>, String> + Send>;
 
@@ -288,7 +299,6 @@ enum Msg {
     Snapshot(Duration),
     Written(u64, Vec<u64>, mpsc::Sender<Option<bool>>),
     Side(SideFn, mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>, Responder),
-    Health(mpsc::Sender<Health>),
     Stop(mpsc::Sender<()>),
 }
 
@@ -296,6 +306,7 @@ enum Msg {
 #[derive(Clone)]
 pub struct Sequencer {
     tx: mpsc::Sender<Msg>,
+    health: std::sync::Arc<HealthCell>,
 }
 
 fn gone() -> String {
@@ -308,9 +319,11 @@ impl Sequencer {
         let (tx, rx) = mpsc::channel();
         let (ready, started) = mpsc::channel();
         let url = url.to_string();
+        let health = std::sync::Arc::new(HealthCell::default());
+        let cell = health.clone();
         std::thread::Builder::new()
             .name("quadra-sequencer".into())
-            .spawn(move || match State::open(&url, options) {
+            .spawn(move || match State::open(&url, options, cell) {
                 Ok(mut s) => {
                     let _ = ready.send(Ok(()));
                     s.run(rx);
@@ -321,7 +334,7 @@ impl Sequencer {
             })
             .map_err(|e| e.to_string())?;
         started.recv().map_err(|_| gone())??;
-        Ok(Sequencer { tx })
+        Ok(Sequencer { tx, health })
     }
 
     /// Checks a transaction and numbers it, or refuses it.
@@ -399,9 +412,12 @@ impl Sequencer {
 
     /// How its log stands: what is written, what is kept, whether the destinations are down.
     pub fn health(&self) -> Option<Health> {
-        let (reply, rx) = mpsc::channel();
-        self.tx.send(Msg::Health(reply)).ok()?;
-        rx.recv().ok()
+        use std::sync::atomic::Ordering::Relaxed;
+        let h = &self.health;
+        let written = h.written.load(Relaxed);
+        let destinations = h.destinations.load(Relaxed);
+        let kept = if destinations { h.kept.load(Relaxed).min(written) } else { written };
+        Some(Health { written, kept, down: h.down.lock().unwrap().clone(), refused: h.refused.load(Relaxed), destinations })
     }
 
     /// Gives up a reserved transaction (its writes could not be prepared).
@@ -671,6 +687,8 @@ struct State {
     log_bytes: u64,
     /// transactions refused because too many were not kept by the destinations
     refused: u64,
+    /// what `Sequencer::health` reads
+    health: std::sync::Arc<HealthCell>,
     url: String,
 }
 
@@ -679,7 +697,7 @@ fn num(s: &Option<String>) -> i64 {
 }
 
 impl State {
-    fn open(url: &str, options: Options) -> Result<State, String> {
+    fn open(url: &str, options: Options, health: std::sync::Arc<HealthCell>) -> Result<State, String> {
         let lock = crate::writer::acquire(url)?;
         crate::conn::set_max_bytes(options.max_bytes);
         crate::conn::set_statement_timeout(options.statement_timeout);
@@ -708,6 +726,7 @@ impl State {
             snapshot_due: None,
             log_bytes: 0,
             refused: 0,
+            health,
             url: url.to_string(),
         };
         s.reload()?;
@@ -753,7 +772,8 @@ impl State {
             }
         }
         if !destinations.is_empty() {
-            s.uploader = Some(Uploader::start(destinations, s.options.rule, s.acked)?);
+            s.health.destinations.store(true, std::sync::atomic::Ordering::Relaxed);
+            s.uploader = Some(Uploader::start(destinations, s.options.rule, s.acked, s.health.clone())?);
         }
         Ok(s)
     }
@@ -768,6 +788,7 @@ impl State {
         let at = |i: usize| row.get(i).cloned().flatten();
         self.head = num(&at(0)) as u64;
         self.durable = self.head;
+        self.health.written.store(self.durable, std::sync::atomic::Ordering::Relaxed);
         self.acked = self.head;
         self.seq = num(&at(1));
         self.prev_hash = at(2).unwrap_or_else(|| "0".repeat(64));
@@ -902,13 +923,6 @@ impl State {
                 let known = base >= self.window.floor;
                 let _ = reply.send(known.then(|| records.iter().any(|id| self.window.fields.get(id).is_some_and(|t| *t > base))));
             }
-            Msg::Health(reply) => {
-                let (kept, down) = match &self.uploader {
-                    Some(u) => (u.acked.load(std::sync::atomic::Ordering::SeqCst), u.down.lock().unwrap().clone()),
-                    None => (self.durable, None),
-                };
-                let _ = reply.send(Health { written: self.durable, kept: kept.min(self.durable), down, refused: self.refused, destinations: self.uploader.is_some() });
-            }
             Msg::Side(f, value, kept) => {
                 // in the order of the log: the transactions ready before it are written first
                 self.flush();
@@ -935,6 +949,7 @@ impl State {
             let kept = u.acked.load(std::sync::atomic::Ordering::SeqCst);
             if self.durable.saturating_sub(kept) > self.options.max_behind {
                 self.refused += 1;
+                self.health.refused.store(self.refused, std::sync::atomic::Ordering::Relaxed);
                 return Err(f(format!("{} commits are not yet kept elsewhere: try again later", self.durable - kept)));
             }
         }
@@ -1093,11 +1108,15 @@ impl State {
         let clock = Instant::now();
         let waited: Duration = submitted.iter().filter_map(|(_, p)| p.submitted.as_ref().map(|(_, _, at)| at.elapsed())).max().unwrap_or_default();
         let n = submitted.len() as u64;
+        // a batch covers every number after the last one written, those given up included: the
+        // log has no gap where a reserved transaction was never written
+        let from = self.durable + 1;
         let results = match self.write(&submitted) {
             Ok(executed) => {
-                let first = submitted.first().unwrap().0;
+                let first = from;
                 let last = submitted.last().unwrap().0;
                 self.durable = self.durable.max(last);
+                self.health.written.store(self.durable, std::sync::atomic::Ordering::Relaxed);
                 if self.uploader.is_some() && self.options.rule != Rule::Local {
                     // confirmed by the uploader once the batch is kept elsewhere too
                     let replies = submitted.into_iter().filter_map(|(tx, p)| p.submitted.map(|(_, reply, _)| (tx, reply))).collect();
@@ -1166,11 +1185,13 @@ impl State {
     fn write_one_by_one(&mut self, items: &[(u64, Pending)]) -> Vec<Result<u64, CommitError>> {
         let mut out = Vec::new();
         for item in items {
+            let from = self.durable + 1;
             let res = match self.write(std::slice::from_ref(item)) {
                 Ok(executed) => {
                     self.durable = self.durable.max(item.0);
+                    self.health.written.store(self.durable, std::sync::atomic::Ordering::Relaxed);
                     if self.uploader.is_some() {
-                        self.upload(item.0, item.0, executed, Vec::new());
+                        self.upload(from, item.0, executed, Vec::new());
                         // (its client is answered here once the uploader confirmed: rare path)
                         if self.options.rule == Rule::Local {
                             Ok(item.0)
@@ -1346,7 +1367,7 @@ impl State {
             executed.push(state);
             let batch = (
                 "INSERT INTO \"_quadra_batches\" (\"number\", \"first_tx\", \"last_tx\", \"hash\") VALUES (?bigint, ?bigint, ?bigint, ?text)".to_string(),
-                vec![Sql::Int(self.batch as i64 + 1), Sql::Int(items[0].0 as i64), Sql::Int(last as i64), Sql::Text(prev.clone())],
+                vec![Sql::Int(self.batch as i64 + 1), Sql::Int(durable as i64 + 1), Sql::Int(last as i64), Sql::Text(prev.clone())],
             );
             self.conn.exec(&batch.0, &batch.1).map_err(Failure::Db)?;
             executed.push(batch);
@@ -1527,21 +1548,18 @@ struct Uploader {
     tx: mpsc::Sender<Upload>,
     handle: Option<std::thread::JoinHandle<()>>,
     acked: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// why the destinations count as down, while they do
-    down: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// set while it is told to stop: a batch it cannot keep is then given up
     stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Uploader {
-    fn start(mut destinations: Vec<Box<dyn DurabilitySink>>, rule: Rule, acked: u64) -> Result<Uploader, String> {
+    fn start(mut destinations: Vec<Box<dyn DurabilitySink>>, rule: Rule, acked: u64, health: std::sync::Arc<HealthCell>) -> Result<Uploader, String> {
+        health.kept.store(acked, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = mpsc::channel::<Upload>();
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(acked));
         let shared = acked.clone();
         let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = stopping.clone();
-        let down_shared = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-        let down_seen = down_shared.clone();
         let handle = std::thread::Builder::new()
             .name("quadra-uploader".into())
             .spawn(move || {
@@ -1605,22 +1623,28 @@ impl Uploader {
                         let (number, last_tx, hash) = queue.range(..n).last().map(|l| (l.number, l.last_tx, l.hash.clone())).unwrap();
                         let (first_number, first_tx) = (queue[0].number, queue[0].first_tx);
                         let batch = Batch { first_number, number, first_tx, last_tx, hash: &hash, statements: &statements };
-                        let r = keep(&mut destinations, rule, &batch);
-                        if r.is_ok() {
-                            shared.store(last_tx, std::sync::atomic::Ordering::SeqCst);
-                            for u in queue.drain(..n) {
-                                for (tx, reply) in u.replies {
+                        // the clients hear once the rule is met; the batch leaves the queue only once
+                        // every destination has it (under any rule: a gap would make the log useless)
+                        let (all, met) = keep(&mut destinations, rule, &batch);
+                        if met {
+                            for u in queue.range_mut(..n) {
+                                for (tx, reply) in u.replies.drain(..) {
                                     let _ = reply.send(Ok(tx));
                                 }
                             }
                         }
-                        r
+                        if all.is_ok() {
+                            shared.store(last_tx, std::sync::atomic::Ordering::SeqCst);
+                            health.kept.store(last_tx, std::sync::atomic::Ordering::Relaxed);
+                            queue.drain(..n);
+                        }
+                        all
                     };
                     match result {
                         Ok(()) => {
                             attempt = 0;
                             if down.take().is_some() {
-                                *down_shared.lock().unwrap() = None;
+                                *health.down.lock().unwrap() = None;
                                 eprintln!("sequencer: the destinations are back");
                             }
                         }
@@ -1630,7 +1654,7 @@ impl Uploader {
                                 eprintln!("sequencer: the destinations are down ({e}): commits are kept here until they are back");
                                 fail_waiting(&mut queue, &e);
                                 down = Some(e.clone());
-                                *down_shared.lock().unwrap() = Some(e.clone());
+                                *health.down.lock().unwrap() = Some(e.clone());
                             }
                             if attempt >= 6 && stopping.load(std::sync::atomic::Ordering::SeqCst) {
                                 let last = queue.back().map_or(0, |u| u.last_tx);
@@ -1665,7 +1689,7 @@ impl Uploader {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Uploader { tx, handle: Some(handle), acked, down: down_seen, stopping: stop })
+        Ok(Uploader { tx, handle: Some(handle), acked, stopping: stop })
     }
 
     /// Keeps what it was given (a few tries for what does not go through), then stops.
@@ -1678,8 +1702,9 @@ impl Uploader {
     }
 }
 
-/// The destinations get the batch; whether the rule is met.
-fn keep(destinations: &mut [Box<dyn DurabilitySink>], rule: Rule, batch: &Batch) -> Result<(), String> {
+/// The destinations get the batch: whether all have it, and whether the rule of confirmation is
+/// met (`Local`: always; `Any`: one has it; `All`: all have it).
+fn keep(destinations: &mut [Box<dyn DurabilitySink>], rule: Rule, batch: &Batch) -> (Result<(), String>, bool) {
     let mut ok = 0;
     let mut errors = Vec::new();
     for d in destinations.iter_mut() {
@@ -1696,9 +1721,6 @@ fn keep(destinations: &mut [Box<dyn DurabilitySink>], rule: Rule, batch: &Batch)
         Rule::Any => ok > 0,
         Rule::All => errors.is_empty(),
     };
-    if met {
-        Ok(())
-    } else {
-        Err(format!("the commit is in the database but not yet kept elsewhere: {}", errors.join("; ")))
-    }
+    let all = if errors.is_empty() { Ok(()) } else { Err(format!("the commit is in the database but not yet kept elsewhere: {}", errors.join("; "))) };
+    (all, met)
 }
