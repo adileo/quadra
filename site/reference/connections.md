@@ -700,6 +700,129 @@ run only where the app delivers its events (production on Quadra Cloud), and a s
 woken for the one due. A pull can sit next to webhooks on the same inbound (`path`), to catch
 what a webhook missed.
 
+## Files: `kind = "sftp"` and `kind = "ftp"`
+
+A cash register that drops its closing in a folder, a bank that exchanges files, an AS/400
+that exports fixed-width records: their files are pulled from an SFTP or FTP server, each a
+message of an `inbound`, and an `outbound` writes files there.
+
+```toml
+[vars]
+POS_SFTP_PASSWORD = { secret = true }
+BANK_FTP_PASSWORD = { secret = true }
+
+[connections.pos]
+kind = "sftp"
+url = "sftp://files.example.com"            # sftp://host:2222/data: another port, a base folder
+user = "quadra"
+password = { var = "POS_SFTP_PASSWORD" }    # or private_key = { var = "POS_SFTP_KEY" }
+known_host = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+
+[connections.bank]
+kind = "ftp"
+url = "ftps://ftp.bank.example.com"
+user = "acme"
+password = { var = "BANK_FTP_PASSWORD" }
+```
+
+| Key | Meaning |
+|---|---|
+| `url` | `sftp://host[:port][/folder]`, `ftps://host[:port][/folder]` (FTP with explicit TLS, `AUTH TLS`); plain `ftp://` only with `insecure = true`. The folder, when given, is where the paths start; else the folder the user logs in to |
+| `user`, `password` | the login; `password` a secret variable |
+| `private_key` | SFTP: a secret variable with the private key (OpenSSH or PEM), instead of the password |
+| `known_host` | SFTP, required: the server's public key as a line of `known_hosts` (`ssh-keyscan -t ed25519 host`). A server that shows another key is refused, as someone posing as it: `files.example.com:22 showed the key ssh-ed25519 SHA256:…, not the one of known_host: refused` |
+| `timeout` | of each command, from `"1s"` to `"600s"` (`"30s"` when not given); reading or writing a whole file has ten times as long |
+| `insecure` | `true` allows `ftp://` without TLS: a test server, or one reached through an agent in its own network |
+| `location` | `"agent:<name>"`: the files are reached by the on-premise agent of that name |
+
+FTP goes in passive mode, binary, and its data connections go to the address of the server
+it logged in to. A refused login or key is in the log of the pull and does not get better by
+trying again; a server down or slow is tried again at the next pull.
+
+### Pulled: a folder, then `processed/` and `rejected/`
+
+```quadra
+entity Sale:
+    store: Code
+    sku: Code
+    qty: Int
+    amount: Decimal
+
+record PosRow from csv(sep=";", decimal=","):
+    store: Code at "NEGOZIO"
+    sku: Code at "SKU"
+    qty: Int at "QTA"
+    amount: Decimal at "IMPORTO" decimals 2
+
+inbound Closing via pos as r: PosRow:
+    pull "in/chiusure/*.csv" every 5 minutes
+    atomic per file
+    if r.qty == 0:
+        fail "a quantity of zero"
+    let s = Sale(store=r.store, sku=r.sku, qty=r.qty, amount=r.amount)
+```
+
+| Step | Rule |
+|---|---|
+| Which files | `pull "in/chiusure/*.csv"`: the folder `in/chiusure` and, in it, the files whose name matches the last part (`*` any characters, `?` one). Not the folders, not the names that start with `.`. Oldest first by their time of change, up to 100 per pull |
+| Still being written | a file changed in the last minute is looked at twice, two seconds apart, and taken only if its size and time did not change; else at the next pull. A sender that can should upload under a name starting with `.` (or another extension) and rename it when done |
+| A message | each file is a message of the inbound, read in the encoding of its record (a file that is not UTF-8 is kept as its bytes); its key is its path and the hash of its content, so a file listed again before it is moved is a duplicate, never handled twice |
+| Handled | a file of rows (`from csv`, `from fixed`) runs the code once per row, as `atomic` says (below); a document (`from json`, `from xml`) once |
+| Moved | once handled, at the next pull (brought forward to a few seconds after the last file waiting is handled): to `processed/` beside it (done, the rows refused reported) or `rejected/` (rejected); the folders are made when missing |
+| The report | when rows were refused or the file was rejected, `<file>.report.txt` is written beside it there, before the file is moved: a line that says what happened, then a line per row (up to 1,000) with its line and why |
+| Again | a file of the same name and content put in the folder again is not handled again: it is moved, beside the first (`a.csv.20261127-101403`). Another content under the same name is a new message |
+| Once | the server may stop at any point: a file kept but not handled is handled after the start, one handled is not handled again, one handled but not moved is moved at the next pull |
+
+```text
+in/chiusure/processed/2026-11-27.csv
+in/chiusure/processed/2026-11-27.csv.report.txt
+
+PosRow: 2 rows of 1200 refused, the others are in
+line 43, column `QTA`: an integer was expected, not `many`
+line 701: a quantity of zero
+```
+
+### `atomic per file`, `atomic per row`
+
+How the rows of a file are committed, a line of an inbound whose record is `from csv` or
+`from fixed`:
+
+| | `atomic per file` (when not said) | `atomic per row` |
+|---|---|---|
+| A row that cannot be read | the file is `rejected` and nothing is written; the report lists every such line, with its column | refused, in the report; the others go on |
+| A row whose code fails | the file is `rejected` and nothing is written; the report says that row | refused, in the report; the others go on |
+| Committed | all the rows in one transaction, `inbound:Closing#12 handled` | by chunks of 500 rows, each a transaction (`inbound:Closing#12/lines 2-501 handled`); a chunk where a row fails is committed without it, one that fails at its commit (a rule over its rows) row by row |
+| The file | `processed/`, or `rejected/` with its report | `processed/` with the report of the rows refused, or `rejected/` when every row was refused |
+| Stopped halfway | nothing was written: handled again | the chunks committed are not run again |
+
+Per file is right when the file is one thing (a closing, a bank statement: half of it is
+wrong). Per row when each row stands alone (a price list, a stock count), and a few bad rows
+should not hold back the others. A file of 100,000 rows comes in, either way, in a few
+seconds.
+
+### `write`: files out
+
+```quadra
+event SaleExported(store: Code, sku: Code, qty: Int, amount: Decimal)
+
+record HostRow from fixed(encoding="ibm-1144"):
+    store: Code at "1..4"
+    sku: Text at "5..12"
+    qty: Int at "13..15" zoned
+    amount: Decimal at "16..19" packed decimals 2
+
+outbound SaleExported via pos as e:
+    write(f"out/{e.store}/{e.sku}.dat", [HostRow(store=e.store, sku=e.sku, qty=e.qty, amount=e.amount)])
+```
+
+`write(path, content)` ends the block of an outbound to a file connection. `path` is in the
+connection's folder (no `..`, not from `/`); its folders are made when missing. The content
+is text (written as UTF-8), a record `from json` or `from xml` (its document), or a list of
+rows of a record `from csv` or `from fixed`, written in the record's encoding: latin1, or
+EBCDIC with its packed numbers, byte for byte. The file is written under a hidden name in
+the same folder (`.a.dat.quadra-….part`) and renamed into place once complete: whoever
+reads the folder never sees half a file. A file already there is replaced.
+
 ## `endpoint`: answered at once
 
 Some systems ask and wait for the answer: a cash register asks for a price, a checkout for the
@@ -898,8 +1021,30 @@ rows.fixed()                        # 611234567     2711260000000001250CFattura 
 | Text | left-aligned, padded with spaces (the spaces after it are not part of it when read); a text longer than its columns is an error, never cut. Enums, dates (`format "%d%m%y"`, else ISO 8601) and booleans (`1` / `0`, or `format "S/N"`) are written the same way |
 | Numbers | right-aligned, padded with zeros, the sign first (`-0042`). A `Decimal` says how many of its last digits are decimals, `decimals 2`, and no separator is written; a number that does not fit is an error |
 | Empty | columns of spaces are none for an optional field, the empty text for a `Text`, an error for the others |
-| Options | `encoding` (`"utf-8"` or `"latin1"`), as for CSV. Lines end with `\r\n` when written |
-| Not yet | EBCDIC and packed decimals (COMP-3) are not read or written: such files are converted to text first. A file mixing records of several layouts is read one layout at a time |
+| Options | `encoding` (`"utf-8"`, `"latin1"`, or an EBCDIC code page, below); `length`, the length of a record when it goes on after its last field (else the end of its last field). Lines end with `\r\n` when written |
+| Not yet | a file mixing records of several layouts is read one layout at a time; binary numbers (COMP) and the zoned numbers of ASCII files are not read |
+
+**EBCDIC.** The files of mainframes and AS/400, sent as they are (a binary transfer), are in
+EBCDIC: `encoding="ibm-280"` (Italy), `"ibm-1144"` (Italy, with `€`), `"ibm-037"` and
+`"ibm-1140"` (United States), `"ibm-273"` and `"ibm-1141"` (Germany, Austria), `"ibm-285"`
+and `"ibm-1146"` (United Kingdom), `"ibm-297"` and `"ibm-1147"` (France), `"ibm-500"` and
+`"ibm-1148"` (international). Then the file is records of bytes back to back, without new
+lines, each `length` bytes; columns count bytes. A number may be held in two ways besides
+its digits:
+
+| Field | Bytes | Example |
+|---|---|---|
+| `qty: Int at "13..15" zoned` | a digit a byte, the sign in the first half of the last byte (`C` positive, `D` negative; `F` read as positive) | `-3` in 3 bytes: `F0 F0 D3` |
+| `amount: Decimal at "16..19" packed decimals 2` | packed decimal (COMP-3): two digits a byte, the sign in the last half-byte; `n` bytes hold `2n - 1` digits | `1234.56` in 4 bytes: `01 23 45 6C` |
+
+A packed or zoned field of spaces (or of zeros, `low-values`) is none for an optional field.
+`rows.fixed()` and `parse_rows(text)` of such a record give and take the text of the bytes,
+a character each, so that `CbiRow.parse_rows(rows.fixed()) == rows` holds; to write the file
+itself, `write(path, rows)` in an outbound.
+
+```text
+record 3, bytes 16..19 (`amount`): not a packed decimal: its last half-byte (0x7) is not a sign (C, D or F)
+```
 
 ### In every format
 

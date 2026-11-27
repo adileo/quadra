@@ -252,7 +252,7 @@ test "a refusal is handled":
 | Statement | What it does |
 |---|---|
 | `receive Inbound "…"` | the text is read as the inbound's record and its code runs, as the system, in a transaction of its own, as when the message comes in. A message with a key already received is a duplicate: nothing happens. One that is not the record, or whose code fails, fails the statement with `rejected: …` (in production it would be `rejected`) |
-| `receive Inbound file "path"` | the same with the text of a file, from the project's folder (a message saved from the inbox: `quadra inbox show <id>`) |
+| `receive Inbound file "path"` | the same with the text of a file, from the project's folder (a message saved from the inbox: `quadra inbox show <id>`). A file of rows (`from csv`, `from fixed`) is read from its bytes and handled as its `atomic` line says: per file, a row that cannot be read or whose code fails fails the statement and nothing is written; per row, each row in a transaction of its own, the statement failing only when every row is refused |
 | `expect sent Event(field=v, …)` | an event of that kind with those fields was emitted by a committed transaction (the other fields whatever they are); `expect sent Event`, any of them. On failure, the message lists those sent |
 | `expect not sent Event(…)` | none was |
 | `deliver Event` | each event of that kind still waiting is delivered: its `on Event delivered` reactions run, each in a transaction of its own |

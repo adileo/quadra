@@ -109,9 +109,9 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 | `rename`, `convert`, `backfill`, `verify` | in a migration |
 | `read`, `create`, `edit`, `run`, `all`, `hide`, `show`, `history` | in a permission rule |
 | `extends` | in a fixture |
-| `via`, `path`, `reply`, `retry`, `times`, `backoff`, `expires`, `after`, `unless`, `delay`, `window`, `key`, `ordered`, `latest`, `by` | in an `outbound` (`via`, `path`, `key` in an `inbound` and an `endpoint` too; `pull`, `every`, `items`, `cursor`, `retry for`, `backoff`, `ordered by`, `latest by … using` in an `inbound`; `batch`, `within` after an outbound's connection; `to`, `on`, `debounce` in a `publish`) |
+| `via`, `path`, `reply`, `retry`, `times`, `backoff`, `expires`, `after`, `unless`, `delay`, `window`, `key`, `ordered`, `latest`, `by` | in an `outbound` (`via`, `path`, `key` in an `inbound` and an `endpoint` too; `pull`, `every`, `items`, `cursor`, `retry for`, `backoff`, `ordered by`, `latest by … using`, `atomic per file`, `atomic per row` in an `inbound`; `batch`, `within` after an outbound's connection; `to`, `on`, `debounce` in a `publish`) |
 | `receive`, `file`, `deliver`, `failed`, `sent` | in a test (`receive OrderIn file "…"`, `deliver OrderPlaced reply …`, `expect sent …`) |
-| `at`, `format`, `decimals` | in a field of a record `from` a format (`from` after a record's name is the reserved word) |
+| `at`, `format`, `decimals`, `packed`, `zoned` | in a field of a record `from` a format (`from` after a record's name is the reserved word); `packed` and `zoned` in a record `from fixed` in EBCDIC |
 | `ns` | at the start of a member of a record `from xml` |
 | `implies` | as a binary operator |
 
