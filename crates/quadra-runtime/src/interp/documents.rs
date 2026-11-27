@@ -49,11 +49,187 @@ impl<'m> Interp<'m> {
         ))
     }
 
-    fn render_label(&mut self, d: &Document, _ctx: &mut Ctx, _ident: &str, _zpl: bool) -> R<V> {
-        fail(format!(
-            "`{}` is a label: labels are rendered by quadra-label (not built in yet)",
-            d.name
+    /// A label: its elements placed in millimetres, as a PDF of the label's size or as ZPL.
+    fn render_label(&mut self, d: &Document, ctx: &mut Ctx, _ident: &str, zpl: bool) -> R<V> {
+        let num = |o: &[PrintOpt], n: &str| -> Option<f64> {
+            o.iter().find(|x| x.name == n).and_then(|x| match &x.value {
+                Some(Expr {
+                    kind: ExprKind::Lit(Lit::Number(v)),
+                    ..
+                }) => v.replace('_', "").parse().ok(),
+                _ => None,
+            })
+        };
+        let width_mm = num(&d.opts, "width").unwrap_or(100.0);
+        let height_mm = num(&d.opts, "height").unwrap_or(150.0);
+        let dpi = num(&d.opts, "dpi").unwrap_or(203.0) as u32;
+        let mut elements = Vec::new();
+        self.label_elements(&d.items, ctx, &mut elements)?;
+        let label = quadra_label::Label {
+            width_mm,
+            height_mm,
+            dpi,
+            elements,
+        };
+        if zpl {
+            let z = quadra_label::to_zpl(std::slice::from_ref(&label))
+                .or_else(|e| fail(format!("`{}`: {e}", d.name)))?;
+            return Ok(text(&z));
+        }
+        let bytes = quadra_label::to_pdf(std::slice::from_ref(&label), None)
+            .or_else(|e| fail(format!("`{}`: {e}", d.name)))?;
+        let texts: Vec<String> = label
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                quadra_label::Element::Text { text, .. } => Some(text.clone()),
+                quadra_label::Element::Barcode { data, .. } => Some(data.clone()),
+                _ => None,
+            })
+            .collect();
+        let name = file_name(&d.name, "pdf");
+        Ok(rendered(
+            &name,
+            "application/pdf",
+            1,
+            &bytes,
+            &texts.join("\n"),
         ))
+    }
+
+    fn label_elements(
+        &mut self,
+        items: &[PrintItem],
+        ctx: &mut Ctx,
+        out: &mut Vec<quadra_label::Element>,
+    ) -> R<()> {
+        use quadra_label::Element as E;
+        for it in items {
+            match &it.kind {
+                PrintKind::Let { name, value } => {
+                    let v = self.eval(value, ctx)?;
+                    ctx.bind(name, v);
+                }
+                PrintKind::If {
+                    bind,
+                    cond,
+                    then,
+                    otherwise,
+                } => {
+                    let c = self.eval(cond, ctx)?;
+                    let yes = match bind {
+                        Some(_) => !c.is_none(),
+                        None => matches!(c, V::Bool(true)),
+                    };
+                    ctx.scopes.push(Default::default());
+                    if let (Some(b), true) = (bind, yes) {
+                        ctx.bind(b, c.clone());
+                    }
+                    let r = self.label_elements(if yes { then } else { otherwise }, ctx, out);
+                    ctx.scopes.pop();
+                    r?;
+                }
+                PrintKind::For { name, iter, body } => {
+                    let v = self.eval(iter, ctx)?;
+                    for x in v.items().map(|s| s.to_vec()).unwrap_or_default() {
+                        ctx.scopes.push(Default::default());
+                        ctx.bind(name, x);
+                        let r = self.label_elements(body, ctx, out);
+                        ctx.scopes.pop();
+                        r?;
+                    }
+                }
+                PrintKind::Element {
+                    element,
+                    value,
+                    opts,
+                    ..
+                } => {
+                    let value = match value {
+                        Some(e) => {
+                            let v = self.eval(e, ctx)?;
+                            Some(self.show(&v))
+                        }
+                        None => None,
+                    };
+                    let x = self.num_opt(opts, "x", ctx)?.unwrap_or(0.0);
+                    let y = self.num_opt(opts, "y", ctx)?.unwrap_or(0.0);
+                    let thickness = self.num_opt(opts, "thickness", ctx)?.unwrap_or(0.5);
+                    let w = self.num_opt(opts, "width", ctx)?;
+                    let h = self.num_opt(opts, "height", ctx)?;
+                    match element.as_str() {
+                        "text" => {
+                            let size_pt = self.num_opt(opts, "size", ctx)?.unwrap_or(10.0);
+                            let align = match self.word_opt(opts, "align", ctx)?.as_deref() {
+                                Some("center") => quadra_label::Align::Center,
+                                Some("right") => quadra_label::Align::Right,
+                                _ => quadra_label::Align::Left,
+                            };
+                            out.push(E::Text {
+                                x_mm: x,
+                                y_mm: y,
+                                size_pt,
+                                bold: opts.iter().any(|o| o.name == "bold"),
+                                width_mm: w,
+                                align,
+                                text: value.unwrap_or_default(),
+                            })
+                        }
+                        "barcode" => {
+                            let kind = self.symbology(opts, ctx)?;
+                            out.push(E::Barcode {
+                                x_mm: x,
+                                y_mm: y,
+                                kind,
+                                data: value.unwrap_or_default(),
+                                height_mm: h.unwrap_or(if kind.is_matrix() { 25.0 } else { 15.0 }),
+                                module_mm: w,
+                                human_readable: opts.iter().any(|o| o.name == "human"),
+                            })
+                        }
+                        "box" => out.push(E::Box {
+                            x_mm: x,
+                            y_mm: y,
+                            w_mm: w.unwrap_or(0.0),
+                            h_mm: h.unwrap_or(0.0),
+                            thickness_mm: thickness,
+                        }),
+                        "line" => {
+                            let x2 = self.num_opt(opts, "x2", ctx)?.unwrap_or(x);
+                            let y2 = self.num_opt(opts, "y2", ctx)?.unwrap_or(y);
+                            out.push(E::Line {
+                                x1_mm: x,
+                                y1_mm: y,
+                                x2_mm: x2,
+                                y2_mm: y2,
+                                thickness_mm: thickness,
+                            })
+                        }
+                        "image" => {
+                            let path = value.unwrap_or_default();
+                            let Some(png) = self.m.assets.get(&path).cloned() else {
+                                return fail(format!("the image `{path}` is not in the project"));
+                            };
+                            out.push(E::Image {
+                                x_mm: x,
+                                y_mm: y,
+                                w_mm: w.unwrap_or(10.0),
+                                h_mm: h.unwrap_or(10.0),
+                                png,
+                            });
+                        }
+                        other => return fail(format!("a label has no element `{other}`")),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn symbology(&mut self, opts: &[PrintOpt], ctx: &mut Ctx) -> R<quadra_label::Symbology> {
+        let name = self.word_opt(opts, "type", ctx)?.unwrap_or_default();
+        quadra_label::Symbology::from_name(&name)
+            .map_or_else(|| fail(format!("no barcode `{name}`")), Ok)
     }
 
     fn opt(&mut self, opts: &[PrintOpt], name: &str, ctx: &mut Ctx) -> R<Option<V>> {
@@ -407,9 +583,36 @@ impl<'m> Interp<'m> {
                             out.push(Block::Totals { items, width, size });
                         }
                         "barcode" => {
-                            return fail(
-                                "barcodes in documents come with quadra-label (not built in yet)",
+                            // drawn by quadra-label as SVG, given to Typst as a file
+                            let kind = self.symbology(opts, ctx)?;
+                            let data = value.as_ref().map(|v| self.show(v)).unwrap_or_default();
+                            let height = self.num_opt(opts, "height", ctx)?;
+                            let width = self.num_opt(opts, "width", ctx)?;
+                            let human = opts.iter().any(|o| o.name == "human");
+                            let o = quadra_label::SvgOptions {
+                                module_mm: kind.default_module_mm(),
+                                height_mm: height.unwrap_or(if kind.is_matrix() {
+                                    25.0
+                                } else {
+                                    15.0
+                                }),
+                                quiet_zone: None,
+                                human_readable: human,
+                                font_size_pt: 8.0,
+                            };
+                            let svg = quadra_label::svg(kind, &data, &o)
+                                .or_else(|e| fail(format!("the barcode `{data}`: {e}")))?;
+                            let path = format!("barcode-{}.svg", files.len() + 1);
+                            files.push((path.clone(), svg.into_bytes()));
+                            let align = Align::parse(
+                                &self.word_opt(opts, "align", ctx)?.unwrap_or_default(),
                             );
+                            out.push(Block::Svg {
+                                path,
+                                width,
+                                height: None,
+                                align,
+                            });
                         }
                         other => return fail(format!("a document has no element `{other}`")),
                     }

@@ -21,5 +21,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
 # documents of `.qdp` files, rendered to PDF by an embedded Typst
 quadra-print = { path = "../quadra-print" }
+# labels (PDF and ZPL) and barcodes
+quadra-label = { path = "../quadra-label" }
 base64 = "0.22"
 sha2 = "0.10"
