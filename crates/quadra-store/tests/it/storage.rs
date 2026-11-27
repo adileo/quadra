@@ -1011,3 +1011,31 @@ fn a_reminder_fires_at_the_first_sweep_after_its_time() {
     assert!(verify(&project, &url).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A migration's `load from` reads a file of the project only: no absolute path, no `..`, no link.
+#[test]
+fn load_from_reads_only_a_file_of_the_project() {
+    use quadra_store::ops;
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shop/v2");
+    for (what, from, link) in [("absolute", "/etc/hosts", false), ("parent", "../customs.csv", false), ("link", "link.csv", true)] {
+        let root = std::env::temp_dir().join(format!("quadra-loadfrom-{}-{what}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("migrations")).unwrap();
+        for f in ["customs.csv", "main.qd", "quadra.toml"] {
+            std::fs::copy(src.join(f), root.join(f)).unwrap();
+        }
+        let m = std::fs::read_to_string(src.join("migrations/2026-12-01_customs.qd")).unwrap();
+        std::fs::write(root.join("migrations/2026-12-01_customs.qd"), m.replace("load from \"customs.csv\"", &format!("load from \"{from}\""))).unwrap();
+        if link {
+            std::os::unix::fs::symlink("/etc/hosts", root.join("link.csv")).unwrap();
+        }
+        let (_, c1, _) = shop("v1");
+        let url = format!("sqlite:{}", root.join("data.db").display());
+        ops::init(&url, c1.model.as_ref().unwrap(), &c1.report, clock()).unwrap();
+        let project = Project::load(&root).unwrap();
+        let c2 = quadra_analysis::check(&project);
+        let err = ops::migrate(&url, c2.model.as_ref().unwrap(), &c2.report, &root, clock(), false).unwrap_err();
+        assert!(err.contains("a file of the project") || err.contains("is a link") || err.contains("outside the project"), "{what}: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

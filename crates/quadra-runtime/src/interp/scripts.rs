@@ -291,7 +291,21 @@ impl<'m> Interp<'m> {
     fn load_temporaries(&mut self, root: Option<&Path>) -> R<()> {
         let temps: Vec<(String, String)> = self.m.entities.iter().filter(|e| e.temporary).filter_map(|e| e.load_from.clone().map(|f| (e.name.clone(), f))).collect();
         for (ent, file) in temps {
+            // a file of the project only: a relative path inside its folder, not a link (a deploy
+            // must not read the files of the machine it runs on)
+            let rel = std::path::Path::new(&file);
+            if rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+                return Err(Flow::Fail(format!("{ent}: `load from \"{file}\"`: a file of the project, by a path inside its folder")));
+            }
             let path = root.map(|r| r.join(&file)).unwrap_or_else(|| file.clone().into());
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(Flow::Fail(format!("{ent}: `load from \"{file}\"` is a link: give the file itself")));
+            }
+            if let (Some(r), Ok(real)) = (root, path.canonicalize()) {
+                if r.canonicalize().is_ok_and(|r| !real.starts_with(r)) {
+                    return Err(Flow::Fail(format!("{ent}: `load from \"{file}\"` is outside the project")));
+                }
+            }
             let text = std::fs::read_to_string(&path).map_err(|e| Flow::Fail(format!("{ent}: cannot read {}: {e}", path.display())))?;
             let rows = parse_csv(&text);
             let Some((header, data)) = rows.split_first() else {

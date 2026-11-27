@@ -117,6 +117,12 @@ fn the_api_is_authenticated_idempotent_and_refuses_stale_writes() {
     assert_eq!(row["cells"]["code"]["d"], json!("W-01"));
     assert_eq!(row["cells"]["standard_cost"]["hidden"], json!(true));
     assert!(row["cells"]["double"]["d"].as_str().unwrap().starts_with("20"), "{row}");
+    // a column of the caller cannot read what the caller may not: a hidden field, by any path
+    for x in ["standard_cost * 1", "Product.map(p => p.standard_cost)"] {
+        let (s, v, _) = http.call("POST", "/v1/query", &auth, Some(&json!({ "entity": "Product", "fields": ["code"], "columns": { "x": x } })));
+        let shown = v["rows"][0]["cells"]["x"]["d"].as_str().unwrap_or("").to_string();
+        assert!(s != 200 || !shown.chars().any(|c| c.is_ascii_digit()), "{x}: {s} {v}");
+    }
     // an expression that does not type check, and one that tries to add code
     let (s, e, _) = http.call("POST", "/v1/query", &auth, Some(&json!({ "entity": "Product", "columns": { "x": "list_price + 3 kg" } })));
     assert_eq!(s, 400);

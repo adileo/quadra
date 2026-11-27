@@ -1112,6 +1112,11 @@ impl Engine {
         let model = checked.model.as_ref().unwrap();
         let base = q["base"].as_u64();
         let mut i = self.interp(model, Some(who), base)?;
+        // expressions of the caller (columns, `where`): evaluated as that user, as an app's
+        // cells are: rows they may read, hidden fields and records refused
+        if !columns.is_empty() || !q["where"].is_null() {
+            i.viewer = true;
+        }
         Ok(reply(200, quadra_api::query_rows(&mut i, model, &entity, q, &items, &columns)?))
     }
 

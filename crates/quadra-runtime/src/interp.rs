@@ -574,6 +574,11 @@ impl<'m> Interp<'m> {
     }
 
     fn get_ref(&mut self, ent: &str, id: Id, name: &str, company: Option<Id>, as_of: Option<u64>) -> R<V> {
+        // a column a caller wrote (`/v1/query`): evaluated as that caller, never with the rights
+        // of the model's own formulas
+        if name.starts_with("__col_") {
+            return self.get_ref_inner(ent, id, name, company, as_of);
+        }
         // a record's own formulas read what they read, whoever looks at them
         self.viewer_pause += 1;
         let r = self.get_ref_inner(ent, id, name, company, as_of);
@@ -1868,6 +1873,11 @@ impl<'m> Interp<'m> {
             if let V::Ref { .. } | V::Rec { .. } = this {
                 let known = self.field(&ent, n).is_some() || ["id", "created_at", "created_by", "updated_at", "updated_by", "version"].contains(&n);
                 if known {
+                    if self.viewing() {
+                        if let V::Ref { ent, id } = &this {
+                            self.viewer_read(ent, *id, n)?;
+                        }
+                    }
                     return self.get(&this, n, ctx.company, ctx.as_of);
                 }
             }
