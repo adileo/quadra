@@ -257,6 +257,12 @@ fn erase_later(conn: &mut Conn, segments: &[Segment], at: u64) -> Result<(), Str
     if later.is_empty() {
         return Ok(());
     }
+    // a record taken away later may still be referred to in the copy (the references were
+    // emptied by the erasure's own writes, which are not applied): its rows go all the same
+    let sqlite = conn.dialect() == Dialect::Sqlite;
+    if sqlite {
+        conn.batch("PRAGMA foreign_keys = OFF")?;
+    }
     conn.batch("BEGIN")?;
     for (sql, ps) in &later {
         if let Err(e) = conn.exec(sql, ps) {
@@ -264,7 +270,11 @@ fn erase_later(conn: &mut Conn, segments: &[Segment], at: u64) -> Result<(), Str
             return Err(format!("the erasures after transaction {at}: {e}"));
         }
     }
-    conn.batch("COMMIT")
+    conn.batch("COMMIT")?;
+    if sqlite {
+        conn.batch("PRAGMA foreign_keys = ON")?;
+    }
+    Ok(())
 }
 
 fn apply_until_inner(

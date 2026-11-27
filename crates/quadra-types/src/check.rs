@@ -1655,6 +1655,10 @@ impl<'m> Checker<'m> {
         if let Some(en) = self.entity {
             if self.m.find_field(en, n).is_some() {
                 let ename = en.name.clone();
+                // a ledger's posting reads the record's own fields by their names
+                if self.in_post.is_some() {
+                    self.retention_access(&T::Ent(ename.clone()), n, span);
+                }
                 let company = if self.company_ctx {
                     Some(vec!["company".to_string()])
                 } else {

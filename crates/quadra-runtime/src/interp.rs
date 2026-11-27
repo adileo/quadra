@@ -6184,6 +6184,7 @@ impl<'m> Interp<'m> {
                 && self.store.dirty.is_empty()
                 && self.store.rows.len() == snapshot.rows.len()
                 && self.store.outbox.is_empty()
+                && self.store.erasures.is_empty()
             {
                 let (next, block) = (self.store.next_id, self.store.id_block());
                 self.store = snapshot.clone();

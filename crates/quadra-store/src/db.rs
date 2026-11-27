@@ -2098,9 +2098,15 @@ impl Database {
                     vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],
                 )?;
             }
-            // the columns of the values erased: empty in such a copy too
+            // the columns of the values erased: empty in such a copy too (the rows of a record
+            // taken away are deleted instead, below)
             let ent = er.ent.to_string();
-            if let Some(t) = self.schema.entity_table(&ent).cloned() {
+            if let Some(t) = self
+                .schema
+                .entity_table(&ent)
+                .cloned()
+                .filter(|_| !er.whole)
+            {
                 let cols: Vec<String> = t
                     .fields
                     .iter()
@@ -2147,16 +2153,20 @@ impl Database {
                     .collect::<Vec<_>>();
                 for (table, col) in traits {
                     self.wexec(
-                        format!("DELETE FROM {} WHERE {} = ?bigint", q(&table), q(col)),
+                        format!(
+                            "{ERASE}DELETE FROM {} WHERE {} = ?bigint",
+                            q(&table),
+                            q(col)
+                        ),
                         vec![Sql::Int(id)],
                     )?;
                 }
                 self.wexec(
-                    "INSERT INTO \"_quadra_erased\" (\"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", \"erased_tx\", \"erased_at\", \"cause\") SELECT \"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", ?bigint, ?text, ?text FROM \"_quadra_records\" WHERE \"id\" = ?bigint".into(),
+                    format!("{ERASE}INSERT INTO \"_quadra_erased\" (\"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", \"erased_tx\", \"erased_at\", \"cause\") SELECT \"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", ?bigint, ?text, ?text FROM \"_quadra_records\" WHERE \"id\" = ?bigint"),
                     vec![Sql::Int(tx as i64), Sql::Text(at.clone()), Sql::Text(er.reason.clone()), Sql::Int(id)],
                 )?;
                 self.wexec(
-                    "DELETE FROM \"_quadra_records\" WHERE \"id\" = ?bigint".into(),
+                    format!("{ERASE}DELETE FROM \"_quadra_records\" WHERE \"id\" = ?bigint"),
                     vec![Sql::Int(id)],
                 )?;
             }

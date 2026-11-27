@@ -10,5 +10,6 @@ mod host;
 mod mail;
 mod orchestration;
 mod printers;
+mod retention;
 mod signin;
 mod uploads;
