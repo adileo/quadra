@@ -9,4 +9,5 @@ mod files;
 mod host;
 mod mail;
 mod orchestration;
+mod printers;
 mod signin;

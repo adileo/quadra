@@ -148,6 +148,7 @@ impl Send {
                 crate::transport::Put::File { body, .. } => body.len() as u64,
                 crate::transport::Put::Row { row, .. } => row.to_string().len() as u64,
                 crate::transport::Put::Http { body, .. } => body.len() as u64,
+                crate::transport::Put::Print { body, .. } => body.len() as u64,
             },
             Send::Job { .. } => 0,
         }
@@ -282,6 +283,8 @@ pub enum Built {
         path: String,
         body: Vec<u8>,
     },
+    /// `print(content)`: what a printer prints, its bytes (ZPL, text, a PDF) and their type
+    Print { body: Vec<u8>, content_type: String },
 }
 
 /// A pull of an `inbound` to make: a `GET` of `url` with the connection's authentication.
@@ -574,6 +577,17 @@ pub fn built_of(v: &quadra_runtime::V) -> Result<Built, String> {
             },
         });
     }
+    if method == "PRINT" {
+        let body = get("body").unwrap_or_default();
+        return Ok(Built::Print {
+            // a document's bytes come a character per byte
+            body: match get("encoding").as_deref() {
+                Some("bytes") => body.chars().map(|c| c as u32 as u8).collect(),
+                _ => body.into_bytes(),
+            },
+            content_type: get("content_type").unwrap_or_else(|| "text/plain".into()),
+        });
+    }
     if method == "EMAIL" {
         // the documents attached: what `render(…)` gives, each its name, type and bytes
         let mut attachments = Vec::new();
@@ -754,6 +768,9 @@ pub fn plan(
                     Some(Built::Email { .. }) => {
                         return Err("an email cannot go through an HTTP connection".into())
                     }
+                    Some(Built::Print { .. }) => {
+                        return Err("`print` is for printer connections".into())
+                    }
                     None => (
                         "POST".to_string(),
                         path.unwrap_or("").to_string(),
@@ -827,7 +844,9 @@ pub fn plan(
                         html.clone(),
                         attachments.clone(),
                     ),
-                    Some(Built::Http { .. }) | Some(Built::Put { .. }) => {
+                    Some(Built::Http { .. })
+                    | Some(Built::Put { .. })
+                    | Some(Built::Print { .. }) => {
                         return Err("only an email goes through an SMTP connection".into())
                     }
                     None => (
@@ -890,6 +909,25 @@ pub fn plan(
             ConnectionKind::Mail { .. } => Err(format!(
                 "`{connection}` is a mailbox read over IMAP: nothing is sent through it"
             )),
+            // a print: a job for whoever runs the printer (an agent, in practice)
+            ConnectionKind::Printer { .. } => {
+                let Some(Built::Print { body, content_type }) = &built else {
+                    return Err(format!(
+                        "`{connection}` is a printer: the block ends with `print(content)`"
+                    ));
+                };
+                Ok(Send::Job {
+                    job: crate::transport::Job::Put {
+                        conn: crate::transport::Conn::of(manifest, connection)?,
+                        put: crate::transport::Put::Print {
+                            body: body.clone(),
+                            content_type: content_type.clone(),
+                        },
+                    },
+                    agent: conn.agent.clone(),
+                    env: env.clone(),
+                })
+            }
         }
     })();
     base(send.unwrap_or_else(Send::Broken))

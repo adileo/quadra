@@ -74,7 +74,8 @@ impl<'m> Interp<'m> {
     /// `post(path, body)`, `put`, `patch`, `delete(path)`, `email(to=, subject=, body=, html=)`:
     /// what an `outbound … as e:` block sends, as a tuple the engine reads (`method`, `path`,
     /// `body`, `content_type`; for an email `to`, `subject`, `body`, `html`). A body that is a
-    /// record `from json` is written as its document.
+    /// record `from json` is written as its document; `print(content)` gives the bytes for a
+    /// printer.
     fn request(&mut self, n: &str, pos: Vec<V>, named: Vec<(String, V)>) -> R<V> {
         let get = |k: &str, i: Option<usize>| -> V {
             named
@@ -147,6 +148,34 @@ impl<'m> Interp<'m> {
             };
             out.push((Some("method".into()), text("WRITE")));
             out.push((Some("path".into()), get("path", Some(0))));
+            out.push((Some("body".into()), text(&body)));
+            out.push((Some("content_type".into()), text(&ctype)));
+            return Ok(V::Tuple(Rc::new(out)));
+        }
+        if n == "print" {
+            // a document rendered: its bytes, a character per byte; text (ZPL) as it is
+            let (body, ctype) = match get("content", Some(0)) {
+                V::Tuple(f) if f.iter().any(|(k, _)| k.as_deref() == Some("content")) => {
+                    use base64::Engine as _;
+                    let field = |k: &str| {
+                        f.iter()
+                            .find(|(n, _)| n.as_deref() == Some(k))
+                            .map(|(_, v)| match v {
+                                V::Text(t) => t.to_string(),
+                                other => other.to_string(),
+                            })
+                            .unwrap_or_default()
+                    };
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(field("content"))
+                        .or_else(|_| fail("the document's bytes are not readable"))?;
+                    out.push((Some("encoding".into()), text("bytes")));
+                    (bytes.iter().map(|b| *b as char).collect(), field("type"))
+                }
+                V::None => return fail("`print` has nothing to print"),
+                other => (as_text(&other).unwrap_or_default(), "text/plain".into()),
+            };
+            out.push((Some("method".into()), text("PRINT")));
             out.push((Some("body".into()), text(&body)));
             out.push((Some("content_type".into()), text(&ctype)));
             return Ok(V::Tuple(Rc::new(out)));
@@ -3479,7 +3508,7 @@ impl<'m> Interp<'m> {
         if self.building_request
             && matches!(
                 n,
-                "post" | "put" | "patch" | "delete" | "email" | "write" | "insert"
+                "post" | "put" | "patch" | "delete" | "email" | "write" | "insert" | "print"
             )
         {
             let (pos, named) = self.eval_args(args, ctx)?;

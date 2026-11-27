@@ -1302,6 +1302,63 @@ reached through an agent there (`location = "agent:<name>"`), with `insecure = t
 database has no TLS: the agent reaches it in its own network, with the credentials it holds.
 Connections are kept open between pulls for two minutes.
 
+## Printers: `kind = "printer"`
+
+A label printer in the warehouse, the office printer for invoices: an `outbound` prints on
+them, with what `zpl(…)` gives for a label or `render(…)` for a document. A printer is in
+the company's network, so it is reached by an [agent](#on-premise-agents) there.
+
+```toml
+[connections.zebra]
+kind = "printer"
+url = "tcp://192.168.1.50:9100"      # raw printing: ZPL, or PDF for a printer that takes it
+location = "agent:backoffice"
+timeout = "30s"
+
+[connections.office]
+kind = "printer"
+url = "lp://Brother_HL_L2350DW"       # a printer of the machine the agent runs on (CUPS)
+location = "agent:backoffice"
+copies = 2
+```
+
+| Key | Meaning |
+|---|---|
+| `url` | `tcp://host[:port]`: the printer's raw port ("JetDirect"), 9100 when not given. `lp://NAME`: a printer of the system where the connection runs, its name as `lpstat -p` shows it, printed with CUPS (`lp -d NAME`) |
+| `timeout` | of connecting and of sending the job, from `"1s"` to `"600s"`; `"30s"` when not given |
+| `copies` | each job printed this many times, from 1 to 99; 1 when not given |
+| `location` | `"agent:<name>"`: printed by that on-premise agent, in the printer's network |
+| `rate`, `concurrency`, `pause_after` | as for any connection ([Limits](#limits-of-the-other-side)); `concurrency` is 1 when not given: a printer takes one job at a time |
+
+```quadra
+event ParcelReady(order: Order)
+
+outbound ParcelReady via zebra as e:
+    print(zpl(ParcelLabel(e.order)))
+
+outbound InvoicePosted via office as e:
+    print(render(InvoicePdf(e.invoice)))
+```
+
+| Rule | Detail |
+|---|---|
+| `print(content)` | ends the block of an outbound to a printer, and only there. The content is text (ZPL from `zpl(…)`, or any raw text the printer takes, sent as UTF-8) or a document (`render(…)`, `sign(…)`), its bytes as they are |
+| `tcp://` | the bytes go to the port as they are, then the connection is closed. Each copy is a job of its own, on a connection of its own. The printer reads them in its own language: ZPL on a Zebra, PDF only on a printer that prints PDF directly; send PDF to an office printer with `lp://` |
+| `lp://` | the bytes go to `lp -d NAME -n COPIES`. Text and ZPL with `-o raw`, so that a raw queue passes them to the printer unchanged; a PDF without it, printed by the queue's driver |
+| Nothing comes in | an `inbound` on a printer is an error: `` `zebra` is a printer: nothing comes in from it `` |
+| Windows | `lp://` is not supported on Windows yet (the job waits, saying so): use `tcp://` to the printer's port |
+
+| Outcome | What happens |
+|---|---|
+| Printed | the job is sent and the printer has closed the connection, or kept it open for 2 seconds: the event is delivered. A printer does not say whether the paper came out: one out of paper or with its cover open usually takes the job and prints it later |
+| The printer is off, refuses the connection, does not answer in `timeout` | tried again, like a server down: the event stays pending, each attempt in its log (`the printer 192.168.1.50:9100: Connection refused`) |
+| `lp` not installed, or it fails (an unknown queue) | tried again, with what `lp` said: `` `lp` is not installed where it runs: lp://Office prints with CUPS `` |
+| A url that is not a printer's (from a variable) | fails for good: `` `http://printer.lan`: a printer's url is tcp://host:port (raw printing, port 9100) or lp://NAME `` |
+| Without an agent, on Quadra Cloud | a printer at a private address is refused for good: `` 192.168.1.50 is not a public address … a printer of the company's network is reached by an on-premise agent `` |
+
+A failed attempt after part of the copies were sent sends them all again at the next one: with
+`copies` above 1, a printer that goes off in the middle of a job may print a copy more.
+
 ## `endpoint`: answered at once
 
 Some systems ask and wait for the answer: a cash register asks for a price, a checkout for the
@@ -1595,11 +1652,11 @@ quadra cloud env pull > .env                        # the values themselves: an 
 
 ## On-premise agents
 
-A database, an SFTP server or a cash register in a company's network is behind its
-firewall: Quadra cannot reach it, and the company does not want to open a port. An **agent**
-is a program installed in that network (`quadra agent`, the same binary as `quadra`, on Linux,
-Windows or macOS) that opens connections **only outwards**, to the app, takes the jobs of the
-connections it runs, and sends back what came of them.
+A database, an SFTP server, a printer or a cash register in a company's network is behind
+its firewall: Quadra cannot reach it, and the company does not want to open a port. An
+**agent** is a program installed in that network (`quadra agent`, the same binary as
+`quadra`, on Linux, Windows or macOS) that opens connections **only outwards**, to the app,
+takes the jobs of the connections it runs, and sends back what came of them.
 
 ```toml
 [connections.erp]
@@ -1611,8 +1668,8 @@ location = "agent:milano"                    # the agent `milano` runs it
 ```
 
 A connection of any kind runs on an agent with `location = "agent:<name>"`: a database, files
-over SFTP or FTP, a mailbox, an HTTP service of the network. The app plans the jobs (a pull
-due, an event to deliver) as for any connection; the agent runs them.
+over SFTP or FTP, a mailbox, a printer, an HTTP service of the network. The app plans the jobs
+(a pull due, an event to deliver) as for any connection; the agent runs them.
 
 **Its credentials stay with the agent.** The job carries the connection as declared in
 quadra.toml, never the values of its variables: the agent reads them from its own environment
