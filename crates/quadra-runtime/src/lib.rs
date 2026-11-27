@@ -16,6 +16,7 @@ pub mod time;
 pub mod value;
 
 pub use interp::unique_message;
+pub use interp::{expire_terms, term_key, Due};
 pub use interp::{
     ChangeDiff, Commit, CommitError, CommitSink, Conflict, Ctx, Flow, Groups, Interp, KeyVal, Page,
     RuleSel, ScriptMeta, Spec, Statics, Units,

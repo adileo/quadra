@@ -4,6 +4,7 @@
 mod crash;
 mod deploy;
 mod due;
+mod erasure;
 mod hints;
 mod import;
 mod limits;

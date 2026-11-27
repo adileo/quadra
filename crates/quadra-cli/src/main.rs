@@ -755,6 +755,9 @@ fn db(args: &[String]) -> ExitCode {
         }
         "migrate" => {
             let dry = rest.iter().any(|a| a == "--dry-run");
+            if rest.iter().any(|a| a == "--allow-expire") {
+                ops::ALLOW_EXPIRE.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             let _writer = if dry { None } else { Some(quadra_store::writer::acquire(&url)?) };
             let Some(r) = ops::migrate(&url, model, report, &root, now(), dry)? else {
                 println!("schema up to date, no pending migrations: nothing to migrate");

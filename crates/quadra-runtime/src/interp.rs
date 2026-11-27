@@ -24,6 +24,7 @@ mod retention;
 mod scripts;
 mod viewer;
 pub use query::{Groups, KeyVal, Page, Spec};
+pub use retention::{expire_terms, term_key, Due};
 pub use scripts::{ChangeDiff, ScriptMeta};
 
 /// Non-local exits.
@@ -369,6 +370,8 @@ pub struct Interp<'m> {
     pub statics: Rc<Statics>,
     /// re-evaluate the rules that read the clock on every record (a periodic sweep)
     pub sweep: bool,
+    /// The `expire` terms in force (`interp::retention::term_key`); None: all of the model's
+    pub retention_armed: Option<std::collections::HashSet<String>>,
     /// evaluating the block of an `outbound … as e:`: `post(…)`, `email(…)`… build its request
     pub building_request: bool,
     /// in a test: every event emitted by a committed transaction, in order (`expect sent`,
@@ -528,6 +531,7 @@ impl<'m> Interp<'m> {
             depth: 0,
             statics: Rc::new(Statics::default()),
             sweep: false,
+            retention_armed: None,
             building_request: false,
             sent: None,
             last_sweep: None,

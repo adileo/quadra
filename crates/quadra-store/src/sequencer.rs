@@ -1689,6 +1689,16 @@ impl State {
             })
             .sum::<u64>();
         self.log_segments += 1;
+        // an erasure: a snapshot at once, so the destinations drop the segments that still
+        // hold the values erased
+        if self.snapshot_due.is_none()
+            && self.conn.dialect() == Dialect::Sqlite
+            && statements
+                .iter()
+                .any(|(sql, _)| sql.starts_with("INSERT INTO \"_quadra_erasures\""))
+        {
+            self.snapshot_due = Some(Instant::now());
+        }
         let many = self.log_segments > self.options.snapshot_segments;
         if (self.log_bytes > self.options.snapshot_bytes || many)
             && self.snapshot_due.is_none()

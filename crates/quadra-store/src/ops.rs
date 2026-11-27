@@ -49,6 +49,9 @@ pub fn init(
     let mut db = Database::open(url, model, report)?;
     db.init()?;
     crate::deploy::Catalog::of(model, &db.schema, None).write(&mut db)?;
+    // a new database: its `expire` terms are in force from the start
+    let terms = quadra_runtime::expire_terms(model);
+    db.set_meta("retention_armed", &serde_json::to_string(&terms).unwrap())?;
     let tables = db.schema.tables.len();
     let mut interp = Interp::new(model);
     interp.set_clock(time);
@@ -401,6 +404,10 @@ fn migrate_with(
     always: bool,
     label: Option<&str>,
 ) -> Result<Option<MigrateReport>, String> {
+    // a new `expire` that would erase records at once needs `--allow-expire`
+    if !dry {
+        retention_check(url, model, report, time)?;
+    }
     match crate::deploy::deploy(url, model, report, root, time, dry, always, label)? {
         Ok(crate::deploy::Done::Nothing) => Ok(None),
         Ok(crate::deploy::Done::Report(r)) => Ok(Some(r)),
@@ -821,6 +828,71 @@ pub fn provisional(
     Ok(interp.provisional_values())
 }
 
+/// Deploys may make records expire at once (`retention_check`): set by `--allow-expire`.
+pub static ALLOW_EXPIRE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The `expire` terms in force in a database: those whose first erasures were seen when they
+/// were deployed. None: not recorded yet (a database where every term of its model is in force).
+pub fn armed_terms(db: &mut Database) -> Result<Option<std::collections::HashSet<String>>, String> {
+    Ok(db
+        .meta("retention_armed")?
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+        .map(|v| v.into_iter().collect()))
+}
+
+/// The `expire` terms of a model new to the database put in force. A term that would erase
+/// records at once (records whose time is already past) is refused unless `ALLOW_EXPIRE`, with
+/// how many: `Candidate: 1204 records expire at once (6 months after last_contact)`. Returns
+/// what the new terms erase at their first pass (empty: nothing at once).
+pub fn retention_check(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<Vec<String>, String> {
+    let terms = quadra_runtime::expire_terms(model);
+    let mut db = Database::open(url, model, report)?;
+    let armed = armed_terms(&mut db)?.unwrap_or_default();
+    let new: std::collections::HashSet<String> = terms
+        .iter()
+        .filter(|t| !armed.contains(*t))
+        .cloned()
+        .collect();
+    let mut lines = Vec::new();
+    if !new.is_empty() {
+        // the records as they are, read with the new model: what its new terms erase now
+        let mut i = loaded(&mut db, model, time)?;
+        i.retention_armed = Some(new);
+        let due = i.due().map_err(|e| flow("expire", e))?;
+        let mut counts: std::collections::BTreeMap<(String, &str, String), usize> =
+            Default::default();
+        for d in due {
+            let key = match d {
+                quadra_runtime::Due::Record { ent, term, .. } => (ent, "record", term),
+                quadra_runtime::Due::Field {
+                    ent, field, term, ..
+                } => (format!("{ent}.{field}"), "value", term),
+            };
+            *counts.entry(key).or_default() += 1;
+        }
+        lines = counts
+            .into_iter()
+            .map(|((what, kind, term), n)| {
+                let s = if n == 1 { "" } else { "s" };
+                format!("{what}: {n} {kind}{s} expire at once ({term})")
+            })
+            .collect();
+        if !lines.is_empty() && !ALLOW_EXPIRE.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(format!(
+                "this version erases data at once:\n  {}\nDeploy it with --allow-expire if that is what you want",
+                lines.join("\n  ")
+            ));
+        }
+    }
+    db.set_meta("retention_armed", &serde_json::to_string(&terms).unwrap())?;
+    Ok(lines)
+}
+
 /// An engine over the database at `url`, committing to it directly (no sequencer: run with the
 /// project stopped, as `quadra change apply` is), its clock at `time`.
 pub fn engine<'m>(
@@ -914,6 +986,7 @@ pub fn sweep_with(
     });
     interp.sweep = true;
     interp.last_sweep = last;
+    interp.retention_armed = armed_terms(&mut Database::open(url, model, report)?)?;
     interp.system += 1;
     let before = interp.store.tx;
     interp

@@ -232,6 +232,46 @@ pub fn apply_until(
     segments: &[Segment],
     until: Option<u64>,
 ) -> Result<u64, String> {
+    let at = apply_until_inner(conn, segments, until)?;
+    if until.is_some() {
+        erase_later(conn, segments, at)?;
+    }
+    Ok(at)
+}
+
+/// A copy as of transaction `at`: what the log erased after it erased there too (the
+/// statements of later erasures marked `/* erase */`: values out of the history, their
+/// columns emptied). A copy of the past never shows what was erased since.
+fn erase_later(conn: &mut Conn, segments: &[Segment], at: u64) -> Result<(), String> {
+    let later: Vec<(String, Vec<Sql>)> = segments
+        .iter()
+        .flat_map(|s| {
+            batches(s)
+                .into_iter()
+                .filter(|(_, _, last, _)| *last > at)
+                .flat_map(|(_, _, _, st)| st.iter().cloned())
+                .collect::<Vec<_>>()
+        })
+        .filter(|(sql, _)| sql.starts_with(crate::db::ERASE))
+        .collect();
+    if later.is_empty() {
+        return Ok(());
+    }
+    conn.batch("BEGIN")?;
+    for (sql, ps) in &later {
+        if let Err(e) = conn.exec(sql, ps) {
+            let _ = conn.batch("ROLLBACK");
+            return Err(format!("the erasures after transaction {at}: {e}"));
+        }
+    }
+    conn.batch("COMMIT")
+}
+
+fn apply_until_inner(
+    conn: &mut Conn,
+    segments: &[Segment],
+    until: Option<u64>,
+) -> Result<u64, String> {
     let (mut batch, mut at) = position(conn)?;
     if until.is_some_and(|u| u < at) {
         return Err(format!(

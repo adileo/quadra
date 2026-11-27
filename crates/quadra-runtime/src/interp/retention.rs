@@ -30,6 +30,31 @@ pub enum Due {
     },
 }
 
+/// The key of an `expire` term, as the database keeps the terms in force: `Candidate: 6 months
+/// after last_contact`, `Candidate.notes: 30 days after created_at`.
+pub fn term_key(ent: &str, field: Option<&str>, t: &Term) -> String {
+    match field {
+        Some(f) => format!("{ent}.{f}: {}", t.text()),
+        None => format!("{ent}: {}", t.text()),
+    }
+}
+
+/// Every `expire` term of a model, by key.
+pub fn expire_terms(m: &Model) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in &m.entities {
+        if let Some(t) = &e.retention.expire {
+            out.push(term_key(&e.name, None, t));
+        }
+        for f in &e.fields {
+            if let Some(t) = &f.retention.expire {
+                out.push(term_key(&e.name, Some(&f.name), t));
+            }
+        }
+    }
+    out
+}
+
 impl<'m> Interp<'m> {
     /// When a term ends for a record: the value of its field plus the time. None when the
     /// field has no value (the time is not counted).
@@ -263,7 +288,29 @@ impl<'m> Interp<'m> {
                 .iter()
                 .filter(|f| f.retention.expire.is_some() && f.formula.is_none())
                 .collect();
-            if e.retention.expire.is_none() && fields.is_empty() {
+            // only the terms in force (`retention_armed`): a new one waits for the deploy that
+            // says how many records it erases at once
+            let armed = |key: String| {
+                self.retention_armed
+                    .as_ref()
+                    .map_or(true, |a| a.contains(&key))
+            };
+            let whole = e
+                .retention
+                .expire
+                .as_ref()
+                .filter(|t| armed(term_key(&e.name, None, t)));
+            let fields: Vec<&Field> = fields
+                .into_iter()
+                .filter(|f| {
+                    armed(term_key(
+                        &e.name,
+                        Some(&f.name),
+                        f.retention.expire.as_ref().unwrap(),
+                    ))
+                })
+                .collect();
+            if whole.is_none() && fields.is_empty() {
                 continue;
             }
             for id in self.ids(&e.name, None) {
@@ -274,7 +321,7 @@ impl<'m> Interp<'m> {
                     ent: Rc::from(e.name.as_str()),
                     id,
                 };
-                if let Some(t) = &e.retention.expire {
+                if let Some(t) = whole {
                     if self.term_end(&rec, t)?.is_some_and(|at| at <= now) {
                         out.push(Due::Record {
                             ent: e.name.clone(),

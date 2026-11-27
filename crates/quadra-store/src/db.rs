@@ -278,6 +278,10 @@ pub(crate) fn history_entry(
     json!(["h", record, field, d])
 }
 
+/// The mark of the statements of an erasure applied again to a copy of the database as of an
+/// earlier moment (what was erased later is erased there too).
+pub(crate) const ERASE: &str = "/* erase */ ";
+
 /// The entry of an erasure in its commit's hash.
 pub(crate) fn erasure_entry(id: u64, ent: &str, fields: &str, whole: bool, reason: &str) -> J {
     json!(["e", id, ent, fields, whole, reason])
@@ -2087,13 +2091,47 @@ impl Database {
                     r[2].as_deref().unwrap_or(""),
                     r[1].as_deref().unwrap_or("null"),
                 );
+                // (`/* erase */` statements are applied again to a copy of the database as of
+                // an earlier moment: crate::segments::apply_until)
                 self.wexec(
-                    "UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint".into(),
+                    format!("{ERASE}UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint"),
                     vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],
                 )?;
             }
+            // the columns of the values erased: empty in such a copy too
+            let ent = er.ent.to_string();
+            if let Some(t) = self.schema.entity_table(&ent).cloned() {
+                let cols: Vec<String> = t
+                    .fields
+                    .iter()
+                    .filter(|fm| !fm.formula && (er.whole || er.fields.contains(&fm.field)))
+                    .flat_map(|fm| fm.columns.iter().map(|c| format!("{} = NULL", q(&c.name))))
+                    .collect();
+                if !cols.is_empty() {
+                    self.wexec(
+                        format!(
+                            "{ERASE}UPDATE {} SET {} WHERE \"id\" = ?bigint",
+                            q(&t.name),
+                            cols.join(", ")
+                        ),
+                        vec![Sql::Int(id)],
+                    )?;
+                }
+            }
+            for t in self.schema.tables.clone() {
+                if let Source::Join(e, f) | Source::PerCompany(e, f) = &t.source {
+                    if *e == ent && (er.whole || er.fields.contains(f)) {
+                        self.wexec(
+                            format!(
+                                "{ERASE}DELETE FROM {} WHERE \"owner_id\" = ?bigint",
+                                q(&t.name)
+                            ),
+                            vec![Sql::Int(id)],
+                        )?;
+                    }
+                }
+            }
             if er.whole {
-                let ent = er.ent.to_string();
                 let traits = self
                     .schema
                     .tables
