@@ -1098,3 +1098,12 @@ fn a_huge_range_is_refused_not_allocated() {
     assert!(m.contains("elements") || m.contains("list") || m.contains("long"), "{m}");
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+/// Integers that overflow fail instead of wrapping into a wrong value.
+#[test]
+fn an_integer_overflow_is_an_error() {
+    let project = project(&[("main.qd", "test \"overflow\":\n    let big = 9223372036854775807\n    let n = big + 1\n    expect n > 0\n")]);
+    let results = quadra_runtime::run_tests(&project, None).unwrap();
+    assert!(!results[0].passed);
+    assert!(results[0].message.clone().unwrap_or_default().contains("too large"), "{:?}", results[0].message);
+}

@@ -2164,7 +2164,10 @@ impl<'m> Interp<'m> {
                     list(out)
                 }
             }
-            (V::Int(a), V::Int(b)) => V::Int(if add { a + b } else { a - b }),
+            (V::Int(a), V::Int(b)) => match if add { a.checked_add(*b) } else { a.checked_sub(*b) } {
+                Some(n) => V::Int(n),
+                None => return fail("an integer too large: the result does not fit"),
+            },
             (V::Pct(a), V::Pct(b)) => V::Pct(s(*a, *b)),
             (a, b) => match (a.num(), b.num()) {
                 (Some(x), Some(y)) => {
@@ -2187,7 +2190,10 @@ impl<'m> Interp<'m> {
             (V::Price { amt, cur, per }, x) | (x, V::Price { amt, cur, per }) if x.num().is_some() => V::Price { amt: amt * x.num().unwrap(), cur: cur.clone(), per: per.clone() },
             (V::Qty { v, unit }, x) | (x, V::Qty { v, unit }) if x.num().is_some() => V::Qty { v: v * x.num().unwrap(), unit: unit.clone() },
             (V::Duration(s), x) if x.num().is_some() => V::Duration((d(*s) * x.num().unwrap()).to_i64().unwrap_or(0)),
-            (V::Int(a), V::Int(b)) => V::Int(a * b),
+            (V::Int(a), V::Int(b)) => match a.checked_mul(*b) {
+                Some(n) => V::Int(n),
+                None => return fail("an integer too large: the result does not fit"),
+            },
             (V::Pct(a), V::Pct(b)) => V::Pct(a * b),
             (a, b) => match (a.num(), b.num()) {
                 (Some(x), Some(y)) => V::Dec(x * y),
