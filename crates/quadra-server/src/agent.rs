@@ -139,6 +139,7 @@ pub fn run(
                         Outcome::Failed(f) => log(&format!("{what}: {}", f.text())),
                         Outcome::Fetched(f) => log(&format!("{what}: {} item(s)", f.items.len())),
                         Outcome::Put => log(&format!("{what}: done")),
+                        Outcome::Answered { status, .. } => log(&format!("{what}: {status}")),
                     }
                     let body = json!({ "results": [{ "id": id, "outcome": outcome }] });
                     // the answer is sent again a few times: the job waits for it
@@ -171,10 +172,12 @@ fn describe(job: &Job) -> String {
             transport::Ask::Files { pattern, .. } => format!("{}: files {pattern}", conn.name),
             transport::Ask::Rows { table, .. } => format!("{}: rows of {table}", conn.name),
             transport::Ask::Mail { mailbox, .. } => format!("{}: mailbox {mailbox}", conn.name),
+            transport::Ask::Http { path } => format!("{}: GET {path}", conn.name),
         },
         Job::Put { conn, put } => match put {
             transport::Put::File { path, .. } => format!("{}: write {path}", conn.name),
             transport::Put::Row { table, .. } => format!("{}: insert into {table}", conn.name),
+            transport::Put::Http { method, path, .. } => format!("{}: {method} {path}", conn.name),
         },
     }
 }

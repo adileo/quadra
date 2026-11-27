@@ -138,6 +138,7 @@ impl Send {
             } => match put {
                 crate::transport::Put::File { body, .. } => body.len() as u64,
                 crate::transport::Put::Row { row, .. } => row.to_string().len() as u64,
+                crate::transport::Put::Http { body, .. } => body.len() as u64,
             },
             Send::Job { .. } => 0,
         }
@@ -582,6 +583,58 @@ pub fn plan(
     };
     let send = (|| -> Result<Send, String> {
         match &conn.kind {
+            // an HTTP service of another network: the agent makes the request, with its values
+            ConnectionKind::Http { .. } if conn.agent.is_some() => {
+                let (method, path, body, content_type) = match &built {
+                    Some(Built::Http {
+                        method,
+                        path: p,
+                        body,
+                        content_type,
+                    }) => (
+                        method.clone(),
+                        format!("{}{}", path.unwrap_or(""), p),
+                        body.clone().unwrap_or_default(),
+                        content_type.clone(),
+                    ),
+                    Some(_) => return Err("only a request goes through an HTTP connection".into()),
+                    None => (
+                        "POST".to_string(),
+                        path.unwrap_or("").to_string(),
+                        json!({
+                            "id": due.id,
+                            "event": due.event,
+                            "tx": due.tx,
+                            "created_at": format!("{}Z", due.created_at),
+                            "data": plain_fields(&due.fields),
+                        })
+                        .to_string(),
+                        Some("application/json".to_string()),
+                    ),
+                };
+                let headers = vec![
+                    (
+                        "Content-Type".to_string(),
+                        content_type.unwrap_or_else(|| "application/json".to_string()),
+                    ),
+                    ("Quadra-Event".to_string(), due.event.clone()),
+                    ("Quadra-Delivery".to_string(), due.id.to_string()),
+                    ("Idempotency-Key".to_string(), idempotency_key(&due)),
+                ];
+                Ok(Send::Job {
+                    job: crate::transport::Job::Put {
+                        conn: crate::transport::Conn::of(manifest, connection)?,
+                        put: crate::transport::Put::Http {
+                            method,
+                            path,
+                            headers,
+                            body,
+                        },
+                    },
+                    agent: conn.agent.clone(),
+                    env: env.clone(),
+                })
+            }
             ConnectionKind::Http { .. } => {
                 let (base, auth, creds, timeout) = http_parts(manifest, env, connection)?;
                 // the request its block built, or the envelope of the event
@@ -1109,6 +1162,30 @@ pub async fn run(
                 },
             };
             match outcome {
+                crate::transport::Outcome::Answered {
+                    status,
+                    body,
+                    retry_after,
+                } => {
+                    seen.status = Some(status);
+                    let short: String = body.chars().take(500).collect();
+                    seen.excerpt = (!short.trim().is_empty()).then_some(short);
+                    if (200..300).contains(&status) {
+                        answer = Some(body);
+                        Ok(())
+                    } else {
+                        let text: String = body.chars().take(200).collect();
+                        let via = agent.as_deref().unwrap_or("the server");
+                        Err(judge(
+                            status,
+                            retry_after.map(Duration::from_secs),
+                            format!(
+                                "answered {status} (through the agent `{via}`): {}",
+                                text.trim()
+                            ),
+                        ))
+                    }
+                }
                 crate::transport::Outcome::Put | crate::transport::Outcome::Fetched(_) => Ok(()),
                 crate::transport::Outcome::Failed(f) => Err(match f {
                     crate::transport::Failed::Again(e) => Failure::Again(e),
@@ -1350,21 +1427,81 @@ async fn http(
             format!(": {}", text.trim())
         }
     );
-    if status.is_redirection() {
-        return Err(Failure::Never(format!(
+    Err(judge(code, retry_after, msg))
+}
+
+/// What an answer that is not a success means for the event: tried again (when), or failed.
+fn judge(code: u16, retry_after: Option<Duration>, msg: String) -> Failure {
+    match code {
+        300..=399 => Failure::Never(format!(
             "{msg} (redirects are not followed: give the final url)"
+        )),
+        429 | 503 if retry_after.is_some() => Failure::Later(msg, retry_after.unwrap()),
+        408 | 429 => Failure::Again(msg),
+        // credentials refused: a token to renew, not a reason to drop the event
+        401 | 403 => Failure::Again(format!(
+            "{msg} (the connection's credentials were refused: check them)"
+        )),
+        500..=599 => Failure::Again(msg),
+        _ => Failure::Never(msg),
+    }
+}
+
+/// A request of an HTTP connection run by an agent (`transport::Put::Http`, `Ask::Http`): the
+/// connection's url, authentication and signature with the values where it runs. Its status,
+/// its body (up to 16 MB) and `Retry-After`; the server judges them.
+pub(crate) async fn job_http(
+    c: &crate::transport::Resolved,
+    method: &str,
+    path: &str,
+    extra: &[(String, String)],
+    body: &str,
+    public_only: bool,
+) -> Result<(u16, String, Option<u64>), crate::transport::Failed> {
+    use crate::transport::Failed;
+    let (base, auth, creds, timeout) =
+        http_parts(&c.manifest, &c.env, &c.connection.name).map_err(Failed::Waiting)?;
+    if path.contains("..") || path.contains("://") || (!path.is_empty() && !path.starts_with('/')) {
+        return Err(Failed::Never(format!(
+            "`{path}` is not a path of the connection's url"
         )));
     }
-    match code {
-        429 | 503 if retry_after.is_some() => Err(Failure::Later(msg, retry_after.unwrap())),
-        408 | 429 => Err(Failure::Again(msg)),
-        // credentials refused: a token to renew, not a reason to drop the event
-        401 | 403 => Err(Failure::Again(format!(
-            "{msg} (the connection's credentials were refused: check them)"
-        ))),
-        _ if status.is_server_error() => Err(Failure::Again(msg)),
-        _ => Err(Failure::Never(msg)),
+    let url = format!("{base}{path}");
+    let parsed = reqwest::Url::parse(&url).map_err(|e| Failed::Never(format!("{url}: {e}")))?;
+    let shared = http_client(public_only);
+    let client = client_for(&shared, &creds, public_only).map_err(Failed::Waiting)?;
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| Failed::Never(format!("`{method}` is not an HTTP method")))?;
+    let mut req = client.request(method, parsed).timeout(timeout);
+    req = req.header("User-Agent", "Quadra");
+    for (k, v) in auth.iter().chain(extra) {
+        req = req.header(k, v);
     }
+    if let Some(o) = &creds.oauth {
+        let t = token(&client, o, public_only, timeout)
+            .await
+            .map_err(|f| Failed::Again(f.text()))?;
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    if let Some((key, how)) = &creds.sign {
+        for (k, v) in signature(key, how, body, chrono::Utc::now().timestamp()) {
+            req = req.header(k, v);
+        }
+    }
+    if !body.is_empty() {
+        req = req.body(body.to_string());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| Failed::Again(format!("{}: {}", host_of(&url), root_cause(&e))))?;
+    let status = resp.status().as_u16();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    Ok((status, read_up_to(resp, 16 << 20).await, retry_after))
 }
 
 /// The first `chars` characters of a response's body, reading no more than 64 KB of it: a huge

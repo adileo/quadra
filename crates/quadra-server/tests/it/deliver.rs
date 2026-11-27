@@ -18,14 +18,14 @@ const CODE: &str = "entity Order:\n    number: Text\n\nevent OrderPlaced(number:
 /// A receiver of webhooks on a free port: each request kept, answered with the next status of
 /// `answers` (the last one once they run out).
 /// The requests a receiver got: their headers (lower case) and bodies.
-type Got = Arc<Mutex<Vec<(HashMap<String, String>, String)>>>;
+pub(crate) type Got = Arc<Mutex<Vec<(HashMap<String, String>, String)>>>;
 
-struct Receiver {
-    port: u16,
-    got: Got,
+pub(crate) struct Receiver {
+    pub(crate) port: u16,
+    pub(crate) got: Got,
 }
 
-fn receiver(answers: Vec<u16>) -> Receiver {
+pub(crate) fn receiver(answers: Vec<u16>) -> Receiver {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let got = Arc::new(Mutex::new(Vec::new()));

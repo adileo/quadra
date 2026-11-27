@@ -206,3 +206,96 @@ fn only_an_admin_manages_agents_and_a_key_is_needed_to_take_jobs() {
     assert_eq!(s, 401);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_http_service_of_another_network_is_reached_through_the_agent_with_its_secret() {
+    // a service only the agent's network reaches (this machine: the server reaches only public
+    // addresses), checking the signature made with a secret only the agent has
+    let r = crate::deliver::receiver(vec![200]);
+    let dir = temp("agents-http");
+    let code = "entity Order:\n    number: Text\n\nevent OrderPlaced(order: Order)\n\non Order created as o:\n    emit OrderPlaced(order=o)\n\noutbound OrderPlaced via lan path \"/orders\"\n";
+    let settings = format!("\n[vars.LAN_SECRET]\nsecret = true\n\n[connections.lan]\nkind = \"http\"\nurl = \"http://127.0.0.1:{}\"\ninsecure = true\nsigning_secret = {{ var = \"LAN_SECRET\" }}\nlocation = \"agent:negozio\"\n", r.port);
+    let (cfg, token) = project_at(&dir, "http://127.0.0.1:9", code, &settings);
+    let (_h, _rt, port) = serve(
+        HostOptions {
+            public_egress_only: true,
+            ..Default::default()
+        },
+        cfg.clone(),
+    );
+    let (_, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/agents",
+        Some(json!({ "name": "negozio" })),
+    );
+    let server = format!("http://127.0.0.1:{port}");
+    let (_, key) = quadra_server::agent::register(&server, v["code"].as_str().unwrap()).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+    let l = lines.clone();
+    let s2 = stop.clone();
+    let h = std::thread::spawn(move || {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("LAN_SECRET".to_string(), "agent-only".to_string());
+        quadra_server::agent::run(
+            quadra_server::agent::Options {
+                server,
+                key,
+                env,
+                concurrency: 2,
+            },
+            move |line| l.lock().unwrap().push(line.to_string()),
+            s2,
+        )
+    });
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/tx",
+        Some(
+            json!({ "ops": [{ "op": "create", "entity": "Order", "values": { "number": "N1" } }] }),
+        ),
+    );
+    assert_eq!(s, 200, "{v}");
+    let state = || -> Vec<String> {
+        Conn::open(&cfg.url)
+            .unwrap()
+            .query("SELECT \"state\" FROM \"_quadra_outbox\"", &[])
+            .unwrap()
+            .into_iter()
+            .map(|r| r[0].clone().unwrap_or_default())
+            .collect()
+    };
+    until("the delivery through the agent", 30, || {
+        state() == ["delivered"]
+    });
+    let got = r.got.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    let (head, body) = &got[0];
+    assert_eq!(head[":path"], "/orders");
+    let sig = &head["quadra-signature"];
+    let t = sig.split(',').next().unwrap().trim_start_matches("t=");
+    assert_eq!(
+        sig,
+        &format!(
+            "t={t},v1={}",
+            quadra_server::deliver::sign("agent-only", &format!("{t}.{body}"))
+        )
+    );
+    assert!(head["idempotency-key"].starts_with("quadra-"));
+    assert!(
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("lan: POST /orders: 200")),
+        "{:?}",
+        lines.lock().unwrap()
+    );
+    stop.store(true, Ordering::Relaxed);
+    let _ = h;
+    let _ = std::fs::remove_dir_all(&dir);
+}

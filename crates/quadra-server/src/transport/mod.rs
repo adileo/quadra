@@ -108,6 +108,8 @@ pub enum Ask {
         after: Option<String>,
         limit: u32,
     },
+    /// a GET of `path` on an HTTP connection (an HTTP pull run by an agent): its answer
+    Http { path: String },
     /// the messages of `mailbox` not taken yet; those of `settle` moved or flagged
     Mail {
         mailbox: String,
@@ -156,6 +158,14 @@ pub enum Put {
         #[serde(with = "b64")]
         body: Vec<u8>,
     },
+    /// a request on an HTTP connection (an event an agent delivers): signed and authenticated
+    /// where it runs, with the connection's settings and the agent's credentials
+    Http {
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
     /// a row in an exchange table: its columns as a JSON object; `key`, the idempotency key,
     /// lets the table refuse it again
     Row {
@@ -198,6 +208,12 @@ pub enum Job {
 pub enum Outcome {
     Fetched(Fetched),
     Put,
+    /// what an HTTP service answered (judged by the server, as for its own requests)
+    Answered {
+        status: u16,
+        body: String,
+        retry_after: Option<u64>,
+    },
     Failed(Failed),
 }
 
@@ -205,6 +221,30 @@ pub enum Outcome {
 /// (Quadra Cloud); an agent runs them in its own network.
 pub async fn run(job: &Job, env: &BTreeMap<String, String>, public_only: bool) -> Outcome {
     match job {
+        Job::Fetch {
+            conn,
+            ask: Ask::Http { path },
+        } => match conn.open(env) {
+            Err(e) => Outcome::Failed(Failed::Waiting(e)),
+            Ok(c) => {
+                answered(crate::deliver::job_http(&c, "GET", path, &[], "", public_only).await)
+            }
+        },
+        Job::Put {
+            conn,
+            put:
+                Put::Http {
+                    method,
+                    path,
+                    headers,
+                    body,
+                },
+        } => match conn.open(env) {
+            Err(e) => Outcome::Failed(Failed::Waiting(e)),
+            Ok(c) => answered(
+                crate::deliver::job_http(&c, method, path, headers, body, public_only).await,
+            ),
+        },
         Job::Fetch { conn, ask } => match conn.open(env) {
             Err(e) => Outcome::Failed(Failed::Waiting(e)),
             Ok(c) => match fetch(&c, ask, public_only).await {
@@ -219,6 +259,17 @@ pub async fn run(job: &Job, env: &BTreeMap<String, String>, public_only: bool) -
                 Err(f) => Outcome::Failed(f),
             },
         },
+    }
+}
+
+fn answered(r: Result<(u16, String, Option<u64>), Failed>) -> Outcome {
+    match r {
+        Ok((status, body, retry_after)) => Outcome::Answered {
+            status,
+            body,
+            retry_after,
+        },
+        Err(f) => Outcome::Failed(f),
     }
 }
 

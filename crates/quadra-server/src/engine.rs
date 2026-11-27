@@ -1709,6 +1709,35 @@ impl Engine {
                 }
                 continue;
             }
+            // an HTTP service of another network: its agent makes the request
+            if let Some(c) = model
+                .manifest
+                .connection(&i.connection)
+                .filter(|c| c.agent.is_some())
+            {
+                let path = p
+                    .path
+                    .replace("{cursor}", &encode(cursor.as_deref().unwrap_or("")));
+                match crate::transport::Conn::of(&model.manifest, &i.connection) {
+                    Ok(conn) => out.push(crate::deliver::Pull {
+                        inbound: i.name.clone(),
+                        job: Some(crate::deliver::JobPull {
+                            job: crate::transport::Job::Fetch {
+                                conn,
+                                ask: crate::transport::Ask::Http { path },
+                            },
+                            agent: c.agent.clone(),
+                            env: self.env.clone(),
+                        }),
+                        url: String::new(),
+                        headers: Vec::new(),
+                        creds: Default::default(),
+                        timeout: std::time::Duration::from_secs(60),
+                    }),
+                    Err(e) => eprintln!("pull {}: {e}", i.name),
+                }
+                continue;
+            }
             match crate::deliver::connection_request(&model.manifest, &self.env, &i.connection) {
                 Ok((base, headers, creds, timeout)) => {
                     let path = p
@@ -1899,6 +1928,12 @@ impl Engine {
             crate::deliver::PullResult::Job(crate::transport::Outcome::Failed(f)) => {
                 return fail(self, f.text().to_string(), None)
             }
+            // an HTTP pull an agent made: its answer, as the server's own
+            crate::deliver::PullResult::Job(crate::transport::Outcome::Answered {
+                status,
+                body,
+                retry_after,
+            }) => (status, body, retry_after),
             crate::deliver::PullResult::Job(crate::transport::Outcome::Put) => {
                 return fail(self, "the job answered with no messages".into(), None)
             }
