@@ -21,6 +21,9 @@ pub struct Due {
     pub created_at: String,
     /// attempts made before this one
     pub attempts: u64,
+    /// the hash of the commit that emitted it: with the id, what tells this event from one
+    /// that reuses its number after the database was restored to an earlier point
+    pub commit: String,
 }
 
 /// What came of an attempt.
@@ -44,11 +47,14 @@ fn in_list(events: &[String]) -> (String, Vec<Sql>) {
 }
 
 /// The pending events of these kinds whose time has come (`now`, as the outbox writes times),
-/// oldest first, at most `limit`.
+/// oldest first, at most `limit`, emitted by transactions up to `durable` (the last one the
+/// sequencer has confirmed where its durability rule wants it: nothing leaves for a commit that
+/// could still be lost).
 pub fn due(
     conn: &mut Conn,
     events: &[String],
     now: &str,
+    durable: u64,
     limit: usize,
 ) -> Result<Vec<Due>, String> {
     if events.is_empty() {
@@ -56,8 +62,9 @@ pub fn due(
     }
     let (marks, mut params) = in_list(events);
     params.push(Sql::Text(now.to_string()));
+    params.push(Sql::Int(durable.min(i64::MAX as u64) as i64));
     let rows = conn.query(
-        &format!("SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"event\", \"fields\", \"created_at\", CAST(\"attempts\" AS TEXT) FROM \"_quadra_outbox\" WHERE \"delivered_at\" IS NULL AND \"failed_at\" IS NULL AND \"event\" IN ({marks}) AND (\"next_at\" IS NULL OR \"next_at\" <= ?text) ORDER BY \"_quadra_outbox\".\"id\" LIMIT {limit}"),
+        &format!("SELECT CAST(o.\"id\" AS TEXT), CAST(o.\"tx\" AS TEXT), o.\"event\", o.\"fields\", o.\"created_at\", CAST(o.\"attempts\" AS TEXT), c.\"hash\" FROM \"_quadra_outbox\" o LEFT JOIN \"_quadra_commits\" c ON c.\"tx\" = o.\"tx\" WHERE o.\"delivered_at\" IS NULL AND o.\"failed_at\" IS NULL AND o.\"event\" IN ({marks}) AND (o.\"next_at\" IS NULL OR o.\"next_at\" <= ?text) AND o.\"tx\" <= ?bigint ORDER BY o.\"id\" LIMIT {limit}"),
         &params,
     )?;
     let num = |v: &Option<String>| v.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0u64);
@@ -73,6 +80,7 @@ pub fn due(
                 .unwrap_or(J::Null),
             created_at: r[4].clone().unwrap_or_default(),
             attempts: num(&r[5]),
+            commit: r[6].clone().unwrap_or_default(),
         })
         .collect())
 }

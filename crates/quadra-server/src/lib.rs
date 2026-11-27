@@ -1954,10 +1954,11 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                 .to_std()
                 .unwrap_or_default()
         });
+        // at least a second: an event due now whose commit is not durable yet waits for it
         let deadline = Instant::now()
             + until
                 .unwrap_or(Duration::from_secs(60))
-                .min(Duration::from_secs(60));
+                .clamp(Duration::from_secs(1), Duration::from_secs(60));
         loop {
             if !t
                 .pause(

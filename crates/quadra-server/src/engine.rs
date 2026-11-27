@@ -707,10 +707,16 @@ impl Engine {
         }
         let events: Vec<String> = model.outbounds.iter().map(|o| o.event.clone()).collect();
         let at = now();
+        // only what its sequencer has confirmed (without one, every commit on this connection is)
+        let durable = match &self.sequencer {
+            Some(s) => s.durable()?,
+            None => u64::MAX,
+        };
         let due = quadra_store::deliveries::due(
             &mut self.conn,
             &events,
             &at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            durable,
             limit,
         )?;
         let plans: Vec<crate::deliver::Plan> = due

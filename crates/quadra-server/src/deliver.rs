@@ -146,6 +146,23 @@ pub fn plain(j: &J) -> J {
     J::Object(o.iter().map(|(k, v)| (k.clone(), plain(v))).collect())
 }
 
+/// The fields of an event (name → value, as the outbox keeps them) as plain JSON, each value
+/// by [`plain`]: the names are the event's own, never read as the marks of a kind of value.
+pub fn plain_fields(fields: &J) -> J {
+    match fields {
+        J::Object(o) => J::Object(o.iter().map(|(k, v)| (k.clone(), plain(v))).collect()),
+        other => plain(other),
+    }
+}
+
+/// `quadra-<commit>-<id>`: the same on every attempt of an event, and different for an event
+/// that reuses the number of another after the database was restored to an earlier point (its
+/// commit is not the same).
+pub fn idempotency_key(due: &Due) -> String {
+    let commit = due.commit.get(..16).unwrap_or(&due.commit);
+    format!("quadra-{commit}-{}", due.id)
+}
+
 /// The text of a field of an event, as the outbox keeps it.
 fn text_field(fields: &J, name: &str) -> Option<String> {
     match plain(fields.get(name)?) {
@@ -206,7 +223,7 @@ pub fn plan(
                     "event": due.event,
                     "tx": due.tx,
                     "created_at": due.created_at,
-                    "data": plain(&due.fields),
+                    "data": plain_fields(&due.fields),
                 })
                 .to_string();
                 let mut headers = vec![
@@ -214,7 +231,7 @@ pub fn plan(
                     ("User-Agent".to_string(), "Quadra".to_string()),
                     ("Quadra-Event".to_string(), due.event.clone()),
                     ("Quadra-Delivery".to_string(), due.id.to_string()),
-                    ("Idempotency-Key".to_string(), format!("quadra-{}", due.id)),
+                    ("Idempotency-Key".to_string(), idempotency_key(&due)),
                 ];
                 match auth {
                     HttpAuth::None => {}
@@ -664,6 +681,18 @@ mod tests {
     }
 
     #[test]
+    fn the_names_of_the_fields_are_never_read_as_marks() {
+        // fields named like the marks of the history's encoding: `date`, `money` and `cur`
+        let fields = json!({ "date": {"date": "2026-11-27"}, "money": {"d": "3.5"}, "cur": "EUR" });
+        assert_eq!(
+            plain_fields(&fields),
+            json!({ "date": "2026-11-27", "money": "3.5", "cur": "EUR" })
+        );
+        let one = json!({ "d": {"d": "2.5"} });
+        assert_eq!(plain_fields(&one), json!({ "d": "2.5" }));
+    }
+
+    #[test]
     fn the_signature_is_hmac_sha256() {
         // RFC 4231, test case 2
         assert_eq!(
@@ -685,6 +714,7 @@ mod tests {
             fields: json!({"number": "A1"}),
             created_at: "2026-11-27T10:00:00".into(),
             attempts: 0,
+            commit: "0123456789abcdef0123".into(),
         };
         let mut env = BTreeMap::new();
         let p = plan(&m, &env, due.clone(), "shop", Some("/hooks"));
@@ -707,7 +737,7 @@ mod tests {
         };
         assert_eq!(url, "https://shop.example.com/api/hooks");
         assert!(headers.contains(&("Authorization".into(), "Bearer t0k".into())));
-        assert!(headers.contains(&("Idempotency-Key".into(), "quadra-7".into())));
+        assert!(headers.contains(&("Idempotency-Key".into(), "quadra-0123456789abcdef-7".into())));
         assert_eq!(sign.as_deref(), Some("k3y"));
         let b: J = serde_json::from_str(&body).unwrap();
         assert_eq!(b["data"]["number"], "A1");

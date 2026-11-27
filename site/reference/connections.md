@@ -161,8 +161,9 @@ outbound SendEmail via mail
 ```
 
 `outbound Event via connection` sends every event of that kind through the connection,
-**after its transaction has committed**: an event emitted by a transaction that is undone
-never leaves. An event has at most one `outbound`.
+**after its transaction has committed** and the commit is confirmed where it is kept (on
+Quadra Cloud, as the plan's durability says): an event emitted by a transaction that is undone,
+or whose commit could still be lost, never leaves. An event has at most one `outbound`.
 
 | Error | Why |
 |---|---|
@@ -201,7 +202,7 @@ The headers:
 |---|---|
 | `Quadra-Event` | the event's name |
 | `Quadra-Delivery` | its `id` |
-| `Idempotency-Key` | `quadra-<id>`: the same on every attempt of the same event |
+| `Idempotency-Key` | `quadra-<commit>-<id>` (the first 16 characters of the hash of the commit that emitted it, and its `id`): the same on every attempt of the same event, never the same for two events |
 | `Quadra-Signature` | with a `signing_secret`: `t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">` |
 
 A receiver checks the signature by computing the HMAC of the timestamp, a dot and the raw

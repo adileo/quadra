@@ -237,7 +237,17 @@ fn a_webhook_arrives_signed_once_and_is_marked_delivered() {
     assert_eq!(b["event"], "OrderPlaced");
     assert_eq!(b["data"]["number"], "A1");
     assert_eq!(h["quadra-event"], "OrderPlaced");
-    assert_eq!(h["idempotency-key"], format!("quadra-{}", b["id"]));
+    // the commit's hash and the event's number: the same on every attempt, another after a restore
+    let key = &h["idempotency-key"];
+    assert!(
+        key.starts_with("quadra-") && key.ends_with(&format!("-{}", b["id"])),
+        "{key}"
+    );
+    assert_eq!(
+        key.len(),
+        "quadra-".len() + 16 + 1 + b["id"].to_string().len(),
+        "{key}"
+    );
     // the signature: HMAC-SHA256 of "<t>.<body>" with the secret of the environment
     let sig = &h["quadra-signature"];
     let (t, v1) = sig.split_once(",v1=").unwrap();
