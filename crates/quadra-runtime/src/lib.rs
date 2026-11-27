@@ -6,6 +6,7 @@
 //! a real database comes later and must behave the same way.
 
 pub mod codec;
+pub mod formats;
 mod interp;
 pub mod limits;
 pub mod query;

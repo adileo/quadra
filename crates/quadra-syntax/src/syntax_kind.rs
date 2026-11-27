@@ -126,6 +126,8 @@ pub enum SyntaxKind {
     TEST,
     EVENT,
     OUTBOUND,
+    /// `from json` after a record's name: the external format it is read from and written to
+    FORMAT_CLAUSE,
 
     // members
     MEMBER_LIST,

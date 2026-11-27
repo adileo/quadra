@@ -4,6 +4,7 @@
 //! entities. It is plain data (serializable) and is consumed by the type checker, the
 //! analyses (`trace`, cycles, fingerprints) and the interpreter.
 
+pub mod formats;
 mod lower;
 pub mod print;
 
@@ -628,6 +629,8 @@ pub struct Field {
     pub via: Option<String>,
     pub through: Option<String>,
     pub per_company: bool,
+    /// `at "a.b"`: where the field is in the document of a `record … from json`
+    pub at: Option<String>,
     /// Declared in an `extend` block of another module.
     pub extension: bool,
     /// Redefines only the default of an inherited (trait) field.
@@ -718,6 +721,9 @@ pub struct Entity {
     pub temporary: bool,
     /// `load from "file.csv"` (temporary entities used by migrations)
     pub load_from: Option<String>,
+    /// `record X from json:`: the external format it is read from (`X.parse(text)`) and written
+    /// to (`x.json()`)
+    pub format: Option<String>,
     pub traits: Vec<String>,
     pub fields: Vec<Field>,
     pub actions: Vec<Action>,

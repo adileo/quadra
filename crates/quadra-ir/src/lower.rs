@@ -412,6 +412,7 @@ impl<'a> Lower<'a> {
             is_ledger: false,
             temporary: false,
             load_from: None,
+            format: None,
             traits: Vec::new(),
             fields: Vec::new(),
             actions: Vec::new(),
@@ -469,6 +470,7 @@ impl<'a> Lower<'a> {
         let name = ast::name_text(item).unwrap_or_default();
         let mut e = self.empty_entity(name, kind, span);
         e.temporary = words.iter().any(|w| w == "temporary");
+        e.format = ast::child(item, FORMAT_CLAUSE).and_then(|c| ast::name_text(&c));
         if let Some(clause) = ast::child(item, IS_CLAUSE) {
             e.traits = ast::children(&clause, PATH)
                 .map(|p| ast::path_text(&p))
@@ -649,6 +651,7 @@ impl<'a> Lower<'a> {
             via: None,
             through: None,
             per_company: false,
+            at: None,
             extension,
             default_override: false,
             span: self.span(m),
@@ -705,6 +708,11 @@ impl<'a> Lower<'a> {
             (_, "per") => f.per_company = true,
             (_, "via") => f.via = ast::child(m, PATH).map(|p| ast::path_text(&p)),
             (_, "through") => f.through = ast::child(m, PATH).map(|p| ast::path_text(&p)),
+            (_, "at") => {
+                f.at = tokens(m)
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()))
+            }
             _ => {}
         }
     }

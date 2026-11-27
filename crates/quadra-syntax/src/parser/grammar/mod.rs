@@ -270,6 +270,13 @@ fn entity(p: &mut Parser) {
             }
             c.complete(p, IS_CLAUSE);
         }
+        // `record ShopOrder from json:`
+        if p.at(FROM_KW) {
+            let c = p.start();
+            p.bump();
+            name(p);
+            c.complete(p, FORMAT_CLAUSE);
+        }
     }
     p.expect(COLON);
     member_block(p, MemberCtx::Entity);
@@ -800,6 +807,10 @@ fn modifiers(p: &mut Parser) -> bool {
         } else if p.at_ctx("via") || p.at_ctx("through") {
             p.bump_ctx();
             path(p);
+        } else if p.at_ctx("at") && p.nth(1) == STRING {
+            // where a field of a `record … from json` is in the document: `at "shipping.zip"`
+            p.bump_ctx();
+            p.bump();
         } else {
             m.abandon(p);
             return any;

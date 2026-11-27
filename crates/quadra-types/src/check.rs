@@ -417,6 +417,7 @@ impl<'m> Checker<'m> {
     }
 
     fn check_entity(&mut self, e: &'m Entity) {
+        self.check_record_format(e);
         self.entity = Some(e);
         let self_root = vec!["self".to_string()];
         for f in &e.fields {
@@ -1805,6 +1806,52 @@ impl<'m> Checker<'m> {
         T::Tuple(out)
     }
 
+    /// `record X from json:`: a record, a known format, fields of types it can hold; `at` only
+    /// there.
+    fn check_record_format(&mut self, e: &'m Entity) {
+        let m = self.m;
+        match &e.format {
+            None => {
+                for f in &e.fields {
+                    if f.at.is_some() {
+                        self.error(f.span, format!("`at` says where a field is in a document: only in a record `from json` (`record {} from json:`)", e.name));
+                    }
+                }
+            }
+            Some(fmt) => {
+                if e.kind != quadra_ir::EntityKind::Record {
+                    self.error(e.span, format!("only a `record` is read from a format: `record {} from {fmt}:` (an entity has an identity and a history)", e.name));
+                    return;
+                }
+                if !quadra_ir::formats::FORMATS.contains(&fmt.as_str()) {
+                    self.error(
+                        e.span,
+                        format!("`{fmt}` is not a format Quadra reads (json)"),
+                    );
+                    return;
+                }
+                for f in &e.fields {
+                    if let Some(p) = &f.at {
+                        if p.is_empty() || p.split('.').any(|k| k.is_empty()) {
+                            self.error(
+                                f.span,
+                                format!("`at \"{p}\"`: keys separated by dots (`shipping.zip`)"),
+                            );
+                        }
+                    }
+                    if f.formula.is_some() {
+                        continue;
+                    }
+                    if let Some(ty) = &f.ty {
+                        if let Err(why) = quadra_ir::formats::kind(m, ty) {
+                            self.error(f.span, format!("`{}.{}`: {why}", e.name, f.name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// `outbound Event via connection`: the event and the connection exist, one outbound per
     /// event, and an email event has what an email needs.
     fn check_outbounds(&mut self) {
@@ -2330,6 +2377,37 @@ impl<'m> Checker<'m> {
                     }
                 }
                 let inner = bt.unopt().clone();
+                // `ShopOrder.parse(text)` and `order.json()`: records `from json`
+                let formatted =
+                    |m: &Model, r: &str| m.entity(r).is_some_and(|e| e.format.is_some());
+                match (&inner, name.as_str()) {
+                    (T::Table(r), "parse") if formatted(self.m, r) => {
+                        let r = r.clone();
+                        match args {
+                            [a] => {
+                                let t = self.infer(&a.value);
+                                if !matches!(t.unopt(), T::Text(_) | T::Unknown) {
+                                    self.error(
+                                        a.value.span,
+                                        format!("`{r}.parse` reads text: the document"),
+                                    );
+                                }
+                            }
+                            _ => self.error(
+                                span,
+                                format!("`{r}.parse` takes one argument, the text of the document"),
+                            ),
+                        }
+                        return T::Ent(r);
+                    }
+                    (T::Ent(r), "json") if formatted(self.m, r) => {
+                        if !args.is_empty() {
+                            self.error(span, "`json()` takes no argument");
+                        }
+                        return T::text();
+                    }
+                    _ => {}
+                }
                 let bpath = bpath
                     .or_else(|| Some(vec![format!("#{}", u32::from(base.span.range.start()))]));
                 self.record_access(&inner, name, callee.span);

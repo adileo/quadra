@@ -110,6 +110,7 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 | `read`, `create`, `edit`, `run`, `all`, `hide`, `show`, `history` | in a permission rule |
 | `extends` | in a fixture |
 | `via`, `path` | in an `outbound` |
+| `at` | in a field of a record `from json` (`from` after a record's name is the reserved word) |
 | `implies` | as a binary operator |
 
 So `key` and `items` (the parts of a group), `to` (in `convert(x, to=EUR)`), or `parent`

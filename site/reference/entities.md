@@ -191,6 +191,10 @@ Lines can be read without `?.`: `l.order.customer`.
 
 ## `record`
 
+(A record can also describe a document of another system, read and written as JSON:
+`record ShopOrder from json:`, with `at "path"` on its fields. See
+[Formats](/reference/connections#formats-record-from-json).)
+
 A record is a value with named parts and no identity of its own: two equal addresses are
 the same address. It is stored inside the entity that holds it.
 

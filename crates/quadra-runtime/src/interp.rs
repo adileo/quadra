@@ -3064,11 +3064,41 @@ impl<'m> Interp<'m> {
                 name,
                 optional,
             } => {
+                // `ShopOrder.parse(text)`: a document read into a record `from json`
+                if name == "parse" {
+                    if let ExprKind::Name(r) = &base.kind {
+                        if ctx.local(r).is_none()
+                            && self.m.entity(r).is_some_and(|e| e.format.is_some())
+                        {
+                            let Some(a) = args.first() else {
+                                return fail(format!("`{r}.parse` takes the text to read"));
+                            };
+                            let text = match self.eval(&a.value, ctx)? {
+                                V::Text(t) => t,
+                                other => {
+                                    return fail(format!("`{r}.parse` reads text, not {other}"))
+                                }
+                            };
+                            return crate::formats::parse_json(self.m, r, &text)
+                                .or_else(|e| fail(format!("{r}: {e}")));
+                        }
+                    }
+                }
                 // a method over a whole entity (`Order.where(…).count()`): SQL when it can
                 if let Some(v) = self.query_call(base, name, args, ctx)? {
                     return Ok(v);
                 }
                 let b = self.eval(base, ctx)?;
+                // `order.json()`: a record `from json` written as its document
+                if name == "json" {
+                    if let V::Rec { ent, .. } = &b {
+                        if self.m.entity(ent).is_some_and(|e| e.format.is_some()) {
+                            return crate::formats::render_json(self.m, &b)
+                                .map(|t| text(&t))
+                                .or_else(|e| fail(e));
+                        }
+                    }
+                }
                 if b.is_none() {
                     return if *optional {
                         Ok(V::None)

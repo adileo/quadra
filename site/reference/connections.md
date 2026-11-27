@@ -305,6 +305,46 @@ On Quadra Cloud connections only reach public addresses: a name that resolves to
 loopback or link-local address (the clouds' metadata, `169.254.169.254`) is refused, and so
 is a redirect. Previews and forks deliver nothing ([On Quadra Cloud](#on-quadra-cloud)).
 
+## Formats: `record … from json`
+
+The documents of another system (a shop's order, a carrier's label, the answer of an API) are
+described as records `from json`: what a field is called there, where it is, what type it has.
+Reading and writing them are pure functions, the same text always giving the same record:
+
+```quadra
+record ShopLine from json:
+    sku: Text
+    quantity: Int
+    price: Decimal
+
+record ShopOrder from json:
+    id: Text                                # a number too large for one: read as its text
+    number: Text at "name"
+    email: Email?
+    total: Decimal at "total_price"         # "129.90" or 129.90
+    placed: DateTime at "created_at"
+    lines: [ShopLine] at "line_items"
+    zip: Text at "shipping_address.zip"     # a path in nested objects
+
+record ErpShipment from json:
+    order: Text at "order.number"
+    weight: Decimal at "parcel.weight_kg"
+    note: Text?
+```
+
+```quadra
+let o = ShopOrder.parse(text)             # fails with where and why: `ShopOrder.lines[0].quantity: an integer was expected, not "two"`
+let s = ErpShipment(order=o.number, weight=2.5)
+s.json()                                  # {"order":{"number":"#1001"},"parcel":{"weight_kg":2.5}}
+```
+
+| Rule | Detail |
+|---|---|
+| Keys | a field is under its name, or under `at "a.b.c"`; keys the record does not declare are ignored when reading |
+| Types | `Text` (and `Code`, `Email`, `Phone`, `VatNumber`, `Barcode`): a string, or a number read as its text. `Int`, `Decimal` (written exactly; read from a number or a string), `Bool`, `Date` (`"2026-11-27"`), `DateTime` (`"2026-11-27T10:14:03Z"`; an instant without a zone is UTC), an enum (the variant's name), another record `from json`, `[T]`, `T?` (missing or `null`; left out when written) |
+| Not in a document | a record of the database (`Customer`): send its id, or a record `from json` made of its fields; amounts with a currency: a `Decimal` and a `Code` |
+| Only records | `entity X from json` is refused: what comes from outside has no identity until the code makes a record of it |
+
 ## Without `outbound`: an integration takes them
 
 The events no `outbound` delivers can be delivered by a program of your own, anywhere, which
