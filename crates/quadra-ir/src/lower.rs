@@ -158,6 +158,14 @@ fn ctx_words(n: &SyntaxNode) -> Vec<String> {
         .collect()
 }
 
+/// The names a node refers to (`on price, stock`).
+fn names_of_refs(n: &SyntaxNode) -> Vec<String> {
+    ast::children(n, NAME_REF)
+        .filter_map(|r| ast::token(&r, IDENT))
+        .map(|t| t.text().to_string())
+        .collect()
+}
+
 fn names(list: &SyntaxNode) -> Vec<String> {
     ast::children(list, NAME_REF)
         .filter_map(|n| ast::token(&n, IDENT))
@@ -275,6 +283,7 @@ impl<'a> Lower<'a> {
                     .unwrap_or_default();
                 self.model.events.push(Event { name, fields, span });
             }
+            PUBLISH => self.publish(item, span),
             ENDPOINT => {
                 let mut names =
                     ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());
@@ -962,6 +971,164 @@ impl<'a> Lower<'a> {
             unless,
             span: self.span(t),
         }
+    }
+
+    /// `publish Product to shop as p:` is sugar for what it means: an event per record
+    /// (`PublishProductToShop(record: Product)`), emitted when a record is created or one of
+    /// the fields of `on` changes and `when` holds, unless the change came from an inbound of
+    /// the same connection (no echo); and an outbound of it to the connection, `latest by` the
+    /// record and `delay` the debounce, whose block reads the record as it was at the emit.
+    fn publish(&mut self, item: &SyntaxNode, span: Span) {
+        let entity = ast::child(item, PATH)
+            .map(|p| ast::path_text(&p))
+            .unwrap_or_default();
+        let mut names = ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());
+        let connection = names.next().unwrap_or_default();
+        let binding = names.next().unwrap_or_default();
+        let clause = |w: &str| {
+            ast::children(item, OUTBOUND_CLAUSE).find(|c| {
+                c.children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .any(|t| t.text() == w)
+            })
+        };
+        let when = clause("when").and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+        let on: Vec<String> = clause("on").map(|c| names_of_refs(&c)).unwrap_or_default();
+        let debounce = clause("debounce").and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+        let block = ast::child(item, BLOCK_EXPR)
+            .map(|b| self.expr(&b))
+            .unwrap_or_else(|| self.error_expr(item));
+        let e = |kind: ExprKind| Expr { kind, span };
+        let name = |n: &str| e(ExprKind::Name(n.to_string()));
+        let call = |f: &str, args: Vec<Expr>| {
+            e(ExprKind::Call {
+                callee: Box::new(name(f)),
+                args: args
+                    .into_iter()
+                    .map(|value| Arg {
+                        name: None,
+                        value,
+                        spread: false,
+                    })
+                    .collect(),
+            })
+        };
+        let text = |s: &str| e(ExprKind::Lit(Lit::Str(s.to_string())));
+        let and = |a: Expr, b: Expr| {
+            e(ExprKind::Binary {
+                op: BinOp::And,
+                lhs: Box::new(a),
+                rhs: Box::new(b),
+            })
+        };
+        let cap = |s: &str| {
+            s.split('_')
+                .map(|w| {
+                    let mut c = w.chars();
+                    c.next()
+                        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<String>()
+        };
+        let event = format!("Publish{entity}To{}", cap(&connection));
+        self.model.events.push(Event {
+            name: event.clone(),
+            fields: vec![(
+                "record".into(),
+                Ty::Path {
+                    segments: vec![entity.clone()],
+                    args: vec![],
+                    span,
+                },
+            )],
+            span,
+        });
+        // on created and on changes: emit, unless the change came from the same connection
+        for created in [true, false] {
+            let mut cond = e(ExprKind::Unary {
+                op: UnOp::Not,
+                expr: Box::new(call("__from", vec![text(&connection)])),
+            });
+            if let Some(w) = &when {
+                cond = and(w.clone(), cond);
+            }
+            if !created && !on.is_empty() {
+                let mut args = vec![name(&binding)];
+                args.extend(on.iter().map(|f| text(f)));
+                cond = and(cond, call("__changed", args));
+            }
+            let emit = e(ExprKind::Call {
+                callee: Box::new(name(&event)),
+                args: vec![Arg {
+                    name: Some("record".into()),
+                    value: name(&binding),
+                    spread: false,
+                }],
+            });
+            self.model.reactions.push(Reaction {
+                entity: entity.clone(),
+                trigger: if created {
+                    Trigger::Created
+                } else {
+                    Trigger::Changes
+                },
+                binding: binding.clone(),
+                converges: false,
+                body: vec![Stmt {
+                    kind: StmtKind::If {
+                        binding: None,
+                        cond,
+                        then: vec![Stmt {
+                            kind: StmtKind::Emit(emit),
+                            span,
+                        }],
+                        otherwise: None,
+                    },
+                    span,
+                }],
+                span,
+            });
+        }
+        // the outbound: `let p = __published.record`, then the code
+        let record = e(ExprKind::Field {
+            base: Box::new(name("__published")),
+            name: "record".into(),
+            optional: false,
+        });
+        let body = match block.kind {
+            ExprKind::Block(mut stmts) => {
+                stmts.insert(
+                    0,
+                    Stmt {
+                        kind: StmtKind::Let {
+                            name: binding.clone(),
+                            ty: None,
+                            value: record.clone(),
+                        },
+                        span,
+                    },
+                );
+                e(ExprKind::Block(stmts))
+            }
+            other => e(other),
+        };
+        let policy = Policy {
+            latest: Some(record),
+            delay: debounce,
+            ..Default::default()
+        };
+        self.model.outbounds.push(Outbound {
+            event,
+            connection,
+            path: None,
+            binding: Some("__published".into()),
+            body: Some(body),
+            reply: None,
+            policy,
+            batch: None,
+            span,
+        });
     }
 
     fn reaction(&mut self, item: &SyntaxNode) {

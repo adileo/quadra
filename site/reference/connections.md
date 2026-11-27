@@ -284,6 +284,39 @@ outbound StockChanged via shop path "/inventory/bulk" batch 50 within 30 seconds
 | The outcome | the same for each of its events: each is delivered or failed, with its own reactions; the `Idempotency-Key` is the batch's (`quadra-batch-…`), the same at every attempt |
 | Not with | `ordered by`, `key`, `reply`: a batch's events go together |
 
+### `publish`: keeping a record in step with another system
+
+When another system must always have the current state of a kind of record (the products of a
+shop, the customers of a CRM), there is no event to write: `publish` says which records go and
+how, and Quadra sends a record each time it is created or changes.
+
+```quadra
+publish Product to shop as p:
+    when p.sellable                               # only these records
+    on price, stock, name                         # only a change of these fields sends it again
+    debounce 30 seconds                           # many changes in a row: only the last state goes
+    put(f"/products/{p.sku}", ShopProduct(sku=p.sku, price=p.price, available=p.stock))
+```
+
+| Line | Effect |
+|---|---|
+| `when C` | the record is sent only when `C` holds after the change (without it, every record) |
+| `on f1, f2` | a change sends it only when one of these fields changed (without it, any change); a new record always |
+| `debounce D` | it waits `D` after the change; a newer change of the same record in the meantime supersedes it |
+| the code | builds the request from `p`, the record as it was at the change, like the block of an `outbound` |
+
+What it means is an `outbound`: Quadra makes an event per record (`PublishProductToShop`, with
+the field `record`), emits it when the record is created or changes, and delivers it with
+`latest by` the record and `delay` the debounce. So everything about an outbound holds:
+attempts, the log, retry and skip, the policy lines of [above](#the-policy-how-long-when-in-what-order)
+(`retry for`, `window`, `expires after`), and the reactions (`on PublishProductToShop failed as
+d:`).
+
+A change that came from the same connection is not sent back: when an `inbound` of `shop`
+changes a product's stock, the product is not published to `shop` again (no echo between two
+systems that keep each other in step). A change made by anyone else, or by an inbound of
+another connection, is.
+
 ### Webhooks
 
 Without a block, through an HTTP connection an event is a `POST` of JSON to the connection's

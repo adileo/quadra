@@ -48,6 +48,7 @@ pub(crate) fn at_item(p: &Parser) -> bool {
                 "outbound" => n1 == IDENT && p.nth(2) == IDENT,
                 "inbound" => n1 == IDENT && p.nth(2) == IDENT,
                 "endpoint" => n1 == IDENT && p.nth(2) == STRING,
+                "publish" => n1 == IDENT && p.nth_at_ctx(2, "to"),
                 "seed" => n1 == COLON,
                 "on" | "before" => n1 == IDENT && matches!(p.nth(2), DOT | IDENT),
                 "deny" | "allow" => n1 == IDENT,
@@ -96,6 +97,7 @@ pub(crate) fn item(p: &mut Parser) {
             "outbound" => outbound(p),
             "inbound" => inbound(p),
             "endpoint" => endpoint(p),
+            "publish" => publish(p),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -591,6 +593,64 @@ fn endpoint(p: &mut Parser) {
         p.error("expected an indented block: the answer");
     }
     m.complete(p, ENDPOINT);
+}
+
+/// `publish Product to shop as p:`, then lines (`when p.sellable`, `on price, stock`,
+/// `debounce 30 seconds`) and the code that builds the request from the record
+fn publish(p: &mut Parser) {
+    let m = p.start();
+    p.bump_ctx();
+    path(p);
+    p.bump_ctx(); // to
+    name(p);
+    p.expect(AS_KW);
+    name(p);
+    p.expect(COLON);
+    if !(p.at(NEWLINE) && p.nth(1) == INDENT) {
+        p.error("expected an indented block: the request built from the record");
+        m.complete(p, PUBLISH);
+        return;
+    }
+    p.bump();
+    p.bump();
+    while p.eat(NEWLINE) {}
+    loop {
+        let c = p.start();
+        if p.at(WHEN_KW) {
+            p.bump();
+            expr(p);
+        } else if p.at_ctx("on") && p.nth(1) == IDENT {
+            // `on price, stock`: the fields whose change sends it again
+            p.bump_ctx();
+            name_ref(p);
+            while p.eat(COMMA) {
+                name_ref(p);
+            }
+        } else if p.at_ctx("debounce") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
+            p.bump_ctx();
+            expr(p);
+        } else {
+            c.abandon(p);
+            break;
+        }
+        end_line(p);
+        c.complete(p, OUTBOUND_CLAUSE);
+        while p.eat(NEWLINE) {}
+    }
+    let b = p.start();
+    let blk = p.start();
+    while !p.at(DEDENT) && !p.at_eof() {
+        if p.eat(NEWLINE) {
+            continue;
+        }
+        let before = p.position();
+        stmts::stmt(p);
+        ensure_progress(p, before);
+    }
+    blk.complete(p, BLOCK);
+    b.complete(p, BLOCK_EXPR);
+    p.eat(DEDENT);
+    m.complete(p, PUBLISH);
 }
 
 /// `outbound OrderShipped via shop path "/hooks/orders"`, `outbound SendEmail via mail`

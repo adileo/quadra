@@ -136,6 +136,8 @@ pub enum SyntaxKind {
     INBOUND,
     /// `endpoint GET "/price" via pos as q: PriceQuery -> PosPrice:` and its block
     ENDPOINT,
+    /// `publish Product to shop as p:`: the state of records sent to a connection
+    PUBLISH,
 
     // members
     MEMBER_LIST,

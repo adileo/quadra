@@ -1439,3 +1439,78 @@ fn a_batch_goes_when_full_or_when_its_oldest_waited() {
     assert_eq!(r.got.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const PUBLISHING: &str = "entity Product:\n    sku: Text\n    price: Decimal\n    stock: Int default 0\n    note: Text?\n\nrecord ProductOut from json:\n    sku: Text\n    price: Decimal\n    stock: Int\n\nrecord StockIn from json:\n    sku: Text\n    stock: Int\n\npublish Product to hooks as p:\n    when p.price > 0\n    on price, stock\n    debounce 2 seconds\n    put(f\"/products/{p.sku}\", ProductOut(sku=p.sku, price=p.price, stock=p.stock))\n\ninbound StockFromShop via hooks path \"/orders\" as m: StockIn:\n    key m.sku\n    let p = Product.where(x => x.sku == m.sku).first() ?? fail \"unknown sku\"\n    p.stock = m.stock\n";
+
+#[test]
+fn publish_sends_the_latest_state_of_a_record_and_never_echoes_what_came_from_there() {
+    let r = receiver(vec![200]);
+    let dir = temp("publish");
+    let (cfg, token) = project_full(
+        &dir,
+        r.port,
+        PUBLISHING,
+        "inbound_signature = \"hmac\"\ninbound_secret = { var = \"HOOK_SECRET\" }\n",
+    );
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    let tx = |ops: J| {
+        let (s, v) = call(port, &token, "POST", "/v1/tx", Some(json!({ "ops": ops })));
+        assert_eq!(s, 200, "{v}");
+        v
+    };
+    let v = tx(
+        json!([{ "op": "create", "entity": "Product", "ref": "p", "values": { "sku": "P1", "price": 10 } }]),
+    );
+    let id = v["created"]["p"].as_u64().unwrap();
+    // a field outside `on`: nothing to send
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/tx",
+        Some(
+            json!({ "base": v["base"], "ops": [{ "op": "update", "entity": "Product", "id": id, "values": { "note": "x" } }] }),
+        ),
+    );
+    assert_eq!(s, 200, "{v}");
+    // the price: sent again, and only this state goes (the first one is superseded)
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/tx",
+        Some(
+            json!({ "base": v["base"], "ops": [{ "op": "update", "entity": "Product", "id": id, "values": { "price": 12 } }] }),
+        ),
+    );
+    assert_eq!(s, 200, "{v}");
+    // `when` does not hold: not published
+    tx(json!([{ "op": "create", "entity": "Product", "values": { "sku": "P0", "price": 0 } }]));
+    let events = |c: &Config| -> usize {
+        Conn::open(&c.url)
+            .unwrap()
+            .query("SELECT \"id\" FROM \"_quadra_outbox\"", &[])
+            .unwrap()
+            .len()
+    };
+    assert_eq!(events(&cfg), 2);
+    let start = Instant::now();
+    while r.got.lock().unwrap().is_empty() && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let got = r.got.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0[":path"], "/products/P1");
+    assert_eq!(got[0].1, "{\"sku\":\"P1\",\"price\":12,\"stock\":0}");
+    // the stock the shop sends: changed here, not sent back to it
+    let (s, v) = send_in(port, "{\"sku\": \"P1\", \"stock\": 7}", Some("s3cret"));
+    assert_eq!(s, 202, "{v}");
+    let start = Instant::now();
+    while inbox_states(&cfg) != ["done"] && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(inbox_states(&cfg), ["done"]);
+    assert_eq!(events(&cfg), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

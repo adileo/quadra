@@ -100,7 +100,7 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 
 | Contextual keywords | Where |
 |---|---|
-| `temporary`, `builtin`, `seed`, `event`, `outbound`, `inbound`, `endpoint`, `on`, `before`, `role`, `deny`, `allow`, `view`, `report`, `metric`, `control`, `migration`, `change`, `fixture`, `test`, `patch` | at the start of a top-level declaration |
+| `temporary`, `builtin`, `seed`, `event`, `outbound`, `publish`, `inbound`, `endpoint`, `on`, `before`, `role`, `deny`, `allow`, `view`, `report`, `metric`, `control`, `migration`, `change`, `fixture`, `test`, `patch` | at the start of a top-level declaration |
 | `check`, `warn`, `unique`, `frozen`, `live`, `flow`, `action`, `post`, `load`, `key`, `measure`, `attr` | at the start of a member |
 | `default`, `required`, `parent`, `per`, `company`, `via`, `through`, `except` | in a field or a `frozen` line |
 | `by`, `unless` | in a flow transition |
@@ -109,7 +109,7 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 | `rename`, `convert`, `backfill`, `verify` | in a migration |
 | `read`, `create`, `edit`, `run`, `all`, `hide`, `show`, `history` | in a permission rule |
 | `extends` | in a fixture |
-| `via`, `path`, `reply`, `retry`, `times`, `backoff`, `expires`, `after`, `unless`, `delay`, `window`, `key`, `ordered`, `latest`, `by` | in an `outbound` (`via`, `path`, `key` in an `inbound` and an `endpoint` too; `pull`, `every`, `items`, `cursor` in an `inbound`; `batch`, `within` after an outbound's connection) |
+| `via`, `path`, `reply`, `retry`, `times`, `backoff`, `expires`, `after`, `unless`, `delay`, `window`, `key`, `ordered`, `latest`, `by` | in an `outbound` (`via`, `path`, `key` in an `inbound` and an `endpoint` too; `pull`, `every`, `items`, `cursor` in an `inbound`; `batch`, `within` after an outbound's connection; `to`, `on`, `debounce` in a `publish`) |
 | `at`, `format`, `decimals` | in a field of a record `from` a format (`from` after a record's name is the reserved word) |
 | `ns` | at the start of a member of a record `from xml` |
 | `implies` | as a binary operator |

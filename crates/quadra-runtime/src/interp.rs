@@ -3400,6 +3400,44 @@ impl<'m> Interp<'m> {
                 return Ok(V::DateTime(time::instant(date.and_time(at), tz)));
             }
             "now" => return Ok(V::DateTime(self.clock)),
+            // `publish … to conn`: whether this change came from an inbound of `conn` (what
+            // it received is not sent back to it)
+            "__from" => {
+                let (pos, _) = self.eval_args(args, ctx)?;
+                let conn = pos.first().map(|v| v.to_string()).unwrap_or_default();
+                let names: Vec<String> = self
+                    .m
+                    .inbounds
+                    .iter()
+                    .filter(|i| i.connection == conn)
+                    .map(|i| format!("inbound:{}#", i.name))
+                    .collect();
+                let mut cur = Some(self.cause.clone());
+                while let Some(c) = cur {
+                    if names.iter().any(|n| c.desc.starts_with(n.as_str())) {
+                        return Ok(V::Bool(true));
+                    }
+                    cur = c.parent.clone();
+                }
+                return Ok(V::Bool(false));
+            }
+            // `publish … on price, stock`: whether the record was created in this transaction
+            // or one of these fields changed in it
+            "__changed" => {
+                let (pos, _) = self.eval_args(args, ctx)?;
+                let Some(id) = pos.first().and_then(|v| v.as_ref_id()) else {
+                    return Ok(V::Bool(false));
+                };
+                let fields: Vec<String> = pos[1..].iter().map(|v| v.to_string()).collect();
+                let tx = self.store.tx;
+                let changed = self.store.records.get(&id).map_or(false, |r| {
+                    r.created_tx == tx
+                        || r.history
+                            .iter()
+                            .any(|(t, f, _)| *t == tx && fields.iter().any(|x| x == f.as_str()))
+                });
+                return Ok(V::Bool(changed));
+            }
             "convert" => {
                 let (pos, named) = self.eval_args(args, ctx)?;
                 let x = pos.into_iter().next().unwrap_or(V::None);

@@ -3063,6 +3063,13 @@ impl<'m> Checker<'m> {
                 }
                 return T::Unknown;
             }
+            // what `publish` generates
+            "__from" | "__changed" => {
+                for a in args {
+                    self.infer(&a.value);
+                }
+                return T::Bool;
+            }
             "now" | "today" => {
                 if self.in_formula {
                     self.error(span, format!("{n}() is not allowed in a formula: formulas must give the same result every time (use `default` or an action)"));
