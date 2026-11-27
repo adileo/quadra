@@ -215,6 +215,9 @@ pub struct Options {
     /// SQLite: a snapshot once the log since the last one is larger than this and than the
     /// database; the destinations then drop the segments it holds (`DurabilitySink::prune`)
     pub snapshot_bytes: u64,
+    /// a snapshot also once this many batches went since the last one (and an eighth of the
+    /// database's size): a log of many small batches does not pile up objects
+    pub snapshot_segments: u64,
     pub destinations: Vec<Box<dyn DurabilitySink>>,
     pub rule: Rule,
     /// SQLite: the size the database may grow to (`conn::set_max_bytes`)
@@ -232,6 +235,7 @@ impl Default for Options {
             abandon_after: Duration::from_secs(60),
             max_behind: 20_000,
             snapshot_bytes: 64 << 20,
+            snapshot_segments: 2000,
             destinations: Vec::new(),
             rule: Rule::Local,
             max_bytes: None,
@@ -683,8 +687,9 @@ struct State {
     uploader: Option<Uploader>,
     /// when a snapshot is due for the destinations
     snapshot_due: Option<Instant>,
-    /// the size of the batches sent to the destinations since their last snapshot
+    /// the size of the batches sent to the destinations since their last snapshot, and how many
     log_bytes: u64,
+    log_segments: u64,
     /// transactions refused because too many were not kept by the destinations
     refused: u64,
     /// numbered and never written (given up, or refused by the database): their deltas count
@@ -728,6 +733,7 @@ impl State {
             uploader: None,
             snapshot_due: None,
             log_bytes: 0,
+            log_segments: 0,
             refused: 0,
             void: HashSet::new(),
             health,
@@ -1311,6 +1317,7 @@ impl State {
     fn take_snapshot(&mut self) {
         self.snapshot_due = None;
         self.log_bytes = 0;
+        self.log_segments = 0;
         let Some(up) = &self.uploader else { return };
         let file = snapshot_file();
         match crate::segments::snapshot(&self.url, &file) {
@@ -1324,12 +1331,15 @@ impl State {
 
     /// Hands a batch written to the database to the uploader, with the clients to confirm.
     fn upload(&mut self, first: u64, last: u64, statements: Vec<(String, Vec<Sql>)>, replies: Vec<(u64, Responder)>) {
-        // the log since the last snapshot as large as the database (and past `snapshot_bytes`):
-        // a new snapshot, after which the destinations drop what it holds
+        // the log since the last snapshot as large as the database (and past `snapshot_bytes`),
+        // or many segments and an eighth of its size: a new snapshot, after which the
+        // destinations drop what it holds (few objects stay, a restore reads few)
         self.log_bytes += statements.iter().map(|(sql, ps)| sql.len() as u64 + ps.iter().map(|p| match p { Sql::Text(t) => t.len() as u64, _ => 8 }).sum::<u64>()).sum::<u64>();
-        if self.log_bytes > self.options.snapshot_bytes && self.snapshot_due.is_none() && self.conn.dialect() == Dialect::Sqlite {
+        self.log_segments += 1;
+        let many = self.log_segments > self.options.snapshot_segments;
+        if (self.log_bytes > self.options.snapshot_bytes || many) && self.snapshot_due.is_none() && self.conn.dialect() == Dialect::Sqlite {
             let size = self.conn.query("SELECT CAST(page_count * page_size AS TEXT) FROM pragma_page_count(), pragma_page_size()", &[]).ok().and_then(|r| r.into_iter().next()).and_then(|r| r[0].as_deref().and_then(|v| v.parse::<u64>().ok())).unwrap_or(0);
-            if self.log_bytes > size {
+            if (self.log_bytes > self.options.snapshot_bytes && self.log_bytes > size) || (many && self.log_bytes > size / 8) {
                 self.snapshot_due = Some(Instant::now());
             }
         }
