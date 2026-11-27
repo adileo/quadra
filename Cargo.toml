@@ -22,6 +22,7 @@ quadra-store = { path = "crates/quadra-store" }
 quadra-server = { path = "crates/quadra-server" }
 quadra-api = { path = "crates/quadra-api" }
 quadra-qdi = { path = "crates/quadra-qdi" }
+quadra-label = { path = "crates/quadra-label" }
 
 # Debug builds: line tables only for our code (backtraces keep their lines), no debug
 # information for dependencies. Full debug information made target/ grow past 50 GB.
