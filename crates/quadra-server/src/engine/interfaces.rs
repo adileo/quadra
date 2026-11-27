@@ -264,6 +264,11 @@ impl Engine {
             if h != hash {
                 return Ok(reply(409, json!({ "error": "this idempotency key was already used for another submit" })));
             }
+            if let Some(s) = &self.sequencer {
+                if s.durable().map_or(true, |d| d < tx) {
+                    return Ok(reply(503, json!({ "error": "the first submit with this key is not kept yet: send it again in a moment" })));
+                }
+            }
             let mut r: J = serde_json::from_str(&resp).unwrap_or(json!({}));
             r["tx"] = json!(tx);
             r["replayed"] = json!(true);

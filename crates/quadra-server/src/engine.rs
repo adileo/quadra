@@ -1203,6 +1203,13 @@ impl Engine {
             if h != hash {
                 return Err((422, "this Idempotency-Key was already used for a different request".into()));
             }
+            // the first request's commit is in the database: confirmed again only once it is
+            // durable (under a strict rule, in the destinations too)
+            if let Some(s) = &self.sequencer {
+                if s.durable().map_or(true, |d| d < tx) {
+                    return Err((503, "the first request with this Idempotency-Key is not kept yet: send it again in a moment".into()));
+                }
+            }
             let mut r: J = serde_json::from_str(&resp).unwrap_or(json!({}));
             r["tx"] = json!(tx);
             r["replayed"] = json!(true);
