@@ -404,6 +404,11 @@ pub struct Engine {
     /// commits of the request being served handed to the sequencer without waiting: its client
     /// is answered once they are durable, while the engine serves the next request
     tickets: Rc<RefCell<Vec<std::sync::Arc<quadra_store::sequencer::Ticket>>>>,
+    /// wrote outside the hash chain before the sequencer was there (interface files, views
+    /// checked at the start): the log gets it with a snapshot once it is (`set_sequencer`)
+    unlogged: bool,
+    /// the interface files installed changed something
+    pub(crate) installed_any: bool,
 }
 
 type Fail = (u16, String);
@@ -502,12 +507,16 @@ impl Engine {
             sequencer: None,
             statics: Vec::new(),
             tickets: Rc::new(RefCell::new(Vec::new())),
+            unlogged: false,
+            installed_any: false,
         };
         if first {
             // the apps and views of the interface files, as the files say
             engine.install_interfaces(&project)?;
             // saved views checked against this model (renames of the migrations applied)
-            engine.revalidate_views();
+            let changed = engine.revalidate_views();
+            // written here before the sequencer is there: the log gets them with a snapshot
+            engine.unlogged = changed > 0 || engine.installed_any;
         }
         engine.seen_interfaces = Some(interface_texts(&project));
         Ok(engine)
@@ -531,6 +540,10 @@ impl Engine {
     }
 
     pub fn set_sequencer(&mut self, s: Option<quadra_store::Sequencer>) {
+        if let (Some(s), true) = (&s, self.unlogged) {
+            s.snapshot_soon(std::time::Duration::ZERO);
+            self.unlogged = false;
+        }
         self.sequencer = s;
     }
 

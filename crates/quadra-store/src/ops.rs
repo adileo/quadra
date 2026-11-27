@@ -440,7 +440,15 @@ pub fn sweep_with(url: &str, model: &Model, report: &Report, time: NaiveDateTime
     interp.with_cause("periodic sweep of time-driven rules".into(), |i| i.transaction(|_| Ok(()))).map_err(|e| flow("sweep", e))?;
     let written = if interp.store.tx > before && !interp.store.dirty.is_empty() { Some(interp.store.tx) } else { None };
     drop(interp);
-    Database::open(url, model, report)?.set_meta("last_sweep", &time.format("%Y-%m-%dT%H:%M:%S%.f").to_string())?;
+    // through the sequencer when there is one: a database rebuilt from the log knows the last
+    // sweep too (else a `becomes` already fired could fire again)
+    let at = time.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
+    match sequencer {
+        Some(s) => s.side(move |c| {
+            c.exec("INSERT INTO \"_quadra_meta\" (\"key\", \"value\") VALUES ('last_sweep', ?text) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\"", &[crate::conn::Sql::Text(at)]).map(|_| ())
+        })?,
+        None => Database::open(url, model, report)?.set_meta("last_sweep", &at)?,
+    }
     Ok(written)
 }
 

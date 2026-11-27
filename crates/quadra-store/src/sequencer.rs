@@ -753,9 +753,14 @@ impl State {
         // (PostgreSQL: no snapshots, it has its own backups)
         let sqlite = s.conn.dialect() == Dialect::Sqlite;
         for d in destinations.iter_mut().filter(|_| sqlite) {
+            // (one that cannot say what it holds is taken as behind: a snapshot costs less than a log
+            // that cannot rebuild the database)
             match d.last() {
                 Ok(Some(p)) if p == (s.batch, s.durable) => {}
-                Ok(_) => {
+                answer => {
+                    if let Err(e) = answer {
+                        eprintln!("sequencer: a destination cannot say what it holds ({e}): it gets a snapshot");
+                    }
                     let file = snapshot_file();
                     let r = crate::segments::snapshot(url, &file).and_then(|(b, t)| d.snapshot(b, t, &file));
                     let _ = std::fs::remove_file(&file);
@@ -768,7 +773,6 @@ impl State {
                         s.snapshot_due = Some(Instant::now() + Duration::from_secs(60));
                     }
                 }
-                Err(e) => eprintln!("sequencer: a destination cannot say what it holds: {e}"),
             }
         }
         if !destinations.is_empty() {
@@ -833,8 +837,24 @@ impl State {
             };
             if let Some(stopped) = self.handle(msg) {
                 self.flush_all();
+                // a snapshot asked for and not taken yet (after a deploy, writes past the
+                // sequencer): before the end, or the destinations could not rebuild what is now
+                if self.snapshot_due.is_some() {
+                    self.take_snapshot();
+                }
                 if let Some(u) = self.uploader.take() {
                     u.finish();
+                }
+                // the WAL written back into the file before anyone takes the file (a hibernation
+                // uploads it whole): checked, and tried again while a reader holds it
+                if self.conn.dialect() == Dialect::Sqlite {
+                    for attempt in 0..50 {
+                        match self.conn.query("PRAGMA wal_checkpoint(TRUNCATE)", &[]) {
+                            Ok(r) if r.first().and_then(|r| r[0].as_deref()) == Some("0") => break,
+                            _ if attempt == 49 => eprintln!("sequencer: the WAL could not be written back into the file at the stop"),
+                            _ => std::thread::sleep(Duration::from_millis(100)),
+                        }
+                    }
                 }
                 self.lock = None;
                 let _ = stopped.send(());

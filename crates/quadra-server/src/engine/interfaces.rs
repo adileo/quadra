@@ -68,6 +68,7 @@ impl Engine {
         let key = self.model_key();
         let done = self.side(move |c| store::install_files(c, &items, &at_now(), Some(&key)))?;
         if done.created + done.changed + done.removed > 0 {
+            self.installed_any = true;
             eprintln!("interfaces: {} created, {} changed, {} removed", done.created, done.changed, done.removed);
         }
         Ok(())
