@@ -1625,6 +1625,8 @@ pub struct Attached {
     pub id: u64,
     pub field: String,
     pub file: crate::files::File,
+    /// the document's bytes, for the store of files
+    pub bytes: Vec<u8>,
 }
 
 /// The documents of the `attach`es due: each record whose condition holds and whose field is
@@ -1707,6 +1709,13 @@ pub fn attach_render(
                         V::Int(n) => n as u64,
                         _ => 0,
                     };
+                    use base64::Engine as _;
+                    let Ok(bytes) =
+                        base64::engine::general_purpose::STANDARD.decode(s(get("content")))
+                    else {
+                        failed.push((a.document.clone(), id, "its bytes are not readable".into()));
+                        continue;
+                    };
                     done.push(Attached {
                         document: a.document.clone(),
                         entity: a.entity.clone(),
@@ -1717,9 +1726,9 @@ pub fn attach_render(
                             name: s(get("name")),
                             ctype: s(get("type")),
                             size,
-                            content_b64: s(get("content")),
                             created_at: time.format("%Y-%m-%dT%H:%M:%S").to_string(),
                         },
+                        bytes,
                     });
                 }
                 Ok(_) => failed.push((a.document.clone(), id, "not a document".into())),
@@ -1732,7 +1741,8 @@ pub fn attach_render(
 
 /// Name the documents rendered in their records, each in a transaction of its own as the
 /// system (`attach:InvoicePdf Invoice#45`): the field gets `sha256:<hex>` unless something was
-/// put there meanwhile. The files themselves are kept first (`files::put`).
+/// put there meanwhile. The files themselves are kept first (their bytes in the store of
+/// files, what they are with `files::put`).
 pub fn attach_write(
     url: &str,
     model: &Model,

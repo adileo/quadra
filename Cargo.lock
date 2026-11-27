@@ -5283,6 +5283,7 @@ dependencies = [
  "postgres",
  "quadra-analysis",
  "quadra-api",
+ "quadra-blobs",
  "quadra-ir",
  "quadra-qdi",
  "quadra-runtime",
@@ -5340,6 +5341,7 @@ dependencies = [
 name = "quadra-store"
 version = "0.10.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.4.3",
  "postgres",

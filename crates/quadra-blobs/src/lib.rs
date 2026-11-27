@@ -128,6 +128,27 @@ impl Files {
             .get_url(&key, DOWNLOAD_FOR, ctype, &disposition(inline, name))
     }
 
+    /// The origins (`https://host:port`) a browser reaches the files at, besides the server:
+    /// the bucket's and the CDN's. None for a folder.
+    pub fn origins(&self) -> Vec<String> {
+        let origin = |u: &str| -> Option<String> {
+            let (scheme, rest) = u.split_once("://")?;
+            let host = rest.split(['/', '?']).next()?;
+            Some(format!("{scheme}://{host}"))
+        };
+        let mut out = Vec::new();
+        if self.blobs.local().is_none() {
+            if let Ok(u) = self.blobs.get_url("files/x", DOWNLOAD_FOR, "", "") {
+                out.extend(origin(&u));
+            }
+        }
+        if let Some(c) = &self.cdn {
+            out.extend(origin(&c.base));
+        }
+        out.dedup();
+        out
+    }
+
     /// Keeps a file's bytes under its hash (once: the same bytes are already there).
     pub fn keep(&self, hash: &str, bytes: &[u8], ctype: &str, name: &str) -> Result<()> {
         let key = file_key(hash);

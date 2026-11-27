@@ -1036,51 +1036,73 @@ async fn history(
     }
 }
 
-/// `GET /v1/records/Invoice/45/files/pdf`: the document a `File` field names, as it was kept
-/// (its type, its name for the download, its SHA-256 in `ETag`).
+/// `GET /v1/records/Expense/45/files/receipt` (`…/files/photos/2`, the third of a list): for
+/// one who may read the field, `302` to a signed URL of the file (5 minutes): shown in the
+/// page for PDFs and images, downloaded otherwise or with `?download`. `?info`: where it is,
+/// as JSON (`{url, name, type, size, hash}`).
 async fn record_file(
     State(app): State<Shared>,
     Ten(t): Ten,
     method: Method,
     headers: HeaderMap,
     Path((entity, id, field)): Path<(String, u64, String)>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let who = match authenticate(&app, &t, &method, &headers).await {
+    file_at(&app, &t, &method, &headers, (entity, id, field, None), &q).await
+}
+
+async fn record_file_n(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id, field, n)): Path<(String, u64, String, usize)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    file_at(
+        &app,
+        &t,
+        &method,
+        &headers,
+        (entity, id, field, Some(n)),
+        &q,
+    )
+    .await
+}
+
+async fn file_at(
+    app: &Shared,
+    t: &Arc<Tenant>,
+    method: &Method,
+    headers: &HeaderMap,
+    (entity, id, field, n): (String, u64, String, Option<usize>),
+    q: &HashMap<String, String>,
+) -> Response {
+    let who = match authenticate(app, t, method, headers).await {
         Ok(who) => who,
         Err(r) => return r,
     };
-    match ask_call(&t, who, Req::File { entity, id, field }).await {
+    let download = q.contains_key("download");
+    let req = Req::File {
+        entity,
+        id,
+        field,
+        n,
+        download,
+    };
+    match ask_call(t, who, req).await {
         Ok(Some(Reply {
             status: 200, body, ..
         })) => {
-            use base64::Engine as _;
-            let bytes = match base64::engine::general_purpose::STANDARD
-                .decode(body["content"].as_str().unwrap_or(""))
-            {
-                Ok(b) => b,
-                Err(_) => return fail(500, "the file kept is not readable"),
+            if q.contains_key("info") {
+                return json_response(200, body);
+            }
+            let Ok(to) = HeaderValue::from_str(body["url"].as_str().unwrap_or("")) else {
+                return fail(500, "the file's address is not valid");
             };
-            let name: String = body["name"]
-                .as_str()
-                .unwrap_or("document")
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-                .collect();
-            let mut r = (StatusCode::OK, bytes).into_response();
+            let mut r = StatusCode::FOUND.into_response();
             let h = r.headers_mut();
-            if let Ok(v) =
-                HeaderValue::from_str(body["type"].as_str().unwrap_or("application/octet-stream"))
-            {
-                h.insert(header::CONTENT_TYPE, v);
-            }
-            if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
-                h.insert(header::CONTENT_DISPOSITION, v);
-            }
-            if let Ok(v) =
-                HeaderValue::from_str(&format!("\"{}\"", body["hash"].as_str().unwrap_or("")))
-            {
-                h.insert(header::ETAG, v);
-            }
+            h.insert(header::LOCATION, to);
             h.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("private, no-store"),
@@ -1091,6 +1113,153 @@ async fn record_file(
         Ok(None) => fail(503, "the engine is not available"),
         Err(r) => r,
     }
+}
+
+/// `POST /v1/uploads {entity, field, name, size}`: for who may write the field, a file it
+/// may take by its name and size; `{id, value, url, method, headers, expires_at}`, the signed
+/// URL to put the bytes to (15 minutes). The transaction then writes `value`
+/// (`upload:<id>`) to the field.
+async fn uploads(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
+    match authenticate(&app, &t, &method, &headers).await {
+        Ok(who) => call(&t, who, Req::Upload { body }).await,
+        Err(r) => r,
+    }
+}
+
+/// The store of a tenant's files.
+async fn files_of(t: &Tenant) -> Result<Arc<quadra_blobs::Files>, Response> {
+    match t.ask(|reply| Job::Files { reply }).await {
+        Some(Ok(f)) => Ok(f),
+        Some(Err(e)) => Err(fail(503, &e)),
+        None => Err(fail(503, "the engine is not available")),
+    }
+}
+
+/// The uploads a transaction names, before it is sent: their bytes read from the store,
+/// recognized and checked against their fields, kept under their hash (off the engine, in a
+/// blocking task). A file refused: `422` with why.
+async fn check_uploads(t: &Tenant, who: &Principal, body: &J, key: &str) -> Result<(), Response> {
+    let due = match ask_call(
+        t,
+        who.clone(),
+        Req::Uploads {
+            body: body.clone(),
+            key: key.to_string(),
+        },
+    )
+    .await?
+    {
+        Some(Reply {
+            status: 200, body, ..
+        }) => body["uploads"].as_array().cloned().unwrap_or_default(),
+        Some(Reply { status, body, .. }) => return Err(json_response(status, body)),
+        None => return Err(fail(503, "the engine is not available")),
+    };
+    if due.is_empty() {
+        return Ok(());
+    }
+    let files = files_of(t).await?;
+    let checked = tokio::task::spawn_blocking(move || {
+        due.iter()
+            .map(|p| {
+                engine::uploads::check(&files, p).map(|f| {
+                    json!({ "id": p["id"], "hash": f.hash, "name": f.name, "type": f.ctype, "size": f.size })
+                })
+            })
+            .collect::<Result<Vec<J>, String>>()
+    })
+    .await
+    .map_err(|_| fail(500, "the uploads could not be checked"))?
+    .map_err(|e| fail(422, &e))?;
+    let req = Req::UploadsChecked {
+        body: json!({ "files": checked }),
+    };
+    match ask_call(t, who.clone(), req).await? {
+        Some(Reply { status: 200, .. }) => Ok(()),
+        Some(Reply { status, body, .. }) => Err(json_response(status, body)),
+        None => Err(fail(503, "the engine is not available")),
+    }
+}
+
+/// `GET` and `PUT /v1/blobs/<key>?expires=…&sig=…`: the signed URLs of a folder of files,
+/// answered by the server (`quadra_blobs::Local`). A download has the type and disposition
+/// signed with it; an upload is exactly the size signed.
+async fn blob(
+    Ten(t): Ten,
+    method: Method,
+    Path(key): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    body: Body,
+) -> Response {
+    let files = match files_of(&t).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let grant = match files.blobs.local() {
+        Some(l) => match l.check(method.as_str(), &key, &q) {
+            Ok(g) => g,
+            Err(e) => return fail(403, &e),
+        },
+        None => return fail(404, "not found"),
+    };
+    if method == Method::PUT {
+        let size = grant.size.unwrap_or(0) as usize;
+        let bytes = match axum::body::to_bytes(body, size + 1).await {
+            Ok(b) if b.len() == size => b,
+            Ok(b) => {
+                return fail(
+                    400,
+                    &format!("the body is {} bytes: the upload is {size}", b.len()),
+                )
+            }
+            Err(_) => return fail(413, &format!("the body is larger than {size} bytes")),
+        };
+        let put = tokio::task::spawn_blocking(move || files.blobs.put(&key, &bytes, "", "")).await;
+        return match put {
+            Ok(Ok(())) => StatusCode::OK.into_response(),
+            Ok(Err(e)) => fail(500, &e),
+            Err(_) => fail(500, "the file was not written"),
+        };
+    }
+    let got = tokio::task::spawn_blocking(move || files.blobs.get(&key)).await;
+    let bytes = match got {
+        Ok(Ok(Some(b))) => b,
+        Ok(Ok(None)) => return fail(404, "not found"),
+        Ok(Err(e)) => return fail(500, &e),
+        Err(_) => return fail(500, "the file was not read"),
+    };
+    let mut r = (StatusCode::OK, bytes).into_response();
+    let h = r.headers_mut();
+    let ctype = grant.ctype.as_deref().unwrap_or("application/octet-stream");
+    if let Ok(v) = HeaderValue::from_str(ctype) {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    if let Some(v) = grant
+        .disposition
+        .as_deref()
+        .and_then(|d| HeaderValue::from_str(d).ok())
+    {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    // shown in a frame of the web client (a PDF, an image), never running anything
+    h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
+    h.insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'self'",
+        ),
+    );
+    r
 }
 
 async fn search(
@@ -1140,6 +1309,12 @@ async fn tx(
     else {
         return fail(400, "Idempotency-Key header required");
     };
+    // the uploads it names (`upload:<id>`): their bytes checked before it runs
+    if body.to_string().contains("\"upload:") {
+        if let Err(r) = check_uploads(&t, &who, &body, &key).await {
+            return r;
+        }
+    }
     let r = call(&t, who, Req::Tx { body, key }).await;
     // `quadra dev`: the records that kept the saved code from applying may be fixed now
     if r.status().is_success() {
@@ -2075,20 +2250,68 @@ fn fresh(ev: &J, last: &mut u64) -> bool {
     }
 }
 
-async fn security_headers(req: Request<Body>, next: Next) -> Response {
+async fn security_headers(State(app): State<Shared>, req: Request<Body>, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string();
     let mut r = next.run(req).await;
+    let html = r
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.starts_with("text/html"));
     let h = r.headers_mut();
     h.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // a response that says its own (a file shown in a frame of the web client) keeps them
+    h.entry("x-frame-options")
+        .or_insert(HeaderValue::from_static("DENY"));
     h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    h.insert(
-        "content-security-policy",
-        HeaderValue::from_static("default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
-    );
+    if !h.contains_key("content-security-policy") {
+        // the web client uploads to, shows and downloads from where the files are
+        let others = if html {
+            files_origins(&app, &host).join(" ")
+        } else {
+            String::new()
+        };
+        let csp = if others.is_empty() {
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'".to_string()
+        } else {
+            format!("default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: {others}; media-src 'self' {others}; frame-src 'self' {others}; connect-src 'self' {others}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        };
+        if let Ok(v) = HeaderValue::from_str(&csp) {
+            h.insert("content-security-policy", v);
+        }
+    }
     r
+}
+
+/// Where the browser reaches the files of the project at `host`, besides this server (its
+/// bucket, its CDN): none when they are in a folder, or the project is not known.
+fn files_origins(app: &App, host: &str) -> Vec<String> {
+    let Some(spec) = app.resolver.resolve(host) else {
+        return Vec::new();
+    };
+    let Ok(m) = quadra_sema::manifest::read(&spec.config.root) else {
+        return Vec::new();
+    };
+    if m.files.is_none() {
+        return Vec::new();
+    }
+    quadra_blobs::open(&spec.config.root, &m, &spec.config.outside.env)
+        .map(|f| f.origins())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|o| o.bytes().all(|b| b.is_ascii_graphic()) && !o.contains(';'))
+        .collect()
 }
 
 /// A tenant's engine on a thread of its own, and its background tasks: live events from new
@@ -2749,6 +2972,16 @@ impl Host {
             .route("/v1/records/{entity}/{id}", get(record))
             .route("/v1/records/{entity}/{id}/history", get(history))
             .route("/v1/records/{entity}/{id}/files/{field}", get(record_file))
+            .route(
+                "/v1/records/{entity}/{id}/files/{field}/{n}",
+                get(record_file_n),
+            )
+            .route("/v1/uploads", post(uploads))
+            // the signed URLs of a folder of files (an upload: its own limit, the size signed)
+            .route(
+                "/v1/blobs/{*key}",
+                get(blob).put(blob).layer(DefaultBodyLimit::disable()),
+            )
             .route("/v1/search/{entity}", get(search))
             .route("/v1/tx", post(tx))
             .route("/v1/stream", get(stream))
@@ -2835,7 +3068,10 @@ impl Host {
         }
         router
             .layer(DefaultBodyLimit::max(2 << 20))
-            .layer(middleware::from_fn(security_headers))
+            .layer(middleware::from_fn_with_state(
+                self.app.clone(),
+                security_headers,
+            ))
             .with_state(self.app.clone())
     }
 

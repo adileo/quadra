@@ -42,8 +42,12 @@ const SYSTEM_DDL: &[&str] = &[
     // the tokens of OAuth2 with a user's consent, one row per connection (crate::grants):
     // sealed by the server, with what may be shown of them
     "CREATE TABLE \"_quadra_oauth\" (\"connection\" TEXT PRIMARY KEY, \"sealed\" TEXT, \"scope\" TEXT, \"expires_at\" TEXT, \"connected_at\" TEXT, \"connected_by\" TEXT, \"refreshed_at\" TEXT, \"error\" TEXT)",
-    // the files the app makes (documents rendered by `attach`), by their SHA-256 (crate::files)
-    "CREATE TABLE \"_quadra_files\" (\"hash\" TEXT PRIMARY KEY, \"name\" TEXT NOT NULL, \"type\" TEXT NOT NULL, \"size\" BIGINT NOT NULL, \"content\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL)",
+    // the files of `File` fields (uploaded, or rendered by `attach`), by their SHA-256
+    // (crate::files): what they are, never their bytes (those are in the store of files)
+    "CREATE TABLE \"_quadra_files\" (\"hash\" TEXT PRIMARY KEY, \"name\" TEXT NOT NULL, \"type\" TEXT NOT NULL, \"size\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL)",
+    // the uploads given a signed URL (crate::files): for whom, for which field, until when;
+    // `hash` once the server has read and checked the bytes, `used` once a commit names it
+    "CREATE TABLE \"_quadra_uploads\" (\"id\" TEXT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"field\" TEXT NOT NULL, \"user_id\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"size\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"expires_at\" TEXT NOT NULL, \"used\" BOOLEAN NOT NULL, \"hash\" TEXT)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
     // (crate::deliveries), written with what it records and never changed
     "CREATE TABLE \"_quadra_exchanges\" (\"id\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"message\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"connection\" TEXT, \"step\" TEXT NOT NULL, \"outcome\" TEXT NOT NULL, \"status\" BIGINT, \"duration_ms\" BIGINT, \"error\" TEXT, \"excerpt\" TEXT, \"by\" TEXT, \"reason\" TEXT)",
@@ -131,7 +135,8 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// delivery.
 /// 13: `_quadra_oauth`, the tokens of OAuth2 with a user's consent (crate::grants).
 /// 14: `_quadra_files`, the documents rendered by `attach` (crate::files).
-const SYSTEM_VERSION: &str = "14";
+/// 15: `_quadra_files` without the bytes (they are in the store of files), `_quadra_uploads`.
+const SYSTEM_VERSION: &str = "15";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
@@ -310,6 +315,18 @@ impl Database {
                 return Ok(())
             }
             Ok(_) => {}
+        }
+        // the documents of version 14 kept their bytes in the database: not moved
+        if self.conn.table_exists("_quadra_files")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"content\" FROM \"_quadra_files\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_ok()
+        {
+            return Err("this database keeps the bytes of its files in `_quadra_files` (system version 14): this version of Quadra keeps them in a store of files, and does not move them. Start from a new database".into());
         }
         if self
             .conn

@@ -101,17 +101,30 @@ impl FileSpec {
 
     /// Whether it takes a file of this type (as recognized from its bytes).
     pub fn accepts(&self, mime: &str) -> bool {
-        self.accept.is_empty()
-            || self.accept.iter().any(|(a, _)| match exact(a) {
-                Some(t) => t.eq_ignore_ascii_case(mime),
-                None => family(a).is_some_and(|ts| ts.contains(&mime)),
-            })
+        accepts(self.accept.iter().map(|(a, _)| a.as_str()), mime)
     }
 
     /// The largest file, in bytes.
     pub fn max_bytes(&self) -> Option<u64> {
         self.max.map(|(n, _)| n)
     }
+}
+
+/// Whether entries as written (`pdf`, `"application/zip"`) take a file of this type: none
+/// take every file.
+pub fn accepts<'a>(entries: impl IntoIterator<Item = &'a str>, mime: &str) -> bool {
+    let mut none = true;
+    for a in entries {
+        none = false;
+        let ok = match exact(a) {
+            Some(t) => t.eq_ignore_ascii_case(mime),
+            None => family(a).is_some_and(|ts| ts.contains(&mime)),
+        };
+        if ok {
+            return true;
+        }
+    }
+    none
 }
 
 /// The type an accepted entry names exactly (`"application/zip"`), if it is one.
