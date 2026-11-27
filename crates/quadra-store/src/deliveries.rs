@@ -64,7 +64,7 @@ pub fn due(
     params.push(Sql::Text(now.to_string()));
     params.push(Sql::Int(durable.min(i64::MAX as u64) as i64));
     let rows = conn.query(
-        &format!("SELECT CAST(o.\"id\" AS TEXT), CAST(o.\"tx\" AS TEXT), o.\"event\", o.\"fields\", o.\"created_at\", CAST(o.\"attempts\" AS TEXT), c.\"hash\" FROM \"_quadra_outbox\" o LEFT JOIN \"_quadra_commits\" c ON c.\"tx\" = o.\"tx\" WHERE o.\"delivered_at\" IS NULL AND o.\"failed_at\" IS NULL AND o.\"event\" IN ({marks}) AND (o.\"next_at\" IS NULL OR o.\"next_at\" <= ?text) AND o.\"tx\" <= ?bigint ORDER BY o.\"id\" LIMIT {limit}"),
+        &format!("SELECT CAST(o.\"id\" AS TEXT), CAST(o.\"tx\" AS TEXT), o.\"event\", o.\"fields\", o.\"created_at\", CAST(o.\"attempts\" AS TEXT), c.\"hash\" FROM \"_quadra_outbox\" o LEFT JOIN \"_quadra_commits\" c ON c.\"tx\" = o.\"tx\" WHERE o.\"state\" = 'pending' AND o.\"event\" IN ({marks}) AND (o.\"next_at\" IS NULL OR o.\"next_at\" <= ?text) AND o.\"tx\" <= ?bigint ORDER BY o.\"id\" LIMIT {limit}"),
         &params,
     )?;
     let num = |v: &Option<String>| v.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0u64);
@@ -93,7 +93,7 @@ pub fn next_at(conn: &mut Conn, events: &[String]) -> Result<Option<String>, Str
     }
     let (marks, params) = in_list(events);
     let rows = conn.query(
-        &format!("SELECT COUNT(*), MIN(COALESCE(\"next_at\", '')) FROM \"_quadra_outbox\" WHERE \"delivered_at\" IS NULL AND \"failed_at\" IS NULL AND \"event\" IN ({marks})"),
+        &format!("SELECT COUNT(*), MIN(COALESCE(\"next_at\", '')) FROM \"_quadra_outbox\" WHERE \"state\" = 'pending' AND \"event\" IN ({marks})"),
         &params,
     )?;
     let row = rows.into_iter().next().unwrap_or_default();
@@ -105,40 +105,232 @@ pub fn next_at(conn: &mut Conn, events: &[String]) -> Result<Option<String>, Str
     Ok((count > 0).then(|| row.get(1).cloned().flatten().unwrap_or_default()))
 }
 
-/// Writes what came of an attempt on event `id` at `now`. An event already delivered or
-/// failed is left as it is.
-pub fn record(conn: &mut Conn, id: u64, now: &str, outcome: &Outcome) -> Result<(), String> {
-    let id = Sql::Int(id as i64);
-    let now = Sql::Text(now.to_string());
-    let pending = "\"id\" = ?bigint AND \"delivered_at\" IS NULL AND \"failed_at\" IS NULL";
-    match outcome {
-        Outcome::Delivered => conn.exec(
-            &format!("UPDATE \"_quadra_outbox\" SET \"delivered\" = ?boolean, \"delivered_at\" = ?text, \"attempts\" = \"attempts\" + 1, \"next_at\" = NULL, \"error\" = NULL WHERE {pending}"),
-            &[Sql::Bool(true), now, id],
-        )?,
-        Outcome::Retry { at, error } => conn.exec(
-            &format!("UPDATE \"_quadra_outbox\" SET \"attempts\" = \"attempts\" + 1, \"next_at\" = ?text, \"error\" = ?text WHERE {pending}"),
-            &[Sql::Text(at.clone()), Sql::Text(error.clone()), id],
-        )?,
-        Outcome::Failed { error } => conn.exec(
-            &format!("UPDATE \"_quadra_outbox\" SET \"attempts\" = \"attempts\" + 1, \"failed_at\" = ?text, \"error\" = ?text WHERE {pending}"),
-            &[now, Sql::Text(error.clone()), id],
-        )?,
-    };
+/// What an attempt was, besides its outcome: for the log.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Attempt {
+    pub connection: String,
+    /// the HTTP status, or the SMTP reply code
+    pub status: Option<u16>,
+    pub duration_ms: u64,
+    /// the beginning of the answer (never a credential: what the receiver sent back)
+    pub excerpt: Option<String>,
+}
+
+/// A row of the log of a message (`_quadra_exchanges`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Step {
+    pub at: String,
+    pub step: String,
+    pub outcome: String,
+    pub connection: Option<String>,
+    pub status: Option<u16>,
+    pub duration_ms: Option<u64>,
+    pub error: Option<String>,
+    pub excerpt: Option<String>,
+    pub by: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Adds a row to the log of event `id` (outgoing).
+#[allow(clippy::too_many_arguments)]
+fn log_step(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    at: &str,
+    step: &str,
+    outcome: &str,
+    attempt: Option<&Attempt>,
+    error: Option<&str>,
+    by: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let next: i64 = conn
+        .query(
+            "SELECT CAST(COALESCE(MAX(\"id\"), 0) + 1 AS TEXT) FROM \"_quadra_exchanges\"",
+            &[],
+        )?
+        .first()
+        .and_then(|r| r[0].as_deref())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let opt = |v: Option<&str>| v.map(|s| Sql::Text(s.to_string())).unwrap_or(Sql::Null);
+    conn.exec(
+        "INSERT INTO \"_quadra_exchanges\" (\"id\", \"at\", \"direction\", \"message\", \"name\", \"connection\", \"step\", \"outcome\", \"status\", \"duration_ms\", \"error\", \"excerpt\", \"by\", \"reason\") VALUES (?bigint, ?text, 'out', ?bigint, ?text, ?text, ?text, ?text, ?bigint, ?bigint, ?text, ?text, ?text, ?text)",
+        &[
+            Sql::Int(next),
+            Sql::Text(at.to_string()),
+            Sql::Int(id as i64),
+            Sql::Text(name.to_string()),
+            opt(attempt.map(|a| a.connection.as_str())),
+            Sql::Text(step.to_string()),
+            Sql::Text(outcome.to_string()),
+            attempt.and_then(|a| a.status).map(|s| Sql::Int(s as i64)).unwrap_or(Sql::Null),
+            attempt.map(|a| Sql::Int(a.duration_ms as i64)).unwrap_or(Sql::Null),
+            opt(error),
+            opt(attempt.and_then(|a| a.excerpt.as_deref())),
+            opt(by),
+            opt(reason),
+        ],
+    )?;
     Ok(())
 }
 
-/// Events that failed for good made pending again (`quadra outbox retry`): tried at the next
-/// round. Returns how many.
-pub fn retry(conn: &mut Conn, ids: &[u64]) -> Result<usize, String> {
+/// Writes what came of an attempt on event `id` (named `name`) at `now`, and the attempt in its
+/// log. An event that is no longer pending is left as it is.
+pub fn record(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    now: &str,
+    outcome: &Outcome,
+    attempt: &Attempt,
+) -> Result<(), String> {
+    let key = Sql::Int(id as i64);
+    let at = Sql::Text(now.to_string());
+    let pending = "\"id\" = ?bigint AND \"state\" = 'pending'";
+    let (n, state, error) = match outcome {
+        Outcome::Delivered => (
+            conn.exec(
+                &format!("UPDATE \"_quadra_outbox\" SET \"delivered\" = ?boolean, \"delivered_at\" = ?text, \"state\" = 'delivered', \"attempts\" = \"attempts\" + 1, \"next_at\" = NULL, \"error\" = NULL WHERE {pending}"),
+                &[Sql::Bool(true), at, key],
+            )?,
+            "delivered",
+            None,
+        ),
+        Outcome::Retry { at: next, error } => (
+            conn.exec(
+                &format!("UPDATE \"_quadra_outbox\" SET \"attempts\" = \"attempts\" + 1, \"next_at\" = ?text, \"error\" = ?text WHERE {pending}"),
+                &[Sql::Text(next.clone()), Sql::Text(error.clone()), key],
+            )?,
+            "pending",
+            Some(error.as_str()),
+        ),
+        Outcome::Failed { error } => (
+            conn.exec(
+                &format!("UPDATE \"_quadra_outbox\" SET \"attempts\" = \"attempts\" + 1, \"failed_at\" = ?text, \"state\" = 'failed', \"error\" = ?text WHERE {pending}"),
+                &[at, Sql::Text(error.clone()), key],
+            )?,
+            "failed",
+            Some(error.as_str()),
+        ),
+    };
+    if n > 0 {
+        log_step(
+            conn,
+            id,
+            name,
+            now,
+            "attempt",
+            state,
+            Some(attempt),
+            error,
+            None,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// Events that failed for good or were skipped made pending again (`quadra outbox retry`):
+/// tried at the next round, logged with who asked. Returns how many.
+pub fn retry(conn: &mut Conn, ids: &[u64], now: &str, by: &str) -> Result<usize, String> {
     let mut n = 0;
     for id in ids {
-        n += conn.exec(
-            "UPDATE \"_quadra_outbox\" SET \"failed_at\" = NULL, \"next_at\" = NULL WHERE \"id\" = ?bigint AND \"delivered_at\" IS NULL AND \"failed_at\" IS NOT NULL",
+        let name = event_name(conn, *id)?;
+        let done = conn.exec(
+            "UPDATE \"_quadra_outbox\" SET \"state\" = 'pending', \"failed_at\" = NULL, \"next_at\" = NULL WHERE \"id\" = ?bigint AND \"state\" IN ('failed', 'skipped')",
             &[Sql::Int(*id as i64)],
-        )? as usize;
+        )?;
+        if done > 0 {
+            log_step(
+                conn,
+                *id,
+                &name.unwrap_or_default(),
+                now,
+                "retry",
+                "pending",
+                None,
+                None,
+                Some(by),
+                None,
+            )?;
+            n += 1;
+        }
     }
     Ok(n)
+}
+
+/// Pending or failed events that will not be sent (`quadra outbox skip`), with a reason:
+/// logged with who asked. Returns how many.
+pub fn skip(
+    conn: &mut Conn,
+    ids: &[u64],
+    now: &str,
+    by: &str,
+    reason: &str,
+) -> Result<usize, String> {
+    if reason.trim().is_empty() {
+        return Err("a skip needs a reason (--reason \"…\")".into());
+    }
+    let mut n = 0;
+    for id in ids {
+        let name = event_name(conn, *id)?;
+        let done = conn.exec(
+            "UPDATE \"_quadra_outbox\" SET \"state\" = 'skipped', \"next_at\" = NULL WHERE \"id\" = ?bigint AND \"state\" IN ('pending', 'failed')",
+            &[Sql::Int(*id as i64)],
+        )?;
+        if done > 0 {
+            log_step(
+                conn,
+                *id,
+                &name.unwrap_or_default(),
+                now,
+                "skip",
+                "skipped",
+                None,
+                None,
+                Some(by),
+                Some(reason),
+            )?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+fn event_name(conn: &mut Conn, id: u64) -> Result<Option<String>, String> {
+    Ok(conn
+        .query(
+            "SELECT \"event\" FROM \"_quadra_outbox\" WHERE \"id\" = ?bigint",
+            &[Sql::Int(id as i64)],
+        )?
+        .into_iter()
+        .next()
+        .and_then(|r| r[0].clone()))
+}
+
+/// The log of event `id`, oldest first.
+pub fn log(conn: &mut Conn, id: u64) -> Result<Vec<Step>, String> {
+    let rows = conn.query(
+        "SELECT \"at\", \"step\", \"outcome\", \"connection\", CAST(\"status\" AS TEXT), CAST(\"duration_ms\" AS TEXT), \"error\", \"excerpt\", \"by\", \"reason\" FROM \"_quadra_exchanges\" WHERE \"direction\" = 'out' AND \"message\" = ?bigint ORDER BY \"_quadra_exchanges\".\"id\"",
+        &[Sql::Int(id as i64)],
+    )?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Step {
+            at: r[0].clone().unwrap_or_default(),
+            step: r[1].clone().unwrap_or_default(),
+            outcome: r[2].clone().unwrap_or_default(),
+            connection: r[3].clone(),
+            status: r[4].as_deref().and_then(|s| s.parse().ok()),
+            duration_ms: r[5].as_deref().and_then(|s| s.parse().ok()),
+            error: r[6].clone(),
+            excerpt: r[7].clone(),
+            by: r[8].clone(),
+            reason: r[9].clone(),
+        })
+        .collect())
 }
 
 /// How long to wait after the `attempts`-th failed attempt: 30 s, doubled each time, at most

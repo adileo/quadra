@@ -1923,14 +1923,16 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                 let Some(p) = plans.next() else { break };
                 let e = egress.clone();
                 set.spawn(async move {
-                    let outcome = deliver::run(&p, &e.client, e.public_only).await;
-                    (p, outcome)
+                    let (outcome, attempt) = deliver::run(&p, &e.client, e.public_only).await;
+                    (p, outcome, attempt)
                 });
             }
             let Some(done) = set.join_next().await else {
                 break;
             };
-            let Ok((p, outcome)) = done else { continue };
+            let Ok((p, outcome, attempt)) = done else {
+                continue;
+            };
             if let quadra_store::deliveries::Outcome::Retry { error, .. }
             | quadra_store::deliveries::Outcome::Failed { error } = &outcome
             {
@@ -1939,7 +1941,9 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
             match t
                 .ask(|reply| Job::Delivered {
                     id: p.id,
+                    event: p.event.clone(),
                     outcome,
+                    attempt,
                     reply,
                 })
                 .await

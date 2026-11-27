@@ -25,7 +25,7 @@
 //! refused, checked after the resolution, and the address checked is the one connected to.
 
 use quadra_sema::manifest::{ConnectionKind, HttpAuth, Manifest, Setting};
-use quadra_store::deliveries::{Due, Outcome};
+use quadra_store::deliveries::{Attempt, Due, Outcome};
 use serde_json::{json, Value as J};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -36,6 +36,8 @@ use std::time::Duration;
 pub struct Plan {
     pub id: u64,
     pub event: String,
+    /// the connection it goes through
+    pub connection: String,
     /// attempts made before this one
     pub attempts: u64,
     pub created_at: String,
@@ -183,6 +185,7 @@ pub fn plan(
     let base = |send| Plan {
         id: due.id,
         event: due.event.clone(),
+        connection: connection.to_string(),
         attempts: due.attempts,
         created_at: due.created_at.clone(),
         send,
@@ -397,7 +400,12 @@ enum Failure {
 
 /// Runs a plan: what came of it, given when it was first emitted (after a day it is not tried
 /// again).
-pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> Outcome {
+pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> (Outcome, Attempt) {
+    let started = std::time::Instant::now();
+    let mut seen = Attempt {
+        connection: plan.connection.clone(),
+        ..Default::default()
+    };
     let result = match &plan.send {
         Send::Broken(why) => Err(Failure::Waiting(why.clone())),
         Send::Http {
@@ -415,6 +423,7 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> Ou
                 key.as_deref(),
                 *timeout,
                 public_only,
+                &mut seen,
             )
             .await
         }
@@ -436,10 +445,17 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> Ou
                 body,
                 *plain,
                 public_only,
+                &mut seen,
             )
             .await
         }
     };
+    seen.duration_ms = started.elapsed().as_millis() as u64;
+    (outcome(plan, result), seen)
+}
+
+/// What a result means for the event: delivered, tried again when, or failed for good.
+fn outcome(plan: &Plan, result: Result<(), Failure>) -> Outcome {
     match result {
         Ok(()) => Outcome::Delivered,
         Err(Failure::Never(e)) => Outcome::Failed { error: e },
@@ -484,6 +500,7 @@ async fn http(
     key: Option<&str>,
     timeout: Duration,
     public_only: bool,
+    seen: &mut Attempt,
 ) -> Result<(), Failure> {
     let parsed = reqwest::Url::parse(url).map_err(|e| Failure::Never(format!("{url}: {e}")))?;
     // an address written as such does not go through the resolver
@@ -523,7 +540,10 @@ async fn http(
         Failure::Again(msg)
     })?;
     let status = resp.status();
+    seen.status = Some(status.as_u16());
     if status.is_success() {
+        let text = excerpt(resp, 500).await;
+        seen.excerpt = (!text.trim().is_empty()).then_some(text);
         return Ok(());
     }
     // `Retry-After` in seconds (a date is read as no hint)
@@ -533,7 +553,9 @@ async fn http(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(Duration::from_secs);
-    let text = excerpt(resp, 200).await;
+    let text = excerpt(resp, 500).await;
+    seen.excerpt = (!text.trim().is_empty()).then(|| text.clone());
+    let text: String = text.chars().take(200).collect();
     let code = status.as_u16();
     let msg = format!(
         "{} answered {code}{}",
@@ -599,6 +621,7 @@ async fn smtp(
     body: &str,
     plain: bool,
     public_only: bool,
+    seen: &mut Attempt,
 ) -> Result<(), Failure> {
     use lettre::transport::smtp::client::{Tls, TlsParameters};
     use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
@@ -652,7 +675,11 @@ async fn smtp(
         ));
     }
     match b.build().send(message).await {
-        Ok(_) => Ok(()),
+        Ok(r) => {
+            seen.status = Some(u16::from(r.code()));
+            seen.excerpt = Some(r.message().collect::<Vec<_>>().join(" "));
+            Ok(())
+        }
         Err(e) if e.is_permanent() => Err(Failure::Never(format!("{host}: {e}"))),
         Err(e) => Err(Failure::Again(format!("{host}: {e}"))),
     }
@@ -730,12 +757,13 @@ mod tests {
         let plan = Plan {
             id: 3,
             event: "E".into(),
+            connection: "c".into(),
             attempts: 40,
             created_at: "2020-01-01T00:00:00".into(),
             send: Send::Broken("the variable TOKEN is not set where the app runs".into()),
         };
         let client = http_client(false);
-        match run(&plan, &client, false).await {
+        match run(&plan, &client, false).await.0 {
             Outcome::Retry { error, .. } => assert!(error.contains("TOKEN"), "{error}"),
             other => panic!("{other:?}"),
         }

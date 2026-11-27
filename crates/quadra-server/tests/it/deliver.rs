@@ -72,7 +72,11 @@ fn receiver(answers: Vec<u16>) -> Receiver {
                 }
                 None => last,
             };
-            let extra = if status == 429 { "Retry-After: 120\r\n" } else { "" };
+            let extra = if status == 429 {
+                "Retry-After: 120\r\n"
+            } else {
+                ""
+            };
             let _ = s.write_all(
                 format!("HTTP/1.1 {status} X\r\n{extra}Content-Length: 2\r\nConnection: close\r\n\r\nno")
                     .as_bytes(),
@@ -231,6 +235,12 @@ fn a_webhook_arrives_signed_once_and_is_marked_delivered() {
     place_order(port, &token, "A1");
     let row = outbox_row(&cfg, |r| r[1].is_some());
     assert_eq!(row[0].as_deref(), Some("1"));
+    let log = quadra_store::deliveries::log(&mut Conn::open(&cfg.url).unwrap(), 1).unwrap();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(
+        (log[0].outcome.as_str(), log[0].status),
+        ("delivered", Some(200))
+    );
     let got = r.got.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "{got:?}");
     let (h, body) = &got[0];
@@ -498,7 +508,9 @@ fn a_receiver_that_asks_to_wait_is_obeyed_and_refused_credentials_are_tried_agai
     let (host, rt, port) = serve(HostOptions::default(), cfg.clone());
     place_order(port, &token, "F1");
     let row = outbox_row(&cfg, |r| r[0].as_deref() == Some("1"));
-    let next = chrono::NaiveDateTime::parse_from_str(row[2].as_deref().unwrap(), "%Y-%m-%dT%H:%M:%S").unwrap();
+    let next =
+        chrono::NaiveDateTime::parse_from_str(row[2].as_deref().unwrap(), "%Y-%m-%dT%H:%M:%S")
+            .unwrap();
     let wait = next - chrono::Utc::now().naive_utc();
     assert!(wait > chrono::Duration::seconds(100), "{row:?}");
     assert!(row[4].is_none(), "{row:?}");
@@ -513,6 +525,63 @@ fn a_receiver_that_asks_to_wait_is_obeyed_and_refused_credentials_are_tried_agai
     place_order(port, &token, "G1");
     let row = outbox_row(&cfg, |r| r[0].as_deref() == Some("1"));
     assert!(row[4].is_none() && row[2].is_some(), "{row:?}");
-    assert!(row[3].as_deref().unwrap_or("").contains("credentials"), "{row:?}");
+    assert!(
+        row[3].as_deref().unwrap_or("").contains("credentials"),
+        "{row:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_attempt_is_in_the_log_with_its_answer() {
+    let r = receiver(vec![503, 200]);
+    let dir = temp("log");
+    let (cfg, token) = project(&dir, r.port);
+    let (_host, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "H1");
+    outbox_row(&cfg, |r| r[0].as_deref() == Some("1"));
+    let mut c = Conn::open(&cfg.url).unwrap();
+    let id: u64 = c
+        .query("SELECT CAST(\"id\" AS TEXT) FROM \"_quadra_outbox\"", &[])
+        .unwrap()[0][0]
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let log = quadra_store::deliveries::log(&mut c, id).unwrap();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].step, "attempt");
+    assert_eq!(log[0].outcome, "pending");
+    assert_eq!(log[0].status, Some(503));
+    assert_eq!(log[0].connection.as_deref(), Some("hooks"));
+    assert!(log[0].duration_ms.is_some());
+    assert!(log[0].error.as_deref().unwrap_or("").contains("503"));
+    // skipped by hand, with who and why; then made pending again
+    let at = "2026-11-27T12:00:00";
+    assert!(quadra_store::deliveries::skip(&mut c, &[id], at, "cli:ann", "").is_err());
+    assert_eq!(
+        quadra_store::deliveries::skip(&mut c, &[id], at, "cli:ann", "the order was cancelled")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        quadra_store::deliveries::retry(&mut c, &[id], at, "cli:ann").unwrap(),
+        1
+    );
+    let log = quadra_store::deliveries::log(&mut c, id).unwrap();
+    let steps: Vec<(&str, &str)> = log
+        .iter()
+        .map(|s| (s.step.as_str(), s.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            ("attempt", "pending"),
+            ("skip", "skipped"),
+            ("retry", "pending")
+        ]
+    );
+    assert_eq!(log[1].reason.as_deref(), Some("the order was cancelled"));
+    assert_eq!(log[1].by.as_deref(), Some("cli:ann"));
     let _ = std::fs::remove_dir_all(&dir);
 }

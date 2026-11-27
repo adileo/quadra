@@ -237,9 +237,28 @@ event's `to`, with its `subject` and `body`.
 | a day of failed attempts | failed for good |
 | a value missing where the app runs (a variable the connection needs) | waits, without a time limit, until the configuration is fixed |
 
-The outbox keeps each event's attempts, the time of the next one and the last error;
-`quadra outbox list` shows them and `quadra outbox retry <id…>` makes failed events pending
-again ([CLI](/reference/cli#events-quadra-outbox)). Delivery is **at least once**: if the
+Each event has a state: `pending` (waiting for its next attempt), `delivered`, `failed` (for
+good), or `skipped` (by hand, with a reason). Every attempt is written to the event's **log**
+with the date and time, the connection, how long it took, the HTTP status or SMTP reply, the
+error and the beginning of the answer; so is every `retry` and `skip`, with who asked and why.
+The log is kept with the data (on Quadra Cloud, in the bucket like any write) and never
+changed:
+
+```bash
+quadra outbox list --state failed
+quadra outbox log 41
+quadra outbox retry 41                                  # failed or skipped: pending again
+quadra outbox skip 42 --reason "the order was cancelled"
+```
+
+```text
+#41  2026-11-27T10:14:05  attempt  pending     via shop  503  412 ms  shop.example.com answered 503: busy
+#41  2026-11-27T10:14:36  attempt  pending     via shop  503  388 ms  shop.example.com answered 503: busy
+#41  2026-11-27T10:15:41  attempt  delivered   via shop  200  97 ms
+        {"ok":true}
+```
+
+([CLI](/reference/cli#events-quadra-outbox)). Delivery is **at least once**: if the
 server stops between sending and recording the answer, the event is sent again with the same
 `Idempotency-Key`, which the receiver should use to ignore what it has already seen.
 

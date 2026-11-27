@@ -13,7 +13,7 @@
 //!     quadra change list | preview <name> | apply <name> | revert <name> [--approved-by login]
 //!     quadra serve [path] [--url URL] [--port 8080] [--dev-login] [--secure-cookies] …
 //!     quadra token create <login> … | revoke <name>
-//!     quadra outbox list [--pending] [--json] | delivered <id…> | retry <id…> [path] [--url URL]
+//!     quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R [path] [--url URL]
 //!     quadra bench gen|run …           the stress benchmark of examples/stress
 //!     quadra parse <file>              print the syntax tree of a file
 //!     quadra lsp                       start the language server on stdin/stdout
@@ -118,7 +118,7 @@ fn usage() -> ExitCode {
          quadra change list | preview <name> | apply <name> [--approved-by login] | revert <name> [--approved-by login]   [path] [--url URL]\n  \
          quadra serve [path] [--url URL] [--port 8080] [--web dir] [--dev-login] [--secure-cookies] [--cache-mb 256] [--prewarm-days N] [--sweep-every secs] [--editors login,…] [--job-timeout 120] [--max-rows N] [--max-list N] [--max-queue 1000] [--readers 2] [--writers 1]\n  \
          quadra token create <login> [--name n] [--read-only] [--days 90] | revoke <name>   [path] [--url URL]\n  \
-         quadra outbox list [--pending] [--json] | delivered <id…> | retry <id…>   [path] [--url URL]   events emitted by `emit`\n  \
+         quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R   [path] [--url URL]   events emitted by `emit`\n  \
          quadra bench gen --scale tiny|small|medium|large --out DIR [--seed N]   stress data as CSV\n  \
          quadra bench run [path] --url URL --scale … [--json file] [--timeout 60] [--reps 5] [--only a,b] [--skip a,b]   the stress benchmark\n  \
          quadra parse <file>                  print the syntax tree of a file\n  \
@@ -378,6 +378,14 @@ fn positionals(args: &[String], with_value: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// Who runs a command, for the logs it writes (`quadra outbox retry`, `skip`): the system's user.
+fn who() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .map(|u| format!("cli:{u}"))
+        .unwrap_or_else(|_| "cli".into())
+}
+
 /// The flags of the `db`, `change`, `token` and `outbox` commands that take a value.
 const VALUE_FLAGS: &[&str] = &[
     "--url",
@@ -385,6 +393,8 @@ const VALUE_FLAGS: &[&str] = &[
     "--name",
     "--days",
     "--commit-size",
+    "--reason",
+    "--state",
 ];
 
 /// The first positional argument (see `positionals`) and the other arguments.
@@ -687,7 +697,7 @@ fn outbox(args: &[String]) -> ExitCode {
     };
     let mut rest = args[1..].to_vec();
     let mut ids: Vec<u64> = Vec::new();
-    if cmd == "delivered" || cmd == "retry" {
+    if matches!(cmd, "delivered" | "retry" | "skip" | "log") {
         // the ids (`12` or `#12`) are the positional arguments before the path
         while let (Some(word), others) = take_positional(&rest, VALUE_FLAGS) {
             let Ok(id) = word.trim_start_matches('#').parse::<u64>() else {
@@ -712,14 +722,18 @@ fn outbox(args: &[String]) -> ExitCode {
     finish((|| match cmd {
         "list" => {
             let pending = rest.iter().any(|a| a == "--pending");
-            let events = ops::outbox(&url, model, report, pending)?;
+            let state = flag(rest, "--state");
+            let mut events = ops::outbox(&url, model, report, pending)?;
+            if let Some(s) = &state {
+                events.retain(|e| &e.state == s);
+            }
             if rest.iter().any(|a| a == "--json") {
                 for e in &events {
                     let line = serde_json::json!({
                         "id": e.id, "tx": e.tx, "event": e.event, "fields": e.fields,
                         "created_at": e.created_at, "delivered_at": e.delivered_at,
                         "attempts": e.attempts, "next_at": e.next_at, "error": e.error,
-                        "failed_at": e.failed_at,
+                        "failed_at": e.failed_at, "state": e.state,
                     });
                     println!("{line}");
                 }
@@ -736,18 +750,20 @@ fn outbox(args: &[String]) -> ExitCode {
                 );
             }
             for e in &events {
-                let state = match (&e.delivered_at, &e.failed_at) {
-                    (Some(at), _) => format!("delivered {at}"),
-                    (None, Some(at)) => {
-                        format!("failed {at}: {}", e.error.as_deref().unwrap_or(""))
-                    }
-                    (None, None) if e.attempts > 0 => format!(
+                let state = match e.state.as_str() {
+                    "delivered" => format!("delivered {}", e.delivered_at.as_deref().unwrap_or("")),
+                    "failed" => format!(
+                        "failed {}: {}",
+                        e.failed_at.as_deref().unwrap_or(""),
+                        e.error.as_deref().unwrap_or("")
+                    ),
+                    "pending" if e.attempts > 0 => format!(
                         "pending, {} attempt(s), next {}: {}",
                         e.attempts,
                         e.next_at.as_deref().unwrap_or("now"),
                         e.error.as_deref().unwrap_or("")
                     ),
-                    (None, None) => "pending".into(),
+                    other => other.to_string(),
                 };
                 println!(
                     "#{:<5} tx {:<6} {}  {}  {}  ({state})",
@@ -762,12 +778,53 @@ fn outbox(args: &[String]) -> ExitCode {
             Ok(())
         }
         "retry" => {
-            let n = ops::outbox_retry(&url, model, report, &ids)?;
-            println!("✓ {n} failed event(s) pending again: tried at the next round");
+            let n = ops::outbox_retry(&url, model, report, &ids, now(), &who())?;
+            println!("✓ {n} event(s) pending again: tried at the next round");
+            Ok(())
+        }
+        "skip" => {
+            let reason = flag(rest, "--reason").unwrap_or_default();
+            let n = ops::outbox_skip(&url, model, report, &ids, now(), &who(), &reason)?;
+            println!("✓ {n} event(s) skipped: they will not be sent");
+            Ok(())
+        }
+        "log" => {
+            for id in &ids {
+                let steps = ops::outbox_log(&url, model, report, *id)?;
+                if steps.is_empty() {
+                    println!("#{id}: nothing happened to it yet");
+                }
+                for s in steps {
+                    let mut line = format!("#{id}  {}  {:<8} {:<10}", s.at, s.step, s.outcome);
+                    if let Some(c) = &s.connection {
+                        line.push_str(&format!("  via {c}"));
+                    }
+                    if let Some(st) = s.status {
+                        line.push_str(&format!("  {st}"));
+                    }
+                    if let Some(ms) = s.duration_ms {
+                        line.push_str(&format!("  {ms} ms"));
+                    }
+                    if let Some(e) = &s.error {
+                        line.push_str(&format!("  {e}"));
+                    }
+                    if let Some(b) = &s.by {
+                        line.push_str(&format!("  by {b}"));
+                    }
+                    if let Some(r) = &s.reason {
+                        line.push_str(&format!(": {r}"));
+                    }
+                    println!("{line}");
+                    if let Some(x) = &s.excerpt {
+                        let x: String = x.replace('\n', " ").chars().take(160).collect();
+                        println!("        {x}");
+                    }
+                }
+            }
             Ok(())
         }
         _ => Err(format!(
-            "unknown outbox command `{cmd}` (list, delivered, retry)"
+            "unknown outbox command `{cmd}` (list, log, delivered, retry, skip)"
         )),
     })())
 }

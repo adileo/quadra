@@ -102,18 +102,53 @@ pub fn outbox_delivered(
     db.mark_delivered(ids, time)
 }
 
-/// Events that failed for good made pending again (`quadra outbox retry`); returns how many.
+fn outbox_db(url: &str, model: &Model, report: &Report) -> Result<Database, String> {
+    let mut db = Database::open(url, model, report)?;
+    if !db.status()?.initialized {
+        return Err("the database is not initialized (run `quadra db init`)".into());
+    }
+    Ok(db)
+}
+
+/// Events that failed for good or were skipped made pending again (`quadra outbox retry`);
+/// returns how many.
 pub fn outbox_retry(
     url: &str,
     model: &Model,
     report: &Report,
     ids: &[u64],
+    time: NaiveDateTime,
+    by: &str,
 ) -> Result<usize, String> {
-    let mut db = Database::open(url, model, report)?;
-    if !db.status()?.initialized {
-        return Err("the database is not initialized (run `quadra db init`)".into());
-    }
-    crate::deliveries::retry(&mut db.conn, ids)
+    let mut db = outbox_db(url, model, report)?;
+    let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+    crate::deliveries::retry(&mut db.conn, ids, &at, by)
+}
+
+/// Events that will not be sent, with a reason (`quadra outbox skip`); returns how many.
+pub fn outbox_skip(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    ids: &[u64],
+    time: NaiveDateTime,
+    by: &str,
+    reason: &str,
+) -> Result<usize, String> {
+    let mut db = outbox_db(url, model, report)?;
+    let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+    crate::deliveries::skip(&mut db.conn, ids, &at, by, reason)
+}
+
+/// What happened to an event, step by step (`quadra outbox log`).
+pub fn outbox_log(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    id: u64,
+) -> Result<Vec<crate::deliveries::Step>, String> {
+    let mut db = outbox_db(url, model, report)?;
+    crate::deliveries::log(&mut db.conn, id)
 }
 
 /// Hash chain and tables against the history, a page at a time (`crate::verify`). Returns

@@ -670,7 +670,7 @@ fn folders_on(target: &str) {
         )
         .unwrap()[0][0]
         .clone();
-    assert_eq!(system.as_deref(), Some("11"));
+    assert_eq!(system.as_deref(), Some("12"));
     assert!(
         Conn::open(&url)
             .unwrap()

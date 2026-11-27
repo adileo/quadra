@@ -389,7 +389,9 @@ pub enum Job {
     /// what came of the delivery of event `id`, written through the sequencer
     Delivered {
         id: u64,
+        event: String,
         outcome: quadra_store::deliveries::Outcome,
+        attempt: quadra_store::deliveries::Attempt,
         reply: oneshot::Sender<Result<(), String>>,
     },
     People {
@@ -960,11 +962,17 @@ impl Engine {
                 Job::Deliveries { limit, reply } => {
                     let _ = reply.send(self.deliveries(limit));
                 }
-                Job::Delivered { id, outcome, reply } => {
+                Job::Delivered {
+                    id,
+                    event,
+                    outcome,
+                    attempt,
+                    reply,
+                } => {
                     let at = now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                    let _ = reply.send(
-                        self.side(move |c| quadra_store::deliveries::record(c, id, &at, &outcome)),
-                    );
+                    let _ = reply.send(self.side(move |c| {
+                        quadra_store::deliveries::record(c, id, &event, &at, &outcome, &attempt)
+                    }));
                 }
                 Job::Sweep { reply } => {
                     let checked = self.checked.clone();

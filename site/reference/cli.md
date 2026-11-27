@@ -524,7 +524,9 @@ them delivered.
 quadra outbox list --pending
 quadra outbox list --pending --json
 quadra outbox delivered 1 2
+quadra outbox log 7
 quadra outbox retry 7
+quadra outbox skip 8 --reason "sent by hand"
 ```
 
 ```text
@@ -535,11 +537,14 @@ quadra outbox retry 7
 
 | Command / flag | Effect |
 |---|---|
-| `outbox list` | every event, oldest first, with `pending` (and its attempts, the time of the next and the last error), `delivered <time>` or `failed <time>: <error>` |
-| `--pending` | only the events neither delivered nor failed |
-| `--json` | one JSON object per line: `id`, `tx`, `event`, `fields`, `created_at`, `delivered_at`, `attempts`, `next_at`, `error`, `failed_at` |
+| `outbox list` | every event, oldest first, with `pending` (and its attempts, the time of the next and the last error), `delivered <time>`, `failed <time>: <error>` or `skipped` |
+| `--pending` | only the pending events |
+| `--state S` | only the events in state `S`: `pending`, `delivered`, `failed`, `skipped` |
+| `--json` | one JSON object per line: `id`, `tx`, `event`, `fields`, `created_at`, `delivered_at`, `attempts`, `next_at`, `error`, `failed_at`, `state` |
+| `outbox log <id…>` | what happened to each event, step by step: every attempt (time, connection, status, duration, error, the beginning of the answer), every `retry` and `skip` with who and why |
 | `outbox delivered <id…>` | marks the events delivered (those already delivered are left as they are): `✓ N event(s) marked delivered` |
-| `outbox retry <id…>` | makes events that failed for good pending again: the server tries them at its next round |
+| `outbox retry <id…>` | makes events that failed for good, or were skipped, pending again: the server tries them at its next round |
+| `outbox skip <id…> --reason R` | pending or failed events that will not be sent; the reason is required, and goes to the log with who skipped them |
 
 Delivery is at least once: if the integration stops after handing an event on and before
 marking it, it sends it again, so receivers should ignore an `id` they have already seen.

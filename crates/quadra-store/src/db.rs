@@ -32,7 +32,10 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_idempotency\" (\"user_id\" BIGINT NOT NULL, \"key\" TEXT NOT NULL, \"request_hash\" TEXT NOT NULL, \"response\" TEXT NOT NULL, \"tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, PRIMARY KEY (\"user_id\", \"key\"))",
     "CREATE TABLE \"_quadra_applied\" (\"key\" TEXT PRIMARY KEY, \"tx\" BIGINT NOT NULL)",
     "CREATE TABLE \"_quadra_renames\" (\"seq\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"entity\" TEXT NOT NULL, \"old_name\" TEXT NOT NULL, \"new_name\" TEXT NOT NULL)",
-    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT)",
+    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT, \"state\" TEXT NOT NULL DEFAULT 'pending')",
+    // what happened to each message in or out, one row per step: attempts, retries, skips
+    // (crate::deliveries), written with what it records and never changed
+    "CREATE TABLE \"_quadra_exchanges\" (\"id\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"message\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"connection\" TEXT, \"step\" TEXT NOT NULL, \"outcome\" TEXT NOT NULL, \"status\" BIGINT, \"duration_ms\" BIGINT, \"error\" TEXT, \"excerpt\" TEXT, \"by\" TEXT, \"reason\" TEXT)",
     // what users make in the web client (crate::views): saved views and boards, shared with
     // users, teams, roles or everyone; teams; each user's favourites, defaults and order; and
     // the log of every change (who, when, what), by object and version
@@ -54,6 +57,12 @@ const SYSTEM_DDL: &[&str] = &[
 /// of an entity (scans), those written or created after a transaction (the cache, conflicts),
 /// the rows of a ledger.
 pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
+    // the log of a message (crate::deliveries)
+    (
+        "qx__quadra_exchanges_message",
+        "_quadra_exchanges",
+        &["direction", "message"],
+    ),
     (
         "qx__quadra_history_record_id_seq",
         "_quadra_history",
@@ -99,7 +108,9 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// 10: `_quadra_batches`, the batches of the sequencer (crate::sequencer).
 /// 11: `_quadra_outbox.attempts`, `next_at`, `error`, `failed_at`: the deliveries of the events
 /// with an `outbound` (crate::deliveries).
-const SYSTEM_VERSION: &str = "11";
+/// 12: `_quadra_outbox.state` (pending, delivered, failed, skipped…) and `_quadra_exchanges`,
+/// the log of every step of a delivery.
+const SYSTEM_VERSION: &str = "12";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
@@ -147,6 +158,8 @@ pub struct OutboxEvent {
     pub next_at: Option<String>,
     pub error: Option<String>,
     pub failed_at: Option<String>,
+    /// `pending`, `delivered`, `failed`, `skipped` (crate::deliveries)
+    pub state: String,
 }
 
 pub struct Database {
@@ -359,6 +372,20 @@ impl Database {
                 .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"error\" TEXT")?;
             self.conn
                 .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"failed_at\" TEXT")?;
+        }
+        // the state of each event, from what the columns said before
+        if self.conn.table_exists("_quadra_outbox")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"state\" FROM \"_quadra_outbox\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            self.conn.batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"state\" TEXT NOT NULL DEFAULT 'pending'")?;
+            self.conn.batch("UPDATE \"_quadra_outbox\" SET \"state\" = 'delivered' WHERE \"delivered_at\" IS NOT NULL")?;
+            self.conn.batch("UPDATE \"_quadra_outbox\" SET \"state\" = 'failed' WHERE \"delivered_at\" IS NULL AND \"failed_at\" IS NOT NULL")?;
         }
         for s in system_ddl(self.dialect()) {
             let name = s.split('"').nth(1).unwrap_or("").to_string();
@@ -1858,13 +1885,13 @@ impl Database {
     /// The events of the outbox, oldest first (only those not delivered yet: `pending`).
     pub fn outbox(&mut self, pending: bool) -> Result<Vec<OutboxEvent>, String> {
         let filter = if pending {
-            " WHERE \"delivered_at\" IS NULL AND \"failed_at\" IS NULL"
+            " WHERE \"state\" = 'pending'"
         } else {
             ""
         };
         let rows = self
             .conn
-            .query(&format!("SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"event\", \"fields\", \"created_at\", \"delivered_at\", CAST(\"attempts\" AS TEXT), \"next_at\", \"error\", \"failed_at\" FROM \"_quadra_outbox\"{filter} ORDER BY \"_quadra_outbox\".\"id\""), &[])?;
+            .query(&format!("SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"event\", \"fields\", \"created_at\", \"delivered_at\", CAST(\"attempts\" AS TEXT), \"next_at\", \"error\", \"failed_at\", \"state\" FROM \"_quadra_outbox\"{filter} ORDER BY \"_quadra_outbox\".\"id\""), &[])?;
         Ok(rows
             .into_iter()
             .map(|r| OutboxEvent {
@@ -1881,6 +1908,7 @@ impl Database {
                 next_at: r[7].clone(),
                 error: r[8].clone(),
                 failed_at: r[9].clone(),
+                state: r[10].clone().unwrap_or_else(|| "pending".into()),
             })
             .collect())
     }
@@ -1898,7 +1926,7 @@ impl Database {
         let r = (|| -> Result<(), String> {
             for id in ids {
                 n += self.conn.exec(
-                    "UPDATE \"_quadra_outbox\" SET \"delivered\" = ?boolean, \"delivered_at\" = ?text WHERE \"id\" = ?bigint AND \"delivered_at\" IS NULL",
+                    "UPDATE \"_quadra_outbox\" SET \"delivered\" = ?boolean, \"delivered_at\" = ?text, \"state\" = 'delivered' WHERE \"id\" = ?bigint AND \"delivered_at\" IS NULL",
                     &[Sql::Bool(true), Sql::Text(at.clone()), Sql::Int(*id as i64)],
                 )? as usize;
             }
