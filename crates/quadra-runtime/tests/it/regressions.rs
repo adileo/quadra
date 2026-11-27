@@ -1085,3 +1085,16 @@ fn group_by_checks_its_keys() {
     assert_error(&[("main.qd", "entity A:\n    t: Text\n\ntest \"x\":\n    let g = A.all().avg(a => a.t)\n")], "cannot average");
     assert_error(&[("main.qd", "test \"x\":\n    let g = [1, 2].first(\"a\")\n")], "takes a whole number");
 }
+
+/// A range of billions is refused before it is made: one expression cannot take the machine's
+/// memory.
+#[test]
+fn a_huge_range_is_refused_not_allocated() {
+    let project = project(&[("main.qd", "test \"huge\":\n    let n = (1..9000000000000).count()\n    expect n > 0\n")]);
+    let started = std::time::Instant::now();
+    let results = quadra_runtime::run_tests(&project, None).unwrap();
+    assert!(!results[0].passed);
+    let m = results[0].message.clone().unwrap_or_default();
+    assert!(m.contains("elements") || m.contains("list") || m.contains("long"), "{m}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}

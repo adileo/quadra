@@ -670,7 +670,7 @@ impl Engine {
                     let _ = reply.send(self.add_user(&email, &roles));
                 }
                 Job::Logout { secret } => {
-                    let _ = self.side(move |c| auth::revoke(c, &secret));
+                    let _ = self.side(move |c| auth::revoke_secret(c, &secret));
                 }
                 Job::Call { who, req, reply } => {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(&who, req))) {

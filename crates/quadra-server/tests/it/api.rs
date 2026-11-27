@@ -135,6 +135,10 @@ fn the_api_is_authenticated_idempotent_and_refuses_stale_writes() {
     let rossi = http.call("POST", "/v1/query", &auth, Some(&json!({ "entity": "Partner", "where": "name == \"Rossi Spa\"", "fields": [] }))).1["rows"][0]["id"].as_u64().unwrap();
     let create = json!({ "ops": [{ "op": "create", "entity": "SalesOrder", "ref": "so", "values": { "customer": rossi, "lines": [{ "product": row["id"], "qty": "3 pcs" }] } }] });
     assert_eq!(http.call("POST", "/v1/tx", &auth, Some(&create)).0, 400, "Idempotency-Key is required");
+    // an operation on an id of another entity: that record does not exist for it
+    let other = json!({ "base": base, "ops": [{ "op": "action", "entity": "SalesOrder", "id": row["id"], "action": "confirm" }] });
+    let (s, v, _) = http.call("POST", "/v1/tx", &[("Authorization", bearer.as_str()), ("Idempotency-Key", "other-entity")], Some(&other));
+    assert!(s >= 400 && v.to_string().contains("does not exist"), "{s} {v}");
     let key = [("Authorization", bearer.as_str()), ("Idempotency-Key", "order-1")];
     let (s, first, _) = http.call("POST", "/v1/tx", &key, Some(&create));
     assert_eq!(s, 200, "{first}");

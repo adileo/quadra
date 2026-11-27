@@ -74,7 +74,13 @@ pub fn authenticate(conn: &mut Conn, secret: &str, now: NaiveDateTime) -> Result
     Ok(Some(Principal { user_id: r[0].as_deref().and_then(|u| u.parse().ok()).unwrap_or(0), read_only: truthy(&r[1]), kind: r[2].clone().unwrap_or_default(), csrf: r[3].clone(), name: r[6].clone().unwrap_or_default() }))
 }
 
-/// Revoke credentials by name (tokens) or by secret (logout). Returns how many.
+/// Revokes the credential of this secret, and only it (a logout): never by name, which anyone
+/// could guess (`email code <login>`).
+pub fn revoke_secret(conn: &mut Conn, secret: &str) -> Result<u64, String> {
+    conn.exec("UPDATE \"_quadra_tokens\" SET \"revoked\" = ?boolean WHERE \"hash\" = ?text", &[Sql::Bool(true), Sql::Text(sha256_hex(secret))])
+}
+
+/// Revoke credentials by name (tokens, from the command line) or by secret. Returns how many.
 pub fn revoke(conn: &mut Conn, name_or_secret: &str) -> Result<u64, String> {
     conn.exec("UPDATE \"_quadra_tokens\" SET \"revoked\" = ?boolean WHERE \"name\" = ?text OR \"hash\" = ?text", &[Sql::Bool(true), Sql::Text(name_or_secret.into()), Sql::Text(sha256_hex(name_or_secret))])
 }

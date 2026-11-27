@@ -917,3 +917,19 @@ fn under_the_local_rule_a_destination_down_still_gets_every_batch() {
     assert_eq!(c.query("SELECT \"name\" FROM \"customer\"", &[]).unwrap()[0][0].as_deref(), Some("back"));
     assert_eq!(verify(&p, &t), Vec::<String>::new());
 }
+
+#[test]
+fn a_logout_revokes_its_own_session_only() {
+    let p = project();
+    let url = fresh("logout");
+    init(&p, &url);
+    let mut c = quadra_store::Conn::open(&url).unwrap();
+    let (anna, _) = quadra_store::auth::create(&mut c, "session", 1, "email code anna", false, clock(), None).unwrap();
+    let (bob, _) = quadra_store::auth::create(&mut c, "session", 1, "email code bob", false, clock(), None).unwrap();
+    // a "secret" that is another session's name revokes nothing
+    assert_eq!(quadra_store::auth::revoke_secret(&mut c, "email code bob").unwrap(), 0);
+    assert!(quadra_store::auth::authenticate(&mut c, &bob, clock()).unwrap().is_some());
+    assert_eq!(quadra_store::auth::revoke_secret(&mut c, &anna).unwrap(), 1);
+    assert!(quadra_store::auth::authenticate(&mut c, &anna, clock()).unwrap().is_none());
+    assert!(quadra_store::auth::authenticate(&mut c, &bob, clock()).unwrap().is_some());
+}

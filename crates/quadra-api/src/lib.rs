@@ -1246,7 +1246,11 @@ pub fn apply_ops(i: &mut Interp, model: &Model, ops: &[J]) -> Result<serde_json:
             Some("update") => {
                 let id = op["id"].as_u64().ok_or_else(|| fail("`id` is required".into()))?;
                 let rec = V::Ref { ent: Rc::from(ent), id };
-                if !i.store.exists(id, None) {
+                // the record must be of the entity the operation names (its rights were checked
+                // for that one): an id of another entity does not exist here
+                let of_it = i.store.exists(id, None)
+                    && i.store.get(id).is_some_and(|r| &*r.ent == ent || model.entity(&r.ent).is_some_and(|a| model.implements(a, ent)));
+                if !of_it {
                     return Err(fail(format!("{ent}#{id} does not exist")));
                 }
                 for (k, v) in values {
@@ -1261,7 +1265,11 @@ pub fn apply_ops(i: &mut Interp, model: &Model, ops: &[J]) -> Result<serde_json:
                 let id = op["id"].as_u64().ok_or_else(|| fail("`id` is required".into()))?;
                 let name = op["action"].as_str().ok_or_else(|| fail("`action` is required".into()))?;
                 let rec = V::Ref { ent: Rc::from(ent), id };
-                if !i.store.exists(id, None) {
+                // the record must be of the entity the operation names (its rights were checked
+                // for that one): an id of another entity does not exist here
+                let of_it = i.store.exists(id, None)
+                    && i.store.get(id).is_some_and(|r| &*r.ent == ent || model.entity(&r.ent).is_some_and(|a| model.implements(a, ent)));
+                if !of_it {
                     return Err(fail(format!("{ent}#{id} does not exist")));
                 }
                 let action = e.actions.iter().find(|a| a.name == name);

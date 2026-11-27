@@ -135,6 +135,11 @@ pub struct Statics {
     pub(crate) trusted_ptr: std::cell::RefCell<HashMap<(usize, usize), bool>>,
 }
 
+/// The most elements a list made at once holds (a range), whatever the job's own limit.
+pub const MAX_VALUES: usize = 10_000_000;
+/// The longest text a concatenation makes.
+pub const MAX_TEXT: usize = 64 << 20;
+
 pub struct Interp<'m> {
     /// Persistence of committed transactions (None = in memory only).
     pub sink: Option<Box<dyn CommitSink + 'm>>,
@@ -2027,6 +2032,14 @@ impl<'m> Interp<'m> {
                 };
                 let mut out = Vec::new();
                 if let (V::Int(a), V::Int(b)) = (&l, &r) {
+                    // counted before it is made: a range of billions is refused, not allocated
+                    let n = b.checked_sub(*a).and_then(|d| d.checked_add(1)).unwrap_or(i64::MAX).max(0) as u64;
+                    let cap = self.max_list.unwrap_or(MAX_VALUES).min(MAX_VALUES) as u64;
+                    if n > cap {
+                        let m = crate::limits::too_long_list(cap as usize);
+                        crate::limits::hit(m.clone());
+                        return fail(m);
+                    }
                     for i in *a..=*b {
                         out.push(V::Int(i));
                     }
@@ -2132,7 +2145,12 @@ impl<'m> Interp<'m> {
             (V::Duration(a), V::Duration(b)) => V::Duration(if add { a + b } else { a - b }),
             (V::Duration(a), x) if x.num().is_some_and(|n| n.is_zero()) => V::Duration(*a),
             (x, V::Duration(b)) if x.num().is_some_and(|n| n.is_zero()) => V::Duration(if add { *b } else { -*b }),
-            (V::Text(a), V::Text(b)) if add => text(&format!("{a}{b}")),
+            (V::Text(a), V::Text(b)) if add => {
+                if a.len() + b.len() > MAX_TEXT {
+                    return fail(format!("a text longer than {} MB", MAX_TEXT >> 20));
+                }
+                text(&format!("{a}{b}"))
+            }
             (V::List(a) | V::Set(a), V::List(b) | V::Set(b)) if add => {
                 let mut out = a.to_vec();
                 for x in b.iter() {
