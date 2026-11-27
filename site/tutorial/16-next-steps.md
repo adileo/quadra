@@ -1,6 +1,6 @@
 # Next steps
 
-<SandboxLink project="tutorial-15" file="documents/invoice.qdp" label="Open the finished shop" />
+<SandboxLink project="tutorial-14" file="orders.qd" label="Open the finished shop" />
 
 You've built a small but complete business application: a catalog with prices per unit,
 customers with credit limits, orders with a life cycle, invoices and payments that follow
