@@ -108,6 +108,8 @@ pub enum Send {
         body: String,
         /// an HTML version, sent with the text one (`email(…, html=…)`)
         html: Option<String>,
+        /// documents attached (name, type, bytes)
+        attachments: Vec<(String, String, Vec<u8>)>,
         /// `smtp://` without TLS (`insecure = true`: a local test server)
         plain: bool,
     },
@@ -128,8 +130,15 @@ impl Send {
     pub fn bytes(&self) -> u64 {
         match self {
             Send::Http { body, .. } => body.len() as u64,
-            Send::Smtp { body, html, .. } => {
-                (body.len() + html.as_ref().map_or(0, |h| h.len())) as u64
+            Send::Smtp {
+                body,
+                html,
+                attachments,
+                ..
+            } => {
+                (body.len()
+                    + html.as_ref().map_or(0, |h| h.len())
+                    + attachments.iter().map(|a| a.2.len()).sum::<usize>()) as u64
             }
             Send::Broken(_) => 0,
             Send::Job {
@@ -264,6 +273,8 @@ pub enum Built {
         subject: String,
         body: String,
         html: Option<String>,
+        /// `attachments=[render(InvoicePdf(…))]`: name, type, bytes
+        attachments: Vec<(String, String, Vec<u8>)>,
     },
     /// `write(path, content)`: a file; `insert(table, row)`: a row of an exchange table
     Put {
@@ -564,11 +575,47 @@ pub fn built_of(v: &quadra_runtime::V) -> Result<Built, String> {
         });
     }
     if method == "EMAIL" {
+        // the documents attached: what `render(…)` gives, each its name, type and bytes
+        let mut attachments = Vec::new();
+        if let Some((_, V::List(items))) = parts
+            .iter()
+            .find(|(n, _)| n.as_deref() == Some("attachments"))
+        {
+            for it in items.iter() {
+                let V::Tuple(f) = it else {
+                    return Err(
+                        "an attachment is a document: `attachments=[render(InvoicePdf(inv))]`"
+                            .into(),
+                    );
+                };
+                let field = |k: &str| {
+                    f.iter()
+                        .find(|(n, _)| n.as_deref() == Some(k))
+                        .and_then(|(_, v)| match v {
+                            V::Text(t) => Some(t.to_string()),
+                            _ => None,
+                        })
+                };
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(field("content").unwrap_or_default())
+                    .map_err(|_| {
+                        "an attachment is a document: `attachments=[render(InvoicePdf(inv))]`"
+                            .to_string()
+                    })?;
+                attachments.push((
+                    field("name").unwrap_or_else(|| "document".into()),
+                    field("type").unwrap_or_else(|| "application/octet-stream".into()),
+                    bytes,
+                ));
+            }
+        }
         return Ok(Built::Email {
             to: get("to").ok_or("`email(…)` without `to`")?,
             subject: get("subject").unwrap_or_default(),
             body: get("body").unwrap_or_default(),
             html: get("html"),
+            attachments,
         });
     }
     Ok(Built::Http {
@@ -766,17 +813,30 @@ pub fn plan(
                         .ok_or_else(|| format!("the event has no `{n}`: an email needs it"))
                 };
                 // what its block built, or the event's `to`, `subject` and `body`
-                let (to, subject, body, html) = match &built {
+                let (to, subject, body, html, attachments) = match &built {
                     Some(Built::Email {
                         to,
                         subject,
                         body,
                         html,
-                    }) => (to.clone(), subject.clone(), body.clone(), html.clone()),
+                        attachments,
+                    }) => (
+                        to.clone(),
+                        subject.clone(),
+                        body.clone(),
+                        html.clone(),
+                        attachments.clone(),
+                    ),
                     Some(Built::Http { .. }) | Some(Built::Put { .. }) => {
                         return Err("only an email goes through an SMTP connection".into())
                     }
-                    None => (field("to")?, field("subject")?, field("body")?, None),
+                    None => (
+                        field("to")?,
+                        field("subject")?,
+                        field("body")?,
+                        None,
+                        Vec::new(),
+                    ),
                 };
                 let url = setting(url)?;
                 Ok(Send::Smtp {
@@ -788,6 +848,7 @@ pub fn plan(
                     subject,
                     body,
                     html,
+                    attachments,
                 })
             }
             // a file, a row: a job for whoever runs the connection (the server, an agent)
@@ -1370,6 +1431,7 @@ pub async fn run(
             subject,
             body,
             html,
+            attachments,
             plain,
         } => {
             smtp(
@@ -1380,6 +1442,7 @@ pub async fn run(
                 subject,
                 body,
                 html.as_deref(),
+                attachments,
                 *plain,
                 public_only,
                 &mut seen,
@@ -1649,6 +1712,7 @@ async fn smtp(
     subject: &str,
     body: &str,
     html: Option<&str>,
+    attachments: &[(String, String, Vec<u8>)],
     plain: bool,
     public_only: bool,
     seen: &mut Attempt,
@@ -1678,14 +1742,32 @@ async fn smtp(
             .parse()
             .map_err(|e| Failure::Never(format!("the address {to}: {e}")))?)
         .subject(subject);
-    let message = match html {
-        None => message
-            .header(lettre::message::header::ContentType::TEXT_PLAIN)
-            .body(body.to_string()),
-        Some(h) => message.multipart(lettre::message::MultiPart::alternative_plain_html(
-            body.to_string(),
-            h.to_string(),
-        )),
+    use lettre::message::{header::ContentType, Attachment, MultiPart, SinglePart};
+    let message = if attachments.is_empty() {
+        match html {
+            None => message
+                .header(ContentType::TEXT_PLAIN)
+                .body(body.to_string()),
+            Some(h) => message.multipart(MultiPart::alternative_plain_html(
+                body.to_string(),
+                h.to_string(),
+            )),
+        }
+    } else {
+        // the text (and HTML), then each document attached
+        let mut mixed = match html {
+            None => MultiPart::mixed().singlepart(SinglePart::plain(body.to_string())),
+            Some(h) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(
+                body.to_string(),
+                h.to_string(),
+            )),
+        };
+        for (name, ctype, bytes) in attachments {
+            let ct = ContentType::parse(ctype)
+                .unwrap_or(ContentType::parse("application/octet-stream").expect("a type"));
+            mixed = mixed.singlepart(Attachment::new(name.clone()).body(bytes.clone(), ct));
+        }
+        message.multipart(mixed)
     }
     .map_err(|e| Failure::Never(format!("the email: {e}")))?;
     // connect to an address checked here, with the certificate checked for the name

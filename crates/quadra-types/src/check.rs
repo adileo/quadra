@@ -3378,6 +3378,8 @@ impl<'m> Checker<'m> {
                             .is_some_and(|e| e.format.as_deref() == Some("json")),
                         T::Ent(r) => self.m.entity(r).is_some_and(|e| e.format.is_some()),
                         T::Text(_) | T::Unknown => n == "write",
+                        // a document rendered: its bytes
+                        T::Tuple(_) => n == "write",
                         // the rows of a file, written in the encoding of their record
                         T::Coll {
                             elem, set: false, ..
@@ -3412,9 +3414,19 @@ impl<'m> Checker<'m> {
                                 _ => false,
                             }
                         }
+                        // documents attached to an email: `attachments=[render(InvoicePdf(inv))]`
+                        ("email", Some("attachments")) => match t.unopt() {
+                            T::Coll { elem, .. } => matches!(&**elem, T::Tuple(_) | T::Unknown),
+                            T::Unknown => true,
+                            _ => false,
+                        },
                         _ => matches!(t.unopt(), T::Text(_) | T::Unknown),
                     };
                     if !ok {
+                        if a.name.as_deref() == Some("attachments") {
+                            self.error(a.value.span, "`attachments` is a list of documents: `attachments=[render(InvoicePdf(inv))]`");
+                            continue;
+                        }
                         self.error(a.value.span, format!("`{n}(…)`: the body is a record `from json` or `from xml`, or text; the others are text"));
                     }
                 }

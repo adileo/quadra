@@ -106,6 +106,24 @@ impl<'m> Interp<'m> {
         }
         if n == "write" {
             let (body, ctype) = match get("content", Some(1)) {
+                // a document rendered (`render(…)`): its bytes, a character per byte
+                V::Tuple(f) if f.iter().any(|(k, _)| k.as_deref() == Some("content")) => {
+                    use base64::Engine as _;
+                    let field = |k: &str| {
+                        f.iter()
+                            .find(|(n, _)| n.as_deref() == Some(k))
+                            .map(|(_, v)| match v {
+                                V::Text(t) => t.to_string(),
+                                other => other.to_string(),
+                            })
+                            .unwrap_or_default()
+                    };
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(field("content"))
+                        .or_else(|_| fail("the document's bytes are not readable"))?;
+                    out.push((Some("encoding".into()), text("bytes")));
+                    (bytes.iter().map(|b| *b as char).collect(), field("type"))
+                }
                 rec @ V::Rec { .. } => {
                     let (body, ctype) = crate::formats::render(self.m, &rec).or_else(fail)?;
                     (body, ctype.to_string())
@@ -135,7 +153,7 @@ impl<'m> Interp<'m> {
         }
         if n == "email" {
             out.push((Some("method".into()), text("EMAIL")));
-            for k in ["to", "subject", "body", "html"] {
+            for k in ["to", "subject", "body", "html", "attachments"] {
                 out.push((Some(k.into()), get(k, None)));
             }
         } else {
