@@ -567,6 +567,23 @@ marking it, it sends it again, so receivers should ignore an `id` they have alre
 An integration may also read the table `_quadra_outbox` directly
 ([Storage](/reference/storage)).
 
+## On-premise agents: `quadra agent`
+
+```bash
+quadra agent run --server https://shop.quadra.run --code K7QD-9XMP-2RTA   # the first time
+quadra agent run                                                       # afterwards, in the same folder
+```
+
+| Command | What it does |
+|---|---|
+| `agent run [--server URL --code CODE] [--config FILE] [--concurrency N]` | runs the agent: the first time it registers with the one-time code made in the studio and keeps the server and its key in `quadra-agent.toml` (or `--config`); then it waits for jobs, runs them (4 at once) and sends back what came of them. The values of the variables come from its environment and the `.env` next to the config. It stops when it is revoked |
+| `agent add <name> [path] [--url URL]` | a one-time code for an agent, valid an hour (self-hosting; in the cloud, the studio's Integrations → Agents) |
+| `agent list [path] [--url URL]` | the agents: registered, waiting for their code, revoked; version and last seen |
+| `agent revoke <name> [path] [--url URL]` | revokes an agent: it receives nothing more within 5 s |
+| `agent upgrade` | `quadra upgrade`: the latest release |
+
+See [On-premise agents](/reference/connections#on-premise-agents).
+
 ## Benchmarks: `quadra bench`
 
 ```bash

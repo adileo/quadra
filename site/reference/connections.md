@@ -966,8 +966,59 @@ quadra cloud env pull > .env                        # the values themselves: an 
 | Applied | at the app's next start: a running app restarts within seconds |
 | Production | a deploy fails while a variable without a default has no value: `✗ a variable is not set: SHOP_TOKEN (declared in quadra.toml, [vars], without a default)` |
 | Previews and forks | they copy production's data but never its values, and they deliver no event: their events stay in the outbox, so a copy of production never sends with production's connections |
-| Egress | connections reach public addresses only |
+| Egress | connections reach public addresses only: what is in another network goes through an [agent](#on-premise-agents) |
 | Who | people change and read values; a project's token (CI) cannot |
+
+## On-premise agents
+
+A database, an SFTP server or a cash register in a company's network is behind its
+firewall: Quadra cannot reach it, and the company does not want to open a port. An **agent**
+is a program installed in that network (`quadra agent`, the same binary as `quadra`, on Linux,
+Windows or macOS) that opens connections **only outwards**, to the app, takes the jobs of the
+connections it runs, and sends back what came of them.
+
+```toml
+[connections.erp]
+kind = "postgres"
+url = "postgres://erp.lan:5432/gestionale"   # an address of that network
+user = "quadra"
+password = { var = "ERP_PASSWORD" }
+location = "agent:milano"                    # the agent `milano` runs it
+```
+
+A connection of any kind runs on an agent with `location = "agent:<name>"`: a database, files
+over SFTP or FTP, a mailbox, an HTTP service of the network. The app plans the jobs (a pull
+due, an event to deliver) as for any connection; the agent runs them.
+
+**Its credentials stay with the agent.** The job carries the connection as declared in
+quadra.toml, never the values of its variables: the agent reads them from its own environment
+(and the `.env` next to its config). A variable used only by connections that agents run is not
+needed where the app runs (`quadra cloud env set` is not asked for it).
+
+### Install and register
+
+In the studio, **Integrations → Agents → Add an agent** (an admin) gives a one-time code, valid
+for an hour. On a machine of that network:
+
+```bash
+quadra agent run --server https://shop.quadra.run --code K7QD-9XMP-2RTA
+```
+
+The agent registers with the code and keeps its key in `quadra-agent.toml` in the folder it
+runs in, readable by its user only; the code cannot be used again. Then `quadra agent run` in
+that folder, as a service of the system (systemd, a Windows service, launchd), whenever the
+machine starts. Several agents for one project (one per site), each with its name.
+
+| Rule | Detail |
+|---|---|
+| Connections | only outwards, HTTPS to the app: it asks for its jobs (`GET /v1/agent/jobs`, held open up to 20 s) and sends back what came of them |
+| Kept | only the SHA-256 of the code and of the key, never them |
+| Status | the studio shows each agent connected or not, its version and when it was last seen |
+| Not connected | a job waits a little for it (45 s), then fails as a connection that does not answer would: tried again later |
+| Revoked | **Revoke** in the studio (or `quadra agent revoke <name>`): it receives nothing more within 5 s, its key no longer valid; registering the name again needs a new code |
+| Quadra Cloud | an app asleep is not woken by its agent asking for jobs: it wakes when a pull or a delivery falls due, and the agent gets the job at its next request (within 20 s) |
+| Upgrade | `quadra agent upgrade` (the latest release of `quadra`) |
+| ODBC | the drivers of ODBC (DB2 for i, the AS/400) are installed where the agent runs, not in the cloud |
 
 ## In tests
 
