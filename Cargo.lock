@@ -5242,6 +5242,7 @@ name = "quadra-store"
 version = "0.10.0"
 dependencies = [
  "chrono",
+ "ed25519-dalek 2.2.0",
  "getrandom 0.4.3",
  "postgres",
  "quadra-analysis",

@@ -781,6 +781,8 @@ struct State {
     seq: i64,
     outbox: i64,
     prev_hash: String,
+    /// the public key signing the commits (crate::signing), read when the sequencer starts
+    signing: Option<String>,
     next_id: u64,
     /// the last id given to an engine
     ids_given: u64,
@@ -839,6 +841,7 @@ impl State {
             seq: 0,
             outbox: 0,
             prev_hash: "0".repeat(64),
+            signing: None,
             next_id: 0,
             ids_given: 0,
             batch: 0,
@@ -944,6 +947,7 @@ impl State {
         self.acked = written;
         self.seq = num(&at(1));
         self.prev_hash = at(2).unwrap_or_else(|| "0".repeat(64));
+        self.signing = crate::signing::active(&mut self.conn)?;
         self.outbox = num(&at(3));
         self.next_id = at(4)
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -1756,9 +1760,11 @@ impl State {
                     h.entry(e);
                 }
                 let hash = h.finish();
+                let signature =
+                    crate::signing::sign_commit(&self.signing, &hash).map_err(Failure::Db)?;
                 let row = (
-                    "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)".to_string(),
-                    vec![Sql::Int(*tx as i64), Sql::Text(p.at.clone()), p.user.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null), Sql::Text(p.cause.clone()), Sql::Text(prev.clone()), Sql::Text(hash.clone())],
+                    "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\", \"signature\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text, ?text)".to_string(),
+                    vec![Sql::Int(*tx as i64), Sql::Text(p.at.clone()), p.user.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null), Sql::Text(p.cause.clone()), Sql::Text(prev.clone()), Sql::Text(hash.clone()), signature],
                 );
                 self.conn.exec(&row.0, &row.1).map_err(Failure::Db)?;
                 executed.push(row);

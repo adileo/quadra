@@ -22,7 +22,9 @@ use std::rc::Rc;
 
 const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_meta\" (\"key\" TEXT PRIMARY KEY, \"value\" TEXT NOT NULL)",
-    "CREATE TABLE \"_quadra_commits\" (\"tx\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"user_id\" BIGINT, \"cause\" TEXT NOT NULL, \"prev_hash\" TEXT NOT NULL, \"hash\" TEXT NOT NULL)",
+    "CREATE TABLE \"_quadra_commits\" (\"tx\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"user_id\" BIGINT, \"cause\" TEXT NOT NULL, \"prev_hash\" TEXT NOT NULL, \"hash\" TEXT NOT NULL, \"signature\" TEXT)",
+    // the keys that sign the commits (crate::signing), each set by a commit of its own
+    "CREATE TABLE \"_quadra_keys\" (\"tx\" BIGINT PRIMARY KEY, \"public\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_records\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"created_tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"frozen_tx\" BIGINT, \"cause\" TEXT NOT NULL, \"warnings\" TEXT NOT NULL, \"last_tx\" BIGINT NOT NULL DEFAULT 0, \"version_tx\" BIGINT NOT NULL DEFAULT 0, \"kinds\" TEXT)",
     // each value with its salt; the commit hash covers `sha256(salt | value)` (`value_digest`):
     // an erased value loses its value and salt and keeps that digest
@@ -208,6 +210,8 @@ pub struct Database {
     /// the salts of the values are derived from their position instead of random, so the same
     /// tests give the same chain byte for byte (`seed_salts`, read from `_quadra_meta` once)
     seeded_salts: Option<bool>,
+    /// the public key signing its commits, read from `_quadra_meta` once (crate::signing)
+    signing: Option<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -322,6 +326,16 @@ impl Database {
         Ok(())
     }
 
+    /// The public key that signs the database's commits (none: unsigned).
+    pub(crate) fn signing_key(&mut self) -> Result<Option<String>, String> {
+        if let Some(k) = &self.signing {
+            return Ok(k.clone());
+        }
+        let k = crate::signing::active(&mut self.conn)?;
+        self.signing = Some(k.clone());
+        Ok(k)
+    }
+
     pub(crate) fn salts_seeded(&mut self) -> Result<bool, String> {
         if let Some(s) = self.seeded_salts {
             return Ok(s);
@@ -368,6 +382,7 @@ impl Database {
             deferred: None,
             recording: None,
             seeded_salts: None,
+            signing: None,
             delta_ops: Vec::new(),
             url: None,
         }
@@ -399,11 +414,13 @@ impl Database {
             )
             .is_err()
         {
-            return Err("this database was created by an older version of Quadra: its hash \
+            return Err(
+                "this database was created by an older version of Quadra: its hash \
                         chain covers the values themselves, and since version 15 it covers \
                         their digests, so that values can be erased. Start from a new database \
                         (`quadra db init`) and load the data again"
-                .into());
+                    .into(),
+            );
         }
         if self
             .conn
@@ -1543,9 +1560,11 @@ impl Database {
         // signed commit row
         let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
         let hash = commit_hash(&self.prev_hash, tx, &at, c.user, &c.cause, &payload);
+        let key = self.signing_key()?;
+        let signature = crate::signing::sign_commit(&key, &hash)?;
         self.wexec(
-            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)".into(),
-            vec![Sql::Int(tx as i64), Sql::Text(at), c.user.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null), Sql::Text(c.cause.clone()), Sql::Text(self.prev_hash.clone()), Sql::Text(hash.clone())],
+            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\", \"signature\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text, ?text)".into(),
+            vec![Sql::Int(tx as i64), Sql::Text(at), c.user.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null), Sql::Text(c.cause.clone()), Sql::Text(self.prev_hash.clone()), Sql::Text(hash.clone()), signature],
         )?;
         self.flush()?;
         self.prev_hash = hash;
@@ -2271,7 +2290,13 @@ impl Database {
                     self.seq += 1;
                     let value = to_json(v).to_string();
                     let salt = new_salt(self.salts_seeded()?, self.seq);
-                    payload.push(history_entry(json!(r.id), f, Some(&value), Some(&salt), None));
+                    payload.push(history_entry(
+                        json!(r.id),
+                        f,
+                        Some(&value),
+                        Some(&salt),
+                        None,
+                    ));
                     self.conn.exec(
                         "INSERT INTO \"_quadra_history\" (\"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?text)",
                         &[Sql::Int(self.seq), Sql::Int(tx as i64), Sql::Int(r.id as i64), Sql::Text(f.clone()), Sql::Text(value), Sql::Text(salt)],
@@ -2285,12 +2310,78 @@ impl Database {
         self.set_meta("state", &state)?;
         let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
         let hash = commit_hash(&self.prev_hash, tx, &at, c.user, &c.cause, &payload);
+        let key = self.signing_key()?;
+        let signature = crate::signing::sign_commit(&key, &hash)?;
         self.conn.exec(
-            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)",
-            &[Sql::Int(tx as i64), Sql::Text(at), Sql::Null, Sql::Text(c.cause.clone()), Sql::Text(self.prev_hash.clone()), Sql::Text(hash.clone())],
+            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\", \"signature\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text, ?text)",
+            &[Sql::Int(tx as i64), Sql::Text(at), Sql::Null, Sql::Text(c.cause.clone()), Sql::Text(self.prev_hash.clone()), Sql::Text(hash.clone()), signature],
         )?;
         self.prev_hash = hash;
         Ok(())
+    }
+
+    /// Signs the commits from now on with `secret` (an Ed25519 private key, `ed25519:…`), loaded
+    /// in this process: a commit of its own records the new public key (`["k", public]` in its
+    /// hash), signed by the key before it, or by the new key when there was none. Run with the
+    /// project stopped, as migrations are. Returns the transaction and the public key.
+    pub fn set_signing_key(
+        &mut self,
+        secret: &str,
+        time: chrono::NaiveDateTime,
+    ) -> Result<(u64, String), String> {
+        let public = crate::signing::load(secret)?;
+        let old = crate::signing::active(&mut self.conn)?;
+        if old.as_deref() == Some(public.as_str()) {
+            return Err("this key already signs the commits".into());
+        }
+        let by = old.clone().unwrap_or_else(|| public.clone());
+        self.conn.batch("BEGIN")?;
+        let r = (|| -> Result<u64, String> {
+            let head = crate::source::head(&mut self.conn)?;
+            let last = self.conn.query("SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1", &[])?;
+            let prev = last
+                .first()
+                .and_then(|r| r[0].clone())
+                .unwrap_or_else(|| "0".repeat(64));
+            let tx = head + 1;
+            let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+            let cause = format!("signing key {}…", &public[..12]);
+            let hash = commit_hash(&prev, tx, &at, None, &cause, &[json!(["k", public])]);
+            let signature = crate::signing::sign(&by, &hash)?;
+            self.conn.exec(
+                "INSERT INTO \"_quadra_keys\" (\"tx\", \"public\") VALUES (?bigint, ?text)",
+                &[Sql::Int(tx as i64), Sql::Text(public.clone())],
+            )?;
+            self.conn.exec(
+                "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\", \"signature\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text, ?text)",
+                &[Sql::Int(tx as i64), Sql::Text(at), Sql::Null, Sql::Text(cause), Sql::Text(prev), Sql::Text(hash.clone()), Sql::Text(signature)],
+            )?;
+            let state = self.conn.query(
+                "SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'state'",
+                &[],
+            )?;
+            let mut st: J = state
+                .first()
+                .and_then(|r| r[0].as_deref())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| json!({"next_id": 0}));
+            st["tx"] = json!(tx);
+            self.set_meta("state", &st.to_string())?;
+            self.set_meta("signing_key", &public)?;
+            self.prev_hash = hash;
+            Ok(tx)
+        })();
+        match r {
+            Ok(tx) => {
+                self.conn.batch("COMMIT")?;
+                self.signing = Some(Some(public.clone()));
+                Ok((tx, public))
+            }
+            Err(e) => {
+                let _ = self.conn.batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     // ---- verification -----------------------------------------------------------------
@@ -2322,19 +2413,29 @@ impl Database {
         for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), \"entity\", \"old_name\", \"new_name\" FROM \"_quadra_renames\" ORDER BY \"_quadra_renames\".\"seq\"", &[])? {
             by_tx.entry(num(&r[0])).or_default().push(json!(["n", r[1], r[2], r[3]]));
         }
+        let mut keys = crate::signing::Keys::read(&mut self.conn)?;
         let mut prev = "0".repeat(64);
-        for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\", \"prev_hash\", \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\"", &[])? {
+        for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\", \"prev_hash\", \"hash\", \"signature\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\"", &[])? {
             let tx = num(&r[0]);
             if r[4].as_deref() != Some(prev.as_str()) {
                 problems.push(format!("commit {tx}: previous hash does not match the chain"));
             }
             let user = r[2].as_deref().and_then(|u| u.parse().ok());
-            let payload = by_tx.remove(&tx).unwrap_or_default();
+            let mut payload = by_tx.remove(&tx).unwrap_or_default();
+            if let Some(e) = keys.entry(tx) {
+                payload.push(serde_json::from_str(&e).unwrap_or(J::Null));
+            }
             let h = commit_hash(&prev, tx as u64, r[1].as_deref().unwrap_or(""), user, r[3].as_deref().unwrap_or(""), &payload);
             if r[5].as_deref() != Some(h.as_str()) {
                 problems.push(format!("commit {tx}: content does not match its hash (history or ledger rows were altered)"));
             }
+            if let Some(p) = keys.check(tx, r[5].as_deref().unwrap_or(""), r[6].as_deref()) {
+                problems.push(p);
+            }
             prev = r[5].clone().unwrap_or_default();
+        }
+        if let Some(p) = keys.last(crate::signing::expected().as_deref()) {
+            problems.push(p);
         }
         for tx in by_tx.keys() {
             problems.push(format!("writes of transaction {tx} have no commit row"));

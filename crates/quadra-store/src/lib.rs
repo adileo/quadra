@@ -18,6 +18,7 @@ pub mod hints;
 pub mod schema;
 pub mod segments;
 pub mod sequencer;
+pub mod signing;
 pub mod source;
 pub mod sqlq;
 pub mod verify;

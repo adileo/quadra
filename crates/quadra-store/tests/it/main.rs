@@ -8,4 +8,5 @@ mod hints;
 mod import;
 mod limits;
 mod sequencer;
+mod signing;
 mod storage;

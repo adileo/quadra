@@ -177,12 +177,13 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
     for r in conn.query("SELECT CAST(\"tx\" AS TEXT), \"entity\", \"old_name\", \"new_name\" FROM \"_quadra_renames\" ORDER BY \"_quadra_renames\".\"seq\"", &[])? {
         renames.entry(num(&r[0])).or_default().push(json!(["n", r[1], r[2], r[3]]).to_string());
     }
+    let mut keys = crate::signing::Keys::read(conn)?;
     let mut orphans: BTreeSet<i64> = BTreeSet::new();
     let mut prev = "0".repeat(64);
     let mut after = i64::MIN;
     loop {
         let rows = conn.query(
-            "SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\", \"prev_hash\", \"hash\" FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint ORDER BY \"_quadra_commits\".\"tx\" LIMIT 1000",
+            "SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\", \"prev_hash\", \"hash\", \"signature\" FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint ORDER BY \"_quadra_commits\".\"tx\" LIMIT 1000",
             &[Sql::Int(after)],
         )?;
         if rows.is_empty() {
@@ -225,8 +226,14 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
             {
                 h.entry(e);
             }
+            if let Some(e) = keys.entry(tx) {
+                h.entry(&e);
+            }
             if r[5].as_deref() != Some(h.finish().as_str()) {
                 problems.push(format!("commit {tx}: content does not match its hash (history or ledger rows were altered)"));
+            }
+            if let Some(p) = keys.check(tx, r[5].as_deref().unwrap_or(""), r[6].as_deref()) {
+                problems.push(p);
             }
             prev = r[5].clone().unwrap_or_default();
         }
@@ -241,7 +248,28 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
     for tx in orphans {
         problems.push(format!("writes of transaction {tx} have no commit row"));
     }
+    if let Some(p) = keys.last(crate::signing::expected().as_deref()) {
+        problems.push(p);
+    }
     Ok(problems)
+}
+
+/// What `quadra db verify` says besides the problems: the values erased (their digests kept),
+/// the commits signed and the key signing them.
+pub fn facts(url: &str) -> Result<(u64, u64, Option<String>), String> {
+    let mut conn = Conn::open(url)?;
+    let one = |conn: &mut Conn, sql: &str| -> Result<u64, String> {
+        Ok(num(&conn.query(sql, &[])?.first().and_then(|r| r[0].clone())) as u64)
+    };
+    let erased = one(
+        &mut conn,
+        "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_history\" WHERE \"digest\" IS NOT NULL",
+    )?;
+    let signed = one(
+        &mut conn,
+        "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_commits\" WHERE \"signature\" IS NOT NULL",
+    )?;
+    Ok((erased, signed, crate::signing::active(&mut conn)?))
 }
 
 /// Rows of a table checked by one unit of work (a range of ids): the units are spread over

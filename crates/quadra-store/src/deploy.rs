@@ -2056,7 +2056,8 @@ impl<'m> Run<'m> {
                 let value = r[3].clone().unwrap_or_default();
                 seq += 1;
                 let salt = crate::db::new_salt(seeded, seq);
-                let e = crate::db::history_entry(json!(id), &field, Some(&value), Some(&salt), None);
+                let e =
+                    crate::db::history_entry(json!(id), &field, Some(&value), Some(&salt), None);
                 hasher.entry(&e.to_string());
                 out.push(vec![
                     Sql::Int(seq),
@@ -2120,9 +2121,11 @@ impl<'m> Run<'m> {
         let state =
             json!({ "next_id": stored_next.max(reserved).max(next_id), "tx": tx }).to_string();
         conn.exec("INSERT INTO \"_quadra_meta\" (\"key\", \"value\") VALUES ('state', ?text) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\"", &[Sql::Text(state)])?;
+        let key = crate::signing::active(conn)?;
+        let signature = crate::signing::sign_commit(&key, &hash)?;
         conn.exec(
-            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)",
-            &[Sql::Int(tx as i64), Sql::Text(at), Sql::Null, Sql::Text(cause.to_string()), Sql::Text(prev), Sql::Text(hash)],
+            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\", \"signature\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text, ?text)",
+            &[Sql::Int(tx as i64), Sql::Text(at), Sql::Null, Sql::Text(cause.to_string()), Sql::Text(prev), Sql::Text(hash), signature],
         )?;
         Ok(())
     }

@@ -401,6 +401,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--commit-size",
     "--reason",
     "--state",
+    "--key",
 ];
 
 /// The first positional argument (see `positionals`) and the other arguments.
@@ -482,6 +483,11 @@ fn open_project(rest: &[String]) -> Result<(PathBuf, quadra_analysis::Checked, S
         return Err(ExitCode::FAILURE);
     }
     let url = database_url(&root, rest);
+    // the key that signs the project's commits, if any (`quadra db key`)
+    if let Err(e) = quadra_store::signing::load_configured(Some(&root)) {
+        eprintln!("error: {e}");
+        return Err(ExitCode::FAILURE);
+    }
     Ok((root, checked, url))
 }
 
@@ -491,6 +497,92 @@ fn finish(result: Result<(), String>) -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `quadra db key`: the key signing the commits; `init` makes one, `rotate` replaces it.
+fn db_key(
+    root: &std::path::Path,
+    url: &str,
+    model: &quadra_ir::Model,
+    report: &quadra_types::Report,
+    sub: Option<&str>,
+    loaded: Option<String>,
+) -> Result<(), String> {
+    let mut database = quadra_store::Database::open(url, model, report)?;
+    let active = quadra_store::signing::active(&mut database.conn)?;
+    let from_env = std::env::var("QUADRA_SIGNING_KEY").is_ok_and(|v| !v.trim().is_empty());
+    let file = std::env::var_os("QUADRA_SIGNING_KEY_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join(".quadra").join("signing.key"));
+    match sub {
+        None => {
+            let Some(k) = active else {
+                println!("the commits are not signed (`quadra db key init` makes a key)");
+                return Ok(());
+            };
+            println!("public key  {k}");
+            let held = loaded.as_deref() == Some(k.as_str());
+            println!(
+                "private key {}",
+                if held {
+                    if from_env {
+                        "QUADRA_SIGNING_KEY".to_string()
+                    } else {
+                        file.display().to_string()
+                    }
+                } else {
+                    "not here: commits cannot be written (set QUADRA_SIGNING_KEY)".to_string()
+                }
+            );
+            Ok(())
+        }
+        Some(which) => {
+            if which == "init" && active.is_some() {
+                return Err(
+                    "the commits are already signed: `quadra db key rotate` replaces the key"
+                        .into(),
+                );
+            }
+            if which == "rotate" && active.is_none() {
+                return Err(
+                    "the commits are not signed yet: `quadra db key init` makes the first key"
+                        .into(),
+                );
+            }
+            if which == "init" && !from_env && file.exists() {
+                return Err(format!(
+                    "{} exists already: remove it or point QUADRA_SIGNING_KEY_FILE elsewhere",
+                    file.display()
+                ));
+            }
+            let _writer = quadra_store::writer::acquire(url)?;
+            let (secret, _) = quadra_store::signing::generate();
+            let (tx, public) = database.set_signing_key(&secret, now())?;
+            println!("✓ commit {tx}: the commits are signed by the key {public}");
+            if from_env {
+                println!("  the new private key (put it in QUADRA_SIGNING_KEY, in place of the old one):");
+                println!("  {secret}");
+            } else {
+                if let Some(d) = file.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+                }
+                let written = std::fs::write(&file, format!("{secret}\n"));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+                }
+                match written {
+                    Ok(()) => println!("  private key in {} (keep it out of the repository and of the database's backups)", file.display()),
+                    Err(e) => println!("  {}: {e}; the private key, to keep somewhere safe:\n  {secret}", file.display()),
+                }
+            }
+            if which == "rotate" {
+                println!("  the commits before stay verifiable with the old public key, kept in the chain");
+            }
+            Ok(())
         }
     }
 }
@@ -507,6 +599,10 @@ fn db(args: &[String]) -> ExitCode {
     };
     let (fixture_name, rest) = match cmd {
         "fixture" | "import" => take_positional(&args[1..], VALUE_FLAGS),
+        // `db key [init|rotate] [path]`
+        "key" if matches!(args.get(1).map(String::as_str), Some("init" | "rotate")) => {
+            (args.get(1).cloned(), args[2..].to_vec())
+        }
         // `db views export|import <file> [path]`
         "views" => take_positional(args.get(2..).unwrap_or(&[]), VALUE_FLAGS),
         _ => (None, args[1..].to_vec()),
@@ -520,7 +616,13 @@ fn db(args: &[String]) -> ExitCode {
     let report = &checked.report;
     use quadra_store::ops;
     finish((|| {
+        // the key that signs this project's commits, when there is one: commits are signed
+        // with it, and `verify` expects the chain to end with it
+        let loaded = quadra_store::signing::load_configured(Some(&root))?;
+        let expected = flag(rest, "--key").or(loaded.clone());
+        quadra_store::signing::expect(expected);
         match cmd {
+        "key" => db_key(&root, &url, model, report, fixture_name.as_deref(), loaded),
         "init" => {
             let _writer = quadra_store::writer::acquire(&url)?;
             let tables = ops::init(&url, model, report, now())?;
@@ -548,8 +650,15 @@ fn db(args: &[String]) -> ExitCode {
         }
         "verify" => {
             let (problems, records) = ops::verify(&url, model, report, now())?;
+            let (erased, signed, key) = quadra_store::verify::facts(&url)?;
             if problems.is_empty() {
                 println!("✓ hash chain intact, tables match the history ({records} records)");
+                if erased > 0 {
+                    println!("✓ {erased} values erased, their digests kept");
+                }
+                if let Some(k) = key {
+                    println!("✓ {signed} commits signed, the last ones by the key {}…", &k[..12]);
+                }
                 Ok(())
             } else {
                 for p in &problems {
@@ -998,6 +1107,11 @@ fn serve(args: &[String]) -> ExitCode {
         Err(c) => return c,
     };
     let url = database_url(&root, args);
+    // the key that signs the project's commits, if any (`quadra db key`)
+    if let Err(e) = quadra_store::signing::load_configured(Some(&root)) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
     let num = |f: &str, d: u64| flag(args, f).and_then(|v| v.parse().ok()).unwrap_or(d);
     // the variables of quadra.toml, from the environment or `.env`: all of them, or it does
     // not start (a missing credential would only show at the first delivery)

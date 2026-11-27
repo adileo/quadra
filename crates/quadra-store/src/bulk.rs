@@ -2491,10 +2491,12 @@ fn finish_write(
             db.sync_indexes(None, false)?;
         }
         // the commits of the chain
+        let key = db.signing_key()?;
         for (tx, prev, hash) in &hashes {
+            let signature = crate::signing::sign_commit(&key, hash)?;
             db.conn.exec(
-                "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)",
-                &[Sql::Int(*tx as i64), Sql::Text(prep.at.clone()), Sql::Null, Sql::Text(prep.cause_text.clone()), Sql::Text(prev.clone()), Sql::Text(hash.clone())],
+                "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\", \"signature\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text, ?text)",
+                &[Sql::Int(*tx as i64), Sql::Text(prep.at.clone()), Sql::Null, Sql::Text(prep.cause_text.clone()), Sql::Text(prev.clone()), Sql::Text(hash.clone()), signature],
             )?;
         }
         let next_id = mem
