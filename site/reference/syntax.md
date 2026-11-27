@@ -109,8 +109,9 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 | `rename`, `convert`, `backfill`, `verify` | in a migration |
 | `read`, `create`, `edit`, `run`, `all`, `hide`, `show`, `history` | in a permission rule |
 | `extends` | in a fixture |
-| `via`, `path`, `reply`, `retry`, `times`, `backoff`, `expires`, `after`, `unless`, `delay`, `window`, `key`, `ordered`, `latest`, `by` | in an `outbound` (`via`, `path`, `key` in an `inbound` too) |
-| `at` | in a field of a record `from json` (`from` after a record's name is the reserved word) |
+| `via`, `path`, `reply`, `retry`, `times`, `backoff`, `expires`, `after`, `unless`, `delay`, `window`, `key`, `ordered`, `latest`, `by` | in an `outbound` (`via`, `path`, `key` in an `inbound` and an `endpoint` too) |
+| `at`, `format`, `decimals` | in a field of a record `from` a format (`from` after a record's name is the reserved word) |
+| `ns` | at the start of a member of a record `from xml` |
 | `implies` | as a binary operator |
 
 So `key` and `items` (the parts of a group), `to` (in `convert(x, to=EUR)`), or `parent`
@@ -176,7 +177,8 @@ division:
 
 A number followed by one of these words does **not** take it as a unit, so that field
 modifiers can follow numbers: `implies`, `default`, `required`, `unless`, `by`, `per`,
-`except`, `live`, `via`, `through`, `parent`, `unique`, `converges`. For example
+`except`, `live`, `via`, `through`, `parent`, `unique`, `converges`, `at`, `format`,
+`decimals`. For example
 `level: Int where 0..4 default 2`.
 
 An unknown code is an error: `` unknown unit or currency `XYZ` ``.

@@ -524,6 +524,8 @@ impl<'a> Lower<'a> {
             temporary: false,
             load_from: None,
             format: None,
+            format_options: Vec::new(),
+            namespaces: Vec::new(),
             traits: Vec::new(),
             fields: Vec::new(),
             actions: Vec::new(),
@@ -581,7 +583,12 @@ impl<'a> Lower<'a> {
         let name = ast::name_text(item).unwrap_or_default();
         let mut e = self.empty_entity(name, kind, span);
         e.temporary = words.iter().any(|w| w == "temporary");
-        e.format = ast::child(item, FORMAT_CLAUSE).and_then(|c| ast::name_text(&c));
+        if let Some(c) = ast::child(item, FORMAT_CLAUSE) {
+            e.format = ast::name_text(&c);
+            e.format_options = ast::children(&c, FORMAT_OPTION)
+                .map(|o| self.format_option(&o))
+                .collect();
+        }
         if let Some(clause) = ast::child(item, IS_CLAUSE) {
             e.traits = ast::children(&clause, PATH)
                 .map(|p| ast::path_text(&p))
@@ -630,6 +637,14 @@ impl<'a> Lower<'a> {
                         span,
                     });
                 }
+                NAMESPACE => e.namespaces.push(Namespace {
+                    prefix: ast::name_text(&m),
+                    uri: tokens(&m)
+                        .find(|t| t.kind() == STRING)
+                        .map(|t| unquote(t.text()))
+                        .unwrap_or_default(),
+                    span,
+                }),
                 LOAD if extension => {
                     self.model.errors.push((span, "`load from` cannot be used in an `extend`: it belongs in the declaration of a `temporary entity`".to_string()));
                 }
@@ -763,6 +778,8 @@ impl<'a> Lower<'a> {
             through: None,
             per_company: false,
             at: None,
+            pattern: None,
+            decimals: None,
             extension,
             default_override: false,
             span: self.span(m),
@@ -824,7 +841,35 @@ impl<'a> Lower<'a> {
                     .find(|t| t.kind() == STRING)
                     .map(|t| unquote(t.text()))
             }
+            (_, "format") => {
+                f.pattern = tokens(m)
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()))
+            }
+            (_, "decimals") => {
+                // a number too large for one is refused as `u32::MAX` by the checker
+                f.decimals = tokens(m)
+                    .find(|t| t.kind() == NUMBER)
+                    .map(|t| t.text().replace('_', "").parse().unwrap_or(u32::MAX))
+            }
             _ => {}
+        }
+    }
+
+    /// `sep=";"` in `from csv(sep=";")`: its value is a literal (anything else is refused by
+    /// the checker).
+    fn format_option(&mut self, o: &SyntaxNode) -> FormatOption {
+        let name = ast::name_text(o).unwrap_or_default();
+        let value = match exprs(o).first().map(|x| self.expr(x)).map(|x| x.kind) {
+            Some(ExprKind::Lit(Lit::Str(t))) => OptionValue::Text(t),
+            Some(ExprKind::Lit(Lit::Bool(b))) => OptionValue::Bool(b),
+            Some(ExprKind::Lit(Lit::Number(n))) => OptionValue::Number(n),
+            _ => OptionValue::Other,
+        };
+        FormatOption {
+            name,
+            value,
+            span: self.span(o),
         }
     }
 

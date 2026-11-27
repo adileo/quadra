@@ -128,6 +128,8 @@ pub enum SyntaxKind {
     OUTBOUND,
     /// `from json` after a record's name: the external format it is read from and written to
     FORMAT_CLAUSE,
+    /// an option of the format: `sep=";"` in `from csv(sep=";")`
+    FORMAT_OPTION,
     /// a line of policy at the top of an `outbound … as e:` block: `reply ErpAck`
     OUTBOUND_CLAUSE,
     /// `inbound ShopOrder via shop path "/orders" as m: ShopOrderDoc:` and its handler
@@ -137,6 +139,8 @@ pub enum SyntaxKind {
 
     // members
     MEMBER_LIST,
+    /// `ns cbc "urn:…"` in a record `from xml`: a prefix of its paths
+    NAMESPACE,
     IS_CLAUSE,
     FIELD,
     MODIFIER,

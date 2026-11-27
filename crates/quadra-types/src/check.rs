@@ -28,6 +28,9 @@ pub struct Report {
     /// every member of a record named in the code (`o.total`, `o.confirm()`), by the span of
     /// its name: find references and rename in the editor
     pub accesses: Vec<(Span, Node)>,
+    /// the record of the rows of every `rows.csv()` and `rows.fixed()`, by the span of the
+    /// method: the header of an empty list (`Model::row_records`)
+    pub row_records: HashMap<Span, String>,
 }
 
 pub fn analyze_model(model: &Model) -> Report {
@@ -63,6 +66,7 @@ pub fn analyze_model(model: &Model) -> Report {
         writes: c.writes,
         field_types,
         sum_types: c.sum_types,
+        row_records: c.row_records,
         accesses: c.accesses,
     }
 }
@@ -103,6 +107,8 @@ struct Checker<'m> {
     writes: HashMap<Node, Vec<(String, Span)>>,
     sum_types: HashMap<Span, T>,
     accesses: Vec<(Span, Node)>,
+    /// `rows.csv()`, `rows.fixed()` → the record of the rows (`Report::row_records`)
+    row_records: HashMap<Span, String>,
 }
 
 /// The statements that write (an assignment, an `emit`), in a block and the blocks in it.
@@ -163,6 +169,7 @@ impl<'m> Checker<'m> {
             writes: HashMap::new(),
             sum_types: HashMap::new(),
             accesses: Vec::new(),
+            row_records: HashMap::new(),
         };
         c.collect_units();
         c
@@ -1837,47 +1844,184 @@ impl<'m> Checker<'m> {
         T::Tuple(out)
     }
 
-    /// `record X from json:`: a record, a known format, fields of types it can hold; `at` only
-    /// there.
+    /// `record X from json:` (and `from xml`, `from csv(…)`, `from fixed`): a record, a known
+    /// format with known options, fields of types the format can hold, each `at` in the syntax
+    /// of the format; `at`, `format`, `decimals` and `ns` only there.
     fn check_record_format(&mut self, e: &'m Entity) {
+        use quadra_ir::formats::{self, Column, Kind, Step};
         let m = self.m;
-        match &e.format {
-            None => {
-                for f in &e.fields {
-                    if f.at.is_some() {
-                        self.error(f.span, format!("`at` says where a field is in a document: only in a record `from json` (`record {} from json:`)", e.name));
-                    }
-                }
+        let Some(fmt) = e.format.as_deref() else {
+            for f in &e.fields {
+                let what = if f.at.is_some() {
+                    "`at` says where a field is in a document or a file"
+                } else if f.pattern.is_some() {
+                    "`format` says how a value is written in a document or a file"
+                } else if f.decimals.is_some() {
+                    "`decimals` says how a number is written in a document or a file"
+                } else {
+                    continue;
+                };
+                self.error(f.span, format!("{what}: only in a record `from` a format (`record {} from json:`, `from xml`, `from csv`, `from fixed`)", e.name));
             }
-            Some(fmt) => {
-                if e.kind != quadra_ir::EntityKind::Record {
-                    self.error(e.span, format!("only a `record` is read from a format: `record {} from {fmt}:` (an entity has an identity and a history)", e.name));
-                    return;
+            for n in &e.namespaces {
+                self.error(n.span, format!("`ns` declares a prefix of the paths of a record `from xml` (`record {} from xml:`)", e.name));
+            }
+            return;
+        };
+        if e.kind != quadra_ir::EntityKind::Record {
+            self.error(e.span, format!("only a `record` is read from a format: `record {} from {fmt}:` (an entity has an identity and a history)", e.name));
+            return;
+        }
+        if !formats::FORMATS.contains(&fmt) {
+            self.error(
+                e.span,
+                format!("`{fmt}` is not a format Quadra reads (json, xml, csv, fixed)"),
+            );
+            return;
+        }
+        let opts = match formats::options(e) {
+            Ok(o) => o,
+            Err((span, why)) => {
+                self.error(span, why);
+                formats::Options::default()
+            }
+        };
+        // the prefixes of a record `from xml`: its own `ns` lines (`xml:` is always bound)
+        let mut prefixes: HashSet<Option<&str>> = HashSet::new();
+        for n in &e.namespaces {
+            if fmt != "xml" {
+                self.error(n.span, format!("`ns` declares a prefix of the paths of a record `from xml`, not `from {fmt}`"));
+            } else if n.uri.trim().is_empty() {
+                self.error(n.span, "`ns` binds a prefix to the name of a namespace: `ns cbc \"urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2\"`");
+            } else if matches!(n.prefix.as_deref(), Some("xml" | "xmlns")) {
+                self.error(n.span, "`xml` and `xmlns` are prefixes of XML itself");
+            } else if !prefixes.insert(n.prefix.as_deref()) {
+                let which = n
+                    .prefix
+                    .as_deref()
+                    .map_or("the default namespace".to_string(), |p| format!("`{p}`"));
+                self.error(n.span, format!("{which} is declared twice"));
+            }
+        }
+        let declared = |q: &str| match formats::prefix(q) {
+            None | Some("xml") => true,
+            Some(p) => prefixes.contains(&Some(p)),
+        };
+        if let Some(root) = &opts.root {
+            if !declared(root) {
+                let span = e
+                    .format_options
+                    .iter()
+                    .find(|o| o.name == "root")
+                    .map_or(e.span, |o| o.span);
+                self.error(span, format!("`root=\"{root}\"`: the prefix `{}` is not declared (`ns {} \"…\"` in the record)", formats::prefix(root).unwrap_or_default(), formats::prefix(root).unwrap_or_default()));
+            }
+        }
+        let fields = formats::fields(m, e);
+        let columns = formats::columns(&fields, opts.header);
+        let mut seen_columns: HashMap<Column, &str> = HashMap::new();
+        let mut ranges: Vec<((usize, usize), &str)> = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            let Some(ty) = &f.ty else { continue };
+            let here = format!("`{}.{}`", e.name, f.name);
+            let k = match formats::kind(m, ty, fmt) {
+                Ok(k) => Some(k),
+                Err(why) => {
+                    self.error(f.span, format!("{here}: {why}"));
+                    None
                 }
-                if !quadra_ir::formats::FORMATS.contains(&fmt.as_str()) {
-                    self.error(
-                        e.span,
-                        format!("`{fmt}` is not a format Quadra reads (json)"),
-                    );
-                    return;
-                }
-                for f in &e.fields {
+            };
+            // what a single value is: the items of a list
+            let item = k.as_ref().map(|k| match k.unopt() {
+                Kind::List(i) => i.unopt().clone(),
+                k => k.clone(),
+            });
+            match fmt {
+                "json" => {
                     if let Some(p) = &f.at {
                         if p.is_empty() || p.split('.').any(|k| k.is_empty()) {
-                            self.error(
-                                f.span,
-                                format!("`at \"{p}\"`: keys separated by dots (`shipping.zip`)"),
-                            );
+                            self.error(f.span, format!("`at \"{p}\"`: keys separated by dots (`shipping.zip`)"));
                         }
                     }
-                    if f.formula.is_some() {
-                        continue;
-                    }
-                    if let Some(ty) = &f.ty {
-                        if let Err(why) = quadra_ir::formats::kind(m, ty) {
-                            self.error(f.span, format!("`{}.{}`: {why}", e.name, f.name));
+                }
+                "xml" => match formats::xml_path(f) {
+                    Err(why) => self.error(f.span, why),
+                    Ok(steps) => {
+                        for s in &steps {
+                            if let Step::Element(q) | Step::Attribute(q) = s {
+                                if !declared(q) {
+                                    let p = formats::prefix(q).unwrap_or_default();
+                                    self.error(f.span, format!("`at \"{}\"`: the prefix `{p}` is not declared (`ns {p} \"…\"` in `{}`: each record declares the prefixes of its paths)", f.at.as_deref().unwrap_or_default(), e.name));
+                                }
+                            }
+                        }
+                        let attribute = steps.iter().any(|s| matches!(s, Step::Attribute(_)));
+                        let own_text = !steps.iter().any(|s| matches!(s, Step::Element(_)));
+                        match &item {
+                            Some(Kind::Record(_)) if attribute || own_text => self.error(f.span, format!("{here}: a record is an element, not an attribute or the text of this one")),
+                            _ if matches!(k.as_ref().map(|k| k.unopt()), Some(Kind::List(_))) && !steps.iter().any(|s| matches!(s, Step::Element(_))) => self.error(f.span, format!("{here}: a list is repeated elements: `at \"Item\"` or `at \"Item/@id\"`")),
+                            _ => {}
                         }
                     }
+                },
+                "csv" => match &columns[i] {
+                    Err(why) => self.error(f.span, why.clone()),
+                    Ok(c) => {
+                        if let Some(other) = seen_columns.insert(c.clone(), &f.name) {
+                            self.error(f.span, format!("{here}: column {c} is already `{other}`"));
+                        }
+                    }
+                },
+                _ => match f.at.as_deref() {
+                    None => self.error(f.span, format!("{here}: a field of a fixed-width line says its columns: `at \"11..20\"` (from 1, both included)")),
+                    Some(at) => match formats::range(at) {
+                        Err(why) => self.error(f.span, why),
+                        Ok(r) => {
+                            if let Some((o, other)) = ranges.iter().find(|(o, _)| o.0 <= r.1 && r.0 <= o.1) {
+                                self.error(f.span, format!("{here}: columns {}..{} overlap those of `{other}` ({}..{})", r.0, r.1, o.0, o.1));
+                            }
+                            ranges.push((r, &f.name));
+                            if item == Some(Kind::Decimal) && f.decimals.is_none() {
+                                self.error(f.span, format!("{here}: a number with decimals in a fixed-width line says how many of its digits are decimals: `decimals 2` (`0001250` is 12.50)"));
+                            }
+                        }
+                    },
+                },
+            }
+            if let Some(p) = &f.pattern {
+                match &item {
+                    Some(Kind::Date | Kind::DateTime) => {
+                        let bad = chrono::format::StrftimeItems::new(p)
+                            .any(|i| matches!(i, chrono::format::Item::Error));
+                        if bad || p.is_empty() {
+                            self.error(f.span, format!("`format \"{p}\"`: a pattern of dates: `%d/%m/%Y`, `%Y%m%d`, `%d.%m.%Y %H:%M`"));
+                        }
+                    }
+                    Some(Kind::Bool) => {
+                        let ok = p.split_once('/').is_some_and(|(t, f)| {
+                            !t.is_empty() && !f.is_empty() && t != f && !f.contains('/')
+                        });
+                        if !ok {
+                            self.error(f.span, format!("`format \"{p}\"`: the text of true and of false: `format \"S/N\"`, `format \"Y/N\"`"));
+                        }
+                    }
+                    Some(_) => self.error(
+                        f.span,
+                        format!(
+                            "{here}: `format` says how a date, an instant or a boolean is written"
+                        ),
+                    ),
+                    None => {}
+                }
+            }
+            if let Some(d) = f.decimals {
+                if item.is_some() && item != Some(Kind::Decimal) {
+                    self.error(
+                        f.span,
+                        format!("{here}: `decimals` says how a `Decimal` is written"),
+                    );
+                } else if d > 28 {
+                    self.error(f.span, format!("{here}: `decimals {d}`: at most 28"));
                 }
             }
         }
@@ -1950,10 +2094,14 @@ impl<'m> Checker<'m> {
         if let Some(r) = &o.reply {
             if kind != "http" {
                 self.error(o.span, "`reply` reads the answer of an HTTP connection");
-            } else if !self.m.entity(r).is_some_and(|e| e.format.is_some()) {
+            } else if !self
+                .m
+                .entity(r)
+                .is_some_and(|e| matches!(e.format.as_deref(), Some("json" | "xml")))
+            {
                 self.error(
                     o.span,
-                    format!("`reply {r}`: a record `from json`, to read the answer"),
+                    format!("`reply {r}`: a record `from json` or `from xml`, to read the answer"),
                 );
             }
         }
@@ -2717,34 +2865,78 @@ impl<'m> Checker<'m> {
                     }
                 }
                 let inner = bt.unopt().clone();
-                // `ShopOrder.parse(text)` and `order.json()`: records `from json`
-                let formatted =
-                    |m: &Model, r: &str| m.entity(r).is_some_and(|e| e.format.is_some());
+                // records `from` a format: `ShopOrder.parse(text)` and `order.json()`, `x.xml()`;
+                // `PosRow.parse_rows(text)` and `rows.csv()`, `rows.fixed()` for files of rows
+                let format_of = |m: &'m Model, r: &str| -> Option<&'m str> {
+                    m.entity(r).and_then(|e| e.format.as_deref())
+                };
+                let by_rows = |f: &str| matches!(f, "csv" | "fixed");
                 match (&inner, name.as_str()) {
-                    (T::Table(r), "parse") if formatted(self.m, r) => {
+                    (T::Table(r), "parse" | "parse_rows") if format_of(self.m, r).is_some() => {
                         let r = r.clone();
+                        let fmt = format_of(self.m, &r).unwrap_or_default();
+                        let what = quadra_ir::formats::title(fmt);
+                        if by_rows(fmt) && name == "parse" {
+                            self.error(span, format!("{what} is read row by row: `{r}.parse_rows(text)`, a list of `{r}`"));
+                        } else if !by_rows(fmt) && name == "parse_rows" {
+                            self.error(span, format!("{what} is one document: `{r}.parse(text)`"));
+                        }
                         match args {
                             [a] => {
                                 let t = self.infer(&a.value);
                                 if !matches!(t.unopt(), T::Text(_) | T::Unknown) {
                                     self.error(
                                         a.value.span,
-                                        format!("`{r}.parse` reads text: the document"),
+                                        format!("`{r}.{name}` reads text: the document"),
                                     );
                                 }
                             }
                             _ => self.error(
                                 span,
-                                format!("`{r}.parse` takes one argument, the text of the document"),
+                                format!(
+                                    "`{r}.{name}` takes one argument, the text of the document"
+                                ),
                             ),
                         }
-                        return T::Ent(r);
+                        return if by_rows(fmt) {
+                            T::list(T::Ent(r))
+                        } else {
+                            T::Ent(r)
+                        };
                     }
-                    (T::Ent(r), "json") if formatted(self.m, r) => {
+                    (T::Ent(r), "json" | "xml" | "csv" | "fixed")
+                        if format_of(self.m, r).is_some() =>
+                    {
+                        let fmt = format_of(self.m, r).unwrap_or_default();
+                        if by_rows(fmt) {
+                            self.error(span, format!("`{r}` is a row of {}: the file is written from the list of its rows, `rows.{fmt}()`", quadra_ir::formats::title(fmt)));
+                        } else if name != fmt {
+                            self.error(
+                                span,
+                                format!(
+                                    "`{r}` is a record `from {fmt}`: it is written with `{fmt}()`"
+                                ),
+                            );
+                        }
                         if !args.is_empty() {
-                            self.error(span, "`json()` takes no argument");
+                            self.error(span, format!("`{name}()` takes no argument"));
                         }
                         return T::text();
+                    }
+                    (T::Coll { elem, .. }, "csv" | "fixed") => {
+                        if let T::Ent(r) = elem.unopt() {
+                            if let Some(fmt) = format_of(self.m, r) {
+                                if fmt != name {
+                                    self.error(span, format!("`{r}` is a record `from {fmt}`: `{name}()` writes the rows of a record `from {name}`"));
+                                }
+                                if !args.is_empty() {
+                                    self.error(span, format!("`{name}()` takes no argument"));
+                                }
+                                // the header of an empty list: the runtime cannot see its type
+                                self.row_records.insert(callee.span, r.clone());
+                                return T::text();
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -2783,13 +2975,15 @@ impl<'m> Checker<'m> {
                 for a in args {
                     let t = self.infer(&a.value);
                     let ok = match (n, a.name.as_deref()) {
-                        // the body: a record `from json` (sent as JSON) or text
+                        // the body: a record `from json` or `from xml` (sent as such) or text
                         (_, Some("body")) | ("post" | "put" | "patch", None)
                             if args.iter().position(|x| std::ptr::eq(x, a)) == Some(1)
                                 || a.name.as_deref() == Some("body") =>
                         {
                             match t.unopt() {
-                                T::Ent(r) => self.m.entity(r).is_some_and(|e| e.format.is_some()),
+                                T::Ent(r) => self.m.entity(r).is_some_and(|e| {
+                                    matches!(e.format.as_deref(), Some("json" | "xml"))
+                                }),
                                 T::Text(_) | T::Unknown => true,
                                 _ => false,
                             }
@@ -2797,7 +2991,7 @@ impl<'m> Checker<'m> {
                         _ => matches!(t.unopt(), T::Text(_) | T::Unknown),
                     };
                     if !ok {
-                        self.error(a.value.span, format!("`{n}(…)`: the body is a record `from json` or text; the others are text"));
+                        self.error(a.value.span, format!("`{n}(…)`: the body is a record `from json` or `from xml`, or text; the others are text"));
                     }
                 }
                 return T::Unknown;

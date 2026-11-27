@@ -449,6 +449,20 @@
           }
         },
         {
+          "match": "\\b(at|format)\\b(?=\\s*\")|\\b(decimals)\\b(?=\\s*\\d)|^\\s*(ns)\\b(?=\\s+(\\w+\\s+)?\")",
+          "captures": {
+            "1": {
+              "name": "keyword.other.modifier.quadra"
+            },
+            "2": {
+              "name": "keyword.other.modifier.quadra"
+            },
+            "3": {
+              "name": "keyword.other.modifier.quadra"
+            }
+          }
+        },
+        {
           "match": "\\b(parent|unique)\\b(?=\\s*(#.*)?$)",
           "captures": {
             "1": {

@@ -104,8 +104,8 @@ test "the compiler refuses type errors":
 
 The block is not run. Its source is added to a copy of the project and checked:
 
-- a block that starts with `extend`, `fn`, `patch` or `entity` is checked as a top-level
-  declaration;
+- a block that starts with `extend`, `fn`, `patch`, `entity` or `record` is checked as a
+  top-level declaration;
 - anything else is checked as the body of a function.
 
 The test passes if one of the errors contains the text. Otherwise:

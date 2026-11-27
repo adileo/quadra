@@ -48,6 +48,7 @@ pub fn check(project: &Project) -> Checked {
     let mut model = quadra_ir::lower(project, &analysis);
     let report = quadra_types::analyze_model(&model);
     model.zeros = zeros(&model, &report);
+    model.row_records = report.row_records.clone();
     diagnostics.extend(report.diagnostics.iter().cloned());
     diagnostics.extend(cycles(&model, &report));
     // warnings about a declaration point at its first line

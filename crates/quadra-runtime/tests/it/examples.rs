@@ -36,6 +36,12 @@ fn extended_example_tests_pass() {
     run("extended");
 }
 
+/// Records read from and written to CSV, XML and fixed-width files.
+#[test]
+fn formats_example_tests_pass() {
+    run("formats");
+}
+
 /// `security.qd`: a Salesperson does not see the product cost; a SalesManager (a Salesperson
 /// whose role says `show Product.cost`) does, and still does not see the standard cost.
 #[test]

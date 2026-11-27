@@ -629,8 +629,16 @@ pub struct Field {
     pub via: Option<String>,
     pub through: Option<String>,
     pub per_company: bool,
-    /// `at "a.b"`: where the field is in the document of a `record … from json`
+    /// `at "…"`: where the field is in the document or the row of a record `from` a format
+    /// (a path of keys in JSON, a path of elements in XML, a column in CSV, columns in a
+    /// fixed-width line)
     pub at: Option<String>,
+    /// `format "%d/%m/%Y"`: how a date, an instant or a boolean (`format "S/N"`) is written in
+    /// the format of the record
+    pub pattern: Option<String>,
+    /// `decimals 2`: the decimals a `Decimal` is written with (in a fixed-width line, the
+    /// last digits of the number, without a separator)
+    pub decimals: Option<u32>,
     /// Declared in an `extend` block of another module.
     pub extension: bool,
     /// Redefines only the default of an inherited (trait) field.
@@ -713,6 +721,32 @@ pub struct Post {
     pub span: Span,
 }
 
+/// An option of a record's format: `sep=";"` in `from csv(sep=";")`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FormatOption {
+    pub name: String,
+    pub value: OptionValue,
+    pub span: Span,
+}
+
+/// The value of a format option: a literal.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum OptionValue {
+    Text(String),
+    Bool(bool),
+    Number(String),
+    /// anything else (an expression): refused by the checker
+    Other,
+}
+
+/// `ns cbc "urn:…"` in a record `from xml` (`prefix` none: the default namespace).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Namespace {
+    pub prefix: Option<String>,
+    pub uri: String,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Entity {
     pub name: String,
@@ -721,9 +755,15 @@ pub struct Entity {
     pub temporary: bool,
     /// `load from "file.csv"` (temporary entities used by migrations)
     pub load_from: Option<String>,
-    /// `record X from json:`: the external format it is read from (`X.parse(text)`) and written
-    /// to (`x.json()`)
+    /// `record X from json:`: the external format it is read from (`X.parse(text)`,
+    /// `X.parse_rows(text)`) and written to (`x.json()`, `x.xml()`, `rows.csv()`,
+    /// `rows.fixed()`); see `formats`
     pub format: Option<String>,
+    /// `from csv(sep=";", header=false)`: the options of the format, as written
+    pub format_options: Vec<FormatOption>,
+    /// `ns cbc "urn:…"` lines of a record `from xml`: the prefixes its paths use (no prefix:
+    /// the default namespace)
+    pub namespaces: Vec<Namespace>,
     pub traits: Vec<String>,
     pub fields: Vec<Field>,
     pub actions: Vec<Action>,
@@ -972,6 +1012,10 @@ pub struct Model {
     /// default or formula) or of a `sum(…)` call → the zero it stands for.
     #[serde(skip)]
     pub zeros: HashMap<Span, Zero>,
+    /// The record of the rows written by `rows.csv()` and `rows.fixed()`, filled by the type
+    /// checker by the span of the method's name: the header of an empty list.
+    #[serde(skip)]
+    pub row_records: HashMap<Span, String>,
     /// Errors found while lowering (an `extend` that cannot be merged), reported by the
     /// type checker with the others.
     #[serde(skip)]

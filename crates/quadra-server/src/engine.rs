@@ -1539,8 +1539,8 @@ impl Engine {
         if let Some(e) = &error {
             parts.push((Some("error".to_string()), text(e)));
         }
-        // `reply T`: the answer read as a record `from json` (none if it does not fit, said in
-        // the log)
+        // `reply T`: the answer read as a record `from json` or `from xml` (none if it does not
+        // fit, said in the log)
         let mut reply_error = None;
         if let Some(t) = model
             .outbounds
@@ -1548,7 +1548,7 @@ impl Engine {
             .find(|o| o.event == event)
             .and_then(|o| o.reply.clone())
         {
-            let reply = match answer.map(|a| quadra_runtime::formats::parse_json(model, &t, a)) {
+            let reply = match answer.map(|a| quadra_runtime::formats::parse(model, &t, a)) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => {
                     reply_error = Some(format!("the answer is not a {t}: {e}"));
