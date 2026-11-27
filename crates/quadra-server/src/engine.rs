@@ -639,6 +639,10 @@ pub struct Engine {
     sequencer: Option<quadra_store::Sequencer>,
     /// when the log of the integrations was last pruned (`[integrations] log_days`)
     pruned_at: Option<std::time::Instant>,
+    /// the causes of the last commits before this engine handled its first message: only a
+    /// message among them can have been handled without being marked (the server stopped in
+    /// between), so only those are looked for in the whole log
+    inbox_recent: Option<Vec<String>>,
     /// the analysis of each model in use (the project's, an app's), shared by the requests: kept
     /// with the model it is of, so that it never outlives it
     statics: Vec<(Rc<Checked>, Rc<quadra_runtime::Statics>)>,
@@ -786,6 +790,7 @@ impl Engine {
             snapshot: false,
             sequencer: None,
             pruned_at: None,
+            inbox_recent: None,
             statics: Vec::new(),
             tickets: Rc::new(RefCell::new(Vec::new())),
             unlogged: false,
@@ -2030,6 +2035,21 @@ impl Engine {
                     continue;
                 }
             }
+            let mark = format!("inbound:{}#{} ", m.inbound, m.id);
+            if self.inbox_recent.is_none() {
+                let recent = self
+                    .conn
+                    .query(
+                        "SELECT \"cause\" FROM \"_quadra_commits\" ORDER BY \"tx\" DESC LIMIT 1000",
+                        &[],
+                    )
+                    .unwrap_or_default();
+                self.inbox_recent = Some(recent.into_iter().filter_map(|r| r[0].clone()).collect());
+            }
+            let maybe_handled = self
+                .inbox_recent
+                .as_ref()
+                .is_some_and(|r| r.iter().any(|c| c.contains(&mark)));
             let result: Result<u64, String> = (|| {
                 let i = model
                     .inbounds
@@ -2039,10 +2059,12 @@ impl Engine {
                         format!("no inbound `{}` in the code deployed now", m.inbound)
                     })?;
                 // handled already (the server stopped before writing it): done
-                if let Some(tx) =
-                    quadra_store::deliveries::handled_by(&mut self.conn, &i.name, m.id)?
-                {
-                    return Ok(tx);
+                if maybe_handled {
+                    if let Some(tx) =
+                        quadra_store::deliveries::handled_by(&mut self.conn, &i.name, m.id)?
+                    {
+                        return Ok(tx);
+                    }
                 }
                 let bytes = crate::transport::body_bytes(&m.body, m.marks.base64);
                 let doc = quadra_runtime::formats::read_message(model, &i.ty, &bytes)
@@ -2107,7 +2129,7 @@ impl Engine {
             }
             let rejected = result.as_ref().err().cloned();
             let inbound_name = name.clone();
-            let _ = self.side(move |c| {
+            let marked = self.side(move |c| {
                 quadra_store::deliveries::handled(
                     c,
                     id,
@@ -2116,6 +2138,12 @@ impl Engine {
                     result.as_ref().map(|t| *t).map_err(|e| e.as_str()),
                 )
             });
+            // not marked: looked for in the log before it is handled again
+            if marked.is_err() {
+                if let Some(r) = self.inbox_recent.as_mut() {
+                    r.push(mark);
+                }
+            }
             // `on OrderIn rejected as r:`: someone to tell, a task to open
             if let Some(error) = rejected {
                 self.rejected(
