@@ -39,7 +39,7 @@ const STATE_SECONDS: i64 = 600;
 
 /// The key that seals the tokens, from the server's environment.
 pub fn key() -> Result<[u8; 32], String> {
-    let raw = std::env::var(KEY_VAR).map_err(|_| {
+    let raw = std::env::var(KEY_VAR).ok().filter(|v| !v.trim().is_empty()).ok_or_else(|| {
         format!("{KEY_VAR} is not set where the server runs: OAuth2 with a user's consent keeps its tokens encrypted with it (32 random bytes in base64: `openssl rand -base64 32`)")
     })?;
     parse_key(&raw)
