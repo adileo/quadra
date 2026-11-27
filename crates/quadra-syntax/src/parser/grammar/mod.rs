@@ -438,9 +438,9 @@ fn reaction(p: &mut Parser) {
             }
             "created" | "changes" | "deleted" => p.bump_ctx(),
             // the outcome of an event's delivery: `on OrderShipped delivered as d:`
-            "delivered" | "failed" => p.bump_ctx(),
+            "delivered" | "failed" | "expired" | "skipped" | "rejected" => p.bump_ctx(),
             _ => p.error(
-                "expected `enters`, `becomes`, `created` or `changes` (or, for an event, `delivered` or `failed`)",
+                "expected `enters`, `becomes`, `created` or `changes` (or, for an event, `delivered`, `failed`, `expired` or `skipped`; for an inbound, `rejected`)",
             ),
         }
     }

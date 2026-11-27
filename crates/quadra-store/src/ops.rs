@@ -902,15 +902,10 @@ pub fn outcome_reactions(
     time: NaiveDateTime,
     sequencer: Option<&crate::Sequencer>,
     event: &str,
-    delivered: bool,
+    want: quadra_ir::Trigger,
     outcome: quadra_runtime::V,
     cause: String,
 ) -> Result<usize, String> {
-    let want = if delivered {
-        quadra_ir::Trigger::Delivered
-    } else {
-        quadra_ir::Trigger::Failed
-    };
     if !model
         .reactions
         .iter()
@@ -937,7 +932,7 @@ pub fn outcome_reactions(
     });
     interp
         .with_cause(cause, |i| {
-            i.transaction(|i| i.run_outcome(event, delivered, &outcome))
+            i.transaction(|i| i.run_outcome_of(event, &want, &outcome))
         })
         .map_err(|e| flow("the reaction", e))
 }

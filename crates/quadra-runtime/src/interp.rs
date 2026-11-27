@@ -4719,6 +4719,9 @@ impl<'m> Interp<'m> {
             Trigger::Changes => format!("on {} changes", r.entity),
             Trigger::Delivered => format!("on {} delivered", r.entity),
             Trigger::Failed => format!("on {} failed", r.entity),
+            Trigger::Expired => format!("on {} expired", r.entity),
+            Trigger::Skipped => format!("on {} skipped", r.entity),
+            Trigger::Rejected => format!("on {} rejected", r.entity),
         };
         self.system += 1;
         let res = self.with_cause(desc, |s| {
@@ -4742,6 +4745,13 @@ impl<'m> Interp<'m> {
         } else {
             Trigger::Failed
         };
+        self.run_outcome_of(event, &want, outcome)
+    }
+
+    /// The reactions `on <name> <want> as x:` (an outcome: delivered, failed, expired, skipped,
+    /// rejected), each with `outcome`. Returns how many ran.
+    pub fn run_outcome_of(&mut self, event: &str, want: &Trigger, outcome: &V) -> R<usize> {
+        let want = want.clone();
         let found: Vec<usize> = self
             .m
             .reactions

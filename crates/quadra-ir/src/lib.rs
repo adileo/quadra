@@ -949,6 +949,27 @@ pub enum Trigger {
     Delivered,
     /// `on Event failed as f:`: its delivery failed for good
     Failed,
+    /// `on Event expired as x:`: not sent, `expires after` passed
+    Expired,
+    /// `on Event skipped as x:`: not sent, its `unless` held
+    Skipped,
+    /// `on OrderIn rejected as r:` (the reaction's `entity` is the inbound): a message it
+    /// received was rejected for good
+    Rejected,
+}
+
+impl Trigger {
+    /// About the outcome of a delivery, or of a message received: not about records.
+    pub fn is_outcome(&self) -> bool {
+        matches!(
+            self,
+            Trigger::Delivered
+                | Trigger::Failed
+                | Trigger::Expired
+                | Trigger::Skipped
+                | Trigger::Rejected
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

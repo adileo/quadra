@@ -484,6 +484,28 @@ never delivered or failed ``. A reaction that fails does not change the outcome 
 got the event, or not): the error goes to the event's log (`quadra outbox log`), as a step
 `reaction`.
 
+An event that is not sent has reactions too: `on OrderPlaced expired as x:` (its `expires
+after` passed) and `on OrderPlaced skipped as x:` (its `unless` held), with `x.event`, `x.at`,
+`x.attempts` and `x.reason` (`expired: not sent within 1 day of its emit`, `unless
+e.order.cancelled`), in a transaction with the cause `outbound:OrderPlaced#41 expired`.
+
+A message rejected for good, as it came (not its record) or by its code (once `retry for` has
+passed), runs `on OrderIn rejected as r:`: the place to tell someone, or to open a task for the
+person who fixes it.
+
+```quadra
+on OrderIn rejected as r:
+    let t = Task(title=f"Shop order not taken: {r.error}", detail=r.message, team=sales)
+```
+
+| In `r` | Value |
+|---|---|
+| `r.message` | the body, as it came |
+| `r.key` | its key (else its hash) |
+| `r.at` | when it came |
+| `r.attempts` | the times its code ran |
+| `r.error` | why it was rejected |
+
 ### Attempts and failures
 
 | Answer | What happens |

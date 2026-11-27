@@ -313,9 +313,19 @@ impl<'m> Checker<'m> {
                 Trigger::Changes => format!("on {} changes", r.entity),
                 Trigger::Delivered => format!("on {} delivered", r.entity),
                 Trigger::Failed => format!("on {} failed", r.entity),
+                Trigger::Expired => format!("on {} expired", r.entity),
+                Trigger::Skipped => format!("on {} skipped", r.entity),
+                Trigger::Rejected => format!("on {} rejected", r.entity),
             };
             self.push();
-            if matches!(r.trigger, Trigger::Delivered | Trigger::Failed) {
+            if r.trigger == Trigger::Rejected {
+                let t = self.rejected_type(r);
+                self.bind(&r.binding, t);
+                self.stmts(&r.body);
+                self.pop();
+                continue;
+            }
+            if r.trigger.is_outcome() {
                 let t = self.outcome_type(r);
                 self.bind(&r.binding, t);
                 self.stmts(&r.body);
@@ -1886,6 +1896,27 @@ impl<'m> Checker<'m> {
         }
     }
 
+    /// The value `on OrderIn rejected as r:` gets: `r.message` (the body as it came), `r.key`,
+    /// `r.at` (when it came), `r.attempts` and `r.error`.
+    fn rejected_type(&mut self, r: &quadra_ir::Reaction) -> T {
+        if !self.m.inbounds.iter().any(|i| i.name == r.entity) {
+            self.error(
+                r.span,
+                format!(
+                    "no inbound `{}`: `on … rejected` is about the messages of an inbound",
+                    r.entity
+                ),
+            );
+        }
+        T::Tuple(vec![
+            (Some("message".to_string()), T::text()),
+            (Some("key".to_string()), T::text()),
+            (Some("at".to_string()), T::DateTime),
+            (Some("attempts".to_string()), T::Num(Num::Int)),
+            (Some("error".to_string()), T::text()),
+        ])
+    }
+
     /// The value an outcome reaction gets (`on OrderShipped delivered as d:`): `d.event` (its
     /// fields), `d.at`, `d.attempts`, `d.status` (the HTTP status or SMTP reply), `d.response`
     /// (the beginning of the answer) and, when it failed, `d.error`. The event must have an
@@ -1922,6 +1953,11 @@ impl<'m> Checker<'m> {
         ];
         if r.trigger == Trigger::Failed {
             out.push((Some("error".to_string()), T::text()));
+        }
+        // why it was not sent
+        if matches!(r.trigger, Trigger::Expired | Trigger::Skipped) {
+            out.push((Some("reason".to_string()), T::text()));
+            return T::Tuple(out);
         }
         // `reply T` on the outbound: the answer, read (none when it does not fit)
         if let Some(t) = m

@@ -1968,3 +1968,81 @@ fn an_inbound_retries_keeps_the_order_of_a_key_and_drops_what_is_older() {
     assert!(tx("3") < tx("4"), "{rows:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn what_is_not_sent_and_what_is_rejected_has_reactions_too() {
+    // expired, then skipped: each runs its reaction, with the reason
+    let r = receiver(vec![503]);
+    let dir = temp("not-sent");
+    let code = format!(
+        "{}\non OrderPlaced expired as x:\n    x.event.order.note = f\"expired: {{x.reason}}\"\n\non OrderPlaced skipped as x:\n    x.event.order.note = f\"skipped: {{x.reason}}\"\n",
+        with_policy("expires after 2 seconds\nunless e.order.customer == \"nobody\"\nbackoff 1 seconds .. 1 seconds")
+    );
+    let (cfg, token) = project_with(&dir, r.port, &code);
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    create(port, &token, "X1", "ann", None);
+    create(port, &token, "S1", "nobody", None);
+    until("both notes", || {
+        note_of(&cfg, "X1").is_some() && note_of(&cfg, "S1").is_some()
+    });
+    assert!(
+        note_of(&cfg, "X1")
+            .unwrap()
+            .starts_with("expired: expired: not sent within 2 s"),
+        "{:?}",
+        note_of(&cfg, "X1")
+    );
+    assert_eq!(
+        note_of(&cfg, "S1").as_deref(),
+        Some("skipped: unless e.order.customer == \"nobody\"")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // a message rejected, as it came or by its code: someone is told
+    let dir = temp("rejected");
+    let (cfg, token) = project_full(
+        &dir,
+        9,
+        &format!("{RECEIVING}\nentity Alert:\n    what: Text\n    message: Text\n\non OrderIn rejected as r:\n    let a = Alert(what=r.error, message=r.message)\n"),
+        "inbound_signature = \"hmac\"\ninbound_secret = { var = \"HOOK_SECRET\" }\n",
+    );
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    call(port, &token, "GET", "/v1/me", None);
+    assert_eq!(send_in(port, "{\"id\": 1003}", Some("s3cret")).0, 202);
+    assert_eq!(
+        send_in(
+            port,
+            "{\"id\": 1004, \"name\": \"#1004\", \"total_price\": \"-5\"}",
+            Some("s3cret")
+        )
+        .0,
+        202
+    );
+    let alerts = || -> Vec<String> {
+        Conn::open(&cfg.url)
+            .unwrap()
+            .query("SELECT \"what\" FROM \"alert\" ORDER BY \"id\"", &[])
+            .unwrap()
+            .into_iter()
+            .map(|r| r[0].clone().unwrap_or_default())
+            .collect()
+    };
+    until("two alerts", || alerts().len() == 2);
+    let a = alerts();
+    assert!(a[0].contains("ShopOrder"), "{a:?}");
+    assert!(a[1].contains("a negative total"), "{a:?}");
+    let causes: Vec<String> = Conn::open(&cfg.url)
+        .unwrap()
+        .query("SELECT \"cause\" FROM \"_quadra_commits\"", &[])
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect();
+    assert!(
+        causes
+            .iter()
+            .any(|c| c.contains("inbound:OrderIn#2 rejected")),
+        "{causes:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

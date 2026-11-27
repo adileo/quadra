@@ -1136,10 +1136,18 @@ impl<'p> Resolver<'p> {
         let segs = ast::path_segments(&path);
         let Some(first) = segs.first() else { return };
         // `on OrderShipped delivered as d:`: the outcome of an event's delivery
-        let outcome = node
+        let words: Vec<String> = node
             .children_with_tokens()
             .filter_map(|t| t.into_token())
-            .any(|t| matches!(t.text(), "delivered" | "failed"));
+            .map(|t| t.text().to_string())
+            .collect();
+        // `on OrderIn rejected as r:`: an inbound, checked by the type checker
+        if words.iter().any(|w| w == "rejected") {
+            return;
+        }
+        let outcome = words
+            .iter()
+            .any(|w| matches!(w.as_str(), "delivered" | "failed" | "expired" | "skipped"));
         if outcome {
             match self
                 .a

@@ -1160,6 +1160,12 @@ impl<'a> Lower<'a> {
             Trigger::Delivered
         } else if words.iter().any(|w| w == "failed") {
             Trigger::Failed
+        } else if words.iter().any(|w| w == "expired") {
+            Trigger::Expired
+        } else if words.iter().any(|w| w == "skipped") {
+            Trigger::Skipped
+        } else if words.iter().any(|w| w == "rejected") {
+            Trigger::Rejected
         } else {
             if words.iter().any(|w| w == "deleted") {
                 self.model.errors.push((

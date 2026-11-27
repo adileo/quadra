@@ -900,9 +900,18 @@ impl Engine {
                         "expired: not sent within {} of its emit",
                         crate::deliver::human(s)
                     );
+                    let reason = why.clone();
                     self.side(move |c| {
                         quadra_store::deliveries::finish(c, d.id, &name, &t, "expired", &why)
                     })?;
+                    self.not_sent(
+                        d.id,
+                        &o.event,
+                        quadra_ir::Trigger::Expired,
+                        &d.fields,
+                        d.attempts,
+                        &reason,
+                    );
                     continue;
                 }
             }
@@ -935,9 +944,18 @@ impl Engine {
                 if matches!(r, Ok(quadra_runtime::V::Bool(true))) {
                     let (name, t) = (o.event.clone(), now_s.clone());
                     let why = format!("unless {}", quadra_ir::print::expr(u));
+                    let reason = why.clone();
                     self.side(move |c| {
                         quadra_store::deliveries::finish(c, d.id, &name, &t, "skipped", &why)
                     })?;
+                    self.not_sent(
+                        d.id,
+                        &o.event,
+                        quadra_ir::Trigger::Skipped,
+                        &d.fields,
+                        d.attempts,
+                        &reason,
+                    );
                     continue;
                 }
             }
@@ -1354,6 +1372,7 @@ impl Engine {
             at.clone(),
             text.to_string(),
         );
+        let not_read = error.clone().map(|e| (key.clone(), e));
         let r = self.side(move |c| {
             quadra_store::deliveries::receive(
                 c,
@@ -1368,6 +1387,10 @@ impl Engine {
             )
         });
         use quadra_store::deliveries::Received;
+        // not its record: rejected as it came (`on OrderIn rejected as r:`)
+        if let (Ok(Received::New(id)), Some((key, e))) = (&r, &not_read) {
+            self.rejected(&i.name, *id, text, key, &at, 0, e, now());
+        }
         match r {
             Ok(Received::New(id)) => (202, json!({ "id": id })),
             Ok(Received::Duplicate(id)) => (200, json!({ "id": id, "duplicate": true })),
@@ -1876,6 +1899,8 @@ impl Engine {
                     result = Err(format!("{e} (tried for {})", crate::deliver::human(for_s)));
                 }
             }
+            let rejected = result.as_ref().err().cloned();
+            let inbound_name = name.clone();
             let _ = self.side(move |c| {
                 quadra_store::deliveries::handled(
                     c,
@@ -1885,8 +1910,145 @@ impl Engine {
                     result.as_ref().map(|t| *t).map_err(|e| e.as_str()),
                 )
             });
+            // `on OrderIn rejected as r:`: someone to tell, a task to open
+            if let Some(error) = rejected {
+                self.rejected(
+                    &inbound_name,
+                    m.id,
+                    &m.body,
+                    &m.key,
+                    &m.received_at,
+                    m.attempts + 1,
+                    &error,
+                    at,
+                );
+            }
         }
         (n, true)
+    }
+
+    /// The reactions to a message rejected for good (`on OrderIn rejected as r:`), in a
+    /// transaction of their own with the cause `inbound:OrderIn#id rejected`.
+    #[allow(clippy::too_many_arguments)]
+    fn rejected(
+        &mut self,
+        inbound: &str,
+        id: u64,
+        body: &str,
+        key: &str,
+        received_at: &str,
+        attempts: u64,
+        error: &str,
+        at: chrono::NaiveDateTime,
+    ) {
+        use quadra_runtime::V;
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return;
+        };
+        let want = quadra_ir::Trigger::Rejected;
+        if !model
+            .reactions
+            .iter()
+            .any(|r| r.entity == inbound && r.trigger == want)
+        {
+            return;
+        }
+        let came =
+            chrono::NaiveDateTime::parse_from_str(received_at, "%Y-%m-%dT%H:%M:%S").unwrap_or(at);
+        let text = |s: &str| V::Text(std::rc::Rc::from(s));
+        let value = V::Tuple(std::rc::Rc::new(vec![
+            (Some("message".to_string()), text(body)),
+            (Some("key".to_string()), text(key)),
+            (Some("at".to_string()), V::DateTime(came)),
+            (Some("attempts".to_string()), V::Int(attempts as i64)),
+            (Some("error".to_string()), text(error)),
+        ]));
+        if let Err(e) = quadra_store::ops::outcome_reactions(
+            &self.url,
+            model,
+            &checked.report,
+            at,
+            self.sequencer.as_ref(),
+            inbound,
+            want,
+            value,
+            format!("inbound:{inbound}#{id} rejected"),
+        ) {
+            eprintln!("inbound {inbound}#{id}: the reaction failed: {e}");
+        }
+    }
+
+    /// The reactions to an event not sent (`on E expired as x:`, `on E skipped as x:`), in a
+    /// transaction of their own with the cause `outbound:E#id expired`: `x.event`, `x.at`,
+    /// `x.attempts`, `x.reason`. One that fails goes to the event's log.
+    fn not_sent(
+        &mut self,
+        id: u64,
+        event: &str,
+        want: quadra_ir::Trigger,
+        fields: &J,
+        attempts: u64,
+        reason: &str,
+    ) {
+        use quadra_runtime::V;
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return;
+        };
+        if !model
+            .reactions
+            .iter()
+            .any(|r| r.entity == event && r.trigger == want)
+        {
+            return;
+        }
+        let at = now();
+        let event_fields: Vec<(Option<String>, V)> = fields
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| (Some(k.clone()), quadra_runtime::codec::from_json(v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let value = V::Tuple(std::rc::Rc::new(vec![
+            (
+                Some("event".to_string()),
+                V::Tuple(std::rc::Rc::new(event_fields)),
+            ),
+            (Some("at".to_string()), V::DateTime(at)),
+            (Some("attempts".to_string()), V::Int(attempts as i64)),
+            (
+                Some("reason".to_string()),
+                V::Text(std::rc::Rc::from(reason)),
+            ),
+        ]));
+        let word = if want == quadra_ir::Trigger::Expired {
+            "expired"
+        } else {
+            "skipped"
+        };
+        let r = quadra_store::ops::outcome_reactions(
+            &self.url,
+            model,
+            &checked.report,
+            at,
+            self.sequencer.as_ref(),
+            event,
+            want,
+            value,
+            format!("outbound:{event}#{id} {word}"),
+        );
+        if let Err(e) = r {
+            eprintln!("outbound {event}#{id}: the reaction failed: {e}");
+            let (ev, stamp) = (
+                event.to_string(),
+                at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            );
+            let _ =
+                self.side(move |c| quadra_store::deliveries::log_reaction(c, id, &ev, &stamp, &e));
+        }
     }
 
     /// The reactions to the final outcome of event `id` (`on E delivered as d:`, `on E failed as
@@ -1978,7 +2140,11 @@ impl Engine {
             at,
             self.sequencer.as_ref(),
             event,
-            delivered,
+            if delivered {
+                quadra_ir::Trigger::Delivered
+            } else {
+                quadra_ir::Trigger::Failed
+            },
             value,
             format!(
                 "outbound:{event}#{id} {}",
