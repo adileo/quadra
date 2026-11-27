@@ -236,6 +236,39 @@ carriers read it.
 
 ![The parcel label](/tutorial/label.png)
 
+### Printed in the back office
+
+The Zebra is in the shop's network: a **printer** connection, reached by the agent of step 14.
+
+```toml
+# The thermal printer in the back office: raw printing on port 9100, reached by the agent there.
+[connections.zebra]
+kind = "printer"
+url = "tcp://192.168.1.50:9100"
+location = "agent:backoffice"
+```
+
+```quadra
+# printing.qd: a shipped order's label goes to the thermal printer in the back office.
+
+from orders import Order
+from documents.label import ParcelLabel
+
+
+event LabelToPrint(order: Order)
+
+on Order enters Shipped as o:
+    emit LabelToPrint(order=o)
+
+
+outbound LabelToPrint via zebra as e:
+    print(zpl(ParcelLabel(e.order)))
+```
+
+`print` ends the block, as `write` does for files. A printer that is off is tried again,
+like any connection that does not answer. A printer of the office's system takes PDFs:
+`url = "lp://Brother_HL"` and `print(render(InvoicePdf(…)))`.
+
 ## Run it
 
 ```bash
@@ -244,7 +277,7 @@ quadra test
 
 ```text
 …
-60 passed, 0 failed
+61 passed, 0 failed
 ```
 
 Start the server with the demo data, and the two posted invoices get their PDF within a
@@ -287,8 +320,8 @@ itself is valid.) As `sam`, the clerk, who may not read invoices:
 1. Add a delivery note: `document DeliveryNote(o: Order)`, with the lines and their
    quantities but no prices, attached to `Order.note` when the order is shipped.
 2. Put the logo on the invoice: `image "assets/logo.png" width 40` in the header's row.
-3. Print three labels per order on an A4 sheet for the laser printer, or send the ZPL to the
-   Zebra ([Printers](/reference/connections)).
+3. Print the invoice on the office's laser printer when it is posted: a connection
+   `kind = "printer"` with `url = "lp://…"` ([Printers](/reference/connections#printers-kind-printer)).
 
 ## Recap
 
@@ -299,6 +332,7 @@ itself is valid.) As `sam`, the clerk, who may not read invoices:
   record, once, signed if you say so.
 - Certificates and keys are signers of `quadra.toml`, from secret variables: `sign`, `p7m`,
   `xades`, `pgp_sign`, `pgp_encrypt`.
-- In outbound blocks, documents go out attached to emails, written as files, or printed.
+- In outbound blocks, documents go out attached to emails, written as files, or printed
+  (`kind = "printer"`, `print(…)`).
 
 [Next steps →](./16-next-steps)

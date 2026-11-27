@@ -70,3 +70,9 @@ p12 = { var = "SIGN_P12" }
 password = { var = "SIGN_PASSWORD" }
 reason = "Invoice"
 location = "Milano"
+
+# The thermal printer in the back office: raw printing on port 9100, reached by the agent there.
+[connections.zebra]
+kind = "printer"
+url = "tcp://192.168.1.50:9100"
+location = "agent:backoffice"

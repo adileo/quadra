@@ -1,12 +1,12 @@
 # Next steps
 
-<SandboxLink project="tutorial-14" file="orders.qd" label="Open the finished shop" />
+<SandboxLink project="tutorial-15" file="documents/invoice.qdp" label="Open the finished shop" />
 
 You've built a small but complete business application: a catalog with prices per unit,
 customers with credit limits, orders with a life cycle, invoices and payments that follow
 them, stock and receivables in ledgers, permissions for each role, a database with a verified
 history, an API, the tools to evolve all of it safely, and the connections to the web shop,
-the carrier, the till, the bank and the accountant.
+the carrier, the till, the bank and the accountant, and the invoices and labels it prints.
 
 Here is where to go from here.
 

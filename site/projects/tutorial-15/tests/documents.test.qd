@@ -53,3 +53,9 @@ test "the customer gets the invoice by email":
     let inv = order.create_invoice()
     inv.post()
     expect sent InvoiceEmail(invoice=inv, to="bar@caffecentrale.example")
+
+
+test "a shipped order's label is printed":
+    use shop_with_orders
+    order.ship()
+    expect sent LabelToPrint(order=order)

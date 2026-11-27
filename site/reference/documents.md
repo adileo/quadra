@@ -128,7 +128,7 @@ What depends on the clock is what the document shows (`today()`).
 ## Sending and keeping documents
 
 In an outbound block, a rendered document can be attached to an email, written as a file,
-or printed:
+or printed ([printers](/reference/connections#printers-kind-printer): `print(zpl(ParcelLabel(e.order)))`):
 
 ```quadra
 outbound InvoicePosted via mail as e:

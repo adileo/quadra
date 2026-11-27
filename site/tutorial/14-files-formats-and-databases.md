@@ -404,4 +404,4 @@ error: this agent was revoked, or its key is not valid here: register it again (
 - `location = "agent:<name>"` runs a connection through an on-premise agent. It connects
   only outwards, keeps the credentials, and is revoked in seconds.
 
-[Next steps →](./15-next-steps)
+[Next: documents, labels and signatures →](./15-documents-labels-and-signatures)

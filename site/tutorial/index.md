@@ -5,7 +5,8 @@ mugs. You start with a single entity and finish with an application you could ac
 customers, a catalog priced in euros per kilogram or per piece, orders with a life cycle,
 invoices and payments, stock, permissions for each kind of employee, a database with an API,
 the tools to change all of it safely once it holds real data, and the connections to
-the systems around it: a web shop, a carrier, a till, a bank and the accountant's database.
+the systems around it (a web shop, a carrier, a till, a bank and the accountant's database),
+and the documents it sends: invoices, labels, signed files.
 
 Each step adds one idea to the same project. Every step is a complete, working project:
 its code compiles with zero errors and all of its tests pass.
@@ -28,7 +29,8 @@ its code compiles with zero errors and all of its tests pass.
 | [12. Migrations and changes](./12-migrations-and-changes) | `migration` (rename, convert, backfill, verify), provisional values, `change` | a model that evolves with real data |
 | [13. Talking to other systems](./13-talking-to-other-systems) | `[vars]`, connections, `inbound`, `outbound`, `publish`, records `from json`, `receive` / `expect sent` / `deliver` | orders from a web shop, parcels, emails |
 | [14. Files, formats and databases](./14-files-formats-and-databases) | SFTP and FTP, `from csv` and `from fixed`, `atomic`, `write`, `insert`, on-premise agents | the till, the bank, the accountant |
-| [Next steps](./15-next-steps) | where to go from here | |
+| [15. Documents, labels and signatures](./15-documents-labels-and-signatures) | `.qdp` files, `document`, `label`, `render`, `zpl`, `attach`, signers | invoices in PDF, parcel labels, signed files |
+| [Next steps](./16-next-steps) | where to go from here | |
 
 ## How each step works
 
