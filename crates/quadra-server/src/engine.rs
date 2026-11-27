@@ -320,6 +320,12 @@ pub enum Req {
         limit: Option<usize>,
         before: Option<u64>,
     },
+    /// the file a `File` field names (a document of `attach`): its name, type and bytes
+    File {
+        entity: String,
+        id: u64,
+        field: String,
+    },
     Search {
         entity: String,
         q: String,
@@ -421,6 +427,7 @@ impl Req {
             | Req::Query(_)
             | Req::Record { .. }
             | Req::History { .. }
+            | Req::File { .. }
             | Req::Search { .. } => true,
             // formulas evaluated as the caller and completions are reads sent as `POST`
             Req::Views { method, path, .. } => {
@@ -470,6 +477,12 @@ pub enum Job {
     /// never, `Ok(Some(at))` at that instant
     NextSweep {
         reply: oneshot::Sender<Result<Option<chrono::NaiveDateTime>, ()>>,
+    },
+    /// the documents of `attach` due, rendered and named in their records (up to `limit`):
+    /// how many, and whether the model has any `attach`
+    Attach {
+        limit: usize,
+        reply: oneshot::Sender<Result<(usize, bool), String>>,
     },
     /// the host's deliveries (`crate::deliver`): the plans of up to `limit` due events of the
     /// outbox, when the next pending one is due after them (`None`: none pending), and whether
@@ -664,6 +677,9 @@ pub struct Engine {
     sequencer: Option<quadra_store::Sequencer>,
     /// when the log of the integrations was last pruned (`[integrations] log_days`)
     pruned_at: Option<std::time::Instant>,
+    /// the documents of an `attach` that could not be rendered (document, record): not tried
+    /// again until the code changes
+    attach_failed: (u64, std::collections::HashSet<(String, u64)>),
     /// when each agent's visit was last written
     agents_seen: HashMap<String, std::time::Instant>,
     /// the causes of the last commits before this engine handled its first message: only a
@@ -817,6 +833,7 @@ impl Engine {
             snapshot: false,
             sequencer: None,
             pruned_at: None,
+            attach_failed: (0, Default::default()),
             agents_seen: HashMap::new(),
             inbox_recent: None,
             statics: Vec::new(),
@@ -875,6 +892,57 @@ impl Engine {
             Some(s) => s.side(f),
             None => f(&mut self.conn),
         }
+    }
+
+    /// The documents of the `attach`es due: rendered from the data as it is, their bytes kept
+    /// (`_quadra_files`, through the sequencer: in the log), then named in their records, each
+    /// in a transaction of its own. A document that cannot be rendered is said once and not
+    /// tried again until the code changes.
+    fn attach(&mut self, limit: usize) -> Result<(usize, bool), String> {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return Ok((0, false));
+        };
+        if model.attaches.is_empty() {
+            return Ok((0, false));
+        }
+        let code = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for (p, t) in &model.sources {
+                p.hash(&mut h);
+                t.hash(&mut h);
+            }
+            h.finish()
+        };
+        if self.attach_failed.0 != code {
+            self.attach_failed = (code, Default::default());
+        }
+        let (done, failed) = quadra_store::ops::attach_render(
+            &self.url,
+            model,
+            &checked.report,
+            now(),
+            limit,
+            &self.attach_failed.1,
+        )?;
+        for (doc, id, e) in failed {
+            eprintln!("attach {doc}: record {id}: {e}");
+            self.attach_failed.1.insert((doc, id));
+        }
+        for d in &done {
+            let file = d.file.clone();
+            self.side(move |c| quadra_store::files::put(c, &file))?;
+        }
+        let n = quadra_store::ops::attach_write(
+            &self.url,
+            model,
+            &checked.report,
+            now(),
+            self.sequencer.as_ref(),
+            &done,
+        )?;
+        Ok((n, true))
     }
 
     /// The plans of up to `limit` due events with an `outbound`, and when the next pending one
@@ -3070,6 +3138,9 @@ impl Engine {
                 Job::Deliveries { limit, reply } => {
                     let _ = reply.send(self.deliveries(limit));
                 }
+                Job::Attach { limit, reply } => {
+                    let _ = reply.send(self.attach(limit));
+                }
                 Job::Receive {
                     connection,
                     path,
@@ -3229,6 +3300,7 @@ impl Engine {
                 limit,
                 before,
             } => self.history(&who, &entity, id, limit, before),
+            Req::File { entity, id, field } => self.file(&who, &entity, id, &field),
             Req::Search {
                 entity,
                 q,
@@ -3789,6 +3861,47 @@ impl Engine {
         Ok(reply(
             200,
             quadra_api::record_json(&mut i, model, entity, id)?,
+        ))
+    }
+
+    /// The file the field of a record names, for one who may read that field: `{name, type,
+    /// size, hash, content}` (the bytes in base64; the route sends them as they are).
+    fn file(&mut self, who: &Principal, entity: &str, id: u64, field: &str) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = self.interp(model, Some(who), None)?;
+        let actual = i
+            .store
+            .get(id)
+            .map(|r| r.ent.to_string())
+            .filter(|e| e == entity)
+            .ok_or((404, format!("{entity}#{id} not found")))?;
+        let rec = V::Ref {
+            ent: Rc::from(actual.as_str()),
+            id,
+        };
+        if !i.can("read", &actual, Some(field), Some(&rec)) {
+            return Err((
+                403,
+                format!("permission denied: cannot read {actual}.{field}"),
+            ));
+        }
+        let value = match i.store.read(id, field, None) {
+            Some(V::Text(t)) => t.to_string(),
+            _ => return Err((404, format!("{actual}#{id} has no file in `{field}` yet"))),
+        };
+        let Some(hash) = quadra_store::files::hash_of(&value) else {
+            return Err((
+                404,
+                format!("`{actual}.{field}` names no file kept by the app"),
+            ));
+        };
+        let f = quadra_store::files::get(&mut self.conn, hash)
+            .map_err(|e| (500, e))?
+            .ok_or((404, format!("the file {hash} is not kept here")))?;
+        Ok(reply(
+            200,
+            json!({"name": f.name, "type": f.ctype, "size": f.size, "hash": f.hash, "content": f.content_b64}),
         ))
     }
 

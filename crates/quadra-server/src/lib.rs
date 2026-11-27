@@ -1036,6 +1036,63 @@ async fn history(
     }
 }
 
+/// `GET /v1/records/Invoice/45/files/pdf`: the document a `File` field names, as it was kept
+/// (its type, its name for the download, its SHA-256 in `ETag`).
+async fn record_file(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id, field)): Path<(String, u64, String)>,
+) -> Response {
+    let who = match authenticate(&app, &t, &method, &headers).await {
+        Ok(who) => who,
+        Err(r) => return r,
+    };
+    match ask_call(&t, who, Req::File { entity, id, field }).await {
+        Ok(Some(Reply {
+            status: 200, body, ..
+        })) => {
+            use base64::Engine as _;
+            let bytes = match base64::engine::general_purpose::STANDARD
+                .decode(body["content"].as_str().unwrap_or(""))
+            {
+                Ok(b) => b,
+                Err(_) => return fail(500, "the file kept is not readable"),
+            };
+            let name: String = body["name"]
+                .as_str()
+                .unwrap_or("document")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                .collect();
+            let mut r = (StatusCode::OK, bytes).into_response();
+            let h = r.headers_mut();
+            if let Ok(v) =
+                HeaderValue::from_str(body["type"].as_str().unwrap_or("application/octet-stream"))
+            {
+                h.insert(header::CONTENT_TYPE, v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+                h.insert(header::CONTENT_DISPOSITION, v);
+            }
+            if let Ok(v) =
+                HeaderValue::from_str(&format!("\"{}\"", body["hash"].as_str().unwrap_or("")))
+            {
+                h.insert(header::ETAG, v);
+            }
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, no-store"),
+            );
+            r
+        }
+        Ok(Some(Reply { status, body, .. })) => json_response(status, body),
+        Ok(None) => fail(503, "the engine is not available"),
+        Err(r) => r,
+    }
+}
+
 async fn search(
     State(app): State<Shared>,
     Ten(t): Ten,
@@ -2209,7 +2266,45 @@ fn start(
     // the pulls go out only where events do (production): a copy never fetches with its
     // connections
     tokio::spawn(inbox(t.clone(), cfg.outside.deliver.then_some(egress)));
+    // the documents of `attach`: made everywhere (nothing leaves the app)
+    tokio::spawn(attachments(t.clone()));
     t
+}
+
+/// A tenant's documents (`Engine::attach`): after each commit, those due rendered and named in
+/// their records, a few at a time; looked at again after the next commit, or in a minute. A
+/// model without any `attach` is looked at once a minute (the code may change).
+async fn attachments(t: Arc<Tenant>) {
+    let mut seen = None;
+    loop {
+        let serves = match t.ask(|reply| Job::Attach { limit: 8, reply }).await {
+            Some(Ok((n, serves))) => {
+                if n > 0 {
+                    if t.stopped() {
+                        return;
+                    }
+                    continue;
+                }
+                serves
+            }
+            Some(Err(e)) => {
+                eprintln!("{}: attach: {e}", t.id);
+                true
+            }
+            None => return,
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if !t.pause(Duration::from_secs(1)).await {
+                return;
+            }
+            let w = t.written();
+            if Instant::now() >= deadline || (serves && w != seen && w.is_some()) {
+                seen = w;
+                break;
+            }
+        }
+    }
 }
 
 /// A tenant's inbox (`Engine::handle_inbox`): the pulls due made (`egress`: where it delivers),
@@ -2653,6 +2748,7 @@ impl Host {
             .route("/v1/query", post(query))
             .route("/v1/records/{entity}/{id}", get(record))
             .route("/v1/records/{entity}/{id}/history", get(history))
+            .route("/v1/records/{entity}/{id}/files/{field}", get(record_file))
             .route("/v1/search/{entity}", get(search))
             .route("/v1/tx", post(tx))
             .route("/v1/stream", get(stream))

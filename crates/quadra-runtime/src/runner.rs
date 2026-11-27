@@ -622,10 +622,90 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
         match r {
             Ok(()) => {
                 *ctx = local;
-                Ok(())
+                self.attach_due()
             }
             Err(e) => Err(describe(&e)),
         }
+    }
+
+    /// After a commit, as the server does: the documents of the `attach`es due rendered, and
+    /// their records given `sha256:<hex>` of them, each in a transaction of its own.
+    fn attach_due(&mut self) -> Result<(), String> {
+        let model = self.model;
+        for a in &model.attaches {
+            for id in self.interp.ids(&a.entity, None) {
+                if !self
+                    .interp
+                    .store
+                    .read(id, &a.field, None)
+                    .unwrap_or(V::None)
+                    .is_none()
+                {
+                    continue;
+                }
+                let rec = V::Ref {
+                    ent: std::rc::Rc::from(a.entity.as_str()),
+                    id,
+                };
+                if let Some(w) = &a.when {
+                    let mut c = Ctx {
+                        this: Some(rec.clone()),
+                        entity: Some(a.entity.clone()),
+                        ..Ctx::default()
+                    };
+                    self.interp.system += 1;
+                    let v = self.interp.eval(w, &mut c);
+                    self.interp.system -= 1;
+                    match v {
+                        Ok(V::Bool(true)) => {}
+                        Ok(_) => continue,
+                        Err(e) => {
+                            return Err(format!(
+                                "attach {}: its `when`: {}",
+                                a.document,
+                                describe(&e)
+                            ))
+                        }
+                    }
+                }
+                let doc = self
+                    .interp
+                    .render_document(&a.document, vec![rec.clone()], false)
+                    .map_err(|e| {
+                        format!(
+                            "attach {} to {}#{id}: {}",
+                            a.document,
+                            a.entity,
+                            describe(&e)
+                        )
+                    })?;
+                let hash = match &doc {
+                    V::Tuple(t) => t
+                        .iter()
+                        .find(|(k, _)| k.as_deref() == Some("hash"))
+                        .map(|(_, v)| v.to_string())
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let value = crate::value::text(&format!("sha256:{}", hash.trim_matches('"')));
+                self.interp.system += 1;
+                let r = self
+                    .interp
+                    .with_cause(format!("attach:{} {}#{id}", a.document, a.entity), |i| {
+                        i.transaction(|i| i.set(&rec, &a.field, value.clone(), None))
+                    });
+                self.interp.system -= 1;
+                r.map_err(|e| {
+                    format!(
+                        "attach {} to {}#{id}: {}",
+                        a.document,
+                        a.entity,
+                        describe(&e)
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn use_fixture(&mut self, name: &str, ctx: &mut Ctx) -> Result<(), String> {
@@ -662,7 +742,7 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
         interp.system -= 1;
         r.map_err(|e| format!("fixture `{name}` failed: {}", describe(&e)))?;
         *ctx = fctx;
-        Ok(())
+        self.attach_due()
     }
 
     fn expect(&mut self, e: &Expr, ctx: &mut Ctx) -> Result<(), String> {

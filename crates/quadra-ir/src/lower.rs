@@ -32,9 +32,9 @@ pub fn lower(project: &Project, analysis: &Analysis) -> Model {
         let print = f.path.extension().is_some_and(|e| e == "qdp");
         for item in f.parse.syntax().children() {
             let k = item.kind();
-            if print && !matches!(k, DOCUMENT | IMPORT | CONST | ERROR) {
+            if print && !matches!(k, DOCUMENT | ATTACH | IMPORT | CONST | ERROR) {
                 let span = l.span(&item);
-                l.model.errors.push((span, "a `.qdp` file holds documents and labels (and their imports and constants): this goes in a `.qd` file".to_string()));
+                l.model.errors.push((span, "a `.qdp` file holds documents and labels (and their imports, constants and `attach`): this goes in a `.qd` file".to_string()));
                 continue;
             }
             if !print && k == DOCUMENT {
@@ -118,6 +118,16 @@ pub fn lower(project: &Project, analysis: &Analysis) -> Model {
                 ));
             } else {
                 e.frozen = Some(fr);
+            }
+        }
+    }
+    // the field an `attach` fills is filled after the record is frozen: it is an exception
+    for a in l.model.attaches.clone() {
+        if let Some(e) = l.model.entities.iter_mut().find(|e| e.name == a.entity) {
+            if let Some(fr) = e.frozen.as_mut() {
+                if !fr.except.contains(&a.field) {
+                    fr.except.push(a.field.clone());
+                }
             }
         }
     }
@@ -363,7 +373,20 @@ impl<'a> Lower<'a> {
                     .map(|p| ast::path_text(&p))
                     .unwrap_or_default();
                 let (entity, field) = path.split_once('.').unwrap_or((path.as_str(), ""));
-                let when = exprs(item).first().map(|e| self.expr(e));
+                // the condition: the expression after `when` (the document's name is a NAME_REF)
+                let mut after_when = false;
+                let mut when_node = None;
+                for c in item.children_with_tokens() {
+                    match c {
+                        rowan::NodeOrToken::Token(t) if t.kind() == WHEN_KW => after_when = true,
+                        rowan::NodeOrToken::Node(n) if after_when && is_expr(&n) => {
+                            when_node = Some(n);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                let when = when_node.map(|e| self.expr(&e));
                 self.model.attaches.push(Attach {
                     document,
                     entity: entity.to_string(),

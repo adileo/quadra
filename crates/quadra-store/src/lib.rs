@@ -12,6 +12,7 @@ pub mod conn;
 pub mod db;
 pub mod deliveries;
 pub mod deploy;
+pub mod files;
 pub mod grants;
 pub mod hints;
 pub mod schema;

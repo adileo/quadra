@@ -42,6 +42,8 @@ const SYSTEM_DDL: &[&str] = &[
     // the tokens of OAuth2 with a user's consent, one row per connection (crate::grants):
     // sealed by the server, with what may be shown of them
     "CREATE TABLE \"_quadra_oauth\" (\"connection\" TEXT PRIMARY KEY, \"sealed\" TEXT, \"scope\" TEXT, \"expires_at\" TEXT, \"connected_at\" TEXT, \"connected_by\" TEXT, \"refreshed_at\" TEXT, \"error\" TEXT)",
+    // the files the app makes (documents rendered by `attach`), by their SHA-256 (crate::files)
+    "CREATE TABLE \"_quadra_files\" (\"hash\" TEXT PRIMARY KEY, \"name\" TEXT NOT NULL, \"type\" TEXT NOT NULL, \"size\" BIGINT NOT NULL, \"content\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
     // (crate::deliveries), written with what it records and never changed
     "CREATE TABLE \"_quadra_exchanges\" (\"id\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"message\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"connection\" TEXT, \"step\" TEXT NOT NULL, \"outcome\" TEXT NOT NULL, \"status\" BIGINT, \"duration_ms\" BIGINT, \"error\" TEXT, \"excerpt\" TEXT, \"by\" TEXT, \"reason\" TEXT)",
@@ -128,7 +130,8 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// event taken by an integration), and `_quadra_exchanges`, the log of every step of a
 /// delivery.
 /// 13: `_quadra_oauth`, the tokens of OAuth2 with a user's consent (crate::grants).
-const SYSTEM_VERSION: &str = "13";
+/// 14: `_quadra_files`, the documents rendered by `attach` (crate::files).
+const SYSTEM_VERSION: &str = "14";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).

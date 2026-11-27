@@ -1616,3 +1616,180 @@ mod tests {
         assert_eq!(super::article("Editor"), "an Editor");
     }
 }
+
+/// A document an `attach` rendered, to be kept and named by its record.
+#[derive(Clone, Debug)]
+pub struct Attached {
+    pub document: String,
+    pub entity: String,
+    pub id: u64,
+    pub field: String,
+    pub file: crate::files::File,
+}
+
+/// The documents of the `attach`es due: each record whose condition holds and whose field is
+/// still empty, rendered from the data as it is (at most `limit`), with the records whose
+/// document could not be rendered and why. Nothing is written: `attach_write` names them.
+pub fn attach_render(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    limit: usize,
+    skip: &HashSet<(String, u64)>,
+) -> Result<(Vec<Attached>, Vec<(String, u64, String)>), String> {
+    let mut done = Vec::new();
+    let mut failed = Vec::new();
+    if model.attaches.is_empty() {
+        return Ok((done, failed));
+    }
+    let db = Database::open(url, model, report)?;
+    let src = crate::source::DbSource::open(url, db.schema.clone(), None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.system += 1;
+    for a in &model.attaches {
+        for id in interp.ids(&a.entity, None) {
+            if done.len() + failed.len() >= limit {
+                return Ok((done, failed));
+            }
+            if skip.contains(&(a.document.clone(), id)) {
+                continue;
+            }
+            if !interp
+                .store
+                .read(id, &a.field, None)
+                .unwrap_or(V::None)
+                .is_none()
+            {
+                continue;
+            }
+            let rec = V::Ref {
+                ent: std::rc::Rc::from(a.entity.as_str()),
+                id,
+            };
+            if let Some(w) = &a.when {
+                let mut ctx = Ctx {
+                    this: Some(rec.clone()),
+                    entity: Some(a.entity.clone()),
+                    ..Ctx::default()
+                };
+                match interp.eval(w, &mut ctx) {
+                    Ok(V::Bool(true)) => {}
+                    Ok(_) => continue,
+                    Err(e) => {
+                        failed.push((a.document.clone(), id, flow("its `when`", e)));
+                        continue;
+                    }
+                }
+            }
+            match interp.render_document(&a.document, vec![rec], false) {
+                Ok(V::Tuple(t)) => {
+                    let get = |k: &str| {
+                        t.iter()
+                            .find(|(n, _)| n.as_deref() == Some(k))
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or(V::None)
+                    };
+                    let s = |v: V| match v {
+                        V::Text(t) => t.to_string(),
+                        other => other.to_string(),
+                    };
+                    let size = match get("size") {
+                        V::Int(n) => n as u64,
+                        _ => 0,
+                    };
+                    done.push(Attached {
+                        document: a.document.clone(),
+                        entity: a.entity.clone(),
+                        id,
+                        field: a.field.clone(),
+                        file: crate::files::File {
+                            hash: s(get("hash")),
+                            name: s(get("name")),
+                            ctype: s(get("type")),
+                            size,
+                            content_b64: s(get("content")),
+                            created_at: time.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                        },
+                    });
+                }
+                Ok(_) => failed.push((a.document.clone(), id, "not a document".into())),
+                Err(e) => failed.push((a.document.clone(), id, flow("", e))),
+            }
+        }
+    }
+    Ok((done, failed))
+}
+
+/// Name the documents rendered in their records, each in a transaction of its own as the
+/// system (`attach:InvoicePdf Invoice#45`): the field gets `sha256:<hex>` unless something was
+/// put there meanwhile. The files themselves are kept first (`files::put`).
+pub fn attach_write(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+    items: &[Attached],
+) -> Result<usize, String> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let db = Database::open(url, model, report)?;
+    let schema = db.schema.clone();
+    let src = crate::source::DbSource::open(url, schema, None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(match sequencer {
+        Some(s) => Box::new(crate::SequencedSink {
+            db,
+            model,
+            sequencer: s.clone(),
+            tickets: None,
+        }),
+        None => Box::new(Sink { db, model }),
+    });
+    interp.system += 1;
+    let mut n = 0;
+    for it in items {
+        let rec = V::Ref {
+            ent: std::rc::Rc::from(it.entity.as_str()),
+            id: it.id,
+        };
+        let value = quadra_runtime::value::text(&crate::files::reference(&it.file.hash));
+        let wrote = interp
+            .with_cause(
+                format!("attach:{} {}#{}", it.document, it.entity, it.id),
+                |i| {
+                    i.transaction(|i| {
+                        if !i
+                            .store
+                            .read(it.id, &it.field, None)
+                            .unwrap_or(V::None)
+                            .is_none()
+                        {
+                            return Ok(false);
+                        }
+                        i.set(&rec, &it.field, value.clone(), None)?;
+                        Ok(true)
+                    })
+                },
+            )
+            .map_err(|e| {
+                flow(
+                    &format!("attach {} {}#{}", it.document, it.entity, it.id),
+                    e,
+                )
+            })?;
+        if wrote {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
