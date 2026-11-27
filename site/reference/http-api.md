@@ -64,7 +64,7 @@ The entities the user may read (temporary entities, records and traits excluded)
 | `name`, `module`, `ledger`, `traits` | the entity |
 | `can_create` | whether the user may create records |
 | `frozen_when` | the `frozen when` condition, as text |
-| `fields` | for each visible field: `name`, `kind` (`text`, `int`, `decimal`, `percent`, `money`, `price`, `qty`, `date`, `datetime`, `duration`, `bool`, `enum`, `ref`, `record`, `list`, `set`, `role`, `other`), the currency or unit (`currency`, `unit`, `per`, or `currency_from`… when it comes from another field), `variants` of an enum, `entity` of a reference, `formula`, `required`, `optional`, `has_default`, `editable`, `parent`, `per_company` |
+| `fields` | for each visible field: `name`, `kind` (`text`, `int`, `decimal`, `percent`, `money`, `price`, `qty`, `date`, `datetime`, `duration`, `bool`, `enum`, `ref`, `record`, `list`, `set`, `role`, `other`), the currency or unit (`currency`, `unit`, `per`, or `currency_from`… when it comes from another field), `variants` of an enum, `entity` of a reference, `formula`, `required`, `optional`, `has_default`, `editable`, `parent`, `per_company`; a `File` field also `file`: `{"accept": ["pdf", "image"], "max": 10485760}` (none: any file; `max` in bytes, `null` when not said) |
 | `actions` | the actions the user may run, with their parameters (`name`, `type`, `default` as written, `optional`) |
 | `flows` | each flow's field and transitions (`from`, `to`, `by`, `automatic`) |
 
@@ -279,13 +279,24 @@ entries (oldest first among them) and `before`: pass it as `?before=` for the ol
 
 ### `GET /v1/records/{Entity}/{id}/files/{field}`
 
-The document kept in a `File` field by an [`attach`](/reference/documents#attach-kept-with-the-record)
-(`sha256:<hex>`): its bytes, with its type (`Content-Type`), its name for the download
-(`Content-Disposition`) and its SHA-256 (`ETag`). Needs the right to read that field of that
-record: otherwise `403`. A field still empty, or that names no file kept by the app: `404`.
+The file a `File` field holds (`sha256:<hex>`, [Files](/reference/entities#files)); for a list,
+`…/files/{field}/{n}`, the `n`th from 0. Needs the right to read that field of that record:
+otherwise `403`. The answer is `302` to a signed URL of the file, valid 5 minutes: the bytes
+come from the store of files (the bucket, or the server itself for a folder), never through
+the engine.
+
+| Query | Effect |
+|---|---|
+| (none) | PDFs and images are shown in the page (`Content-Disposition: inline`), other files are downloaded (`attachment`). SVG and HTML are never shown. |
+| `?download` | Downloaded, whatever the type. |
+| `?info` | `200` with where the file is and what it is, instead of the redirect: `{"url", "name", "type", "size", "hash"}`. |
+
+A field still empty, a place past the end of a list, or a value that names no file kept by
+the app: `404`. A list without the place: `400`.
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" -o invoice.pdf $API/v1/records/Invoice/45/files/pdf
+curl -L -H "Authorization: Bearer $TOKEN" -o invoice.pdf $API/v1/records/Invoice/45/files/pdf
+curl -L -H "Authorization: Bearer $TOKEN" -o photo.jpg "$API/v1/records/Expense/7/files/photos/0?download"
 ```
 
 ### `GET /v1/search/{Entity}`
@@ -362,6 +373,7 @@ Values in `values` and `args`:
 | lines (children) | objects, inline: `"lines": [{"product": 63, "qty": "3 pcs"}]` |
 | a `record` value (an address) | an object of its fields: `{"street": "Via Roma 1", "city": "Milano", …}` |
 | lists and sets | JSON arrays of the element values |
+| a file (`File`) | `"upload:<id>"`, an upload of `POST /v1/uploads` ([Files](#files)), or the `"sha256:<hex>"` the field already has |
 | amounts, quantities, prices, percents, dates, durations | Quadra literals as text: `"5.40 EUR"`, `"4 pcs"`, `"1.50 EUR/pcs"`, `"10%"`, `"2026-11-21"`, instants with their zone `"2026-11-21T09:30:00+01:00"` or `"2026-11-21T08:30:00Z"` (without one, `"2026-11-21T09:30"` is a time of the project's clock: send the zone when the time comes from another system); durations as people write them: `"8 h"`, `"1h30"`, `"1:30"`, `"90 min"`, `"2 days"`, `"1 day 4 h"` (a number alone is refused: hours or days?) |
 | enum values | the variant's name: `"Storable"` (otherwise `` `X` is not one of Storable, Consumable, Service ``) |
 | text, numbers, booleans, null | JSON values (text at most 10,000 characters) |
@@ -370,6 +382,42 @@ Literals are read by fixed rules and never evaluated. Amounts are checked agains
 another currency is refused (`Product.list_price: expected an amount in EUR, not USD`),
 another unit of the same kind is converted (`"2000 g"` becomes `"2 kg"`), another kind is
 refused. A bare number takes the field's currency or unit.
+
+### Files
+
+A file goes into a `File` field in three steps ([Files](/reference/entities#files)): an upload
+asked for, the bytes put straight to the store of files, a transaction naming the upload.
+
+```http
+POST /v1/uploads
+Content-Type: application/json
+
+{ "entity": "Expense", "field": "receipt", "name": "scan.pdf", "size": 48213 }
+```
+
+```json
+{ "id": "6f0c…", "value": "upload:6f0c…", "method": "PUT",
+  "url": "https://acme-files.fsn1.your-objectstorage.com/prod/uploads/6f0c…?X-Amz-…",
+  "headers": {}, "expires_at": "2026-11-27T10:15:00Z" }
+```
+
+The server checks that the user may write the field (`403` otherwise), and that the type the
+name suggests and the size are taken by the field (`422` with why:
+`report.exe: the file is an application/x-msdownload, but Expense.receipt accepts pdf, image`,
+`big.pdf: the file is 4.9 KB, but Expense.receipt takes files up to 1 KB`). Then:
+
+1. `PUT` the file's bytes, exactly `size` of them, to `url` with `headers`, before
+   `expires_at` (15 minutes). With the files in a folder, `url` is a path of the server
+   itself (`/v1/blobs/uploads/<id>?expires=…&sig=…`).
+2. Write `value` to the field in a transaction, alone (`"receipt": "upload:6f0c…"`) or among
+   the files of a list (`"photos": ["sha256:<a file it has>", "upload:6f0c…"]`).
+
+Before the transaction runs, the server reads the bytes, tells their type from them and
+checks it and the size again: a file refused is `422` with why
+(`report.pdf: the file is an application/x-msdownload, but Expense.receipt accepts pdf, image`),
+and nothing is written. An upload is for the user who asked for it and for its field, and is
+named once (`upload:6f0c…: the upload was already used: upload the file again`); one never
+named is removed after 24 hours. A `File` field takes only an upload, or a file it already has.
 
 ### Concurrency: `base` and 409
 
