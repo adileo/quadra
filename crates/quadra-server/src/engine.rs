@@ -1254,8 +1254,18 @@ impl Engine {
             };
         };
         match self.side(move |c| auth::code_start(c, user, now())) {
-            Ok(Ok((id, code))) => Reply { status: 200, body: json!({ "login_id": id, "expires_in": auth::CODE_MINUTES * 60, "_send": { "to": to, "code": code } }), session: None },
-            Ok(Err(_)) => error(429, "Too many codes asked for this user. Wait 15 minutes, or use the last one you received."),
+            Ok(Ok((id, code))) => Reply {
+                status: 200,
+                body: json!({ "login_id": id, "expires_in": auth::CODE_MINUTES * 60, "_send": { "to": to, "code": code } }),
+                session: None,
+            },
+            // too many codes for this user: the same answer as for an unknown login (no email),
+            // so that the answer does not tell which logins exist; the last code still works
+            Ok(Err(_)) => Reply {
+                status: 200,
+                body: json!({ "login_id": auth::random_hex(16), "expires_in": auth::CODE_MINUTES * 60 }),
+                session: None,
+            },
             Err(e) => error(500, e),
         }
     }

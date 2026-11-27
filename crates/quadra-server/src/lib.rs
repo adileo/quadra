@@ -1592,6 +1592,12 @@ async fn stream(
             return None;
         }
         ev["records"] = J::Array(recs);
+        // which records changed, not who changed them nor why (the history says that, within
+        // what the caller may read)
+        if let Some(o) = ev.as_object_mut() {
+            o.remove("user_id");
+            o.remove("cause");
+        }
         Some(
             Event::default()
                 .event("commit")

@@ -582,5 +582,48 @@ fn sign_in_by_email_code_on_two_tenants() {
             .map(|(_, u)| u.requests),
         Some(1)
     );
+    // past the codes a user may ask for: the same answer as for nobody, and no more emails
+    for _ in 0..6 {
+        http(
+            port,
+            "a.test",
+            "POST",
+            "/v1/auth/code",
+            Some(json!({ "login": "bob" })),
+            None,
+        );
+    }
+    let sent = outbox
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, _, m)| matches!(m, SignInMail::Code { to, .. } if to == "bob@example.com"))
+        .count();
+    let mut statuses = Vec::new();
+    for _ in 0..4 {
+        let (s, r, _) = http(
+            port,
+            "a.test",
+            "POST",
+            "/v1/auth/code",
+            Some(json!({ "login": "bob" })),
+            None,
+        );
+        assert!(r["login_id"].is_string(), "{r}");
+        statuses.push(s);
+    }
+    assert_eq!(statuses, vec![200; 4]);
+    assert_eq!(
+        outbox
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, m)| matches!(m, SignInMail::Code { to, .. } if to == "bob@example.com"))
+            .count(),
+        sent,
+        "no more emails"
+    );
     std::fs::remove_dir_all(&base).ok();
 }
