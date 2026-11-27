@@ -75,10 +75,22 @@ impl TenantResolver for Map {
 static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn http(port: u16, host: &str, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
+    http_from(port, host, token, method, path, body, "")
+}
+
+fn http_from(
+    port: u16,
+    host: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<J>,
+    extra: &str,
+) -> (u16, J) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     let body = body.map(|b| b.to_string()).unwrap_or_default();
-    let req = format!("{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nIdempotency-Key: k{}-{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", std::process::id(), KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed), body.len());
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n{extra}Idempotency-Key: k{}-{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", std::process::id(), KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed), body.len());
     s.write_all(req.as_bytes()).unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();
@@ -104,8 +116,15 @@ fn items(port: u16, host: &str, token: &str, columns: J) -> (u16, J) {
 
 /// A host on its own runtime, serving on a free port.
 fn serve(specs: Vec<(&str, TenantSpec)>) -> (Host, tokio::runtime::Runtime, u16) {
+    serve_with(HostOptions::default(), specs)
+}
+
+fn serve_with(
+    options: HostOptions,
+    specs: Vec<(&str, TenantSpec)>,
+) -> (Host, tokio::runtime::Runtime, u16) {
     let host = Host::new(
-        HostOptions::default(),
+        options,
         Arc::new(Map(specs
             .into_iter()
             .map(|(h, s)| (h.to_string(), s))
@@ -639,6 +658,54 @@ fn an_awake_tenant_sweeps_when_a_threshold_passes() {
         assert!(Instant::now() < until, "the reminder never fired");
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+/// Behind a proxy that says who the client is, one client trying wrong credentials is held
+/// back alone: the others still sign in.
+#[test]
+fn failed_sign_ins_hold_back_their_client_only() {
+    const NOTES: &str = "entity Note:\n    text: Text\n";
+    let (cfg, token) = project(&temp("failures"), NOTES);
+    let (_host, _rt, port) = serve_with(
+        HostOptions {
+            forwarded_for: true,
+            ..Default::default()
+        },
+        vec![(
+            "n.test",
+            TenantSpec {
+                id: "n".into(),
+                config: cfg,
+            },
+        )],
+    );
+    let from = |ip: &str, token: &str| {
+        http_from(
+            port,
+            "n.test",
+            token,
+            "GET",
+            "/v1/me",
+            None,
+            &format!("X-Forwarded-For: {ip}\r\n"),
+        )
+        .0
+    };
+    let mut refused = false;
+    for n in 0..80 {
+        if from("2001:db8:1:2::7", &format!("wrong-{n}")) == 429 {
+            refused = true;
+            break;
+        }
+    }
+    assert!(
+        refused,
+        "the client with wrong credentials is never held back"
+    );
+    // the same /64 is the same client, held back even with a good credential
+    assert_eq!(from("2001:db8:1:2::1", &token), 429);
+    // another client, with a credential not seen yet, gets in
+    assert_eq!(from("198.51.100.9", &token), 200);
 }
 
 /// Past the size limit a write fails with the limit as its error, and nothing of it is

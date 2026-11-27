@@ -541,13 +541,16 @@ struct App {
     durability: Option<Arc<dyn Durability>>,
     /// requests per valid credential (`tenant/hash`): (tokens, last refill)
     limiter: Mutex<HashMap<String, (f64, Instant)>>,
-    /// failed authentications per tenant: (tokens, last refill)
+    /// failed authentications per tenant and client (`tenant/client`), and per tenant (a
+    /// larger allowance, for the engine's sake): (tokens, last refill)
     failures: Mutex<HashMap<String, (f64, Instant)>>,
     /// credentials found valid lately (`tenant/hash` → who, until when): a request with one
     /// does not wait for the engine, and still gets in while a flood of wrong ones is refused
     known: Mutex<HashMap<String, (Principal, Instant)>>,
     /// what tenants stopped since the host last asked had used
     used: Mutex<HashMap<String, Usage>>,
+    /// clients told apart by `X-Forwarded-For`
+    forwarded_for: bool,
 }
 
 type Shared = Arc<App>;
@@ -590,6 +593,9 @@ const BURST: f64 = 120.0;
 /// is refused without asking the engine.
 const FAIL_RATE: f64 = 5.0;
 const FAIL_BURST: f64 = 50.0;
+/// The same for all the clients of a tenant together (they are told apart only behind a proxy
+/// that says who they are).
+const FAIL_TENANT: f64 = 10.0;
 /// How long a credential found valid is trusted without asking the engine again (a revoked token
 /// or a session signed out elsewhere works at most this long more; signing out here is at once).
 const KNOWN_FOR: Duration = Duration::from_secs(10);
@@ -707,6 +713,35 @@ impl App {
     fn forget(&self, key: &str) {
         self.known.lock().unwrap().remove(key);
     }
+
+    /// Who sends a request, for the limits on failures: the address `X-Forwarded-For` gives
+    /// behind the proxy (an IPv6 one by its /64, what one client can rotate within), else one
+    /// key for all.
+    fn client(&self, headers: &HeaderMap) -> String {
+        if !self.forwarded_for {
+            return String::new();
+        }
+        let first = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .unwrap_or("");
+        client_key(first)
+    }
+}
+
+/// An address as the key of its client's limits: IPv4 whole, IPv6 by its /64.
+fn client_key(addr: &str) -> String {
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        Ok(std::net::IpAddr::V6(v6)) => v6.to_ipv4_mapped().unwrap().to_string(),
+        Ok(ip) => ip.to_string(),
+        Err(_) => addr.to_string(),
+    }
 }
 
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -742,8 +777,17 @@ async fn authenticate(
     let who = match app.known(&key) {
         Some(who) => who,
         None => {
-            // a flood of wrong credentials stops here instead of filling the engine's queue
-            if !has_token(&app.failures, &t.id, FAIL_RATE) {
+            // a flood of wrong credentials stops here instead of filling the engine's queue:
+            // from that client, and past a larger allowance from all of them
+            let client = format!("{}/{}", t.id, app.client(headers));
+            let tenant_rate = if app.forwarded_for {
+                FAIL_RATE * FAIL_TENANT
+            } else {
+                FAIL_RATE
+            };
+            if !has_token(&app.failures, &client, FAIL_RATE)
+                || !has_token(&app.failures, &t.id, tenant_rate)
+            {
                 return Err(fail(
                     429,
                     "too many failed sign-ins on this project: try again in a moment",
@@ -755,7 +799,15 @@ async fn authenticate(
                     who
                 }
                 None => {
-                    take(&app.failures, &t.id, FAIL_RATE, FAIL_BURST);
+                    take(&app.failures, &client, FAIL_RATE, FAIL_BURST);
+                    if app.forwarded_for {
+                        take(
+                            &app.failures,
+                            &t.id,
+                            FAIL_RATE * FAIL_TENANT,
+                            FAIL_BURST * FAIL_TENANT,
+                        );
+                    }
                     return Err(fail(401, "invalid or expired credentials"));
                 }
             }
@@ -1782,6 +1834,10 @@ pub struct HostOptions {
     pub requests_per_second: Option<f64>,
     /// where commits are kept besides each tenant's database (None: only there)
     pub durability: Option<Arc<dyn Durability>>,
+    /// the client's address from `X-Forwarded-For`: only behind a proxy that sets it and drops
+    /// what clients send (the cloud's router). Failed sign-ins are then counted per client, so
+    /// that one client trying wrong credentials does not lock out everybody else.
+    pub forwarded_for: bool,
 }
 
 /// A running tenant, as its host sees it.
@@ -1820,6 +1876,7 @@ impl Host {
             failures: Mutex::new(HashMap::new()),
             known: Mutex::new(HashMap::new()),
             used: Mutex::new(HashMap::new()),
+            forwarded_for: options.forwarded_for,
         });
         Host {
             app,
@@ -2164,6 +2221,7 @@ pub fn serve_with(cfg: Config, log_dir: Option<std::path::PathBuf>) -> Result<()
             sign_in: None,
             requests_per_second: None,
             durability,
+            forwarded_for: false,
         };
         let host = Host::new(
             options,
