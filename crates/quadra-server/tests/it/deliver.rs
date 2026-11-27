@@ -2056,3 +2056,64 @@ fn what_is_not_sent_and_what_is_rejected_has_reactions_too() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_tenant_rebuilt_from_its_log_has_the_same_messages_and_deliveries() {
+    let r = receiver(vec![200]);
+    let dir = temp("replayed");
+    let logs = temp("replayed-log");
+    let _ = std::fs::remove_dir_all(&logs);
+    let code = format!("{RECEIVING}\nevent OrderPlaced(order: Order)\n\non Order created as o:\n    emit OrderPlaced(order=o)\n\noutbound OrderPlaced via hooks path \"/orders\"\n");
+    let (cfg, token) = project_full(
+        &dir,
+        r.port,
+        &code,
+        "inbound_signature = \"hmac\"\ninbound_secret = { var = \"HOOK_SECRET\" }\n",
+    );
+    let options = HostOptions {
+        durability: Some(Arc::new(quadra_server::LogFolder(logs.clone()))),
+        ..Default::default()
+    };
+    let picture = |url: &str| -> Vec<Vec<Option<String>>> {
+        let mut c = Conn::open(url).unwrap();
+        [
+            "SELECT \"number\", CAST(\"total\" AS TEXT) FROM \"order\" ORDER BY \"id\"",
+            "SELECT \"inbound\", \"key\", \"state\", \"error\", CAST(\"tx\" AS TEXT) FROM \"_quadra_inbox\" ORDER BY \"id\"",
+            "SELECT \"event\", \"state\", CAST(\"attempts\" AS TEXT), \"delivered_at\" FROM \"_quadra_outbox\" ORDER BY \"id\"",
+            "SELECT \"direction\", CAST(\"message\" AS TEXT), \"step\", \"outcome\" FROM \"_quadra_exchanges\" ORDER BY \"id\"",
+        ]
+        .iter()
+        .flat_map(|q| c.query(q, &[]).unwrap())
+        .collect()
+    };
+    {
+        let (h, rt, port) = serve(options, cfg.clone());
+        call(port, &token, "GET", "/v1/me", None);
+        let good = "{\"id\": 1001, \"name\": \"#1001\", \"total_price\": \"129.90\"}";
+        assert_eq!(send_in(port, good, Some("s3cret")).0, 202);
+        assert_eq!(send_in(port, good, Some("s3cret")).0, 200);
+        assert_eq!(send_in(port, "{\"id\": 1003}", Some("s3cret")).0, 202);
+        until("the delivery", || {
+            !Conn::open(&cfg.url)
+                .unwrap()
+                .query(
+                    "SELECT 1 FROM \"_quadra_outbox\" WHERE \"state\" = 'delivered'",
+                    &[],
+                )
+                .unwrap()
+                .is_empty()
+        });
+        drop((h, rt));
+    }
+    let here = picture(&cfg.url);
+    assert!(here.len() > 6, "{here:?}");
+    let target = dir.join("rebuilt.db");
+    quadra_store::segments::Folder::new(logs.join("d"))
+        .unwrap()
+        .restore(&target)
+        .unwrap();
+    let rebuilt = picture(&format!("sqlite:{}", target.display()));
+    assert_eq!(rebuilt, here);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&logs);
+}

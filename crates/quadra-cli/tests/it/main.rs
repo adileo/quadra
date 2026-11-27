@@ -8,6 +8,7 @@ mod folders;
 mod formulas;
 mod groups;
 mod interfaces;
+mod killed;
 mod load;
 mod lsp;
 mod permissions;

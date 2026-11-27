@@ -48,6 +48,10 @@ on OrderPlaced failed as f:
 fn d_failed(o: Order, why: Text):
     o.tracking = f"failed: {why}"
 
+fn place_and_fail(n: Text):
+    let o = Order(number=n, total=1)
+    fail "boom"
+
 inbound OrderIn via shop path "/orders" as m: ShopOrder:
     key m.id
     if m.total < 0:
@@ -82,6 +86,12 @@ test "a bad message is rejected and changes nothing":
         receive OrderIn "{\"id\": \"7\", \"name\": \"#7\", \"total_price\": \"-1\"}"
     expect_error "is not a ShopOrder":
         receive OrderIn "{\"id\": \"8\"}"
+    expect Order.count() == 0
+    expect not sent OrderPlaced
+
+test "an event of a transaction undone never goes":
+    expect_error "boom":
+        place_and_fail("Z1")
     expect Order.count() == 0
     expect not sent OrderPlaced
 
@@ -140,7 +150,7 @@ fn results(tests: &str) -> Vec<(String, Option<String>)> {
 #[test]
 fn receive_deliver_and_expect_sent_play_the_other_side() {
     let r = results(TESTS);
-    assert_eq!(r.len(), 4);
+    assert_eq!(r.len(), 5);
     for (name, message) in r {
         assert!(message.is_none(), "{name}: {message:?}");
     }
