@@ -75,7 +75,7 @@ event ShipmentReady(order: Text, carrier: Text, weight_kg: Decimal, label: Text)
 ```
 
 ```json
-{"id": 12, "event": "ShipmentReady", "tx": 88, "created_at": "2026-11-27T10:14:03", "data": {"order": "A-1042", "carrier": "DHL", "weight_kg": "2.5", "label": "A-1042/DHL"}}
+{"id": 12, "event": "ShipmentReady", "tx": 88, "created_at": "2026-11-27T10:14:03Z", "data": {"order": "A-1042", "carrier": "DHL", "weight_kg": "2.5", "label": "A-1042/DHL"}}
 ```
 
 The envelope (`id`, `event`, `tx`, `created_at`) and the field names are fixed today. A body in
@@ -179,7 +179,7 @@ Through an HTTP connection an event is a `POST` of JSON to the connection's `url
 the `path`:
 
 ```json
-{"id": 41, "event": "OrderShipped", "tx": 1207, "created_at": "2026-11-27T10:14:03", "data": {"number": "A-1042"}}
+{"id": 41, "event": "OrderShipped", "tx": 1207, "created_at": "2026-11-27T10:14:03Z", "data": {"number": "A-1042"}}
 ```
 
 `data` holds the event's fields as plain JSON:
@@ -231,9 +231,11 @@ event's `to`, with its `subject` and `body`.
 | Answer | What happens |
 |---|---|
 | HTTP 2xx, SMTP accepted | delivered |
-| HTTP 408, 429 or 5xx, a timeout, no connection, SMTP 4xx | tried again: after 30 s, then twice as long each time up to an hour, for a day |
+| HTTP 408, 429 or 5xx, a timeout, no connection, SMTP 4xx | tried again: after 30 s, then twice as long each time up to an hour, for a day; a 429 or 503 with `Retry-After` (in seconds) waits at least that long, up to an hour |
+| HTTP 401 or 403 | tried again in the same way: the connection's credentials were refused, and a renewed token should not cost the events |
 | any other HTTP answer (a 4xx, a redirect: redirects are not followed), SMTP 5xx | failed for good |
 | a day of failed attempts | failed for good |
+| a value missing where the app runs (a variable the connection needs) | waits, without a time limit, until the configuration is fixed |
 
 The outbox keeps each event's attempts, the time of the next one and the last error;
 `quadra outbox list` shows them and `quadra outbox retry <id…>` makes failed events pending

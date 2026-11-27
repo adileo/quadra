@@ -72,8 +72,9 @@ fn receiver(answers: Vec<u16>) -> Receiver {
                 }
                 None => last,
             };
+            let extra = if status == 429 { "Retry-After: 120\r\n" } else { "" };
             let _ = s.write_all(
-                format!("HTTP/1.1 {status} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno")
+                format!("HTTP/1.1 {status} X\r\n{extra}Content-Length: 2\r\nConnection: close\r\n\r\nno")
                     .as_bytes(),
             );
         }
@@ -485,5 +486,33 @@ fn the_compiler_keeps_secrets_out_of_the_code_and_variables_out_of_formulas() {
         1,
         "{errors:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_receiver_that_asks_to_wait_is_obeyed_and_refused_credentials_are_tried_again() {
+    // 429 with Retry-After: 120 → not before two minutes
+    let r = receiver(vec![429]);
+    let dir = temp("later");
+    let (cfg, token) = project(&dir, r.port);
+    let (host, rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "F1");
+    let row = outbox_row(&cfg, |r| r[0].as_deref() == Some("1"));
+    let next = chrono::NaiveDateTime::parse_from_str(row[2].as_deref().unwrap(), "%Y-%m-%dT%H:%M:%S").unwrap();
+    let wait = next - chrono::Utc::now().naive_utc();
+    assert!(wait > chrono::Duration::seconds(100), "{row:?}");
+    assert!(row[4].is_none(), "{row:?}");
+    drop((host, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // 401: the credentials of the connection, to fix: tried again, not failed
+    let r = receiver(vec![401]);
+    let dir = temp("unauthorized");
+    let (cfg, token) = project(&dir, r.port);
+    let (_host, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "G1");
+    let row = outbox_row(&cfg, |r| r[0].as_deref() == Some("1"));
+    assert!(row[4].is_none() && row[2].is_some(), "{row:?}");
+    assert!(row[3].as_deref().unwrap_or("").contains("credentials"), "{row:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -222,7 +222,7 @@ pub fn plan(
                     "id": due.id,
                     "event": due.event,
                     "tx": due.tx,
-                    "created_at": due.created_at,
+                    "created_at": format!("{}Z", due.created_at),
                     "data": plain_fields(&due.fields),
                 })
                 .to_string();
@@ -388,14 +388,18 @@ pub fn http_client(public_only: bool) -> reqwest::Client {
 /// What failed, and whether it may work later.
 enum Failure {
     Again(String),
+    /// try again, not before this long (the receiver said so: `Retry-After`)
+    Later(String, Duration),
     Never(String),
+    /// it cannot be sent as configured: it waits for the configuration, without a time limit
+    Waiting(String),
 }
 
 /// Runs a plan: what came of it, given when it was first emitted (after a day it is not tried
 /// again).
 pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> Outcome {
     let result = match &plan.send {
-        Send::Broken(why) => Err(Failure::Again(why.clone())),
+        Send::Broken(why) => Err(Failure::Waiting(why.clone())),
         Send::Http {
             url,
             headers,
@@ -439,12 +443,19 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> Ou
     match result {
         Ok(()) => Outcome::Delivered,
         Err(Failure::Never(e)) => Outcome::Failed { error: e },
-        Err(Failure::Again(e)) => {
+        Err(f) => {
             let now = chrono::Utc::now().naive_utc();
+            let (e, at_least, ages) = match f {
+                Failure::Again(e) => (e, None, true),
+                Failure::Later(e, d) => (e, Some(d), true),
+                // a configuration to fix (a value missing where it runs) is no reason to give up
+                Failure::Waiting(e) => (e, None, false),
+                Failure::Never(_) => unreachable!(),
+            };
             let first =
                 chrono::NaiveDateTime::parse_from_str(&plan.created_at, "%Y-%m-%dT%H:%M:%S")
                     .unwrap_or(now);
-            if now - first > chrono::Duration::hours(24) {
+            if ages && now - first > chrono::Duration::hours(24) {
                 return Outcome::Failed {
                     error: format!("{e} (tried for a day)"),
                 };
@@ -452,7 +463,10 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> Ou
             // a jitter of its own, the same for the same event and attempt
             let jitter =
                 ((plan.id.wrapping_mul(2654435761) ^ plan.attempts) % 1000) as f64 / 1000.0;
-            let wait = quadra_store::deliveries::backoff(plan.attempts + 1, jitter);
+            let mut wait = quadra_store::deliveries::backoff(plan.attempts + 1, jitter);
+            if let Some(d) = at_least {
+                wait = wait.max(d.min(Duration::from_secs(3600)));
+            }
             let at = now + chrono::Duration::from_std(wait).unwrap_or_default();
             Outcome::Retry {
                 at: at.format("%Y-%m-%dT%H:%M:%S").to_string(),
@@ -512,17 +526,18 @@ async fn http(
     if status.is_success() {
         return Ok(());
     }
-    let text: String = resp
-        .text()
-        .await
-        .unwrap_or_default()
-        .chars()
-        .take(200)
-        .collect();
+    // `Retry-After` in seconds (a date is read as no hint)
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let text = excerpt(resp, 200).await;
+    let code = status.as_u16();
     let msg = format!(
-        "{} answered {}{}",
+        "{} answered {code}{}",
         host_of(url),
-        status.as_u16(),
         if text.trim().is_empty() {
             String::new()
         } else {
@@ -534,11 +549,29 @@ async fn http(
             "{msg} (redirects are not followed: give the final url)"
         )));
     }
-    if status.is_server_error() || status.as_u16() == 408 || status.as_u16() == 429 {
-        Err(Failure::Again(msg))
-    } else {
-        Err(Failure::Never(msg))
+    match code {
+        429 | 503 if retry_after.is_some() => Err(Failure::Later(msg, retry_after.unwrap())),
+        408 | 429 => Err(Failure::Again(msg)),
+        // credentials refused: a token to renew, not a reason to drop the event
+        401 | 403 => Err(Failure::Again(format!(
+            "{msg} (the connection's credentials were refused: check them)"
+        ))),
+        _ if status.is_server_error() => Err(Failure::Again(msg)),
+        _ => Err(Failure::Never(msg)),
     }
+}
+
+/// The first `chars` characters of a response's body, reading no more than 64 KB of it: a huge
+/// or endless answer does not fill the node's memory.
+async fn excerpt(mut resp: reqwest::Response, chars: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < 64 << 10 {
+        match resp.chunk().await {
+            Ok(Some(c)) => buf.extend_from_slice(&c),
+            _ => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).chars().take(chars).collect()
 }
 
 fn host_of(url: &str) -> String {
@@ -690,6 +723,22 @@ mod tests {
         );
         let one = json!({ "d": {"d": "2.5"} });
         assert_eq!(plain_fields(&one), json!({ "d": "2.5" }));
+    }
+
+    #[tokio::test]
+    async fn a_configuration_to_fix_waits_without_a_time_limit() {
+        let plan = Plan {
+            id: 3,
+            event: "E".into(),
+            attempts: 40,
+            created_at: "2020-01-01T00:00:00".into(),
+            send: Send::Broken("the variable TOKEN is not set where the app runs".into()),
+        };
+        let client = http_client(false);
+        match run(&plan, &client, false).await {
+            Outcome::Retry { error, .. } => assert!(error.contains("TOKEN"), "{error}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
