@@ -22,7 +22,7 @@ fn now() -> chrono::NaiveDateTime {
 }
 
 /// A project in a folder of its own with its database initialized, and a token for user 1.
-fn project(dir: &Path, code: &str) -> (Config, String) {
+pub(crate) fn project(dir: &Path, code: &str) -> (Config, String) {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"t\"\n").unwrap();
@@ -75,7 +75,7 @@ impl TenantResolver for Map {
 
 static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn http(port: u16, host: &str, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
+pub(crate) fn http(port: u16, host: &str, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
     http_from(port, host, token, method, path, body, "")
 }
 
@@ -116,7 +116,7 @@ fn items(port: u16, host: &str, token: &str, columns: J) -> (u16, J) {
 }
 
 /// A host on its own runtime, serving on a free port.
-fn serve(specs: Vec<(&str, TenantSpec)>) -> (Host, tokio::runtime::Runtime, u16) {
+pub(crate) fn serve(specs: Vec<(&str, TenantSpec)>) -> (Host, tokio::runtime::Runtime, u16) {
     serve_with(HostOptions::default(), specs)
 }
 
@@ -153,7 +153,7 @@ fn serve_with(
     (host, rt, port)
 }
 
-fn temp(name: &str) -> PathBuf {
+pub(crate) fn temp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("quadra-host-{name}-{}", std::process::id()))
 }
 
