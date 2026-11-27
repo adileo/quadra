@@ -1206,6 +1206,64 @@ pub fn handled_by(conn: &mut Conn, name: &str, id: u64) -> Result<Option<u64>, S
         .and_then(|r| r[0].as_deref().and_then(|v| v.parse().ok())))
 }
 
+/// The rows of message `id` of `inbound` committed by chunks (`atomic per row`): the ranges of
+/// their lines (`inbound:Name#id/lines 2-501 handled`, `…/line 7 handled`), and the last of
+/// those transactions. A server stopped halfway through a file goes on after them.
+#[allow(clippy::type_complexity)]
+pub fn rows_handled(
+    conn: &mut Conn,
+    name: &str,
+    id: u64,
+) -> Result<(Vec<(usize, usize)>, Option<u64>), String> {
+    let mark = format!("inbound:{name}#{id}/");
+    let mut ranges = Vec::new();
+    let mut last = None;
+    for r in conn.query(
+        "SELECT CAST(\"tx\" AS TEXT), \"cause\" FROM \"_quadra_commits\" WHERE \"cause\" LIKE ?text ORDER BY \"tx\"",
+        &[Sql::Text(format!("%{mark}%"))],
+    )? {
+        let (Some(tx), Some(cause)) = (r[0].as_deref(), r[1].as_deref()) else {
+            continue;
+        };
+        let Some(rest) = cause.split(&mark).nth(1) else {
+            continue;
+        };
+        let span = rest.split_whitespace().nth(1).unwrap_or_default();
+        let (a, b) = span.split_once('-').unwrap_or((span, span));
+        if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+            ranges.push((a, b));
+            last = tx.parse().ok().or(last);
+        }
+    }
+    Ok((ranges, last))
+}
+
+/// The next pull of `inbound` brought forward to `now` once none of its messages waits to be
+/// handled: what was handled is settled on the other side (a file moved to `processed/`) at
+/// once rather than at the next pull.
+pub fn pull_soon(conn: &mut Conn, inbound: &str, now: &str) -> Result<(), String> {
+    conn.exec(
+        "UPDATE \"_quadra_cursors\" SET \"next_at\" = ?text WHERE \"inbound\" = ?text AND \"next_at\" > ?text AND NOT EXISTS (SELECT 1 FROM \"_quadra_inbox\" WHERE \"inbound\" = ?text AND \"state\" = 'received')",
+        &[
+            Sql::Text(now.to_string()),
+            Sql::Text(inbound.to_string()),
+            Sql::Text(now.to_string()),
+            Sql::Text(inbound.to_string()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// A message received again (a file that came back with the same content): settled again
+/// on the other side, as the first time.
+pub fn unsettle(conn: &mut Conn, id: u64) -> Result<(), String> {
+    conn.exec(
+        "UPDATE \"_quadra_inbox\" SET \"settled_at\" = NULL WHERE \"id\" = ?bigint AND \"origin\" IS NOT NULL",
+        &[Sql::Int(id as i64)],
+    )?;
+    Ok(())
+}
+
 /// How long to wait after the `attempts`-th failed attempt: 30 s, doubled each time, at most
 /// an hour; `jitter` in 0..1 moves it by up to a fifth either way, so that many events that
 /// failed together are not all tried again at once.

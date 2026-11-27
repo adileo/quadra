@@ -109,6 +109,21 @@ impl<'m> Interp<'m> {
                     let (body, ctype) = crate::formats::render(self.m, &rec).or_else(fail)?;
                     (body, ctype.to_string())
                 }
+                // the rows of a file: its bytes in the record's encoding (latin1, EBCDIC),
+                // carried a character per byte
+                V::List(rows) => {
+                    let bytes = match rows.first() {
+                        Some(V::Rec { ent, .. }) => {
+                            crate::formats::render_rows_bytes(self.m, ent, &rows).or_else(fail)?
+                        }
+                        _ => Vec::new(),
+                    };
+                    out.push((Some("encoding".into()), text("bytes")));
+                    (
+                        bytes.iter().map(|b| *b as char).collect(),
+                        "application/octet-stream".into(),
+                    )
+                }
                 other => (as_text(&other).unwrap_or_default(), "text/plain".into()),
             };
             out.push((Some("method".into()), text("WRITE")));

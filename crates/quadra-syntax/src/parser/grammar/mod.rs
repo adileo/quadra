@@ -524,6 +524,15 @@ fn inbound(p: &mut Parser) {
                 p.bump_ctx();
                 p.bump_ctx();
                 expr(p);
+            } else if p.at_ctx("atomic") && p.nth_at_ctx(1, "per") {
+                // `atomic per file` (all the rows of a file or none), `atomic per row`
+                p.bump_ctx();
+                p.bump_ctx();
+                if p.at_ctx("file") || p.at_ctx("row") {
+                    p.bump_ctx();
+                } else {
+                    p.error("expected `file` or `row`: `atomic per file`, `atomic per row`");
+                }
             } else if p.at_ctx("latest") && p.nth_at_ctx(1, "by") {
                 // `latest by m.product using m.updated_at`
                 p.bump_ctx();
@@ -1159,6 +1168,9 @@ fn modifiers(p: &mut Parser) -> bool {
             // `decimals 2`: the decimals a number is written with in a format
             p.bump_ctx();
             p.bump();
+        } else if p.at_ctx("packed") || p.at_ctx("zoned") {
+            // a number of an EBCDIC file as packed (COMP-3) or zoned decimal
+            p.bump_ctx();
         } else {
             m.abandon(p);
             return any;

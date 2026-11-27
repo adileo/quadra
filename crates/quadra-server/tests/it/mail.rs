@@ -839,8 +839,8 @@ fn a_pec_received_creates_its_invoice_and_its_receipts_are_kept_with_their_messa
             .starts_with("2026-11-27 09:20:11"),
         "{sent:?}"
     );
-    // nothing moved yet: the next pull settles (after a restart, from the cursor kept)
-    assert_eq!(subjects(&st, "INBOX").len(), 4);
+    // a mailbox whose messages are all handled is pulled again at once, which settles them; a
+    // restart in between settles what is left, from the cursor kept
     quadra_store::Conn::open(&cfg.url)
         .unwrap()
         .exec(
@@ -1283,9 +1283,10 @@ fn a_mailbox_of_gmail_or_microsoft_365_is_read_with_xoauth2_after_the_consent() 
     assert_eq!(
         log.iter()
             .filter(|c| c.starts_with("AUTHENTICATE XOAUTH2"))
-            .count(),
-        2,
-        "{log:?}"
+            .count()
+            >= 2,
+        true,
+        "the token refused, then the one refreshed (and the pulls that settle after): {log:?}"
     );
     assert!(!log.iter().any(|c| c.starts_with("LOGIN")));
     let grants = prov.lock().unwrap().grants.clone();

@@ -145,14 +145,58 @@ pub enum Encoding {
     Utf8,
     /// ISO-8859-1: one byte per character, the characters up to U+00FF
     Latin1,
+    /// an EBCDIC code page of IBM mainframes and AS/400 (`37`, `280`, `1144`…): one byte per
+    /// character; a fixed-width file of it is records of bytes back to back, which may hold
+    /// packed decimals
+    Ebcdic(u16),
 }
+
+/// The EBCDIC code pages known, with their names: those of 1140 and after are the earlier
+/// ones (1140 is 37, 1141 is 273…) with `€` in place of `¤`.
+pub const EBCDIC_PAGES: &[(u16, &str)] = &[
+    (37, "ibm-037"),
+    (273, "ibm-273"),
+    (280, "ibm-280"),
+    (285, "ibm-285"),
+    (297, "ibm-297"),
+    (500, "ibm-500"),
+    (1140, "ibm-1140"),
+    (1141, "ibm-1141"),
+    (1144, "ibm-1144"),
+    (1146, "ibm-1146"),
+    (1147, "ibm-1147"),
+    (1148, "ibm-1148"),
+];
 
 impl Encoding {
     pub fn name(self) -> &'static str {
         match self {
             Encoding::Utf8 => "utf-8",
             Encoding::Latin1 => "latin1",
+            Encoding::Ebcdic(p) => EBCDIC_PAGES
+                .iter()
+                .find(|(n, _)| *n == p)
+                .map_or("ebcdic", |(_, name)| name),
         }
+    }
+
+    /// The encoding of a name: `utf-8`, `latin1`, or an EBCDIC page (`ibm-280`, `cp1144`,
+    /// `ebcdic-037`, `IBM280`).
+    pub fn of(name: &str) -> Option<Encoding> {
+        let n = name.trim().to_ascii_lowercase();
+        match n.as_str() {
+            "utf-8" | "utf8" => return Some(Encoding::Utf8),
+            "latin1" | "latin-1" | "iso-8859-1" => return Some(Encoding::Latin1),
+            _ => {}
+        }
+        let digits = ["ibm-", "ibm", "cp", "ebcdic-", "ccsid-"]
+            .iter()
+            .find_map(|p| n.strip_prefix(p))?;
+        let page: u16 = digits.parse().ok()?;
+        EBCDIC_PAGES
+            .iter()
+            .any(|(p, _)| *p == page)
+            .then_some(Encoding::Ebcdic(page))
     }
 }
 
@@ -170,6 +214,9 @@ pub struct Options {
     /// xml: the name of the root element (the record's name); when given, a document with
     /// another root is refused
     pub root: Option<String>,
+    /// fixed: the length of a record (characters, or bytes in EBCDIC), when it goes on after
+    /// its last field; else the end of the last field
+    pub length: Option<usize>,
 }
 
 impl Default for Options {
@@ -180,6 +227,7 @@ impl Default for Options {
             header: true,
             encoding: Encoding::Utf8,
             root: None,
+            length: None,
         }
     }
 }
@@ -188,7 +236,7 @@ impl Default for Options {
 fn known_options(fmt: &str) -> &'static [&'static str] {
     match fmt {
         "csv" => &["sep", "decimal", "header", "encoding"],
-        "fixed" => &["encoding"],
+        "fixed" => &["encoding", "length"],
         "xml" => &["root"],
         _ => &[],
     }
@@ -247,10 +295,22 @@ pub fn options(e: &Entity) -> Result<Options, (Span, String)> {
                 OptionValue::Bool(b) => o.header = *b,
                 _ => return err("`header` is `true` or `false`".into()),
             },
-            "encoding" => match text.map(|t| t.to_ascii_lowercase()).as_deref() {
-                Some("utf-8" | "utf8") => o.encoding = Encoding::Utf8,
-                Some("latin1" | "latin-1" | "iso-8859-1") => o.encoding = Encoding::Latin1,
-                _ => return err("`encoding` is \"utf-8\" or \"latin1\" (ISO-8859-1)".into()),
+            "encoding" => match text.and_then(Encoding::of) {
+                Some(Encoding::Ebcdic(_)) if fmt != "fixed" => {
+                    return err("EBCDIC is read in fixed-width files: `record … from fixed(encoding=\"ibm-280\")`".into())
+                }
+                Some(e) => o.encoding = e,
+                None => return err(format!(
+                    "`encoding` is \"utf-8\", \"latin1\" (ISO-8859-1) or an EBCDIC code page ({})",
+                    EBCDIC_PAGES.iter().map(|(_, n)| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
+                )),
+            },
+            "length" => match &opt.value {
+                OptionValue::Number(n) => match n.replace('_', "").parse::<usize>() {
+                    Ok(n) if (1..=100_000).contains(&n) => o.length = Some(n),
+                    _ => return err("`length` is the length of a record, from 1 to 100000: `length=120`".into()),
+                },
+                _ => return err("`length` is the length of a record, a number: `length=120`".into()),
             },
             "root" => match text {
                 Some(t) if xml_name(t) => o.root = Some(t.to_string()),

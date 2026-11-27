@@ -4,6 +4,7 @@
 mod agents;
 mod api;
 mod deliver;
+mod files;
 mod host;
 mod mail;
 mod orchestration;

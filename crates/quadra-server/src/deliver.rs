@@ -269,7 +269,7 @@ pub enum Built {
     Put {
         file: bool,
         path: String,
-        body: String,
+        body: Vec<u8>,
     },
 }
 
@@ -552,7 +552,15 @@ pub fn built_of(v: &quadra_runtime::V) -> Result<Built, String> {
         return Ok(Built::Put {
             file: method == "WRITE",
             path: get("path").unwrap_or_default(),
-            body: get("body").unwrap_or_default(),
+            // the bytes of a file of rows come a character per byte
+            body: match get("encoding").as_deref() {
+                Some("bytes") => get("body")
+                    .unwrap_or_default()
+                    .chars()
+                    .map(|c| c as u32 as u8)
+                    .collect(),
+                _ => get("body").unwrap_or_default().into_bytes(),
+            },
         });
     }
     if method == "EMAIL" {
@@ -800,12 +808,12 @@ pub fn plan(
                     }
                     crate::transport::Put::File {
                         path: path.clone(),
-                        body: body.as_bytes().to_vec(),
+                        body: body.clone(),
                     }
                 } else {
                     crate::transport::Put::Row {
                         table: path.clone(),
-                        row: serde_json::from_str(body).map_err(|e| e.to_string())?,
+                        row: serde_json::from_slice(body).map_err(|e| e.to_string())?,
                         key: idempotency_key(&due),
                     }
                 };

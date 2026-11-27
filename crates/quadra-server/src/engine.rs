@@ -2022,7 +2022,17 @@ impl Engine {
         for (origin, bytes, item_cursor) in items {
             let (text, base64) = crate::transport::body_text(&bytes);
             let hash = crate::inbound::hash(&bytes);
-            let parsed = quadra_runtime::formats::read_message(model, &i.ty, &bytes);
+            // a file of rows: only what is wrong with the whole file refuses it here; its
+            // rows are reported when it is handled
+            let parsed = if crate::files::rows_record(model, &i.ty) {
+                quadra_runtime::formats::read_rows(model, &i.ty, &bytes).map(|each| {
+                    quadra_runtime::V::List(std::rc::Rc::new(
+                        each.into_iter().filter_map(|(_, r)| r.ok()).collect(),
+                    ))
+                })
+            } else {
+                quadra_runtime::formats::read_message(model, &i.ty, &bytes)
+            };
             let eval = |e: &quadra_ir::Expr, doc: &quadra_runtime::V| -> Option<String> {
                 let mut interp = quadra_runtime::Interp::new(model);
                 let mut ctx = quadra_runtime::Ctx::default();
@@ -2067,25 +2077,33 @@ impl Engine {
         );
         let r = self.side(move |cn| {
             let mut new = 0;
+            let mut again = false;
             for (key, hash, text, error, marks) in &kept {
-                if let quadra_store::deliveries::Received::New(_) =
-                    quadra_store::deliveries::receive(
-                        cn,
-                        &n,
-                        &c,
-                        key,
-                        hash,
-                        text,
-                        &t,
-                        error.as_deref(),
-                        marks,
-                    )?
-                {
-                    new += 1;
+                match quadra_store::deliveries::receive(
+                    cn,
+                    &n,
+                    &c,
+                    key,
+                    hash,
+                    text,
+                    &t,
+                    error.as_deref(),
+                    marks,
+                )? {
+                    quadra_store::deliveries::Received::New(_) => new += 1,
+                    // a file that came again as it was: moved there again, not handled again
+                    quadra_store::deliveries::Received::Duplicate(id) if marks.origin.is_some() => {
+                        quadra_store::deliveries::unsettle(cn, id)?;
+                        again = true;
+                    }
+                    _ => {}
                 }
             }
             quadra_store::deliveries::settled(cn, &n, &settled, &t)?;
             quadra_store::deliveries::pulled(cn, &n, &t, &nx, cursor.as_deref(), None)?;
+            if again {
+                quadra_store::deliveries::pull_soon(cn, &n, &t)?;
+            }
             Ok(new)
         });
         r.unwrap_or_else(|e| {
@@ -2138,6 +2156,8 @@ impl Engine {
                     continue;
                 }
             }
+            // the report of the rows of a file: those refused, and why
+            let mut rows_report: Option<String> = None;
             let result: Result<u64, String> = (|| {
                 let i = model
                     .inbounds
@@ -2153,6 +2173,22 @@ impl Engine {
                     return Ok(tx);
                 }
                 let bytes = crate::transport::body_bytes(&m.body, m.marks.base64);
+                // a file of rows: all of them or none, or each row that works
+                if crate::files::rows_record(model, &i.ty) {
+                    let (r, report) = crate::files::handle_file(
+                        &mut self.conn,
+                        &self.url,
+                        self.sequencer.as_ref(),
+                        model,
+                        &checked.report,
+                        at,
+                        i,
+                        m.id,
+                        &bytes,
+                    );
+                    rows_report = report;
+                    return r;
+                }
                 let doc = quadra_runtime::formats::read_message(model, &i.ty, &bytes)
                     .map_err(|e| format!("{}: {e}", i.ty))?;
                 quadra_store::ops::handle_inbound(
@@ -2215,6 +2251,7 @@ impl Engine {
             }
             let rejected = result.as_ref().err().cloned();
             let inbound_name = name.clone();
+            let from_there = m.marks.origin.is_some();
             let _ = self.side(move |c| {
                 quadra_store::deliveries::handled(
                     c,
@@ -2222,7 +2259,15 @@ impl Engine {
                     &name,
                     &stamp,
                     result.as_ref().map(|t| *t).map_err(|e| e.as_str()),
-                )
+                )?;
+                if let Some(r) = &rows_report {
+                    quadra_store::deliveries::set_report(c, id, r)?;
+                }
+                // a file handled is moved on the other side soon, not at the next pull
+                if from_there {
+                    quadra_store::deliveries::pull_soon(c, &name, &stamp)?;
+                }
+                Ok(())
             });
             // `on OrderIn rejected as r:`: someone to tell, a task to open
             if let Some(error) = rejected {

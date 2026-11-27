@@ -1114,6 +1114,188 @@ pub fn handle_inbound(
     Ok((interp.store.tx > before && !interp.store.dirty.is_empty()).then_some(interp.store.tx))
 }
 
+/// One transaction of rows: committed (its transaction, if it wrote), or the index of the
+/// row that failed (none: at its commit) and why; the outer error is not a row's.
+type RowsRun = Result<Result<Option<u64>, (Option<usize>, String)>, String>;
+
+/// What came of the rows of a file handled by an inbound (`handle_inbound_rows`).
+#[derive(Debug, Default)]
+pub struct RowsOutcome {
+    /// the last transaction committed
+    pub tx: Option<u64>,
+    /// the rows whose code failed: their line (record) and why
+    pub refused: Vec<(usize, String)>,
+    /// the rows committed now
+    pub committed: usize,
+}
+
+/// The rows of a chunk committed in one transaction (`atomic per row`): large enough that a
+/// file of a hundred thousand rows is two hundred commits, small enough that a row that fails
+/// costs little to isolate.
+pub const ROWS_PER_COMMIT: usize = 500;
+
+/// The rows of a file (`(line, row)`) run through an inbound's code. `per_row` false (`atomic
+/// per file`): all of them in one transaction with the cause `<cause> handled`, or none (the
+/// error says the line). `per_row` (`atomic per row`): by chunks of [`ROWS_PER_COMMIT`], each
+/// a transaction with the cause `<cause>/lines A-B handled`; a row that fails is refused and
+/// the rows before it in its chunk committed without it; a chunk that fails as a whole (a
+/// rule checked at its commit) is run again a row at a time (`<cause>/line N handled`). The
+/// rows `done` committed before (a server stopped halfway) are not run again. `unit` names a
+/// row in what is reported (`line`, `record`).
+#[allow(clippy::too_many_arguments)]
+pub fn handle_inbound_rows(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+    inbound: &quadra_ir::Inbound,
+    rows: &[(usize, V)],
+    per_row: bool,
+    cause: &str,
+    done: impl Fn(usize) -> bool,
+    unit: &str,
+) -> Result<RowsOutcome, String> {
+    let what = format!("inbound {}", inbound.name);
+    let open = || -> Result<Interp<'_>, String> {
+        let db = Database::open(url, model, report)?;
+        let schema = db.schema.clone();
+        let src = crate::source::DbSource::open(url, schema, None)?;
+        let mut interp = Interp::new(model);
+        interp.set_clock(time);
+        interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+        interp.load_units();
+        interp.materialize = materialized_formulas(&db.schema);
+        interp.sink = Some(match sequencer {
+            Some(s) => Box::new(crate::SequencedSink {
+                db,
+                model,
+                sequencer: s.clone(),
+                tickets: None,
+            }),
+            None => Box::new(Sink { db, model }),
+        });
+        interp.system += 1;
+        Ok(interp)
+    };
+    // one transaction of `rows`: the transaction, or the index of the row that failed (none:
+    // it failed at its commit) and why
+    let run = |interp: &mut Interp, rows: &[(usize, V)], cause: String| -> RowsRun {
+        let before = interp.store.tx;
+        let failed_at = std::cell::Cell::new(None);
+        let r = interp.with_cause(cause, |i| {
+            i.transaction(|i| {
+                for (n, (_, row)) in rows.iter().enumerate() {
+                    let mut ctx = Ctx::default();
+                    ctx.bind(&inbound.binding, row.clone());
+                    match i.stmts(&inbound.body, &mut ctx) {
+                        Err(Flow::Return(_)) | Ok(()) => {}
+                        Err(e) => {
+                            failed_at.set(Some(n));
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(())
+            })
+        });
+        match r {
+            Ok(()) => Ok(Ok((interp.store.tx > before
+                && !interp.store.dirty.is_empty())
+            .then_some(interp.store.tx))),
+            Err(Flow::Fail(e)) => Ok(Err((failed_at.get(), e))),
+            Err(e) => Err(flow(&what, e)),
+        }
+    };
+    let mut out = RowsOutcome::default();
+    if !per_row {
+        let mut interp = open()?;
+        return match run(&mut interp, rows, format!("{cause} handled"))? {
+            Ok(tx) => {
+                out.tx = tx;
+                out.committed = rows.len();
+                Ok(out)
+            }
+            Err((Some(n), e)) => Err(format!("{what}: {unit} {}: {e}", rows[n].0)),
+            Err((None, e)) => Err(format!("{what}: {e}")),
+        };
+    }
+    let span = |rows: &[(usize, V)]| match (rows.first(), rows.last()) {
+        (Some(a), Some(b)) if a.0 != b.0 => format!("{unit}s {}-{}", a.0, b.0),
+        (Some(a), _) => format!("{unit} {}", a.0),
+        _ => String::new(),
+    };
+    let todo: Vec<(usize, V)> = rows.iter().filter(|(n, _)| !done(*n)).cloned().collect();
+    let mut rest: &[(usize, V)] = &todo;
+    while !rest.is_empty() {
+        let chunk = &rest[..rest.len().min(ROWS_PER_COMMIT)];
+        let mut interp = open()?;
+        match run(
+            &mut interp,
+            chunk,
+            format!("{cause}/{} handled", span(chunk)),
+        )? {
+            Ok(tx) => {
+                out.tx = tx.or(out.tx);
+                out.committed += chunk.len();
+                rest = &rest[chunk.len()..];
+            }
+            // a row failed: the rows before it go without it, the next chunk starts after it
+            Err((Some(n), e)) => {
+                out.refused.push((chunk[n].0, e));
+                if n > 0 {
+                    let before = &chunk[..n];
+                    match run(
+                        &mut interp,
+                        before,
+                        format!("{cause}/{} handled", span(before)),
+                    )? {
+                        Ok(tx) => {
+                            out.tx = tx.or(out.tx);
+                            out.committed += before.len();
+                        }
+                        Err(_) => one_by_one(&mut interp, before, &mut out, &run, cause, unit)?,
+                    }
+                }
+                rest = &rest[n + 1..];
+            }
+            // it failed at its commit (a rule over the rows): a row at a time
+            Err((None, _)) => {
+                one_by_one(&mut interp, chunk, &mut out, &run, cause, unit)?;
+                rest = &rest[chunk.len()..];
+            }
+        }
+    }
+    out.refused.sort_by_key(|(n, _)| *n);
+    Ok(out)
+}
+
+/// Each row in a transaction of its own: those that fail are refused.
+#[allow(clippy::type_complexity)]
+fn one_by_one<'m>(
+    interp: &mut Interp<'m>,
+    rows: &[(usize, V)],
+    out: &mut RowsOutcome,
+    run: &dyn Fn(&mut Interp<'m>, &[(usize, V)], String) -> RowsRun,
+    cause: &str,
+    unit: &str,
+) -> Result<(), String> {
+    for row in rows {
+        match run(
+            interp,
+            std::slice::from_ref(row),
+            format!("{cause}/{unit} {} handled", row.0),
+        )? {
+            Ok(tx) => {
+                out.tx = tx.or(out.tx);
+                out.committed += 1;
+            }
+            Err((_, e)) => out.refused.push((row.0, e)),
+        }
+    }
+    Ok(())
+}
+
 /// The answer of an endpoint to a request (`q`, its record): the code of its block run as the
 /// system; with `cause` (a `POST`) in a transaction of its own, else (a `GET`) reading only.
 /// Returns the answer and the transaction it committed, if any.

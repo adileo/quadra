@@ -88,6 +88,17 @@ fn rows(text: &str, sep: char) -> Result<Vec<(usize, Vec<String>)>, String> {
 
 /// Reads the rows of a CSV text into records of `rec`.
 pub(super) fn parse_rows(m: &Model, rec: &str, text: &str) -> Result<V, String> {
+    let mut out = Vec::new();
+    for (_, row) in parse_each(m, rec, text)? {
+        out.push(row?);
+    }
+    Ok(V::List(Rc::new(out)))
+}
+
+/// Reads each row of a CSV text on its own: the line it starts on, and its record or what is
+/// wrong with it. An error of the whole file (a quote never closed, a column missing from the
+/// header) is the outer one.
+pub(super) fn parse_each(m: &Model, rec: &str, text: &str) -> Result<super::Rows, String> {
     let e = record(m, rec)?;
     let opts = options(e)?;
     let fields = fields(m, e);
@@ -120,43 +131,51 @@ pub(super) fn parse_rows(m: &Model, rec: &str, text: &str) -> Result<V, String> 
         }
         at.push((index, c));
     }
+    let kinds = fields
+        .iter()
+        .map(|f| f.ty.as_ref().map(|ty| kind(m, ty, "csv")).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
     for (line, cells) in rows {
-        let mut values = Vec::new();
-        for (f, (index, column)) in fields.iter().zip(&at) {
-            let Some(ty) = &f.ty else { continue };
-            let k = kind(m, ty, "csv")?;
-            let here = |why: String| format!("line {line}, column {column}: {why}");
-            let optional = matches!(k, Kind::Optional(_));
-            let cell = match index.map(|i| cells.get(i)) {
-                None => None,
-                Some(Some(c)) => Some(c.as_str()),
-                Some(None) if optional => None,
-                Some(None) => {
-                    return Err(here(format!("missing (the row has {} cells)", cells.len())))
-                }
-            };
-            let k = k.unopt();
-            let v = match cell {
-                None => V::None,
-                Some(c) if c.trim().is_empty() && optional => V::None,
-                Some(c) if c.trim().is_empty() && !matches!(k, Kind::Text) => {
-                    return Err(here("missing".into()))
-                }
-                Some(c) => {
-                    // the `'` written before a formula is not part of the text
-                    let c = match c.strip_prefix('\'') {
-                        Some(rest) if matches!(k, Kind::Text) && rest.starts_with(FORMULA) => rest,
-                        _ => c,
-                    };
-                    read_scalar(m, k, c, f, opts.decimal).map_err(here)?
-                }
-            };
-            values.push((f.name.clone(), v));
-        }
-        out.push(new_record(m, rec, values));
+        let row = (|| -> Result<V, String> {
+            let mut values = Vec::new();
+            for ((f, (index, column)), k) in fields.iter().zip(&at).zip(&kinds) {
+                let Some(k) = k else { continue };
+                let here = |why: String| format!("line {line}, column {column}: {why}");
+                let optional = matches!(k, Kind::Optional(_));
+                let cell = match index.map(|i| cells.get(i)) {
+                    None => None,
+                    Some(Some(c)) => Some(c.as_str()),
+                    Some(None) if optional => None,
+                    Some(None) => {
+                        return Err(here(format!("missing (the row has {} cells)", cells.len())))
+                    }
+                };
+                let k = k.unopt();
+                let v = match cell {
+                    None => V::None,
+                    Some(c) if c.trim().is_empty() && optional => V::None,
+                    Some(c) if c.trim().is_empty() && !matches!(k, Kind::Text) => {
+                        return Err(here("missing".into()))
+                    }
+                    Some(c) => {
+                        // the `'` written before a formula is not part of the text
+                        let c = match c.strip_prefix('\'') {
+                            Some(rest) if matches!(k, Kind::Text) && rest.starts_with(FORMULA) => {
+                                rest
+                            }
+                            _ => c,
+                        };
+                        read_scalar(m, k, c, f, opts.decimal).map_err(here)?
+                    }
+                };
+                values.push((f.name.clone(), v));
+            }
+            Ok(new_record(m, rec, values))
+        })();
+        out.push((line, row));
     }
-    Ok(V::List(Rc::new(out)))
+    Ok(out)
 }
 
 /// A cell as written in the file: quoted when it holds the separator, a quote or a new line.

@@ -157,7 +157,7 @@ test "the compiler refuses what a format cannot hold":
     expect_compile_error "`delimiter` is not an option of `csv` (sep, decimal, header, encoding)":
         record Bad from csv(delimiter=";"):
             id: Text
-    expect_compile_error "`encoding` is \"utf-8\" or \"latin1\"":
+    expect_compile_error "`encoding` is \"utf-8\", \"latin1\"":
         record Bad from csv(encoding="ebcdic"):
             id: Text
     expect_compile_error "a pattern of dates":

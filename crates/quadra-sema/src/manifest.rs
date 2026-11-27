@@ -937,9 +937,11 @@ fn other_kind(
                 }
             }
             match (&password, &oauth) {
-                (None, None) => return Err(format!(
+                (None, None) => {
+                    return Err(format!(
                     "{at}: a password is needed, or OAuth2 (oauth2_grant = \"authorization_code\")"
-                )),
+                ))
+                }
                 (Some(_), Some(_)) => {
                     return Err(format!(
                         "{at}: one authentication only: a password, or OAuth2"
