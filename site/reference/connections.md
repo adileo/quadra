@@ -142,6 +142,7 @@ quadra.toml, [connections.shop]: bearer is a credential: not written in quadra.t
 | `api_key`, `api_key_header` | sends the key in a header (`X-Api-Key` when not given) |
 | `user`, `password` | HTTP basic authentication |
 | `oauth2_token_url`, `client_id`, `client_secret`, `scope`, `client_auth` | OAuth2 client credentials (below) |
+| `oauth2_grant = "authorization_code"`, `oauth2_authorize_url` | OAuth2 with the consent of a user instead ([below](#oauth2-with-the-users-consent)) |
 | `signing_secret` | signs every request (see [Webhooks](#webhooks)); `signature_…` say how (below) |
 | `client_certificate` | the client's certificate and its private key, PEM, for servers that ask for one (mutual TLS) |
 | `server_ca` | the certificate (PEM) of the authority that signed the server's, when it is a private one (an ERP of the company's network): then only it is trusted |
@@ -202,6 +203,323 @@ answer resumes the others. (The pause is kept in memory: a restart starts afresh
 | `user`, `password` | the SMTP login |
 | `from` | the sender, `Name <address>` or an address |
 | `insecure` | `true` allows `smtp://` without TLS: for a local test server such as Mailpit |
+
+### `kind = "imap"`: mailboxes and PEC
+
+A mailbox read over IMAP: an ordinary one, or a PEC mailbox (*posta elettronica
+certificata*), whose certified messages and receipts arrive as mails. Each mail is a message
+of an [`inbound`](#inbound-messages-in) that pulls it:
+
+```toml
+[vars]
+PEC_PASSWORD = { secret = true }
+
+[connections.pec]
+kind = "imap"
+url = "imaps://imaps.pec.aruba.it"
+user = "amministrazione@pec.acme.it"
+password = { var = "PEC_PASSWORD" }
+```
+
+| Key | Meaning |
+|---|---|
+| `url` | `imaps://host` (TLS, port 993 when not given); plain `imap://host:143` only with `insecure = true` |
+| `user` | the login of the mailbox |
+| `password` | its password, a secret variable |
+| `oauth2_grant = "authorization_code"`, `oauth2_authorize_url`, `oauth2_token_url`, `client_id`, `client_secret`, `scope` | instead of a password, OAuth2 with the user's consent (`AUTHENTICATE XOAUTH2`): Gmail, Microsoft 365 ([below](#oauth2-with-the-users-consent)) |
+| `timeout` | from `"1s"` to `"600s"`; `"30s"` when not given |
+| `insecure` | `true` allows `imap://` without TLS: for a local test server such as GreenMail |
+| `location` | `"agent:<name>"`: read by an on-premise agent, in the network of the mail server (with a password only) |
+
+```quadra
+entity Invoice:
+    number: Text
+    supplier: Text
+    total: Decimal
+    pec_id: Text
+    file_name: Text
+
+entity SentPec:
+    message_id: Text
+    subject: Text
+    accepted_at: DateTime?
+    delivered_at: DateTime?
+
+entity PecReceipt:
+    kind: Text
+    pec_message_id: Text
+    at: DateTime
+    sent: SentPec?
+
+record MailAddress from json:
+    name: Text?
+    address: Text?
+
+record MailAttachment from json:
+    name: Text
+    content_type: Text
+    size: Int
+    sha256: Text
+    content: Text?
+    text: Text?
+
+record OriginalMail from json:
+    message_id: Text?
+    subject: Text?
+    sender: MailAddress? at "from"
+    attachments: [MailAttachment]
+
+record PecRecipient from json:
+    address: Text
+    kind: Text? at "type"
+
+record PecData from json:
+    kind: Text at "type"
+    message_id: Text?
+    id: Text?
+    sender: Text?
+    date: DateTime?
+    recipients: [PecRecipient]
+    original: OriginalMail?
+
+record PecMail from json:
+    message_id: Text?
+    subject: Text?
+    sender: MailAddress? at "from"
+    date: DateTime?
+    text: Text?
+    attachments: [MailAttachment]
+    pec: PecData?
+
+record FatturaPA from xml(root="p:FatturaElettronica"):
+    ns p "http://ivaservizi.agenziaentrate.gov.it/docs/xsd/fatture/v1.2"
+    number: Text at "FatturaElettronicaBody/DatiGenerali/DatiGeneraliDocumento/Numero"
+    total: Decimal at "FatturaElettronicaBody/DatiGenerali/DatiGeneraliDocumento/ImportoTotaleDocumento"
+    supplier: Text at "FatturaElettronicaHeader/CedentePrestatore/DatiAnagrafici/Anagrafica/Denominazione"
+
+inbound PecIn via pec as m: PecMail:
+    pull "INBOX" every 2 minutes
+    key m.message_id
+    let p = m.pec ?? fail "not a PEC"
+    if p.kind == "posta-certificata":
+        let o = p.original ?? fail "a PEC without its message"
+        for a in o.attachments:
+            if a.name.ends_with(".xml"):
+                let f = FatturaPA.parse(a.text ?? fail "an invoice that is not text")
+                let i = Invoice(number=f.number, supplier=f.supplier, total=f.total, pec_id=p.id ?? "", file_name=a.name)
+    else:
+        let id = p.message_id ?? fail "a receipt without the id of its message"
+        let at = p.date ?? fail "a receipt without a date"
+        let s = SentPec.where(x => x.message_id == id).first()
+        let r = PecReceipt(kind=p.kind, pec_message_id=id, at=at, sent=s)
+        if let sent = s:
+            if p.kind == "accettazione":
+                sent.accepted_at = at
+            if p.kind == "avvenuta-consegna":
+                sent.delivered_at = at
+```
+
+`pull "INBOX"` names the mailbox (`"INBOX"`, `"Fatture/2026"`), `every` how often it is read
+(a minute at least). Each mail is kept, read as the inbound's record and handled like any
+message: the same states, duplicates, log and commands. Use `key m.message_id`: the mail's
+own id is what tells it apart.
+
+**The document of a mail.** An inbound reads each mail as this JSON document, with a record
+`from json` that declares what it uses (the rest is ignored):
+
+```json
+{
+  "message_id": "20261127.4711@shop.example.com",
+  "from": {"name": "Shop Orders", "address": "orders@shop.example.com"},
+  "to": [{"name": null, "address": "acme@example.com"}],
+  "cc": [],
+  "reply_to": [],
+  "subject": "Order 1042",
+  "date": "2026-11-27T09:14:03Z",
+  "text": "Thank you for your order 1042.",
+  "html": "<p><b>Thank you</b> for your order 1042.</p>",
+  "attachments": [
+    {"name": "order-1042.csv", "content_type": "text/csv", "size": 14,
+     "sha256": "6f1c…", "content": "c2t1O3F0eQpBLTE7Mgo=", "text": "sku;qty\nA-1;2\n",
+     "truncated": false}
+  ],
+  "pec": null
+}
+```
+
+| Key | Value |
+|---|---|
+| `message_id` | the `Message-ID` header, without `<` `>` (`null` when the mail has none) |
+| `from`, `to`, `cc`, `reply_to` | `{"name", "address"}`: `from` one, the others lists |
+| `subject` | the subject, decoded |
+| `date` | the `Date` header as an instant in UTC, `2026-11-27T09:14:03Z` |
+| `text`, `html` | the first plain-text and HTML bodies, decoded to UTF-8 (`null` when there is none) |
+| `attachments` | every other part, in order (below) |
+| `pec` | for a PEC, what its `daticert.xml` certifies (below); `null` for any other mail |
+| `truncated`, `size` | only on a mail larger than 32 MiB: taken with its headers alone, no bodies or attachments, `size` its size in bytes |
+
+**Attachments.**
+
+| Key | Value |
+|---|---|
+| `name` | its file name (`attachment-2`, `message-3.eml` when it has none) |
+| `content_type` | `application/pdf`, `text/csv`, `message/rfc822` (an attached mail)… |
+| `size`, `sha256` | its size in bytes and the hex SHA-256 of its content, decoded |
+| `content` | the content, base64 |
+| `text` | the content as text, when it is text (`text/*`, XML, JSON, `.csv`, `.txt`, `.eml`) in UTF-8: what `Invoice.parse(a.text)` reads; `null` otherwise |
+| `truncated` | `true` when the content is left out: an attachment larger than 16 MiB, or past 24 MiB of attachments in one mail; `size` and `sha256` are still given |
+
+**PEC.** A PEC is a transport envelope (`X-Trasporto`) or a receipt (`X-Ricevuta`) with a
+`daticert.xml`, signed by the provider (`smime.p7s`). Its `pec` says what the provider
+certifies; the envelope's own parts (`daticert.xml`, `postacert.eml`, `smime.p7s`) are read
+into it and not listed among the attachments.
+
+```json
+"pec": {
+  "type": "posta-certificata",
+  "error": "nessuno",
+  "error_detail": null,
+  "id": "opec21031.20261127101403.04711.06.1.1@pec.example.it",
+  "message_id": "FAT2026118.20261127@mail.fornitore.example.it",
+  "sender": "fatture@pec.fornitore.example.it",
+  "recipients": [{"address": "amministrazione@pec.acme.it", "type": "certificato"}],
+  "reply_to": "fatture@pec.fornitore.example.it",
+  "subject": "Fattura 2026/118",
+  "provider": "Example PEC S.p.A.",
+  "date": "2026-11-27T09:14:03Z",
+  "receipt": null,
+  "delivered_to": null,
+  "original": {"message_id": "FAT2026118.20261127@mail.fornitore.example.it", "subject": "Fattura 2026/118", "from": {…}, "attachments": [{"name": "IT01234567890_00118.xml", …}], …}
+}
+```
+
+| Key | Value (from `daticert.xml`) |
+|---|---|
+| `type` | `posta-certificata` (a certified message), `accettazione`, `non-accettazione`, `presa-in-carico`, `avvenuta-consegna`, `errore-consegna`, `preavviso-errore-consegna`, `rilevazione-virus` |
+| `error`, `error_detail` | `nessuno`, `no-dest`, `no-dominio`, `virus`, `altro`; and the provider's explanation (`errore-esteso`) |
+| `id` | the provider's identifier of the message (`identificativo`): the same on the message and on all its receipts |
+| `message_id` | the `Message-ID` of the message certified, without `<` `>` (`msgid`): on a receipt, the id of the PEC it is about |
+| `sender`, `recipients`, `reply_to`, `subject` | as certified; each recipient with its `type`, `certificato` or `esterno` |
+| `provider` | the provider that certifies it (`gestore-emittente`) |
+| `date` | when, as an instant in UTC (the provider writes the day, the time and the zone) |
+| `receipt`, `delivered_to` | on an `avvenuta-consegna`: `completa`, `breve` or `sintetica`, and the mailbox it was delivered to |
+| `original` | the message carried (`postacert.eml`: a `posta-certificata`, a complete receipt), as the same document without `pec` |
+
+A receipt links to the PEC it is about by `pec.message_id`: the `Message-ID` the app gave the
+PEC it sent (keep it on the record that sent it, as `SentPec` above). The signature
+`smime.p7s` is not verified: the mailbox is the provider's, read over TLS, and the provider is
+who signs; keep the mailbox's `Quadra/processed` folder (or the provider's archive) where the
+law asks for the messages as received.
+
+**Where the mails go.** A mail is never deleted, and taking it does not mark it read
+(`BODY.PEEK`). Once handled for good, it is marked read and moved at the next pull:
+
+| State of the message | Moved to |
+|---|---|
+| `done`, `skipped`, `superseded` | `Quadra/processed` |
+| `rejected` | `Quadra/rejected` (the error stays in its log, `quadra inbox log`) |
+
+The folders are created when missing, with the server's separator (`Quadra.processed` where
+it is `.`). The move is `UID MOVE` where the server has it, else a copy, the original flagged
+`\Deleted` and expunged (`UID EXPUNGE` with UIDPLUS; a server without it expunges every mail
+flagged `\Deleted` in that mailbox). A mail someone moved meanwhile counts as settled.
+
+| Rule | Detail |
+|---|---|
+| Taken once | each pull takes the mails after its cursor, the mailbox's `UIDVALIDITY` and the last UID taken, kept with the mails in one write: a restart neither loses nor takes again what it took |
+| The first pull | takes every mail already in the mailbox, oldest first: point the inbound at a mailbox or folder of its own |
+| Per pull | at most 100 mails and about 64 MiB; the rest at the next one |
+| Renumbered | a server that changes `UIDVALIDITY` hands out its mails again: with `key m.message_id` they are duplicates, and settling finds them by their `Message-ID` |
+| Errors | no answer, a dropped connection: the pull is tried again (within five minutes); a login refused: in the log of message 0, until the password is fixed |
+| Not done | sending through PEC (use an `smtp` connection to the PEC provider), IDLE (mails come at the next pull), S/MIME and `.p7m` signatures (read as attachments, not verified or opened) |
+
+### OAuth2 with the user's consent
+
+Some systems are reached only with the consent of one of their users: an app of a shop
+(Shopify), a mailbox of Gmail or Microsoft 365. The connection says where to ask
+(`oauth2_grant = "authorization_code"`); an admin of the app gives the consent once, in the
+provider's page, and Quadra keeps the tokens and refreshes them.
+
+```toml
+[vars]
+SHOPIFY_CLIENT_ID = {}
+SHOPIFY_CLIENT_SECRET = { secret = true }
+GOOGLE_CLIENT_SECRET = { secret = true }
+
+[connections.shop]
+kind = "http"
+url = "https://acme.myshopify.com/admin/api/2026-10"
+oauth2_grant = "authorization_code"
+oauth2_authorize_url = "https://acme.myshopify.com/admin/oauth/authorize"
+oauth2_token_url = "https://acme.myshopify.com/admin/oauth/access_token"
+client_id = { var = "SHOPIFY_CLIENT_ID" }
+client_secret = { var = "SHOPIFY_CLIENT_SECRET" }
+client_auth = "body"
+scope = "read_orders,write_fulfillments"
+
+[connections.inbox]
+kind = "imap"
+url = "imaps://imap.gmail.com"
+user = "ordini@acme.it"
+oauth2_grant = "authorization_code"
+oauth2_authorize_url = "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent"
+oauth2_token_url = "https://oauth2.googleapis.com/token"
+client_id = "123456789.apps.googleusercontent.com"
+client_secret = { var = "GOOGLE_CLIENT_SECRET" }
+scope = "https://mail.google.com/"
+```
+
+| Key | Meaning |
+|---|---|
+| `oauth2_grant` | `"authorization_code"`: the user's consent. `"client_credentials"` (the default, HTTP only) is the [client's own token](#kind-http) |
+| `oauth2_authorize_url` | the provider's page that asks the user; parameters of the provider's own may be written in it (`access_type=offline&prompt=consent`, which Google needs to give a refresh token) |
+| `oauth2_token_url` | where the code is exchanged and the tokens refreshed |
+| `client_id`, `client_secret` | the app registered with the provider; the secret a secret variable |
+| `client_auth` | `"basic"` (the default) or `"body"`: how the client's id and secret go to the token url |
+| `scope` | what the consent covers, in the provider's words: `https://mail.google.com/` for Gmail, `https://outlook.office.com/IMAP.AccessAsUser.All offline_access` for Microsoft 365 (`offline_access` gives the refresh token) |
+
+Register `https://<app>/oauth/<connection>/callback` with the provider as the redirect URL
+(`https://shop.quadra.run/oauth/shop/callback`).
+
+| Step | What happens |
+|---|---|
+| Consent | an admin (who may edit `User.roles`) opens `https://<app>/v1/connections/<name>/authorize`: a redirect to the provider's page, with a `state` and a PKCE challenge (S256). The state is sealed by the server and holds ten minutes: it carries the connection, the PKCE verifier and who asked, so no one else can complete it |
+| Callback | the provider sends the admin back to `/oauth/<name>/callback?code=…&state=…`; the server checks the state, exchanges the code with the verifier, keeps the tokens and shows `` `shop` is connected `` |
+| Use | requests (`outbound`, `pull`) send `Authorization: Bearer <access token>`; a mailbox logs in with `AUTHENTICATE XOAUTH2` |
+| Refresh | a minute before the access token expires (`expires_in`; one without it does not expire), and once when the other side answers 401 (or refuses the mailbox's login), the refresh token gets a new one, kept at once. A provider that rotates refresh tokens gets one refresh at a time |
+| Revoked | a refresh refused (`invalid_grant`): events and pulls wait, without a time limit, with ``the provider refused to refresh the token of `shop` (…): the consent was revoked or expired; an admin connects it again at /v1/connections/shop/authorize``; connecting again resumes them |
+| Not connected | the same wait, with `` `shop` is not connected: an admin gives the consent at /v1/connections/shop/authorize `` |
+| Disconnect | `POST /v1/connections/<name>/disconnect` forgets the tokens (revoke the app at the provider too) |
+
+**Where the tokens are.** In the app's database (`_quadra_oauth`, one row per connection),
+encrypted with AES-256-GCM under the key `QUADRA_TOKEN_KEY` of the server's environment, bound
+to the connection's name. They go with the database (backups, its log) and never in the clear;
+they never appear in the logs, the API or the studio. Without the key a connection with consent
+waits, saying so, and nothing is kept:
+
+```bash
+export QUADRA_TOKEN_KEY=$(openssl rand -base64 32)    # 32 bytes, base64 or hex; quadra serve reads it
+```
+
+| Where | The key |
+|---|---|
+| `quadra serve`, `quadra dev` | the process's environment (keep it with the server's other secrets: a lost key means connecting again) |
+| Quadra Cloud | the platform's servers have it: nothing to set |
+
+**What is shown.** `GET /v1/integrations` (the studio's page "Integrations") and
+`GET /v1/connections` list each connection, and for one with consent:
+
+```json
+{"name": "shop", "kind": "http", "location": null,
+ "oauth2": {"grant": "authorization_code", "connected": true, "scope": "read_orders,write_fulfillments",
+            "expires_at": "2026-11-27T11:14:03Z", "connected_at": "2026-11-27T10:14:03Z",
+            "connected_by": "user:1", "refreshed_at": null, "error": null,
+            "authorize": "/v1/connections/shop/authorize"}}
+```
+
+A connection with consent runs on the server only: `location = "agent:<name>"` is refused
+(`OAuth2 with the user's consent runs on the server only: its tokens are not handed to an
+on-premise agent`). Tests never ask for tokens: they send and receive nothing.
 
 ## `outbound`
 
