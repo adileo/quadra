@@ -1,0 +1,41 @@
+test "not approved in 4 hours: escalated, once":
+    clock 2026-03-02 09:00
+    let o = order("E")
+    clock 2026-03-02 12:59
+    Tick()
+    expect Escalation.count() == 0
+    clock 2026-03-02 13:00
+    Tick()
+    expect Escalation.where(e => e.order == o).count() == 1
+    clock 2026-03-02 18:00
+    Tick()
+    expect Escalation.where(e => e.order == o).count() == 1
+    o.approve()                            # approved late: it goes on
+    expect o.state is Open
+
+test "not paid in 48 hours: cancelled":
+    clock 2026-03-02 09:00
+    let o = order("C")
+    o.approve()
+    for l in o.lines:
+        l.pick()
+    Payment(order=o, amount=49)
+    clock 2026-03-04 08:59
+    Tick()
+    expect o.state is Open
+    clock 2026-03-04 09:00
+    Tick()
+    expect o.state is Cancelled
+    expect o.cancel_reason == "not paid within 48 hours"
+    Payment(order=o, amount=1)             # paid too late: nothing ships
+    expect Shipment.count() == 0
+    expect o.state is Cancelled
+
+test "paid in time: no timeout":
+    clock 2026-03-02 09:00
+    let o = order("K")
+    Payment(order=o, amount=50)
+    clock 2026-03-05 09:00
+    Tick()
+    expect o.state is Open
+    expect o.cancel_reason is none

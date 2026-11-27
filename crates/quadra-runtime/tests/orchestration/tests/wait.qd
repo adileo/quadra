@@ -1,0 +1,22 @@
+test "a day after shipping":
+    clock 2026-03-02 09:00
+    let o = order("W")
+    o.approve()
+    Payment(order=o, amount=50)
+    for l in o.lines:
+        l.pick()
+    expect o.state is Shipped
+    clock 2026-03-02 21:00
+    Tick()                                 # anything happening meanwhile
+    expect ReviewRequest.count() == 0
+    clock 2026-03-03 08:59
+    Tick()
+    expect ReviewRequest.count() == 0
+    expect o.state is Shipped
+    clock 2026-03-03 09:00                 # exactly 24 hours
+    Tick()
+    expect ReviewRequest.count() == 1
+    expect o.state is Completed
+    clock 2026-03-05 09:00
+    Tick()
+    expect ReviewRequest.count() == 1      # once

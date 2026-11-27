@@ -191,6 +191,18 @@ clock 2026-12-01            # a date: 09:00 that day
 Sets the time that `now()` and `today()` return, that defaults read, that records and ledger
 rows are stamped with, and that exchange rates are looked up at.
 
+Then it runs the rules that read the clock on every record, as the server's sweep does when
+their time comes: a `becomes now() >= shipped_at + 24 hours` that the new time makes true
+fires at the `clock` statement, in a transaction of its own, before the statements that
+follow ([Waits, joins, timeouts](/reference/flows-and-actions#waits-joins-timeouts-and-cancellations)).
+
+```quadra
+clock 2026-03-03 08:59
+expect o.state is Shipped
+clock 2026-03-03 09:00                 # 24 hours after shipping
+expect o.state is Completed
+```
+
 ## As a user
 
 ```quadra

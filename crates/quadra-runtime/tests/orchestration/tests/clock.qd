@@ -1,0 +1,39 @@
+# The clock passing a threshold fires the rule at once, as the server's sweep does, without
+# waiting for another statement: a payment that comes after the deadline finds the order
+# already cancelled.
+
+test "a clock alone":
+    clock 2026-03-02 09:00
+    let o = order("E")
+    clock 2026-03-02 12:59
+    expect Escalation.count() == 0
+    clock 2026-03-02 13:00
+    expect Escalation.count() == 1
+    clock 2026-03-04 09:00
+    expect o.state is Cancelled
+    expect Escalation.count() == 1
+
+test "a payment after the deadline":
+    clock 2026-03-02 09:00
+    let o = order("D")
+    o.approve()
+    for l in o.lines:
+        l.pick()
+    clock 2026-03-04 09:01
+    Payment(order=o, amount=50)
+    expect o.state is Cancelled
+    expect Shipment.count() == 0
+
+test "shipped, then a day later":
+    clock 2026-03-02 09:00
+    let o = order("W")
+    o.approve()
+    Payment(order=o, amount=50)
+    for l in o.lines:
+        l.pick()
+    clock 2026-03-03 08:59
+    expect o.state is Shipped
+    clock 2026-03-03 09:00
+    expect o.state is Completed
+    expect ReviewRequest.count() == 1
+    expect ReviewRequest.first()?.created_at == 2026-03-03 09:00

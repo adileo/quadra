@@ -22,7 +22,7 @@ fn now() -> chrono::NaiveDateTime {
 }
 
 /// A project in a folder of its own with its database initialized, and a token for user 1.
-fn project(dir: &Path, code: &str) -> (Config, String) {
+pub(crate) fn project(dir: &Path, code: &str) -> (Config, String) {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"t\"\n").unwrap();
@@ -75,7 +75,14 @@ impl TenantResolver for Map {
 
 static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn http(port: u16, host: &str, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
+pub(crate) fn http(
+    port: u16,
+    host: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<J>,
+) -> (u16, J) {
     http_from(port, host, token, method, path, body, "")
 }
 
@@ -116,7 +123,7 @@ fn items(port: u16, host: &str, token: &str, columns: J) -> (u16, J) {
 }
 
 /// A host on its own runtime, serving on a free port.
-fn serve(specs: Vec<(&str, TenantSpec)>) -> (Host, tokio::runtime::Runtime, u16) {
+pub(crate) fn serve(specs: Vec<(&str, TenantSpec)>) -> (Host, tokio::runtime::Runtime, u16) {
     serve_with(HostOptions::default(), specs)
 }
 
@@ -153,7 +160,7 @@ fn serve_with(
     (host, rt, port)
 }
 
-fn temp(name: &str) -> PathBuf {
+pub(crate) fn temp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("quadra-host-{name}-{}", std::process::id()))
 }
 
@@ -287,6 +294,10 @@ fn two_tenants_in_one_process_are_isolated() {
     assert!(host.running().iter().any(|t| t.id == "a"));
 }
 
+/// The test that measures the memory of the process, and the tests that take much of it, run
+/// one at a time (the tests of the binary share one process).
+pub(crate) static MEMORY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn open_files() -> usize {
     std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0)
 }
@@ -305,6 +316,7 @@ fn rss_mb() -> f64 {
 
 #[test]
 fn starting_and_stopping_a_tenant_a_thousand_times_leaks_nothing() {
+    let _alone = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     let (cfg, _) = project(&temp("cycles"), ITEMS);
     let host = Host::new(
         HostOptions::default(),

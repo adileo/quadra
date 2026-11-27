@@ -1,0 +1,76 @@
+# An order process: it ships when it is paid, approved and every line is picked (in any
+# order); a day after shipping it is completed and a review is asked for; an order not
+# approved within 4 hours is escalated, one not paid within 48 hours is cancelled.
+entity Order:
+    number: Text unique
+    lines: [Line]
+    payments: [Payment]
+    approved: Bool default false
+    placed_at: DateTime default now()
+    shipped_at: DateTime? required when state in {Shipped, Completed}
+    cancel_reason: Text?
+    state: enum(Open, Shipped, Completed, Cancelled) default Open
+
+    total = lines.sum(l => l.amount)
+    paid = lines.count() > 0 and payments.sum(p => p.amount) >= total
+
+    flow state:
+        Open -> Shipped               by ship
+        Shipped -> Completed          by complete
+        Open | Shipped -> Cancelled   by cancel
+
+    action approve:
+        approved = true
+
+    action ship:
+        shipped_at = now()
+
+    action cancel(reason: Text):
+        cancel_reason = reason
+
+entity Line:
+    order: Order parent
+    sku: Text
+    amount: Int
+    picked: Bool default false
+
+    action pick:
+        picked = true
+
+entity Payment:
+    order: Order
+    amount: Int
+
+entity Shipment:
+    order: Order
+
+entity Escalation:
+    order: Order
+
+entity ReviewRequest:
+    order: Order
+
+# something else happening meanwhile
+entity Tick:
+    note: Text default "tick"
+
+# the join: the last of the three conditions to become true ships the order
+on Order becomes state is Open and approved and paid and lines.all(l => l.picked) as o converges:
+    Shipment(order=o)
+    o.ship()
+
+# the wait: a day after shipping
+on Order becomes state is Shipped and now() >= shipped_at + 24 hours as o converges:
+    ReviewRequest(order=o)
+    o.complete()
+
+# an escalation: not approved within 4 hours
+on Order becomes state is Open and not approved and now() >= placed_at + 4 hours as o:
+    Escalation(order=o)
+
+# a timeout: not paid within 48 hours
+on Order becomes state is Open and not paid and now() >= placed_at + 48 hours as o converges:
+    o.cancel("not paid within 48 hours")
+
+fn order(number: Text) -> Order:
+    return Order(number=number, lines=[Line(sku="A", amount=30), Line(sku="B", amount=20)])

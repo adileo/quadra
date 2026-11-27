@@ -19,9 +19,14 @@ fn run_on(name: &str, target: &str) -> Vec<(usize, String)> {
     run_with(name, DbBackend::new(target))
 }
 
-fn run_with(name: &str, mut backend: DbBackend) -> Vec<(usize, String)> {
+fn run_with(name: &str, backend: DbBackend) -> Vec<(usize, String)> {
+    run_dir(&example(name), backend)
+}
+
+fn run_dir(dir: &Path, mut backend: DbBackend) -> Vec<(usize, String)> {
+    let name = dir.display();
     let target = backend.target.clone();
-    let project = Project::load(&example(name)).unwrap();
+    let project = Project::load(dir).unwrap();
     let results = quadra_runtime::run_tests_with(&project, None, Some(&mut backend))
         .unwrap_or_else(|d| panic!("{name} does not check: {d:#?}"));
     let failed: Vec<String> = results
@@ -53,6 +58,16 @@ fn minimal_example_on_sqlite() {
 #[test]
 fn extended_example_on_sqlite() {
     run_on("extended", "sqlite");
+}
+
+/// The orchestration tests of quadra-runtime (a join, a 24-hour wait, timeouts, a
+/// cancellation) on SQLite, loading on demand as the server does: what the clock alone makes
+/// due fires at `clock`, as at the server's sweep, though no statement writes the record.
+#[test]
+fn orchestration_on_sqlite() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../quadra-runtime/tests/orchestration");
+    run_dir(&dir, DbBackend::new("sqlite"));
+    run_dir(&dir, DbBackend::in_memory("sqlite"));
 }
 
 /// Loading on demand (a fresh working set per statement, incremental checks and formulas)

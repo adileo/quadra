@@ -1,0 +1,28 @@
+test "cancelled before the escalation and the timeout":
+    clock 2026-03-02 09:00
+    let o = order("Z")
+    clock 2026-03-02 10:00
+    o.cancel("the customer changed their mind")
+    clock 2026-03-02 14:00
+    Tick()
+    clock 2026-03-05 09:00
+    Tick()
+    expect Escalation.count() == 0
+    expect o.cancel_reason == "the customer changed their mind"
+
+test "cancelled while waiting the day after shipping":
+    clock 2026-03-02 09:00
+    let o = order("S")
+    o.approve()
+    Payment(order=o, amount=50)
+    for l in o.lines:
+        l.pick()
+    expect o.state is Shipped
+    clock 2026-03-02 20:00
+    o.cancel("refused at delivery")
+    clock 2026-03-03 09:00
+    Tick()
+    clock 2026-03-10 09:00
+    Tick()
+    expect ReviewRequest.count() == 0
+    expect o.state is Cancelled

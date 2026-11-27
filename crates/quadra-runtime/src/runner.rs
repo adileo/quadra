@@ -237,7 +237,21 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
                     }
                     other => return Err(format!("clock needs a date-time, found {other}")),
                 }
-                Ok(())
+                // the time passing runs the rules on the clock, as the server's sweep does when a
+                // threshold passes: `becomes now() >= at + 24 hours` fires here, not at whatever
+                // statement comes next (on a database, nothing else would look at that record)
+                self.refresh()?;
+                let at = self.at(s.span);
+                let interp = &mut self.interp;
+                interp.sweep = true;
+                interp.system += 1;
+                let r = interp.with_cause(format!("time-driven rules at clock {at}"), |i| {
+                    i.transaction(|_| Ok(()))
+                });
+                interp.system -= 1;
+                interp.sweep = false;
+                interp.last_sweep = Some(interp.clock);
+                r.map_err(|e| format!("{at}: {}", describe(&e)))
             }
             StmtKind::Expect(e) => self.expect(e, ctx),
             StmtKind::Receive {
