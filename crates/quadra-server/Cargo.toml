@@ -39,10 +39,23 @@ russh = { version = "0.65", default-features = false, features = ["aws-lc-rs", "
 russh-sftp = "3"
 suppaftp = { version = "13", default-features = false, features = ["tokio-rustls-aws-lc-rs"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
 aws-lc-rs = "1"
 quick-xml = "0.42"
+# the databases of other systems (transport/db.rs): each with TLS (rustls) unless `insecure`
+tokio-postgres = { version = "0.7", default-features = false }
+tokio-postgres-rustls = "0.14"
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls", "aws-lc-rs", "tls12"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+bytes = "1"
+# ODBC (DB2 for i on the AS/400): needs unixODBC to build, so only where it runs (the agent)
+odbc-api = { version = "30", default-features = false, features = ["odbc_version_3_80"], optional = true }
+
+[features]
+odbc = ["dep:odbc-api"]
+
 
 [dev-dependencies]
 rustls = "0.23"
@@ -51,4 +64,5 @@ libunftp = { version = "0.25", default-features = false, features = ["aws_lc_rs"
 unftp-sbe-fs = "0.4"
 tokio-rustls = "0.26"
 calamine = "0.38.0"
+postgres = "0.19"
 quadra-analysis.workspace = true

@@ -3,6 +3,7 @@
 
 mod agents;
 mod api;
+mod databases;
 mod deliver;
 mod files;
 mod host;

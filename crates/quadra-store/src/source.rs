@@ -357,9 +357,11 @@ pub fn load_with(
         let mut current: HashMap<String, Vec<(Id, u64)>> = HashMap::new();
         let mut kinds: HashMap<Id, String> = HashMap::new();
         let mut from_rows: std::collections::HashSet<Id> = std::collections::HashSet::new();
+        // `+`: the records by their ids, not by the index of `created_tx`, which SQLite would
+        // otherwise pick and read through every record created before
         let sql = match &joined {
-            Some(j) => format!("SELECT {META}, {} FROM \"_quadra_records\" r LEFT JOIN {} t ON t.\"id\" = r.\"id\" WHERE r.\"id\" IN ({list}) AND r.\"created_tx\" <= ?bigint", j.columns(d).join(", "), q(&j.table.name)),
-            None => format!("SELECT {META} FROM \"_quadra_records\" r WHERE r.\"id\" IN ({list}) AND r.\"created_tx\" <= ?bigint"),
+            Some(j) => format!("SELECT {META}, {} FROM \"_quadra_records\" r LEFT JOIN {} t ON t.\"id\" = r.\"id\" WHERE r.\"id\" IN ({list}) AND +r.\"created_tx\" <= ?bigint", j.columns(d).join(", "), q(&j.table.name)),
+            None => format!("SELECT {META} FROM \"_quadra_records\" r WHERE r.\"id\" IN ({list}) AND +r.\"created_tx\" <= ?bigint"),
         };
         for r in conn.query(&sql, &[Sql::Int(base as i64)])? {
             let mut rec = meta_record(&r, base);

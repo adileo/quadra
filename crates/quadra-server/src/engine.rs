@@ -126,6 +126,35 @@ fn cursor_column(
     Some(quadra_ir::formats::place(field).join("."))
 }
 
+/// The rows a pull of a table asks for at once; a pull that brings as many goes on at once.
+const ROWS_PER_PULL: usize = 1000;
+
+/// What is wrong with the rows a pull of a table brought for the inbound's record: a field
+/// whose column (its `at`, else its name) is not in the table.
+fn missing_column(
+    model: &quadra_ir::Model,
+    i: &quadra_ir::Inbound,
+    table: &str,
+    first: &[u8],
+) -> Option<String> {
+    let J::Object(cols) = serde_json::from_slice::<J>(first).ok()? else {
+        return None;
+    };
+    let rec = model.entity(&i.ty)?;
+    for f in quadra_ir::formats::fields(model, rec) {
+        let col = quadra_ir::formats::place(f).join(".");
+        if !cols.contains_key(&col) {
+            return Some(format!(
+                "the table {table} has no column `{col}` (the field `{}` of {}); its columns: {}",
+                f.name,
+                i.ty,
+                cols.keys().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+    None
+}
+
 /// A checked project, its model given the values of the variables where it runs.
 pub(crate) fn with_env(
     mut checked: Checked,
@@ -637,6 +666,10 @@ pub struct Engine {
     pruned_at: Option<std::time::Instant>,
     /// when each agent's visit was last written
     agents_seen: HashMap<String, std::time::Instant>,
+    /// the causes of the last commits before this engine handled its first message: only a
+    /// message among them can have been handled without being marked (the server stopped in
+    /// between), so only those are looked for in the whole log
+    inbox_recent: Option<Vec<String>>,
     /// the analysis of each model in use (the project's, an app's), shared by the requests: kept
     /// with the model it is of, so that it never outlives it
     statics: Vec<(Rc<Checked>, Rc<quadra_runtime::Statics>)>,
@@ -785,6 +818,7 @@ impl Engine {
             sequencer: None,
             pruned_at: None,
             agents_seen: HashMap::new(),
+            inbox_recent: None,
             statics: Vec::new(),
             tickets: Rc::new(RefCell::new(Vec::new())),
             unlogged: false,
@@ -1691,6 +1725,13 @@ impl Engine {
                 .connection(&i.connection)
                 .filter(|c| c.pulls() != "path")
             {
+                // a table whose rows of the last pulls still wait in the inbox: not pulled
+                // until they are handled, so that a large table never floods it
+                if c.pulls() == "table" && self.waiting(&i.name) > 2 * ROWS_PER_PULL {
+                    let soon = at + chrono::Duration::seconds(2);
+                    next = Some(next.map_or(soon, |n| n.min(soon)));
+                    continue;
+                }
                 let ask = match c.pulls() {
                     "files" => crate::transport::Ask::Files {
                         pattern: p.path.clone(),
@@ -1707,7 +1748,7 @@ impl Engine {
                         table: p.path.clone(),
                         column: p.cursor.as_ref().and_then(|e| cursor_column(model, i, e)),
                         after: cursor.clone(),
-                        limit: 1000,
+                        limit: ROWS_PER_PULL as u32,
                     },
                 };
                 let consent = self.consent_of(&i.connection);
@@ -1897,6 +1938,18 @@ impl Engine {
         Some(name)
     }
 
+    /// How many messages of `inbound` wait to be handled (counted up to a little more than two
+    /// pages of a table).
+    fn waiting(&mut self, inbound: &str) -> usize {
+        self.conn
+            .query(
+                "SELECT 1 FROM \"_quadra_inbox\" WHERE \"inbound\" = ?text AND \"state\" = 'received' LIMIT 2001",
+                &[quadra_store::conn::Sql::Text(inbound.to_string())],
+            )
+            .map(|r| r.len())
+            .unwrap_or(0)
+    }
+
     /// The messages of `inbound` handled for good, to settle on the other side at its next pull.
     fn settle_of(&mut self, inbound: &str) -> Vec<crate::transport::Settle> {
         quadra_store::deliveries::to_settle(&mut self.conn, inbound, 100)
@@ -2011,6 +2064,19 @@ impl Engine {
                 .map(|j| (None, j.to_string().into_bytes(), None))
                 .collect();
         }
+        // the rows of a table: each field of the record has its column
+        let table =
+            matches!(model.manifest.connection(&i.connection), Some(c) if c.pulls() == "table");
+        if let Some(why) = items
+            .first()
+            .filter(|_| table)
+            .and_then(|(_, b, _)| missing_column(model, i, &p.path, b))
+        {
+            return fail(self, why, None);
+        }
+        let (old_cursor, _) =
+            quadra_store::deliveries::pull_state(&mut self.conn, &name).unwrap_or((None, None));
+        let full = table && items.len() >= ROWS_PER_PULL;
         let mut kept: Vec<(
             String,
             String,
@@ -2018,6 +2084,8 @@ impl Engine {
             Option<String>,
             quadra_store::deliveries::Marks,
         )> = Vec::new();
+        // the rows of the cursor's last value, read again (`>=`): dropped quietly when kept
+        let mut at_cursor: Vec<bool> = Vec::new();
         let mut cursor: Option<String> = None;
         for (origin, bytes, item_cursor) in items {
             let (text, base64) = crate::transport::body_text(&bytes);
@@ -2049,10 +2117,11 @@ impl Engine {
                 (_, _, Some(o)) => format!("{o}#{}", &hash[..16]),
                 _ => hash.clone(),
             };
+            // the rows of a table come in the order of their cursor (a number does not sort as
+            // text): the last one's is where the next pull starts
+            at_cursor.push(item_cursor.is_some() && item_cursor == old_cursor);
             if let Some(v) = item_cursor {
-                if cursor.as_deref().is_none_or(|old| v.as_str() > old) {
-                    cursor = Some(v);
-                }
+                cursor = Some(v);
             } else if let (Ok(d), Some(c)) = (&parsed, &p.cursor) {
                 if let Some(v) = eval(c, d) {
                     if cursor.as_deref().is_none_or(|old| v.as_str() > old) {
@@ -2069,16 +2138,36 @@ impl Engine {
             let error = parsed.err().map(|e| format!("{}: {e}", i.ty));
             kept.push((key, hash, text, error, marks));
         }
-        let (n, c, t, nx) = (
+        let (n, c, t, mut nx) = (
             name.clone(),
             conn.clone(),
             stamp(at),
             stamp(at + chrono::Duration::seconds(every)),
         );
+        // a full page of a table that moved the cursor: more rows wait, the next pull is at
+        // once (held back while the inbox has two pages of them to handle: `pulls`)
+        if full && cursor.is_some() && cursor != old_cursor {
+            nx = t.clone();
+        }
         let r = self.side(move |cn| {
             let mut new = 0;
             let mut again = false;
-            for (key, hash, text, error, marks) in &kept {
+            for (k, (key, hash, text, error, marks)) in kept.iter().enumerate() {
+                // a row read again at the cursor (`>=`), kept already: quietly not again
+                if at_cursor[k]
+                    && !cn
+                        .query(
+                            "SELECT 1 FROM \"_quadra_inbox\" WHERE \"inbound\" = ?text AND \"key\" = ?text AND \"hash\" = ?text LIMIT 1",
+                            &[
+                                quadra_store::conn::Sql::Text(n.clone()),
+                                quadra_store::conn::Sql::Text(key.clone()),
+                                quadra_store::conn::Sql::Text(hash.clone()),
+                            ],
+                        )?
+                        .is_empty()
+                {
+                    continue;
+                }
                 match quadra_store::deliveries::receive(
                     cn,
                     &n,
@@ -2158,6 +2247,21 @@ impl Engine {
             }
             // the report of the rows of a file: those refused, and why
             let mut rows_report: Option<String> = None;
+            let mark = format!("inbound:{}#{} ", m.inbound, m.id);
+            if self.inbox_recent.is_none() {
+                let recent = self
+                    .conn
+                    .query(
+                        "SELECT \"cause\" FROM \"_quadra_commits\" ORDER BY \"tx\" DESC LIMIT 1000",
+                        &[],
+                    )
+                    .unwrap_or_default();
+                self.inbox_recent = Some(recent.into_iter().filter_map(|r| r[0].clone()).collect());
+            }
+            let maybe_handled = self
+                .inbox_recent
+                .as_ref()
+                .is_some_and(|r| r.iter().any(|c| c.contains(&mark)));
             let result: Result<u64, String> = (|| {
                 let i = model
                     .inbounds
@@ -2167,10 +2271,12 @@ impl Engine {
                         format!("no inbound `{}` in the code deployed now", m.inbound)
                     })?;
                 // handled already (the server stopped before writing it): done
-                if let Some(tx) =
-                    quadra_store::deliveries::handled_by(&mut self.conn, &i.name, m.id)?
-                {
-                    return Ok(tx);
+                if maybe_handled {
+                    if let Some(tx) =
+                        quadra_store::deliveries::handled_by(&mut self.conn, &i.name, m.id)?
+                    {
+                        return Ok(tx);
+                    }
                 }
                 let bytes = crate::transport::body_bytes(&m.body, m.marks.base64);
                 // a file of rows: all of them or none, or each row that works
@@ -2252,7 +2358,7 @@ impl Engine {
             let rejected = result.as_ref().err().cloned();
             let inbound_name = name.clone();
             let from_there = m.marks.origin.is_some();
-            let _ = self.side(move |c| {
+            let marked = self.side(move |c| {
                 quadra_store::deliveries::handled(
                     c,
                     id,
@@ -2269,6 +2375,12 @@ impl Engine {
                 }
                 Ok(())
             });
+            // not marked: looked for in the log before it is handled again
+            if marked.is_err() {
+                if let Some(r) = self.inbox_recent.as_mut() {
+                    r.push(mark);
+                }
+            }
             // `on OrderIn rejected as r:`: someone to tell, a task to open
             if let Some(error) = rejected {
                 self.rejected(
