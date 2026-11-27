@@ -7,6 +7,7 @@
 //! - `fmt`: conservative source formatting.
 
 mod certify;
+pub mod clock;
 pub mod deps;
 mod format;
 mod trace;

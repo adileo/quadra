@@ -1345,6 +1345,24 @@ impl Host {
         }
     }
 
+    /// When the tenant of an address next needs a sweep, for a host that puts it to sleep and
+    /// wakes it then: the nearest threshold of its rules that read the clock not passed yet
+    /// (`quadra_analysis::clock`: `at <= now()` and the like), a day after its last sweep at the
+    /// latest; its periodic sweep when it reads the clock otherwise; None when nothing in it
+    /// changes with time alone. Starts it if needed.
+    pub async fn next_sweep(&self, host: &str) -> Option<Duration> {
+        let t = self.app.tenant(host).ok()?;
+        let periodic = || {
+            let clock = t.reads_clock.load(std::sync::atomic::Ordering::Relaxed);
+            t.sweep_every.filter(|_| clock).map(|every| (*t.last_sweep.lock().unwrap() + every).saturating_duration_since(Instant::now()))
+        };
+        match t.ask(|reply| Job::NextSweep { reply }).await {
+            Some(Ok(None)) => None,
+            Some(Ok(Some(at))) => Some((at - chrono::Utc::now().naive_utc()).to_std().unwrap_or_default()),
+            Some(Err(())) | None => periodic(),
+        }
+    }
+
     /// The roles of the project of an address and its users (`{roles, users: [{id, login,
     /// email, roles}], total}`), for the host's own console. Starts it if needed.
     pub async fn people(&self, host: &str) -> Result<J, (u16, String)> {

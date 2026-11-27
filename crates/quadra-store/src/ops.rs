@@ -444,6 +444,70 @@ pub fn sweep_with(url: &str, model: &Model, report: &Report, time: NaiveDateTime
     Ok(written)
 }
 
+/// When a project next needs a sweep, from its database (`quadra_analysis::clock`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Due {
+    /// nothing in it changes with time alone
+    Never,
+    /// it reads the clock in a way only a periodic sweep follows
+    Periodic,
+    /// at the nearest threshold not passed yet at the last sweep (None: none ahead): a sweep
+    /// at that instant, or later, sees it passed
+    At(Option<NaiveDateTime>),
+}
+
+/// The next sweep a project needs: the nearest instant after its last sweep (`last_sweep` in
+/// the database's meta, or `since`) at which one of its thresholds passes for one of its
+/// records. One column read per threshold, no interpreter. Rounded up to the second after.
+pub fn next_due(url: &str, model: &Model, report: &Report, since: NaiveDateTime) -> Result<Due, String> {
+    use quadra_analysis::clock::{schedule, Schedule};
+    let thresholds = match schedule(model) {
+        Schedule::Never => return Ok(Due::Never),
+        Schedule::Periodic(_) => return Ok(Due::Periodic),
+        Schedule::At(t) => t,
+    };
+    let mut db = Database::open(url, model, report)?;
+    let after = db.meta("last_sweep")?.and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok()).unwrap_or(since);
+    let tz = quadra_runtime::time::zone(&model.timezone).or_else(|_| quadra_runtime::time::zone("UTC"))?;
+    let schema = db.schema.clone();
+    let mut best: Option<NaiveDateTime> = None;
+    for t in &thresholds {
+        let entities: Vec<String> = match model.entity(&t.entity) {
+            Some(e) if e.kind == quadra_ir::EntityKind::Trait => model.implementors(&t.entity).iter().map(|e| e.name.clone()).collect(),
+            _ => vec![t.entity.clone()],
+        };
+        for ent in entities {
+            let column = schema.tables.iter().find(|tb| matches!(&tb.source, crate::schema::Source::Entity(n) if *n == ent)).and_then(|tb| {
+                let f = tb.fields.iter().find(|f| f.field == t.field && !f.formula)?;
+                Some((tb.name.clone(), f.columns.first()?.name.clone()))
+            });
+            // a field with no column of its own: only a periodic sweep follows it
+            let Some((table, col)) = column else { return Ok(Due::Periodic) };
+            let rows = db.conn.query(&format!("SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" IS NOT NULL"), &[])?;
+            for r in rows {
+                let Some(v) = r[0].as_deref() else { continue };
+                let Some(at) = parse_instant(v) else { continue };
+                let mut due = if t.days != 0 { quadra_runtime::time::add_days(at, t.days, tz) } else { at };
+                due += chrono::Duration::seconds(t.secs + 1);
+                if due > after && best.is_none_or(|b| due < b) {
+                    best = Some(due);
+                }
+            }
+        }
+    }
+    Ok(Due::At(best))
+}
+
+/// When the project's database was last swept, if ever.
+pub fn last_sweep(url: &str, model: &Model, report: &Report) -> Result<Option<NaiveDateTime>, String> {
+    let mut db = Database::open(url, model, report)?;
+    Ok(db.meta("last_sweep")?.and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok()))
+}
+
+fn parse_instant(v: &str) -> Option<NaiveDateTime> {
+    ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"].iter().find_map(|f| NaiveDateTime::parse_from_str(v, f).ok())
+}
+
 /// Load a fixture of the tests (with the fixtures it extends) into a database, as one
 /// transaction: demo and development data.
 pub fn fixture(url: &str, model: &Model, report: &Report, name: &str, time: NaiveDateTime) -> Result<u64, String> {

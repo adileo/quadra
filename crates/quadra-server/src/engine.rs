@@ -294,6 +294,11 @@ pub enum Job {
         reply: oneshot::Sender<Reply>,
     },
     /// the host (a console): the roles of the project and its users
+    /// when the next sweep is needed (`Host::next_sweep`): `Err(())` periodic, `Ok(None)`
+    /// never, `Ok(Some(at))` at that instant
+    NextSweep {
+        reply: oneshot::Sender<Result<Option<chrono::NaiveDateTime>, ()>>,
+    },
     People {
         reply: oneshot::Sender<Reply>,
     },
@@ -695,8 +700,16 @@ impl Engine {
                     let _ = reply.send(ev);
                 }
                 Job::Stop { .. } => unreachable!("handled by `run`"),
+                Job::NextSweep { reply } => {
+                    let _ = reply.send(self.next_sweep());
+                }
                 Job::Sweep { reply } => {
                     let checked = self.checked.clone();
+                    // only thresholds read the clock and none passed: no need to read every record
+                    // (`quadra_analysis::clock`); at least one sweep a day all the same
+                    if reply.is_none() && self.next_sweep().is_ok_and(|at| at.is_some_and(|at| at > now())) {
+                        return;
+                    }
                     let r = quadra_store::ops::sweep_with(&self.url, checked.model.as_ref().unwrap(), &checked.report, now(), self.sequencer.as_ref());
                     if let Err(e) = &r {
                         eprintln!("sweep: {e}");
@@ -706,6 +719,24 @@ impl Engine {
                     }
                 }
             }
+        }
+    }
+
+    /// When the next sweep is needed: `Err(())` periodically (the clock is read in a way only a
+    /// periodic sweep follows), `Ok(None)` never, `Ok(Some(at))` at the nearest threshold not
+    /// passed at the last sweep, a day after the last sweep at the latest.
+    fn next_sweep(&mut self) -> Result<Option<chrono::NaiveDateTime>, ()> {
+        let checked = self.checked.clone();
+        let (Some(model), report) = (checked.model.as_ref(), &checked.report) else { return Err(()) };
+        let n = now();
+        match quadra_store::ops::next_due(&self.url, model, report, n) {
+            Ok(quadra_store::ops::Due::Never) => Ok(None),
+            Ok(quadra_store::ops::Due::At(at)) => {
+                let last = quadra_store::ops::last_sweep(&self.url, model, report).ok().flatten();
+                let net = last.map_or(n, |l| l + chrono::Duration::hours(24));
+                Ok(Some(at.map_or(net, |a| a.min(net))))
+            }
+            Ok(quadra_store::ops::Due::Periodic) | Err(_) => Err(()),
         }
     }
 
