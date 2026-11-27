@@ -16,6 +16,7 @@ quadra serve examples/extended --url sqlite:/tmp/demo.db --port 8091 --dev-login
 | `POST /v1/query` | rows of an entity, filtered, ordered, with computed columns |
 | `GET /v1/records/{Entity}/{id}` | one record, with what the user may do on it now |
 | `GET /v1/records/{Entity}/{id}/history` | every write of the record, with its cause |
+| `GET /v1/records/{Entity}/{id}/files/{field}` | the document a `File` field names (an invoice's PDF) |
 | `GET /v1/search/{Entity}` | records found by their number, code, name or login, then by full-text search (pickers) |
 | `POST /v1/tx` | a transaction: creates, updates, actions |
 | `GET /v1/stream` | live events, one per committed transaction |
@@ -275,6 +276,17 @@ Fields renamed by a migration appear under their current name; hidden fields are
 Needs `read history` (or `all`) on the entity: otherwise `403`. With `?limit=50`, the 50 newest
 entries (oldest first among them) and `before`: pass it as `?before=` for the older ones
 (`null` when there are none).
+
+### `GET /v1/records/{Entity}/{id}/files/{field}`
+
+The document kept in a `File` field by an [`attach`](/reference/documents#attach-kept-with-the-record)
+(`sha256:<hex>`): its bytes, with its type (`Content-Type`), its name for the download
+(`Content-Disposition`) and its SHA-256 (`ETag`). Needs the right to read that field of that
+record: otherwise `403`. A field still empty, or that names no file kept by the app: `404`.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -o invoice.pdf $API/v1/records/Invoice/45/files/pdf
+```
 
 ### `GET /v1/search/{Entity}`
 

@@ -112,6 +112,48 @@
     "declarations": {
       "patterns": [
         {
+          "match": "^\\s*(document|label)\\s+([A-Za-z_]\\w*)(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.document.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(attach)\\s+([A-Za-z_]\\w*)\\s+(to)\\s+([A-Za-z_][\\w.]*)(?:\\s+(signed)\\b)?",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.document.quadra"
+            },
+            "3": {
+              "name": "keyword.other.quadra"
+            },
+            "4": {
+              "name": "variable.other.quadra"
+            },
+            "5": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(title|page|font|heading|text|pages|image|space|line|pagebreak|table|column|item|barcode|typst|box)\\b(?=[ \\t]|$)|^\\s*(header|footer|row|block|totals)\\b(?=[ \\t].*:\\s*$|:\\s*$)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.element.quadra"
+            },
+            "2": {
+              "name": "keyword.other.element.quadra"
+            }
+          }
+        },
+        {
           "match": "^\\s*(outbound)\\s+([A-Za-z_]\\w*)\\s+(via)\\s+([a-z_]\\w*)(?:\\s+(path)\\b)?",
           "captures": {
             "1": {

@@ -25,7 +25,8 @@
           "quadra"
         ],
         "extensions": [
-          ".qd"
+          ".qd",
+          ".qdp"
         ],
         "configuration": "./language-configuration.json"
       },

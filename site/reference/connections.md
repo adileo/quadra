@@ -571,7 +571,7 @@ on OrderPlaced delivered as d:
 | `e` | the event: its fields, as they were emitted |
 | The data | read **as it was when the event was emitted**: every attempt builds the same request, even a day later and after the order changed. The content is decided at `emit`; the block decides its shape |
 | No writes | the block builds the request and nothing else: an assignment or an `emit` there is an error (write in the transaction that emits, or in `on … delivered`) |
-| The request | the block ends with it. HTTP: `post(path, body)`, `put(path, body)`, `patch(path, body)`, `delete(path)`; the path is appended to the connection's url (and to the outbound's `path`), the body is a record `from json` (sent as `application/json`), a record `from xml` (sent as `application/xml`) or text. SMTP: `email(to=…, subject=…, body=…, html=…)` (with `html`, the email has both versions) |
+| The request | the block ends with it. HTTP: `post(path, body)`, `put(path, body)`, `patch(path, body)`, `delete(path)`; the path is appended to the connection's url (and to the outbound's `path`), the body is a record `from json` (sent as `application/json`), a record `from xml` (sent as `application/xml`) or text. SMTP: `email(to=…, subject=…, body=…, html=…, attachments=[…])` (with `html`, the email has both versions; `attachments`, the [documents](/reference/documents) rendered) |
 | `reply T` | the first line of the block: the answer of a 2xx, read as a record `from json` or `from xml`, is `d.reply` in `on … delivered` (none when it does not fit, said in the log) |
 | A block that fails | (a bug, a record that no longer exists) the event waits, without a time limit, for a deploy that fixes it; the error is in its log |
 
@@ -1135,7 +1135,7 @@ outbound SaleExported via pos as e:
 
 `write(path, content)` ends the block of an outbound to a file connection. `path` is in the
 connection's folder (no `..`, not from `/`); its folders are made when missing. The content
-is text (written as UTF-8), a record `from json` or `from xml` (its document), or a list of
+is text (written as UTF-8), a [document](/reference/documents) rendered (its bytes), a record `from json` or `from xml` (its document), or a list of
 rows of a record `from csv` or `from fixed`, written in the record's encoding: latin1, or
 EBCDIC with its packed numbers, byte for byte. The file is written under a hidden name in
 the same folder (`.a.dat.quadra-….part`) and renamed into place once complete: whoever
