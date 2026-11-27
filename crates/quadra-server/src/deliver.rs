@@ -1011,7 +1011,11 @@ pub fn is_public(ip: IpAddr) -> bool {
 }
 
 /// The addresses of `host` that may be connected to (all of them, or only public ones).
-async fn addresses(host: &str, port: u16, public_only: bool) -> Result<Vec<SocketAddr>, String> {
+pub(crate) async fn addresses(
+    host: &str,
+    port: u16,
+    public_only: bool,
+) -> Result<Vec<SocketAddr>, String> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let all: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],

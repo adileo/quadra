@@ -2383,6 +2383,20 @@ impl<'m> Checker<'m> {
                         if p.cursor.is_none() {
                             self.error(i.span, "a table is read from where the last pull stopped: say the column with `cursor m.<field>` (a growing id or a time of change)");
                         }
+                        // the cursor is a column: a field of the row, read in the database
+                        if let Some(c) = &p.cursor {
+                            let field = match &c.kind {
+                                ExprKind::Field { base, name, .. } if matches!(&base.kind, ExprKind::Name(b) if *b == i.binding) => {
+                                    m.entity(&i.ty).and_then(|r| m.find_field(r, name))
+                                }
+                                _ => None,
+                            };
+                            match field {
+                                None => self.error(c.span, format!("the cursor of a table is one of its columns: a field of the row, `cursor {}.<field>`", i.binding)),
+                                Some(f) if quadra_ir::formats::place(f).len() > 1 => self.error(c.span, "the cursor is a column of the table, not a path (`at \"UPDATED_AT\"`)"),
+                                _ => {}
+                            }
+                        }
                     }
                     _ => {
                         if p.path.is_empty() {
@@ -3319,7 +3333,22 @@ impl<'m> Checker<'m> {
                             ),
                         );
                     }
+                    // a table named in the code: its name only, checked again where it runs
+                    if let ExprKind::Lit(Lit::Str(t)) = &args[0].value.kind {
+                        let name = |p: &str| {
+                            !p.is_empty()
+                                && p.chars()
+                                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$'))
+                        };
+                        if n == "insert" && !(t.split('.').count() <= 2 && t.split('.').all(name)) {
+                            self.error(args[0].value.span, format!("`{t}`: a table, its name only (`EXCHANGE_ORDERS`, `erp.exchange_orders`)"));
+                        }
+                    }
                     let ok = match ts[1].unopt() {
+                        T::Ent(r) if n == "insert" => self
+                            .m
+                            .entity(r)
+                            .is_some_and(|e| e.format.as_deref() == Some("json")),
                         T::Ent(r) => self.m.entity(r).is_some_and(|e| e.format.is_some()),
                         T::Text(_) | T::Unknown => n == "write",
                         _ => false,
