@@ -91,6 +91,32 @@ impl<'m> Interp<'m> {
             }
         };
         let mut out: Vec<(Option<String>, V)> = Vec::new();
+        if n == "insert" {
+            // a row: the record's fields as plain JSON, by their `at`
+            let row = match get("row", Some(1)) {
+                rec @ V::Rec { .. } => crate::formats::render_json(self.m, &rec).or_else(fail)?,
+                other => return fail(format!("insert takes a record, not {other}")),
+            };
+            out.push((Some("method".into()), text("INSERT")));
+            out.push((Some("path".into()), get("table", Some(0))));
+            out.push((Some("body".into()), text(&row)));
+            out.push((Some("content_type".into()), text("application/json")));
+            return Ok(V::Tuple(Rc::new(out)));
+        }
+        if n == "write" {
+            let (body, ctype) = match get("content", Some(1)) {
+                rec @ V::Rec { .. } => {
+                    let (body, ctype) = crate::formats::render(self.m, &rec).or_else(fail)?;
+                    (body, ctype.to_string())
+                }
+                other => (as_text(&other).unwrap_or_default(), "text/plain".into()),
+            };
+            out.push((Some("method".into()), text("WRITE")));
+            out.push((Some("path".into()), get("path", Some(0))));
+            out.push((Some("body".into()), text(&body)));
+            out.push((Some("content_type".into()), text(&ctype)));
+            return Ok(V::Tuple(Rc::new(out)));
+        }
         if n == "email" {
             out.push((Some("method".into()), text("EMAIL")));
             for k in ["to", "subject", "body", "html"] {
@@ -3384,7 +3410,12 @@ impl<'m> Interp<'m> {
             return self.apply(&f, pos);
         }
         // the request an `outbound … as e:` block ends with
-        if self.building_request && matches!(n, "post" | "put" | "patch" | "delete" | "email") {
+        if self.building_request
+            && matches!(
+                n,
+                "post" | "put" | "patch" | "delete" | "email" | "write" | "insert"
+            )
+        {
             let (pos, named) = self.eval_args(args, ctx)?;
             return self.request(n, pos, named);
         }

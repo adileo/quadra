@@ -158,6 +158,61 @@ pub enum ConnectionKind {
         from: Setting,
         insecure: bool,
     },
+    /// files on a server: SFTP (`sftp://host`, the server's key pinned by `known_host`) or FTP
+    /// (`ftps://host`; plain `ftp://` only with `insecure = true`)
+    Files {
+        protocol: FileProtocol,
+        url: Setting,
+        user: Setting,
+        /// a secret variable: the password
+        password: Option<String>,
+        /// a secret variable: the private key (OpenSSH or PEM), SFTP only
+        private_key: Option<String>,
+        /// the server's public key as in `known_hosts` (`ssh-ed25519 AAAA…`): SFTP only, needed
+        known_host: Option<Setting>,
+        timeout_s: u64,
+        insecure: bool,
+    },
+    /// the database of another system: its tables read with a cursor (`inbound … pull
+    /// "ORDERS"`), rows written to exchange tables agreed with it (`insert(…)` in an outbound)
+    Database {
+        engine: DbEngine,
+        /// `postgres://host:5432/db`, `mysql://host:3306/db`, `sqlserver://host:1433/db`; for
+        /// ODBC the connection string or the DSN (`DSN=erp`)
+        url: Setting,
+        user: Option<Setting>,
+        password: Option<String>,
+        timeout_s: u64,
+        /// no TLS (a database on the same network, through an agent)
+        insecure: bool,
+    },
+    /// a mailbox read over IMAP (`imaps://host`), PEC included: each message with its
+    /// attachments is a message of an inbound (`inbound … pull "INBOX"`)
+    Mail {
+        url: Setting,
+        user: Setting,
+        password: Option<String>,
+        timeout_s: u64,
+        insecure: bool,
+    },
+}
+
+/// The protocol of a connection to files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileProtocol {
+    Sftp,
+    Ftp,
+}
+
+/// The kind of database of a connection to another system's database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DbEngine {
+    Postgres,
+    Mysql,
+    SqlServer,
+    /// any database with an ODBC driver (DB2 for i, the AS/400): run by an agent, where the
+    /// driver is installed
+    Odbc,
 }
 
 /// A connection of `[connections.<name>]`.
@@ -170,6 +225,12 @@ pub struct Connection {
     /// what the other side accepts: requests per second or minute (`rate = "2/s"`), at once
     /// (`concurrency`), and how many failures of transport in a row pause it (`pause_after`)
     pub limits: Limits,
+    /// `location = "agent:milano"`: run by that on-premise agent, in the network of the other
+    /// system, which holds its credentials; none: by the server
+    pub agent: Option<String>,
+    /// the declaration as written in quadra.toml, as an inline table: what an agent is given to
+    /// run it
+    pub decl: String,
 }
 
 /// How a message received from a connection proves where it comes from: a signature of its
@@ -227,6 +288,29 @@ impl Connection {
         match self.kind {
             ConnectionKind::Http { .. } => "http",
             ConnectionKind::Smtp { .. } => "smtp",
+            ConnectionKind::Files {
+                protocol: FileProtocol::Sftp,
+                ..
+            } => "sftp",
+            ConnectionKind::Files { .. } => "ftp",
+            ConnectionKind::Database { engine, .. } => match engine {
+                DbEngine::Postgres => "postgres",
+                DbEngine::Mysql => "mysql",
+                DbEngine::SqlServer => "sqlserver",
+                DbEngine::Odbc => "odbc",
+            },
+            ConnectionKind::Mail { .. } => "imap",
+        }
+    }
+
+    /// What `pull "…"` names on it: a URL path (http), files (`in/*.csv`), a table, a mailbox.
+    pub fn pulls(&self) -> &'static str {
+        match self.kind {
+            ConnectionKind::Http { .. } => "path",
+            ConnectionKind::Files { .. } => "files",
+            ConnectionKind::Database { .. } => "table",
+            ConnectionKind::Mail { .. } => "mailbox",
+            ConnectionKind::Smtp { .. } => "nothing",
         }
     }
 
@@ -298,6 +382,44 @@ impl Connection {
                     out.push(p);
                 }
                 setting(from, &mut out);
+            }
+            ConnectionKind::Files {
+                url,
+                user,
+                password,
+                private_key,
+                known_host,
+                ..
+            } => {
+                setting(url, &mut out);
+                setting(user, &mut out);
+                out.extend(password.iter().map(String::as_str));
+                out.extend(private_key.iter().map(String::as_str));
+                if let Some(k) = known_host {
+                    setting(k, &mut out);
+                }
+            }
+            ConnectionKind::Database {
+                url,
+                user,
+                password,
+                ..
+            } => {
+                setting(url, &mut out);
+                if let Some(u) = user {
+                    setting(u, &mut out);
+                }
+                out.extend(password.iter().map(String::as_str));
+            }
+            ConnectionKind::Mail {
+                url,
+                user,
+                password,
+                ..
+            } => {
+                setting(url, &mut out);
+                setting(user, &mut out);
+                out.extend(password.iter().map(String::as_str));
             }
         }
         out
@@ -565,6 +687,182 @@ fn setting(m: &Manifest, at: &str, key: &str, v: &toml::Value) -> Result<Setting
     }
 }
 
+/// The kinds of connection.
+const KINDS: &str =
+    "\"http\", \"smtp\", \"sftp\", \"ftp\", \"postgres\", \"mysql\", \"sqlserver\", \"odbc\", \"imap\"";
+
+/// What the other side accepts (`rate`, `concurrency`, `pause_after`).
+fn limits_of(at: &str, t: &toml::Table) -> Result<Limits, String> {
+    let mut limits = Limits::default();
+    if let Some(v) = t.get("rate") {
+        limits.rate = Some(v.as_str().and_then(parse_rate).ok_or(format!(
+            "{at}: rate is requests per second, minute or hour: \"2/s\", \"100/min\""
+        ))?);
+    }
+    if let Some(v) = t.get("concurrency") {
+        limits.concurrency =
+            v.as_integer()
+                .filter(|n| (1..=64).contains(n))
+                .ok_or(format!("{at}: concurrency is from 1 to 64"))? as u32;
+    }
+    if let Some(v) = t.get("pause_after") {
+        limits.pause_after =
+            v.as_integer()
+                .filter(|n| (1..=1000).contains(n))
+                .ok_or(format!("{at}: pause_after is from 1 to 1000"))? as u32;
+    }
+    Ok(limits)
+}
+
+/// A connection to files, a database or a mailbox.
+fn other_kind(
+    m: &Manifest,
+    at: &str,
+    kind: &str,
+    t: &toml::Table,
+) -> Result<ConnectionKind, String> {
+    let common = [
+        "kind",
+        "url",
+        "user",
+        "password",
+        "timeout",
+        "insecure",
+        "rate",
+        "concurrency",
+        "pause_after",
+        "location",
+    ];
+    let extra: &[&str] = match kind {
+        "sftp" => &["private_key", "known_host"],
+        _ => &[],
+    };
+    for k in t.keys() {
+        if !common.contains(&k.as_str()) && !extra.contains(&k.as_str()) {
+            let mut all: Vec<&str> = common[1..].to_vec();
+            all.extend(extra);
+            return Err(format!(
+                "{at}: `{k}` is not a key of a {kind} connection ({})",
+                all.join(", ")
+            ));
+        }
+    }
+    let insecure = match t.get("insecure") {
+        None => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or(format!("{at}: insecure is true or false"))?,
+    };
+    let url = setting(
+        m,
+        at,
+        "url",
+        t.get("url").ok_or(format!("{at}: url is needed"))?,
+    )?;
+    let schemes: &[&str] = match kind {
+        "sftp" => &["sftp://"],
+        "ftp" if insecure => &["ftps://", "ftp://"],
+        "ftp" => &["ftps://"],
+        "postgres" => &["postgres://", "postgresql://"],
+        "mysql" => &["mysql://"],
+        "sqlserver" => &["sqlserver://"],
+        "imap" if insecure => &["imaps://", "imap://"],
+        "imap" => &["imaps://"],
+        _ => &[],
+    };
+    if let Setting::Literal(u) = &url {
+        if !schemes.is_empty() && !schemes.iter().any(|s| u.starts_with(s)) {
+            let plain = match kind {
+                "ftp" => " (plain ftp:// only with `insecure = true`)",
+                "imap" => " (plain imap:// only with `insecure = true`)",
+                _ => "",
+            };
+            return Err(format!(
+                "{at}: url starts with {}{plain}",
+                schemes.join(" or ")
+            ));
+        }
+        if u.contains('@') && kind != "odbc" {
+            return Err(format!("{at}: the url has no credentials: they are `user` and `password` (a secret variable)"));
+        }
+    }
+    let user = t
+        .get("user")
+        .map(|v| setting(m, at, "user", v))
+        .transpose()?;
+    let password = t
+        .get("password")
+        .map(|v| credential(m, at, "password", v))
+        .transpose()?;
+    let timeout_s = match t.get("timeout") {
+        None => 30,
+        Some(v) => v
+            .as_str()
+            .and_then(parse_seconds)
+            .filter(|s| (1..=600).contains(s))
+            .ok_or(format!(
+                "{at}: timeout is a duration from 1 to 600 seconds (\"30s\")"
+            ))?,
+    };
+    Ok(match kind {
+        "sftp" | "ftp" => {
+            let user = user.ok_or(format!("{at}: user is needed"))?;
+            let private_key = t
+                .get("private_key")
+                .map(|v| credential(m, at, "private_key", v))
+                .transpose()?;
+            let known_host = t
+                .get("known_host")
+                .map(|v| setting(m, at, "known_host", v))
+                .transpose()?;
+            if kind == "sftp" {
+                if known_host.is_none() {
+                    return Err(format!("{at}: known_host is needed: the server's public key as in known_hosts (`ssh-keyscan -t ed25519 host`), so that no one else can pose as the server"));
+                }
+                if password.is_none() && private_key.is_none() {
+                    return Err(format!("{at}: a password or a private_key is needed"));
+                }
+            } else if password.is_none() {
+                return Err(format!("{at}: password is needed"));
+            }
+            ConnectionKind::Files {
+                protocol: if kind == "sftp" {
+                    FileProtocol::Sftp
+                } else {
+                    FileProtocol::Ftp
+                },
+                url,
+                user,
+                password,
+                private_key,
+                known_host,
+                timeout_s,
+                insecure,
+            }
+        }
+        "imap" => ConnectionKind::Mail {
+            url,
+            user: user.ok_or(format!("{at}: user is needed"))?,
+            password: Some(password.ok_or(format!("{at}: password is needed"))?),
+            timeout_s,
+            insecure,
+        },
+        _ => ConnectionKind::Database {
+            engine: match kind {
+                "postgres" => DbEngine::Postgres,
+                "mysql" => DbEngine::Mysql,
+                "sqlserver" => DbEngine::SqlServer,
+                _ => DbEngine::Odbc,
+            },
+            url,
+            user,
+            password,
+            timeout_s,
+            insecure,
+        },
+    })
+}
+
 /// A credential of a connection: always `{ var = "NAME" }` with a secret variable.
 fn credential(m: &Manifest, at: &str, key: &str, v: &toml::Value) -> Result<String, String> {
     match setting(m, at, key, v) {
@@ -592,7 +890,36 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
     let kind = t
         .get("kind")
         .and_then(|k| k.as_str())
-        .ok_or(format!("{at}: kind is needed: \"http\" or \"smtp\""))?;
+        .ok_or(format!("{at}: kind is needed: {KINDS}"))?;
+    // `location = "agent:milano"`: an on-premise agent runs it
+    let agent = match t.get("location") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(|l| l.strip_prefix("agent:"))
+                .filter(|n| is_connection_name(n))
+                .ok_or(format!(
+                    "{at}: location is \"agent:<name>\": the on-premise agent that runs it (`agent:milano`)"
+                ))?
+                .to_string(),
+        ),
+    };
+    // inline, so that it reads back as one value (`name = { kind = …, url = { var = … } }`)
+    let decl = toml::Value::Table(t.clone()).to_string();
+    if matches!(
+        kind,
+        "sftp" | "ftp" | "postgres" | "mysql" | "sqlserver" | "odbc" | "imap"
+    ) {
+        let kind = other_kind(m, &at, kind, t)?;
+        return Ok(Connection {
+            name: name.to_string(),
+            kind,
+            inbound: None,
+            limits: limits_of(&at, t)?,
+            agent,
+            decl,
+        });
+    }
     let allowed: &[&str] = match kind {
         "http" => &[
             "kind",
@@ -623,6 +950,7 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             "inbound_secret",
             "inbound_secret_previous",
             "inbound_max_kb",
+            "location",
         ],
         "smtp" => &[
             "kind",
@@ -634,12 +962,9 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             "rate",
             "concurrency",
             "pause_after",
+            "location",
         ],
-        _ => {
-            return Err(format!(
-                "{at}: kind `{kind}` is not known (\"http\", \"smtp\")"
-            ))
-        }
+        _ => return Err(format!("{at}: kind `{kind}` is not known ({KINDS})")),
     };
     for k in t.keys() {
         if !allowed.contains(&k.as_str()) {
@@ -902,24 +1227,7 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             insecure,
         }
     };
-    let mut limits = Limits::default();
-    if let Some(v) = t.get("rate") {
-        limits.rate = Some(v.as_str().and_then(parse_rate).ok_or(format!(
-            "{at}: rate is requests per second, minute or hour: \"2/s\", \"100/min\""
-        ))?);
-    }
-    if let Some(v) = t.get("concurrency") {
-        limits.concurrency =
-            v.as_integer()
-                .filter(|n| (1..=64).contains(n))
-                .ok_or(format!("{at}: concurrency is from 1 to 64"))? as u32;
-    }
-    if let Some(v) = t.get("pause_after") {
-        limits.pause_after =
-            v.as_integer()
-                .filter(|n| (1..=1000).contains(n))
-                .ok_or(format!("{at}: pause_after is from 1 to 1000"))? as u32;
-    }
+    let limits = limits_of(&at, t)?;
     let inbound = match t.get("inbound_signature") {
         None => {
             if t.contains_key("inbound_secret") {
@@ -974,6 +1282,8 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
         kind,
         inbound,
         limits,
+        agent,
+        decl,
     })
 }
 
@@ -1061,6 +1371,48 @@ user = "noreply@acme.example.com"
 password = { var = "SMTP_PASSWORD" }
 from = "Acme <noreply@acme.example.com>"
 "#;
+
+    #[test]
+    fn files_databases_and_mailboxes_are_connections_and_an_agent_may_run_them() {
+        let vars =
+            "[vars]\nPASS = { secret = true }\nKEY = { secret = true }\nHOST = {}\nPLAIN = {}\n\n";
+        let ok = |c: &str| {
+            parse(&format!("{vars}[connections.x]\n{c}"))
+                .map(|m| m.connection("x").unwrap().clone())
+        };
+        let sftp = ok("kind = \"sftp\"\nurl = \"sftp://files.example.com\"\nuser = \"q\"\nprivate_key = { var = \"KEY\" }\nknown_host = \"ssh-ed25519 AAAA\"\nlocation = \"agent:milano\"\n").unwrap();
+        assert_eq!(
+            (sftp.kind_name(), sftp.pulls(), sftp.agent.as_deref()),
+            ("sftp", "files", Some("milano"))
+        );
+        assert_eq!(sftp.vars(), ["KEY"]);
+        assert!(sftp.decl.contains("known_host"));
+        let pg = ok("kind = \"postgres\"\nurl = \"postgres://db:5432/erp\"\nuser = \"q\"\npassword = { var = \"PASS\" }\n").unwrap();
+        assert_eq!((pg.kind_name(), pg.pulls()), ("postgres", "table"));
+        let odbc = ok("kind = \"odbc\"\nurl = \"DSN=AS400\"\nuser = \"q\"\npassword = { var = \"PASS\" }\nlocation = \"agent:sede\"\n").unwrap();
+        assert_eq!(odbc.kind_name(), "odbc");
+        let imap = ok("kind = \"imap\"\nurl = \"imaps://imap.pec.example.it\"\nuser = \"q\"\npassword = { var = \"PASS\" }\n").unwrap();
+        assert_eq!(imap.pulls(), "mailbox");
+        let bad = |c: &str| ok(c).unwrap_err();
+        assert!(bad(
+            "kind = \"sftp\"\nurl = \"sftp://h\"\nuser = \"q\"\npassword = { var = \"PASS\" }\n"
+        )
+        .contains("known_host is needed"));
+        assert!(bad(
+            "kind = \"ftp\"\nurl = \"ftp://h\"\nuser = \"q\"\npassword = { var = \"PASS\" }\n"
+        )
+        .contains("insecure = true"));
+        assert!(
+            bad("kind = \"postgres\"\nurl = \"postgres://u:p@db/erp\"\n")
+                .contains("no credentials")
+        );
+        assert!(bad(
+            "kind = \"imap\"\nurl = \"imaps://h\"\nuser = \"q\"\npassword = { var = \"PLAIN\" }\n"
+        )
+        .contains("secret = true"));
+        assert!(bad("kind = \"sftp\"\nurl = \"sftp://h\"\nuser = \"q\"\npassword = { var = \"PASS\" }\nknown_host = \"x\"\nlocation = \"milano\"\n").contains("agent:<name>"));
+        assert!(bad("kind = \"gopher\"\nurl = \"x\"\n").contains("not known"));
+    }
 
     #[test]
     fn the_log_of_the_integrations_is_kept_as_said() {
@@ -1186,7 +1538,7 @@ from = "Acme <noreply@acme.example.com>"
             "[connections.x]\nkind = \"http\"\nurl = \"https://a\"\nbearer = { var = \"NOPE\" }\n"
         )
         .contains("does not declare"));
-        assert!(bad("[connections.x]\nkind = \"ftp\"\nurl = \"x\"\n").contains("not known"));
+        assert!(bad("[connections.x]\nkind = \"gopher\"\nurl = \"x\"\n").contains("not known"));
         assert!(
             bad("[connections.Shop]\nkind = \"http\"\nurl = \"https://a\"\n")
                 .contains("lower case")

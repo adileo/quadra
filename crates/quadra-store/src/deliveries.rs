@@ -636,6 +636,8 @@ pub struct Message {
     /// tried again then (`retry for`)
     pub next_at: Option<String>,
     pub marks: Marks,
+    /// the rows refused, and why (a file of rows handled `atomic per row`)
+    pub report: Option<String>,
 }
 
 /// Keeps a message received by `inbound` from `connection`, raw with its hash, unless one with
@@ -650,6 +652,10 @@ pub struct Marks {
     pub lane: Option<String>,
     pub latest: Option<String>,
     pub version: Option<String>,
+    /// its name on the other side (a file's path, a mail's id): where it is settled once handled
+    pub origin: Option<String>,
+    /// the body is kept as base64 (it is not UTF-8: an EBCDIC file, an attachment)
+    pub base64: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -698,7 +704,7 @@ pub fn receive(
     };
     let opt = |v: &Option<String>| v.clone().map(Sql::Text).unwrap_or(Sql::Null);
     conn.exec(
-        "INSERT INTO \"_quadra_inbox\" (\"id\", \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", \"attempts\", \"error\", \"lane\", \"latest\", \"version\") VALUES (?bigint, ?text, ?text, ?text, ?text, ?text, ?text, ?text, ?bigint, ?text, ?text, ?text, ?text)",
+        "INSERT INTO \"_quadra_inbox\" (\"id\", \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", \"attempts\", \"error\", \"lane\", \"latest\", \"version\", \"origin\", \"encoding\") VALUES (?bigint, ?text, ?text, ?text, ?text, ?text, ?text, ?text, ?bigint, ?text, ?text, ?text, ?text, ?text, ?text)",
         &[
             Sql::Int(id),
             Sql::Text(inbound.to_string()),
@@ -713,6 +719,12 @@ pub fn receive(
             opt(&marks.lane),
             opt(&marks.latest),
             opt(&marks.version),
+            opt(&marks.origin),
+            if marks.base64 {
+                Sql::Text("base64".into())
+            } else {
+                Sql::Null
+            },
         ],
     )?;
     log_dir(
@@ -781,8 +793,58 @@ fn message_of(r: &[Option<String>]) -> Message {
             lane: r.get(13).cloned().flatten(),
             latest: r.get(14).cloned().flatten(),
             version: r.get(15).cloned().flatten(),
+            origin: r.get(16).cloned().flatten(),
+            base64: r.get(17).cloned().flatten().as_deref() == Some("base64"),
         },
+        report: r.get(18).cloned().flatten(),
     }
+}
+
+/// The messages of `inbound` from the other side (with an origin) handled for good and not
+/// settled there yet: (origin, done, the error or the report of its rows).
+pub fn to_settle(
+    conn: &mut Conn,
+    inbound: &str,
+    limit: usize,
+) -> Result<Vec<(String, bool, Option<String>)>, String> {
+    Ok(conn
+        .query(
+            &format!("SELECT \"origin\", \"state\", \"error\", \"report\" FROM \"_quadra_inbox\" WHERE \"inbound\" = ?text AND \"origin\" IS NOT NULL AND \"settled_at\" IS NULL AND \"state\" IN ('done', 'rejected', 'skipped', 'superseded') ORDER BY \"id\" LIMIT {limit}"),
+            &[Sql::Text(inbound.to_string())],
+        )?
+        .into_iter()
+        .filter_map(|r| {
+            let origin = r[0].clone()?;
+            let done = r[1].as_deref() != Some("rejected");
+            let report = r[3].clone().or_else(|| r[2].clone());
+            Some((origin, done, report))
+        })
+        .collect())
+}
+
+/// The messages of `inbound` from `origins` settled on the other side at `now`.
+pub fn settled(
+    conn: &mut Conn,
+    inbound: &str,
+    origins: &[String],
+    now: &str,
+) -> Result<(), String> {
+    for o in origins {
+        conn.exec(
+            "UPDATE \"_quadra_inbox\" SET \"settled_at\" = ?text WHERE \"inbound\" = ?text AND \"origin\" = ?text AND \"settled_at\" IS NULL",
+            &[Sql::Text(now.to_string()), Sql::Text(inbound.to_string()), Sql::Text(o.clone())],
+        )?;
+    }
+    Ok(())
+}
+
+/// The report of the rows of message `id` (those refused, and why), kept with it.
+pub fn set_report(conn: &mut Conn, id: u64, report: &str) -> Result<(), String> {
+    conn.exec(
+        "UPDATE \"_quadra_inbox\" SET \"report\" = ?text WHERE \"id\" = ?bigint",
+        &[Sql::Text(report.to_string()), Sql::Int(id as i64)],
+    )?;
+    Ok(())
 }
 
 /// A message whose code failed, tried again at `next_at` (`retry for`): it stays `received`.
@@ -892,7 +954,7 @@ pub fn as_new(a: &str, b: &str) -> bool {
     }
 }
 
-const MESSAGE: &str = "SELECT CAST(\"id\" AS TEXT), \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", CAST(\"attempts\" AS TEXT), \"error\", \"done_at\", CAST(\"tx\" AS TEXT), \"next_at\", \"lane\", \"latest\", \"version\" FROM \"_quadra_inbox\"";
+const MESSAGE: &str = "SELECT CAST(\"id\" AS TEXT), \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", CAST(\"attempts\" AS TEXT), \"error\", \"done_at\", CAST(\"tx\" AS TEXT), \"next_at\", \"lane\", \"latest\", \"version\", \"origin\", \"encoding\", \"report\" FROM \"_quadra_inbox\"";
 
 /// Messages received and not handled yet whose time has come (`now`), oldest first, at most
 /// `limit`; of an `ordered by`, only the first of each value not done.

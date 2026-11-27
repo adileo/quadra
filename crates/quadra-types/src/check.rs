@@ -2252,13 +2252,18 @@ impl<'m> Checker<'m> {
         let fits = ends_with(stmts, &|n| match kind {
             "http" => matches!(n, "post" | "put" | "patch" | "delete"),
             "smtp" => n == "email",
+            "sftp" | "ftp" => n == "write",
+            "postgres" | "mysql" | "sqlserver" | "odbc" => n == "insert",
             _ => false,
         });
         if !fits {
-            let what = if kind == "smtp" {
-                "`email(to=…, subject=…, body=…)`"
-            } else {
-                "the request: `post(path, body)`, `put(…)`, `patch(…)` or `delete(path)`"
+            let what = match kind {
+                "smtp" => "`email(to=…, subject=…, body=…)`",
+                "sftp" | "ftp" => "the file: `write(path, content)`",
+                "postgres" | "mysql" | "sqlserver" | "odbc" => {
+                    "the row: `insert(table, record)`, in an exchange table agreed with the other system"
+                }
+                _ => "the request: `post(path, body)`, `put(…)`, `patch(…)` or `delete(path)`",
             };
             self.error(
                 o.span,
@@ -2298,9 +2303,18 @@ impl<'m> Checker<'m> {
                     ),
                 );
             }
+            // what `pull "…"` names on it: a path, files, a table, a mailbox
+            let pulls = m
+                .manifest
+                .connection(&i.connection)
+                .map(|c| c.pulls())
+                .unwrap_or("path");
             match m.manifest.connection(&i.connection) {
                 None => self.error(i.span, format!("no connection `{}` in quadra.toml ([connections.{}])", i.connection, i.connection)),
-                Some(c) if c.kind_name() != "http" => self.error(i.span, format!("`{}` is not an HTTP connection: messages come in over HTTP", i.connection)),
+                Some(c) if c.kind_name() == "smtp" => self.error(i.span, format!("`{}` sends emails: a mailbox is read with an imap connection", i.connection)),
+                // files, a database, a mailbox: only pulled
+                Some(c) if pulls != "path" && (i.pull.is_none() || i.path.is_some()) => self.error(i.span, format!("the messages of `{}` ({}) are fetched: `inbound {} via {} as m: {}:` with `pull \"{}\" every 5 minutes`", i.connection, c.kind_name(), i.name, i.connection, i.ty, match pulls { "files" => "in/*.csv", "table" => "ORDERS", _ => "INBOX" })),
+                Some(_) if pulls != "path" => {}
                 // a pull fetches its messages: only messages sent in prove their sender
                 Some(c) if c.inbound.is_none() && (i.pull.is_none() || i.path.is_some()) => self.error(i.span, format!("`{}` does not say how its messages are signed (`inbound_signature` and `inbound_secret` in quadra.toml): without it anyone could send them", i.connection)),
                 _ => {}
@@ -2322,6 +2336,14 @@ impl<'m> Checker<'m> {
                     ),
                 );
             }
+            // the record of a file of rows, of a row of a table, of a mail
+            let format = m.entity(&i.ty).and_then(|e| e.format.clone());
+            match (pulls, format.as_deref()) {
+                ("table", Some(f)) if f != "json" => self.error(i.span, format!("`{}`: a row of a table is read as a record `from json`, its fields (or their `at`) the columns", i.ty)),
+                ("mailbox", Some(f)) if f != "json" => self.error(i.span, format!("`{}`: a mail is read as a record `from json` (`from`, `subject`, `text`, `attachments`…)", i.ty)),
+                ("path", Some("csv" | "fixed")) if i.pull.is_some() => self.error(i.span, format!("`{}`: an HTTP pull reads JSON: files of rows come from an sftp or ftp connection", i.ty)),
+                _ => {}
+            }
             if let Some(p) = &i.pull {
                 let t = self.infer(&p.every);
                 let fixed = matches!(&p.every.kind, ExprKind::Quantity { .. });
@@ -2331,11 +2353,45 @@ impl<'m> Checker<'m> {
                         "`every` takes a fixed duration: `every 5 minutes`",
                     );
                 }
-                if !p.path.starts_with('/')
-                    || p.path.contains("..")
-                    || p.path.chars().any(|c| c.is_whitespace())
-                {
-                    self.error(i.span, format!("the path `{}`: from `/`, no spaces, no `..` (the cursor as `{{cursor}}`)", p.path));
+                match pulls {
+                    "path" => {
+                        if !p.path.starts_with('/')
+                            || p.path.contains("..")
+                            || p.path.chars().any(|c| c.is_whitespace())
+                        {
+                            self.error(i.span, format!("the path `{}`: from `/`, no spaces, no `..` (the cursor as `{{cursor}}`)", p.path));
+                        }
+                    }
+                    "files" => {
+                        if p.path.is_empty()
+                            || p.path.contains("..")
+                            || p.path.starts_with('/')
+                            || p.path.ends_with('/')
+                        {
+                            self.error(i.span, format!("`{}`: the files of a folder of the connection, a name or a pattern (`in/chiusure/*.csv`): no `..`, not from `/`", p.path));
+                        }
+                    }
+                    "table" => {
+                        if !p
+                            .path
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$'))
+                            || p.path.is_empty()
+                        {
+                            self.error(i.span, format!("`{}`: a table, its name only (`ORDERS`, `erp.orders`): the rows are chosen by the cursor", p.path));
+                        }
+                        if p.cursor.is_none() {
+                            self.error(i.span, "a table is read from where the last pull stopped: say the column with `cursor m.<field>` (a growing id or a time of change)");
+                        }
+                    }
+                    _ => {
+                        if p.path.is_empty() {
+                            self.error(i.span, "the mailbox to read (`\"INBOX\"`)");
+                        }
+                    }
+                }
+                if pulls != "path" && p.items.is_some() {
+                    self.error(i.span, "`items` reads a page of an HTTP answer");
                 }
                 if p.path.contains("{cursor}") && p.cursor.is_none() {
                     self.error(
@@ -2639,6 +2695,18 @@ impl<'m> Checker<'m> {
                             self.error(o.span, format!("the path `{p}` is a path of the connection's url: from `/`, no spaces, no `..`"));
                         }
                     }
+                }
+                quadra_sema::manifest::ConnectionKind::Files { .. }
+                | quadra_sema::manifest::ConnectionKind::Database { .. } => {
+                    if o.path.is_some() || o.body.is_none() {
+                        self.error(
+                            o.span,
+                            format!("an event goes to a {} connection by a block that ends with {}: `outbound {} via {} as e:`", c.kind_name(), if c.pulls() == "files" { "`write(path, content)`" } else { "`insert(table, record)`" }, o.event, o.connection),
+                        );
+                    }
+                }
+                quadra_sema::manifest::ConnectionKind::Mail { .. } => {
+                    self.error(o.span, format!("`{}` is a mailbox read over IMAP: emails are sent by an smtp connection", o.connection));
                 }
                 quadra_sema::manifest::ConnectionKind::Smtp { .. } => {
                     if o.path.is_some() {
@@ -3226,6 +3294,42 @@ impl<'m> Checker<'m> {
         }
         match n {
             // the request of an `outbound … as e:` block (`check_outbounds`)
+            // a file to a folder of an sftp or ftp connection: `write("out/a.csv", rows.csv())`;
+            // a row to an exchange table of a database: `insert("EXCHANGE", ErpOrder(…))`
+            "write" | "insert" if self.context.starts_with("outbound ") => {
+                let mut ts = Vec::new();
+                for a in args {
+                    ts.push(self.infer(&a.value));
+                }
+                if args.len() != 2 || args.iter().any(|a| a.name.is_some()) {
+                    self.error(
+                        span,
+                        format!(
+                            "`{n}` takes two values: `{n}({}, …)`",
+                            if n == "write" { "path" } else { "table" }
+                        ),
+                    );
+                } else {
+                    if !matches!(ts[0].unopt(), T::Text(_) | T::Unknown) {
+                        self.error(
+                            args[0].value.span,
+                            format!(
+                                "the {} is text",
+                                if n == "write" { "path" } else { "table" }
+                            ),
+                        );
+                    }
+                    let ok = match ts[1].unopt() {
+                        T::Ent(r) => self.m.entity(r).is_some_and(|e| e.format.is_some()),
+                        T::Text(_) | T::Unknown => n == "write",
+                        _ => false,
+                    };
+                    if !ok {
+                        self.error(args[1].value.span, if n == "write" { "the content is text (`rows.csv()`) or a record with a format" } else { "the row is a record `from json` (its fields, or their `at`, are the columns)" });
+                    }
+                }
+                return T::Unknown;
+            }
             "post" | "put" | "patch" | "delete" | "email"
                 if self.context.starts_with("outbound ") =>
             {

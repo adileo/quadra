@@ -114,6 +114,13 @@ pub enum Send {
     /// it cannot be sent as configured (a value missing where it runs): tried again later,
     /// once the configuration is fixed and deployed
     Broken(String),
+    /// a file, a row: run by the server, or by the agent `agent` with its own values
+    Job {
+        job: crate::transport::Job,
+        agent: Option<String>,
+        /// the values here, for a job the server runs
+        env: BTreeMap<String, String>,
+    },
 }
 
 impl Send {
@@ -125,6 +132,14 @@ impl Send {
                 (body.len() + html.as_ref().map_or(0, |h| h.len())) as u64
             }
             Send::Broken(_) => 0,
+            Send::Job {
+                job: crate::transport::Job::Put { put, .. },
+                ..
+            } => match put {
+                crate::transport::Put::File { body, .. } => body.len() as u64,
+                crate::transport::Put::Row { row, .. } => row.to_string().len() as u64,
+            },
+            Send::Job { .. } => 0,
         }
     }
 }
@@ -249,16 +264,61 @@ pub enum Built {
         body: String,
         html: Option<String>,
     },
+    /// `write(path, content)`: a file; `insert(table, row)`: a row of an exchange table
+    Put {
+        file: bool,
+        path: String,
+        body: String,
+    },
 }
 
 /// A pull of an `inbound` to make: a `GET` of `url` with the connection's authentication.
 #[derive(Clone, Debug)]
 pub struct Pull {
     pub inbound: String,
+    /// a connection that is not HTTP (files, a database, a mailbox): the job that fetches,
+    /// for the server or the agent that runs it; then `url` and the rest are not used
+    pub job: Option<JobPull>,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub creds: Credentials,
     pub timeout: Duration,
+}
+
+/// The fetch of a pull of a connection that is not HTTP.
+#[derive(Clone, Debug)]
+pub struct JobPull {
+    pub job: crate::transport::Job,
+    pub agent: Option<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+/// What a pull brought: an HTTP answer (status, body, `Retry-After`), or what a job fetched.
+#[derive(Clone, Debug)]
+pub enum PullResult {
+    Http(Result<(u16, String, Option<u64>), String>),
+    Job(crate::transport::Outcome),
+}
+
+/// Makes a pull: its HTTP request, or its job (here, or by its agent).
+pub async fn pull(
+    client: &reqwest::Client,
+    p: &Pull,
+    public_only: bool,
+    agents: Option<&crate::agents::Agents>,
+) -> PullResult {
+    match &p.job {
+        None => PullResult::Http(fetch(client, p, public_only).await),
+        Some(j) => PullResult::Job(match (&j.agent, agents) {
+            (None, _) => crate::transport::run(&j.job, &j.env, public_only).await,
+            (Some(a), Some(q)) => q.run(a, &j.job).await,
+            (Some(a), None) => {
+                crate::transport::Outcome::Failed(crate::transport::Failed::Waiting(format!(
+                    "the agent `{a}` runs it: this server has no agents"
+                )))
+            }
+        }),
+    }
 }
 
 /// What proves who sends a request, beyond its headers: an OAuth2 token asked for it, the
@@ -446,6 +506,13 @@ pub fn built_of(v: &quadra_runtime::V) -> Result<Built, String> {
             })
     };
     let method = get("method").ok_or("the block did not end with a request")?;
+    if method == "WRITE" || method == "INSERT" {
+        return Ok(Built::Put {
+            file: method == "WRITE",
+            path: get("path").unwrap_or_default(),
+            body: get("body").unwrap_or_default(),
+        });
+    }
     if method == "EMAIL" {
         return Ok(Built::Email {
             to: get("to").ok_or("`email(…)` without `to`")?,
@@ -530,6 +597,11 @@ pub fn plan(
                         body.clone().unwrap_or_default(),
                         content_type.clone(),
                     ),
+                    Some(Built::Put { .. }) => {
+                        return Err(
+                            "`write` and `insert` are for file and database connections".into()
+                        )
+                    }
                     Some(Built::Email { .. }) => {
                         return Err("an email cannot go through an HTTP connection".into())
                     }
@@ -599,8 +671,8 @@ pub fn plan(
                         body,
                         html,
                     }) => (to.clone(), subject.clone(), body.clone(), html.clone()),
-                    Some(Built::Http { .. }) => {
-                        return Err("an HTTP request cannot go through an SMTP connection".into())
+                    Some(Built::Http { .. }) | Some(Built::Put { .. }) => {
+                        return Err("only an email goes through an SMTP connection".into())
                     }
                     None => (field("to")?, field("subject")?, field("body")?, None),
                 };
@@ -616,6 +688,45 @@ pub fn plan(
                     html,
                 })
             }
+            // a file, a row: a job for whoever runs the connection (the server, an agent)
+            ConnectionKind::Files { .. } | ConnectionKind::Database { .. } => {
+                let Some(Built::Put { file, path, body }) = &built else {
+                    return Err(format!(
+                        "`{connection}` takes {}: the block ends with it",
+                        if conn.pulls() == "files" {
+                            "`write(path, content)`"
+                        } else {
+                            "`insert(table, record)`"
+                        }
+                    ));
+                };
+                let put = if *file {
+                    if path.is_empty() || path.contains("..") || path.starts_with('/') {
+                        return Err(format!("the path `{path}` is a path in the connection's folder: no `..`, not from `/`"));
+                    }
+                    crate::transport::Put::File {
+                        path: path.clone(),
+                        body: body.as_bytes().to_vec(),
+                    }
+                } else {
+                    crate::transport::Put::Row {
+                        table: path.clone(),
+                        row: serde_json::from_str(body).map_err(|e| e.to_string())?,
+                        key: idempotency_key(&due),
+                    }
+                };
+                Ok(Send::Job {
+                    job: crate::transport::Job::Put {
+                        conn: crate::transport::Conn::of(manifest, connection)?,
+                        put,
+                    },
+                    agent: conn.agent.clone(),
+                    env: env.clone(),
+                })
+            }
+            ConnectionKind::Mail { .. } => Err(format!(
+                "`{connection}` is a mailbox read over IMAP: nothing is sent through it"
+            )),
         }
     })();
     base(send.unwrap_or_else(Send::Broken))
@@ -977,6 +1088,7 @@ pub async fn run(
     plan: &Plan,
     client: &reqwest::Client,
     public_only: bool,
+    agents: Option<&crate::agents::Agents>,
 ) -> (Outcome, Attempt, Option<String>) {
     let started = std::time::Instant::now();
     let mut seen = Attempt {
@@ -986,6 +1098,25 @@ pub async fn run(
     let mut answer: Option<String> = None;
     let result = match &plan.send {
         Send::Broken(why) => Err(Failure::Waiting(why.clone())),
+        Send::Job { job, agent, env } => {
+            let outcome = match agent {
+                None => crate::transport::run(job, env, public_only).await,
+                Some(a) => match agents {
+                    Some(q) => q.run(a, job).await,
+                    None => crate::transport::Outcome::Failed(crate::transport::Failed::Waiting(
+                        format!("the agent `{a}` runs it: this server has no agents"),
+                    )),
+                },
+            };
+            match outcome {
+                crate::transport::Outcome::Put | crate::transport::Outcome::Fetched(_) => Ok(()),
+                crate::transport::Outcome::Failed(f) => Err(match f {
+                    crate::transport::Failed::Again(e) => Failure::Again(e),
+                    crate::transport::Failed::Never(e) => Failure::Never(e),
+                    crate::transport::Failed::Waiting(e) => Failure::Waiting(e),
+                }),
+            }
+        }
         Send::Http {
             method,
             url,
@@ -1438,7 +1569,7 @@ mod tests {
             send: Send::Broken("the variable TOKEN is not set where the app runs".into()),
         };
         let client = http_client(false);
-        match run(&plan, &client, false).await.0 {
+        match run(&plan, &client, false, None).await.0 {
             Outcome::Retry { error, .. } => assert!(error.contains("TOKEN"), "{error}"),
             other => panic!("{other:?}"),
         }

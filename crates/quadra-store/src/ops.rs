@@ -1087,12 +1087,27 @@ pub fn handle_inbound(
     interp
         .with_cause(cause, |i| {
             i.transaction(|i| {
-                let mut ctx = Ctx::default();
-                ctx.bind(&inbound.binding, doc.clone());
-                match i.stmts(&inbound.body, &mut ctx) {
-                    Err(Flow::Return(_)) => Ok(()),
-                    other => other,
+                // a file of rows (`from csv`, `from fixed`): the code once per row, in this one
+                // transaction (all or nothing), a failure saying its row
+                let rows = model
+                    .entity(&inbound.ty)
+                    .is_some_and(|e| matches!(e.format.as_deref(), Some("csv" | "fixed")));
+                let list: Vec<V> = match (&doc, rows) {
+                    (V::List(l), true) => l.iter().cloned().collect(),
+                    _ => vec![doc.clone()],
+                };
+                for (n, row) in list.into_iter().enumerate() {
+                    let mut ctx = Ctx::default();
+                    ctx.bind(&inbound.binding, row);
+                    match i.stmts(&inbound.body, &mut ctx) {
+                        Err(Flow::Return(_)) | Ok(()) => {}
+                        Err(Flow::Fail(e)) if rows => {
+                            return Err(Flow::Fail(format!("row {}: {e}", n + 1)))
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
+                Ok(())
             })
         })
         .map_err(|e| flow(&format!("inbound {}", inbound.name), e))?;

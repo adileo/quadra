@@ -13,8 +13,10 @@
 
 mod engine;
 
+pub mod agents;
 pub mod deliver;
 pub mod inbound;
+pub mod transport;
 pub use engine::{
     app_params, bind_for, open_requests, unhex, AppRequest, Config, Engines, Limits, Local,
     Outside, ENGINE_STACK,
@@ -119,6 +121,8 @@ struct Tenant {
     durability: Option<Arc<dyn Durability>>,
     /// a message was kept in the inbox: its task handles it now
     inbox: Arc<tokio::sync::Notify>,
+    /// its on-premise agents: the jobs waiting for them (`crate::agents`)
+    agents: Arc<agents::Agents>,
 }
 
 /// What a tenant's engines used, added after each job and taken by the host
@@ -1831,6 +1835,7 @@ fn start(
         sequencer,
         durability,
         inbox: Arc::new(tokio::sync::Notify::new()),
+        agents: Arc::default(),
     });
     let (watch, root) = (cfg.watch, cfg.root.clone());
 
@@ -1971,7 +1976,7 @@ async fn inbox(t: Arc<Tenant>, egress: Option<Arc<Egress>>) {
             next_pull = next;
             if let Some(e) = &egress {
                 for p in pulls {
-                    let result = deliver::fetch(&e.client, &p, e.public_only).await;
+                    let result = deliver::pull(&e.client, &p, e.public_only, Some(&t.agents)).await;
                     let inbound = p.inbound.clone();
                     let new = t
                         .ask(|reply| Job::Pulled {
@@ -2227,10 +2232,11 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                 if !matches!(p.send, deliver::Send::Broken(_)) {
                     t.usage.delivery(p.send.bytes());
                 }
+                let agents = t.agents.clone();
                 set.spawn(async move {
                     tokio::time::sleep_until(start.into()).await;
                     let (outcome, attempt, answer) =
-                        deliver::run(&p, &e.client, e.public_only).await;
+                        deliver::run(&p, &e.client, e.public_only, Some(&agents)).await;
                     (p, outcome, attempt, answer)
                 });
             }

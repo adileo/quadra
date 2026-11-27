@@ -8,6 +8,6 @@ repository.workspace = true
 
 [dependencies]
 chrono-tz = "0.10"
-toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "display"] }
 rowan.workspace = true
 quadra-syntax.workspace = true

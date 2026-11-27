@@ -366,6 +366,21 @@ fn fixed_scale(d: Decimal, n: u32) -> Result<Decimal, String> {
 // ---- JSON ----------------------------------------------------------------------------------
 
 /// Reads a JSON document into a record of `rec`.
+/// A message received as the record `rec`: a document (`from json`, `from xml`) is one
+/// record; a file of rows (`from csv`, `from fixed`) is the list of its rows, read from its
+/// bytes in the record's encoding.
+pub fn read_message(m: &Model, rec: &str, body: &[u8]) -> Result<V, String> {
+    let rows = m
+        .entity(rec)
+        .is_some_and(|e| matches!(e.format.as_deref(), Some("csv" | "fixed")));
+    if rows {
+        return parse_rows_bytes(m, rec, body);
+    }
+    let text =
+        std::str::from_utf8(body).map_err(|_| "the message is not text (UTF-8)".to_string())?;
+    parse(m, rec, text)
+}
+
 pub fn parse_json(m: &Model, rec: &str, text: &str) -> Result<V, String> {
     let doc: J = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
     read_record(m, rec, &doc, rec)

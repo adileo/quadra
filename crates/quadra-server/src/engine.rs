@@ -95,7 +95,27 @@ fn marks_of(
         lane: i.ordered.as_ref().and_then(eval),
         latest: i.latest.as_ref().and_then(|(k, _)| eval(k)),
         version: i.latest.as_ref().and_then(|(_, u)| eval(u)),
+        ..Default::default()
     }
+}
+
+/// The column of a table a pull's cursor reads (`cursor m.updated_at`: the field's `at`, else
+/// its name).
+fn cursor_column(
+    model: &quadra_ir::Model,
+    i: &quadra_ir::Inbound,
+    e: &quadra_ir::Expr,
+) -> Option<String> {
+    let quadra_ir::ExprKind::Field { base, name, .. } = &e.kind else {
+        return None;
+    };
+    if !matches!(&base.kind, quadra_ir::ExprKind::Name(b) if *b == i.binding) {
+        return None;
+    }
+    let field = model
+        .entity(&i.ty)
+        .and_then(|r| model.find_field(r, name))?;
+    Some(quadra_ir::formats::place(field).join("."))
 }
 
 /// A checked project, its model given the values of the variables where it runs.
@@ -456,7 +476,7 @@ pub enum Job {
     /// what a pull brought: its messages kept in the inbox, its cursor moved; how many new
     Pulled {
         inbound: String,
-        result: Result<(u16, String, Option<u64>), String>,
+        result: crate::deliver::PullResult,
         reply: oneshot::Sender<usize>,
     },
     /// the host's inbox: up to `limit` messages received handled; how many, and whether the
@@ -1364,7 +1384,7 @@ impl Engine {
         };
         let hash = crate::inbound::hash(body);
         // read as its record; the key from it (else the hash)
-        let parsed = quadra_runtime::formats::parse_json(model, &i.ty, text);
+        let parsed = quadra_runtime::formats::read_message(model, &i.ty, text.as_bytes());
         let key = match (&parsed, &i.key) {
             (Ok(doc), Some(k)) => {
                 let mut interp = quadra_runtime::Interp::new(model);
@@ -1623,6 +1643,47 @@ impl Engine {
                 next = Some(next.map_or(d, |n| n.min(d)));
                 continue;
             }
+            // files, a table, a mailbox: a job, for the server or for the connection's agent
+            if let Some(c) = model
+                .manifest
+                .connection(&i.connection)
+                .filter(|c| c.pulls() != "path")
+            {
+                let ask = match c.pulls() {
+                    "files" => crate::transport::Ask::Files {
+                        pattern: p.path.clone(),
+                        settle: self.settle_of(&i.name),
+                        limit: 100,
+                    },
+                    "mailbox" => crate::transport::Ask::Mail {
+                        mailbox: p.path.clone(),
+                        settle: self.settle_of(&i.name),
+                        limit: 100,
+                    },
+                    _ => crate::transport::Ask::Rows {
+                        table: p.path.clone(),
+                        column: p.cursor.as_ref().and_then(|e| cursor_column(model, i, e)),
+                        after: cursor.clone(),
+                        limit: 1000,
+                    },
+                };
+                match crate::transport::Conn::of(&model.manifest, &i.connection) {
+                    Ok(conn) => out.push(crate::deliver::Pull {
+                        inbound: i.name.clone(),
+                        job: Some(crate::deliver::JobPull {
+                            job: crate::transport::Job::Fetch { conn, ask },
+                            agent: c.agent.clone(),
+                            env: self.env.clone(),
+                        }),
+                        url: String::new(),
+                        headers: Vec::new(),
+                        creds: Default::default(),
+                        timeout: std::time::Duration::from_secs(60),
+                    }),
+                    Err(e) => eprintln!("pull {}: {e}", i.name),
+                }
+                continue;
+            }
             match crate::deliver::connection_request(&model.manifest, &self.env, &i.connection) {
                 Ok((base, headers, creds, timeout)) => {
                     let path = p
@@ -1630,6 +1691,7 @@ impl Engine {
                         .replace("{cursor}", &encode(cursor.as_deref().unwrap_or("")));
                     out.push(crate::deliver::Pull {
                         inbound: i.name.clone(),
+                        job: None,
                         url: format!("{base}{path}"),
                         headers,
                         creds,
@@ -1650,15 +1712,20 @@ impl Engine {
         (out, next)
     }
 
+    /// The messages of `inbound` handled for good, to settle on the other side at its next pull.
+    fn settle_of(&mut self, inbound: &str) -> Vec<crate::transport::Settle> {
+        quadra_store::deliveries::to_settle(&mut self.conn, inbound, 100)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, ok, report)| crate::transport::Settle { name, ok, report })
+            .collect()
+    }
+
     /// What a pull of `inbound` brought: each message kept in the inbox like one sent in (its
     /// key, its hash; read as its record, else `rejected`), the cursor moved to the largest of
     /// theirs, and the time of the next pull, in one write. A failed pull is tried again sooner
     /// (or after `Retry-After`). Returns how many messages are new.
-    fn pulled(
-        &mut self,
-        inbound: &str,
-        result: Result<(u16, String, Option<u64>), String>,
-    ) -> usize {
+    fn pulled(&mut self, inbound: &str, result: crate::deliver::PullResult) -> usize {
         let checked = self.checked.clone();
         let Some(model) = checked.model.as_ref() else {
             return 0;
@@ -1685,11 +1752,30 @@ impl Engine {
                 s.side(move |c| quadra_store::deliveries::pulled(c, &n, &t, &nx, None, Some(&why)));
             0
         };
+        // what came, each with its origin on the other side, as bytes; and what was settled
+        let mut items: Vec<(Option<String>, Vec<u8>, Option<String>)> = Vec::new();
+        let mut settled: Vec<String> = Vec::new();
         let (status, body, retry_after) = match result {
-            Ok(r) => r,
-            Err(e) => return fail(self, e, None),
+            crate::deliver::PullResult::Http(Ok(r)) => r,
+            crate::deliver::PullResult::Http(Err(e)) => return fail(self, e, None),
+            crate::deliver::PullResult::Job(crate::transport::Outcome::Fetched(f)) => {
+                for it in f.items {
+                    items.push((Some(it.name), it.body, it.cursor));
+                }
+                settled = f.settled;
+                (200, String::new(), None)
+            }
+            crate::deliver::PullResult::Job(crate::transport::Outcome::Failed(f)) => {
+                return fail(self, f.text().to_string(), None)
+            }
+            crate::deliver::PullResult::Job(crate::transport::Outcome::Put) => {
+                return fail(self, "the job answered with no messages".into(), None)
+            }
         };
-        if !(200..300).contains(&status) {
+
+        let is_job =
+            matches!(model.manifest.connection(&i.connection), Some(c) if c.pulls() != "path");
+        if !is_job && !(200..300).contains(&status) {
             let text: String = body.chars().take(200).collect();
             return fail(
                 self,
@@ -1697,9 +1783,13 @@ impl Engine {
                 retry_after,
             );
         }
-        let doc: J = match serde_json::from_str(&body) {
-            Ok(d) => d,
-            Err(e) => return fail(self, format!("the answer is not JSON: {e}"), None),
+        let doc: J = if is_job {
+            J::Null
+        } else {
+            match serde_json::from_str(&body) {
+                Ok(d) => d,
+                Err(e) => return fail(self, format!("the answer is not JSON: {e}"), None),
+            }
         };
         // the messages: the list in the page (`items Page.field`), or the answer itself
         let list = match &p.items {
@@ -1717,13 +1807,19 @@ impl Engine {
             }
             None => Some(doc.clone()),
         };
-        let Some(J::Array(items)) = list else {
-            return fail(
-                self,
-                "the answer has no list of messages where the inbound says".into(),
-                None,
-            );
-        };
+        if !is_job {
+            let Some(J::Array(list)) = list else {
+                return fail(
+                    self,
+                    "the answer has no list of messages where the inbound says".into(),
+                    None,
+                );
+            };
+            items = list
+                .into_iter()
+                .map(|j| (None, j.to_string().into_bytes(), None))
+                .collect();
+        }
         let mut kept: Vec<(
             String,
             String,
@@ -1732,10 +1828,10 @@ impl Engine {
             quadra_store::deliveries::Marks,
         )> = Vec::new();
         let mut cursor: Option<String> = None;
-        for item in items {
-            let text = item.to_string();
-            let hash = crate::inbound::hash(text.as_bytes());
-            let parsed = quadra_runtime::formats::parse_json(model, &i.ty, &text);
+        for (origin, bytes, item_cursor) in items {
+            let (text, base64) = crate::transport::body_text(&bytes);
+            let hash = crate::inbound::hash(&bytes);
+            let parsed = quadra_runtime::formats::read_message(model, &i.ty, &bytes);
             let eval = |e: &quadra_ir::Expr, doc: &quadra_runtime::V| -> Option<String> {
                 let mut interp = quadra_runtime::Interp::new(model);
                 let mut ctx = quadra_runtime::Ctx::default();
@@ -1746,21 +1842,29 @@ impl Engine {
                     other => other.to_string(),
                 })
             };
-            let key = match (&parsed, &i.key) {
-                (Ok(d), Some(k)) => eval(k, d).unwrap_or_else(|| hash.clone()),
+            // the key: the inbound's, else (from the other side) its name and its hash, else the hash
+            let key = match (&parsed, &i.key, &origin) {
+                (Ok(d), Some(k), _) => eval(k, d).unwrap_or_else(|| hash.clone()),
+                (_, _, Some(o)) => format!("{o}#{}", &hash[..16]),
                 _ => hash.clone(),
             };
-            if let (Ok(d), Some(c)) = (&parsed, &p.cursor) {
+            if let Some(v) = item_cursor {
+                if cursor.as_deref().is_none_or(|old| v.as_str() > old) {
+                    cursor = Some(v);
+                }
+            } else if let (Ok(d), Some(c)) = (&parsed, &p.cursor) {
                 if let Some(v) = eval(c, d) {
                     if cursor.as_deref().is_none_or(|old| v.as_str() > old) {
                         cursor = Some(v);
                     }
                 }
             }
-            let marks = parsed
+            let mut marks = parsed
                 .as_ref()
                 .map(|d| marks_of(model, i, d))
                 .unwrap_or_default();
+            marks.origin = origin;
+            marks.base64 = base64;
             let error = parsed.err().map(|e| format!("{}: {e}", i.ty));
             kept.push((key, hash, text, error, marks));
         }
@@ -1789,6 +1893,7 @@ impl Engine {
                     new += 1;
                 }
             }
+            quadra_store::deliveries::settled(cn, &n, &settled, &t)?;
             quadra_store::deliveries::pulled(cn, &n, &t, &nx, cursor.as_deref(), None)?;
             Ok(new)
         });
@@ -1856,7 +1961,8 @@ impl Engine {
                 {
                     return Ok(tx);
                 }
-                let doc = quadra_runtime::formats::parse_json(model, &i.ty, &m.body)
+                let bytes = crate::transport::body_bytes(&m.body, m.marks.base64);
+                let doc = quadra_runtime::formats::read_message(model, &i.ty, &bytes)
                     .map_err(|e| format!("{}: {e}", i.ty))?;
                 quadra_store::ops::handle_inbound(
                     &self.url,
