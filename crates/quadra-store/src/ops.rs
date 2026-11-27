@@ -746,28 +746,47 @@ pub fn next_due(
             // the due instant grows with the column's value: the smallest values past a bound,
             // in order, give the nearest (days are calendar days of the project's zone: the
             // bound leaves two days of margin and the exact instant is computed for each)
-            let margin = if t.days != 0 {
+            let margin = if t.days != 0 || t.date {
                 chrono::Duration::days(t.days + 2)
             } else {
                 chrono::Duration::zero()
             };
+            // (a date: compared as its text, the day of the bound)
             let bound = (after - chrono::Duration::seconds(t.secs + 1) - margin)
-                .format("%Y-%m-%d %H:%M:%S")
+                .format(if t.date {
+                    "%Y-%m-%d"
+                } else {
+                    "%Y-%m-%d %H:%M:%S"
+                })
                 .to_string();
             let mut offset = 0;
             'scan: loop {
                 let rows = db.conn.query(&format!("SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" > ?text ORDER BY \"{col}\" LIMIT 64 OFFSET {offset}"), &[crate::conn::Sql::Text(bound.clone())])?;
                 let n = rows.len();
                 for r in rows {
-                    let Some(at) = r[0].as_deref().and_then(parse_instant) else {
-                        continue;
-                    };
-                    let mut due = if t.days != 0 {
-                        quadra_runtime::time::add_days(at, t.days, tz)
+                    let due = if t.date {
+                        // the midnight starting the day, in the project's zone
+                        let Some(day) = r[0].as_deref().and_then(|v| {
+                            chrono::NaiveDate::parse_from_str(v.get(..10).unwrap_or(v), "%Y-%m-%d")
+                                .ok()
+                        }) else {
+                            continue;
+                        };
+                        let midnight = (day + chrono::Duration::days(t.days))
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap();
+                        quadra_runtime::time::instant(midnight, tz) + chrono::Duration::seconds(1)
                     } else {
-                        at
+                        let Some(at) = r[0].as_deref().and_then(parse_instant) else {
+                            continue;
+                        };
+                        let due = if t.days != 0 {
+                            quadra_runtime::time::add_days(at, t.days, tz)
+                        } else {
+                            at
+                        };
+                        due + chrono::Duration::seconds(t.secs + 1)
                     };
-                    due += chrono::Duration::seconds(t.secs + 1);
                     if due > after {
                         if best.is_none_or(|b| due < b) {
                             best = Some(due);

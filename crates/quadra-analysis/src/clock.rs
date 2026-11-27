@@ -2,25 +2,29 @@
 //!
 //! A formula, a check or a `becomes` condition that reads the clock is a *threshold* when every
 //! read of the clock in it is a comparison of `now()` with a stored `DateTime` field of the
-//! record, possibly moved by a fixed amount: `at <= now()`, `now() > sent_at + 2 hours`,
-//! `due_at + 3 days < now()`. Its value changes only when `now()` passes one of those instants,
-//! so the next sweep it needs is the nearest of them: a query on one column
-//! (`quadra_store::ops::next_due`). Anything else that reads the clock (`today()`, `now().hour`,
-//! the clock in a function, a field of another record) keeps the periodic sweep: waking early
-//! costs little, late is a bug.
+//! record, or of `today()` with a stored `Date` field, either possibly moved by a fixed amount:
+//! `at <= now()`, `now() > sent_at + 2 hours`, `due_at + 3 days < now()`, `due < today()`,
+//! `renew_on <= today() + 7 days`. Its value changes only when the clock passes one of those
+//! instants (for a date, the midnight starting that day or the day after, in the project's
+//! zone), so the next sweep it needs is the nearest of them: a query on one column
+//! (`quadra_store::ops::next_due`). Anything else that reads the clock (`now().hour`, the clock
+//! in a function, a field of another record) keeps the periodic sweep: waking early costs
+//! little, late is a bug.
 
 use crate::deps;
 use quadra_ir::{BinOp, Entity, Expr, ExprKind, Model, Trigger, Ty};
 
 /// An instant a threshold passes for each record: the value of `field` (a stored `DateTime`)
 /// moved by `days` calendar days (in the project's zone, as the interpreter does) and `secs`
-/// seconds.
+/// seconds; for a `date` threshold (a stored `Date` against `today()`), the midnight starting
+/// the day `days` after the field's, in the project's zone.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Threshold {
     pub entity: String,
     pub field: String,
     pub days: i64,
     pub secs: i64,
+    pub date: bool,
 }
 
 /// How a model changes with time alone.
@@ -44,22 +48,60 @@ fn reads_clock(e: &Expr) -> bool {
     s.contains("Name(\"now\")") || s.contains("Name(\"today\")")
 }
 
-fn is_datetime(ty: &Option<Ty>) -> bool {
+fn is_type(ty: &Option<Ty>, name: &str) -> bool {
     match ty {
         Some(Ty::Path { segments, args, .. }) => {
-            args.is_empty() && segments.len() == 1 && segments[0] == "DateTime"
+            args.is_empty() && segments.len() == 1 && segments[0] == name
         }
-        Some(Ty::Optional(t)) => is_datetime(&Some((**t).clone())),
+        Some(Ty::Optional(t)) => is_type(&Some((**t).clone()), name),
         _ => false,
     }
 }
 
-/// A stored `DateTime` field of the record, possibly with a fixed amount added or taken away:
-/// (field, days, seconds).
-fn term(m: &Model, ent: &Entity, e: &Expr) -> Option<(String, i64, i64)> {
+/// An amount of time added (`op` is `+`) or taken away: (days, seconds).
+fn amount(op: BinOp, e: &Expr) -> Option<(i64, i64)> {
+    let ExprKind::Quantity {
+        value,
+        unit,
+        per: None,
+    } = &e.kind
+    else {
+        return None;
+    };
+    let n: i64 = value.parse().ok()?;
+    let n = if op == BinOp::Add { n } else { -n };
+    Some(match unit.as_str() {
+        "second" | "seconds" => (0, n),
+        "minute" | "minutes" => (0, n * 60),
+        "hour" | "hours" => (0, n * 3600),
+        "day" | "days" => (n, 0),
+        "week" | "weeks" => (n * 7, 0),
+        _ => return None,
+    })
+}
+
+/// The clock (`now()` or `today()`, by `name`), possibly moved by a fixed amount: (days,
+/// seconds).
+fn clock_side(e: &Expr, name: &str) -> Option<(i64, i64)> {
+    if is_clock_call(e, name) {
+        return Some((0, 0));
+    }
+    match &e.kind {
+        ExprKind::Binary {
+            op: op @ (BinOp::Add | BinOp::Sub),
+            lhs,
+            rhs,
+        } if is_clock_call(lhs, name) => amount(*op, rhs),
+        _ => None,
+    }
+}
+
+/// A stored field of the record of type `ty` (`DateTime`, `Date`), possibly with a fixed amount
+/// added or taken away: (field, days, seconds).
+fn term(m: &Model, ent: &Entity, e: &Expr, ty: &str) -> Option<(String, i64, i64)> {
     let field = |name: &str| -> Option<String> {
         let f = m.all_fields(ent).into_iter().find(|f| f.name == name)?;
-        (f.formula.is_none() && is_datetime(&f.ty)).then(|| name.to_string())
+        (f.formula.is_none() && is_type(&f.ty, ty)).then(|| name.to_string())
     };
     match &e.kind {
         ExprKind::Name(n) => Some((field(n)?, 0, 0)),
@@ -73,25 +115,8 @@ fn term(m: &Model, ent: &Entity, e: &Expr) -> Option<(String, i64, i64)> {
             lhs,
             rhs,
         } => {
-            let (f, d, s) = term(m, ent, lhs)?;
-            let ExprKind::Quantity {
-                value,
-                unit,
-                per: None,
-            } = &rhs.kind
-            else {
-                return None;
-            };
-            let n: i64 = value.parse().ok()?;
-            let n = if *op == BinOp::Add { n } else { -n };
-            let (dd, ss) = match unit.as_str() {
-                "second" | "seconds" => (0, n),
-                "minute" | "minutes" => (0, n * 60),
-                "hour" | "hours" => (0, n * 3600),
-                "day" | "days" => (n, 0),
-                "week" | "weeks" => (n * 7, 0),
-                _ => return None,
-            };
+            let (f, d, s) = term(m, ent, lhs, ty)?;
+            let (dd, ss) = amount(*op, rhs)?;
             Some((f, d + dd, s + ss))
         }
         _ => None,
@@ -116,31 +141,49 @@ fn scan(m: &Model, ent: &Entity, e: &Expr, out: &mut Vec<Threshold>) -> Result<(
             lhs,
             rhs,
         } => {
-            let other = if is_clock_call(lhs, "now") {
-                rhs
-            } else if is_clock_call(rhs, "now") {
-                lhs
-            } else {
-                return Err(format!(
-                    "a comparison of `{}` with the clock that is not a threshold",
-                    ent.name
-                ));
-            };
-            match term(m, ent, other) {
-                Some((field, days, secs)) => {
+            // `field + a OP clock + b` is `field + (a - b) OP clock`
+            for (clock, ty) in [("now", "DateTime"), ("today", "Date")] {
+                let (other, (cd, cs)) = if let Some(c) = clock_side(lhs, clock) {
+                    (rhs, c)
+                } else if let Some(c) = clock_side(rhs, clock) {
+                    (lhs, c)
+                } else {
+                    continue;
+                };
+                let Some((field, days, secs)) = term(m, ent, other, ty) else {
+                    return Err(format!(
+                        "`{clock}()` compared with something other than a stored {ty} of `{}`",
+                        ent.name
+                    ));
+                };
+                let (days, secs) = (days - cd, secs - cs);
+                if clock == "today" {
+                    // the day it is or the day after, whichever way the comparison goes (`<`
+                    // turns at the day after, `<=` at the day itself)
+                    for d in [days, days + 1] {
+                        out.push(Threshold {
+                            entity: ent.name.clone(),
+                            field: field.clone(),
+                            days: d,
+                            secs: 0,
+                            date: true,
+                        });
+                    }
+                } else {
                     out.push(Threshold {
                         entity: ent.name.clone(),
                         field,
                         days,
                         secs,
+                        date: false,
                     });
-                    Ok(())
                 }
-                None => Err(format!(
-                    "`now()` compared with something other than a stored DateTime of `{}`",
-                    ent.name
-                )),
+                return Ok(());
             }
+            Err(format!(
+                "a comparison of `{}` with the clock that is not a threshold",
+                ent.name
+            ))
         }
         ExprKind::Binary {
             op: BinOp::And | BinOp::Or | BinOp::Implies,
@@ -151,7 +194,6 @@ fn scan(m: &Model, ent: &Entity, e: &Expr, out: &mut Vec<Threshold>) -> Result<(
             scan(m, ent, rhs, out)
         }
         ExprKind::Unary { expr, .. } => scan(m, ent, expr, out),
-        _ if format!("{:?}", e.kind).contains("Name(\"today\")") => Err("`today()`".into()),
         _ => Err(format!(
             "the clock read in a way that is not a threshold, on `{}`",
             ent.name

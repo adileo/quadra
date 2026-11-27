@@ -77,3 +77,52 @@ fn the_next_sweep_is_at_the_nearest_reminder_after_the_last_sweep() {
         Due::At(None)
     );
 }
+
+/// A rule on `today()` against a stored date: the next sweep is at a midnight of the project's
+/// zone (the day of a task or the day after), not at every periodic interval.
+#[test]
+fn a_rule_on_today_sweeps_at_the_midnight_of_the_project_zone() {
+    const TASKS: &str = "entity Task:\n    due: Date\n\nentity Late:\n    task: Task\n\non Task becomes due < today() as t:\n    Late(task=t)\n\nseed:\n    Task(due=2026-12-03)\n";
+    let root = Path::new("/due-dates");
+    let mut p = Project::from_sources(root, vec![(root.join("main.qd"), TASKS.to_string())]);
+    p.timezone = "America/New_York".into();
+    let checked = quadra_analysis::check(&p);
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    let file = std::env::temp_dir().join(format!("quadra-due-dates-{}.db", std::process::id()));
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{s}", file.display()));
+    }
+    let url = format!("sqlite:{}", file.display());
+    ops::init(&url, m, r, t(1, 0, 0, 0)).unwrap();
+    let second = chrono::Duration::seconds(1);
+    // midnight of 3 December in New York is 05:00 UTC; then the day after
+    let set = |at: NaiveDateTime| {
+        Database::open(&url, m, r)
+            .unwrap()
+            .set_meta("last_sweep", &at.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+            .unwrap()
+    };
+    set(t(1, 0, 0, 0));
+    assert_eq!(
+        ops::next_due(&url, m, r, t(1, 0, 0, 0)).unwrap(),
+        Due::At(Some(t(3, 5, 0, 0) + second))
+    );
+    set(t(3, 6, 0, 0));
+    assert_eq!(
+        ops::next_due(&url, m, r, t(3, 6, 0, 0)).unwrap(),
+        Due::At(Some(t(4, 5, 0, 0) + second))
+    );
+    // the sweep then: the task is late
+    ops::sweep(&url, m, r, t(4, 5, 0, 1)).unwrap();
+    let mut c = quadra_store::Conn::open(&url).unwrap();
+    assert_eq!(
+        c.query("SELECT CAST(COUNT(*) AS TEXT) FROM \"late\"", &[])
+            .unwrap()[0][0]
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        ops::next_due(&url, m, r, t(4, 6, 0, 0)).unwrap(),
+        Due::At(None)
+    );
+}
