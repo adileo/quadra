@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type DefaultTheme } from "vitepress";
+import { quadraDark, quadraLight } from "./code-themes";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const site = path.resolve(here, "..");
@@ -74,18 +75,21 @@ export default defineConfig({
   cleanUrls: true,
   srcExclude: ["README.md", "projects/**", "scripts/**", "archive/**"],
   lang: "en",
-  appearance: "dark",
+  appearance: true,
   head: [
     ["link", { rel: "icon", type: "image/svg+xml", href: "/logo.svg" }],
-    ["meta", { name: "theme-color", content: "#7c3aed" }],
+    ["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }],
+    ["link", { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" }],
+    ["link", { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&display=swap" }],
+    ["meta", { name: "theme-color", content: "#171717" }],
     ["meta", { property: "og:title", content: "Quadra: programming language for finance and operations" }],
   ],
   markdown: {
     languages: [{ ...grammar, name: "quadra", aliases: ["qd"] }],
-    theme: { light: "github-light", dark: "one-dark-pro" },
+    theme: { light: quadraLight, dark: quadraDark },
   },
   themeConfig: {
-    logo: "/logo.svg",
+    logo: { light: "/logo.svg", dark: "/logo-dark.svg" },
     siteTitle: "Quadra",
     nav: [
       { text: "Guide", link: "/guide/introduction", activeMatch: "^/guide/" },

@@ -28,9 +28,9 @@ onMounted(() => {
 
 <style scoped>
 .q-fold { position: relative; margin-bottom: 12px; }
-.q-fold__body { overflow: hidden; border-radius: 12px; }
+.q-fold__body { overflow: hidden; border-radius: var(--q-radius, 8px); }
 .q-fold__body :deep(div[class*="language-"]) { margin: 0 !important; }
-.q-fold.folded .q-fold__body::after { content: ""; position: absolute; left: 1px; right: 1px; bottom: 1px; height: 96px; border-radius: 0 0 12px 12px; background: linear-gradient(to bottom, transparent, var(--vp-code-block-bg) 85%); pointer-events: none; }
-.q-fold__more { position: absolute; left: 50%; bottom: 14px; z-index: 1; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: var(--vp-c-bg-soft); border: 1px solid rgba(167, 139, 250, 0.5); color: var(--vp-c-text-1); font-size: 13px; font-weight: 600; white-space: nowrap; transition: border-color 0.15s, transform 0.15s; }
-.q-fold__more:hover { border-color: rgba(167, 139, 250, 0.9); transform: translateX(-50%) translateY(-1px); }
+.q-fold.folded .q-fold__body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 96px; border-radius: 0 0 var(--q-radius, 8px) var(--q-radius, 8px); background: linear-gradient(to bottom, transparent, var(--vp-code-block-bg) 85%); pointer-events: none; }
+.q-fold__more { position: absolute; left: 50%; bottom: 14px; z-index: 1; transform: translateX(-50%); padding: 6px 14px; border-radius: 6px; background: var(--vp-c-bg); color: var(--vp-c-text-1); font-size: 13px; font-weight: 500; white-space: nowrap; transition: background-color 0.15s; }
+.q-fold__more:hover { background: var(--q-hl, #fde047); color: #171717; }
 </style>

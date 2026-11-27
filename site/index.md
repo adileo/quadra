@@ -60,7 +60,7 @@ hero:
   </div>
   <div class="q-gap__item q-gap__item--q">
     <div class="q-gap__icons" aria-hidden="true">
-      <img src="/logo.svg" alt="">
+      <svg class="q-logo" viewBox="0 0 64 64"><rect x="4" y="4" width="26" height="26" rx="6"/><rect x="34" y="4" width="26" height="26" rx="6"/><rect x="4" y="34" width="26" height="26" rx="6"/><rect x="34" y="34" width="26" height="26" rx="6"/></svg>
     </div>
     <div class="q-gap__kind">Quadra</div>
     <h4>Quick like a sheet, solid by design</h4>
@@ -327,11 +327,6 @@ metric gross_margin(period: DateRange) -> Money<EUR>:
 <pre class="q-term"><span class="c">$ quadra certify gross_margin --approved-by "m.bianchi (CFO)"</span>
 <span class="ok">certified gross_margin: sha256:a1c018754ce6c703 (9 dependencies)</span></pre>
 
-<div class="q-label">Weeks later, in another file: <code>cost: Money&lt;EUR&gt; default 0 EUR</code></div>
-
-<pre class="q-term"><span class="c">$ quadra check</span>
-<span class="e">error</span>: the definition of <span class="x">`gross_margin`</span> changed since it was certified by <span class="u">m.bianchi (CFO)</span> on 2026-11-25 <span class="d">(sha256:a1c018754ce6c703 → sha256:4aaf3745f5bb4eaa)</span>: run <span class="ok">`quadra certify gross_margin`</span> once the change is approved</pre>
-
 <ol class="q-safe__steps q-safe__steps--3">
   <li><b>Defined once</b><span>dashboards show it with a certified mark</span></li>
   <li><b>Owned</b><span>a name, an owner, a definition in words</span></li>
@@ -413,45 +408,27 @@ Every branch gets its own environment, with sample data or a copy of production.
 
 ## Connect Quadra to Claude or ChatGPT
 
-<p class="q-lead">You don't need to be a programmer. Connect your project to your AI assistant and describe what you need in plain words. It writes the rules, Quadra checks every line and runs the tests, and you approve the change.</p>
-
-<div class="q-ai">
-<div class="q-ai__chat">
-  <div class="q-ai__head">
-    <span class="q-ai__avatar" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" fill="currentColor"/><circle cx="18.5" cy="17.5" r="1.6" fill="currentColor"/></svg></span>
-    <span class="q-ai__who">Your AI assistant</span>
-    <span class="q-ai__chips"><span>Claude</span><span>ChatGPT</span></span>
-  </div>
-  <div class="q-ai__you">An order can't be confirmed if it loses money, and a line can't sell more than we have in stock.</div>
-  <div class="q-ai__bot">I added two rules to <code>orders.qd</code>: each line is checked against the stock, and an order is confirmed only if its margin is positive. The check passes and all 4 tests pass. Apply the change?
-    <div class="q-ai__tool"><span class="q-ai__q">Q</span>Quadra · check <b>✓</b> · test 4/4 <b>✓</b></div>
-  </div>
-  <div class="q-ai__you">Yes, apply it.</div>
-</div>
-<div class="q-ai__code">
-
-```quadra
-entity Order:
-    action confirm:
-        require margin > 0, "Below cost: this order loses money"
-
-entity OrderLine:
-    check qty <= product.stock, "Not enough stock"
-```
-
-<pre class="q-term"><span class="c">$ quadra check</span>
-<span class="ok">✓ 6 modules (1 interface files) checked, 0 warnings</span>
-<span class="c">$ quadra test</span>
-<span class="ok">4 passed, 0 failed</span></pre>
-
-</div>
-</div>
+<p class="q-lead">Quadra has an MCP server: connect your project to Claude, ChatGPT or any assistant that speaks MCP, and describe what you need in plain words. The assistant writes the rules, Quadra checks every line and runs the tests, and nothing changes until you approve it.</p>
 
 <div class="q-cards q-cards--3">
-  <div class="q-card"><h4>Plain words in, rules out</h4><p>The rules read like the process you described, so you can check them yourself.</p></div>
-  <div class="q-card"><h4>Checked before it's applied</h4><p>The assistant gets every error with its line and fix, and corrects it before you see it.</p></div>
-  <div class="q-card"><h4>You approve every change</h4><p>Nothing reaches your data until you say yes. Every change stays on record.</p></div>
+  <div class="q-card">
+    <div class="q-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg></div>
+    <h4>Say it in plain words</h4>
+    <p>“An order can’t be confirmed if it loses money.” The assistant turns it into a rule you can read.</p>
+  </div>
+  <div class="q-card">
+    <div class="q-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
+    <h4>Checked before it’s applied</h4>
+    <p>Quadra checks the code and runs the tests. The assistant gets every error with its line, and fixes it.</p>
+  </div>
+  <div class="q-card">
+    <div class="q-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></svg></div>
+    <h4>You approve every change</h4>
+    <p>Nothing reaches your data until you say yes, and every change stays on record.</p>
+  </div>
 </div>
+
+<div class="q-works"><span>Works with</span><b>Claude</b><b>ChatGPT</b><b>Cursor</b><b>any MCP client</b></div>
 
 </div>
 
@@ -460,8 +437,6 @@ entity OrderLine:
 <div class="q-eyebrow">AI, with guardrails</div>
 
 ## Would you trust AI-written code to run your business?
-
-<p class="q-lead">Ask an AI to build the app from scratch and you get thousands of lines of frontend, backend and SQL that nobody reads. One wrong rounding or one forgotten permission, and the numbers are quietly wrong. Quadra is a language AI can use safely: it writes a few readable rules, and the compiler refuses what's unsafe before anything runs.</p>
 
 <div class="q-vs">
   <div class="q-vs__side q-vs__side--bad">
@@ -483,13 +458,6 @@ entity OrderLine:
     </ul>
   </div>
 </div>
-
-<div class="q-label" style="margin-top: 22px">What the compiler stops, whoever wrote the code</div>
-
-<pre class="q-term"><span class="e">error</span>: formula cycle: <span class="n">Order.rebate → Order.total → Order.rebate</span>
-       <span class="d">(break it with a `default` snapshot, or make one value stored)</span>
-<span class="w">warning</span>: state <span class="x">`Archived`</span> of <span class="n">`Order.state`</span> can never be reached
-<span class="e">error</span>: <span class="n">Exact&lt;Money&lt;EUR&gt;&gt;</span> must be rounded with <span class="ok">.round()</span> before it is stored as <span class="n">Money&lt;EUR&gt;</span></pre>
 
 </div>
 
@@ -528,62 +496,37 @@ entity OrderLine:
 
 <div class="q-cases">
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">📊</div>
     <h4>Finance calculations</h4>
     <p>Commissions, budgets, cost allocations, cash forecasts.</p>
   </div>
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">🚚</div>
     <h4>Logistics</h4>
     <p>Stock, lots, picking and shipments.</p>
   </div>
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">🏭</div>
     <h4>Production</h4>
     <p>Work orders, progress and job costing.</p>
   </div>
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">🧪</div>
     <h4>Lab analysis</h4>
     <p>Samples, results within limits, certificates.</p>
   </div>
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">⏱️</div>
     <h4>Timesheets</h4>
     <p>Hours by person and project, approvals, billing.</p>
   </div>
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">✅</div>
     <h4>Quality</h4>
     <p>Non-conformities, returns, corrective actions.</p>
   </div>
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">🧾</div>
     <h4>Purchasing</h4>
     <p>Requests, approvals, suppliers, contracts.</p>
   </div>
   <div class="q-case">
-    <div class="q-case__icon" aria-hidden="true">📅</div>
     <h4>Bookings</h4>
     <p>Machines, rooms, vehicles and people.</p>
   </div>
-</div>
-
-</div>
-
-<div class="q-section">
-
-<div class="q-eyebrow">Solid where Excel breaks</div>
-
-## Low-code, with the guarantees of code
-
-<div class="q-cards q-cards--3">
-  <div class="q-card"><h4>Rules on every save</h4><p>A record that breaks a rule is never written.</p></div>
-  <div class="q-card"><h4>Every number traceable</h4><p>Ask any value where it comes from and who can change it.</p></div>
-  <div class="q-card"><h4>Full history</h4><p>Every change keeps who made it, when and why.</p></div>
-  <div class="q-card"><h4>Permissions in the model</h4><p>Written once, enforced on every screen and API call.</p></div>
-  <div class="q-card"><h4>Safe schema changes</h4><p>Migrations run on a copy of the live data first.</p></div>
-  <div class="q-card"><h4>No lock-in</h4><p>An open source language, plain text files in git. Move between your servers and our cloud whenever you want.</p></div>
 </div>
 
 </div>
@@ -602,11 +545,12 @@ entity OrderLine:
     <h4>Your servers, your data</h4>
     <p>One command on your machines, with SQLite or PostgreSQL. Nothing leaves your network.</p>
     <ul>
-      <li>Runs on Linux, macOS or a container</li>
+      <li>Runs on Linux, macOS, Windows or a container</li>
       <li>Your database, your backups</li>
       <li>Your identity provider for sign-in</li>
     </ul>
     <div class="q-host__price"><b>Free</b><span>, the Quadra language is open source</span></div>
+    <div class="q-host__act"><a class="q-host__link" href="https://github.com/adileo/quadra" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>View on GitHub</a></div>
   </div>
   <div class="q-host__plan q-host__plan--cloud">
     <div class="q-host__kind">Quadra Cloud</div>
@@ -616,8 +560,13 @@ entity OrderLine:
       <li>Deploy from GitHub or the command line</li>
       <li>A preview for every branch</li>
       <li>Continuous backups and custom domains</li>
+      <li>RPO 0: no saved change is ever lost</li>
+      <li>Environment forks: a copy of production to try anything on</li>
+      <li>Sign-in for your users, with no email server to set up</li>
+      <li>Teams, and two-factor sign-in for your account</li>
     </ul>
     <div class="q-host__price"><span>Starting at</span> <b>€0</b><span>/month</span></div>
+    <div class="q-host__act"><a class="q-host__btn" href="https://app.quadra.run">Try it for free</a><span class="q-host__note">No credit card required</span></div>
   </div>
 </div>
 
