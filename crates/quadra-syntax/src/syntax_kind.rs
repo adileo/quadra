@@ -128,6 +128,8 @@ pub enum SyntaxKind {
     OUTBOUND,
     /// `from json` after a record's name: the external format it is read from and written to
     FORMAT_CLAUSE,
+    /// a line of policy at the top of an `outbound … as e:` block: `reply ErpAck`
+    OUTBOUND_CLAUSE,
 
     // members
     MEMBER_LIST,

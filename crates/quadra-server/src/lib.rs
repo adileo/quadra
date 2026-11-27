@@ -1962,14 +1962,15 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                 let Some(p) = plans.next() else { break };
                 let e = egress.clone();
                 set.spawn(async move {
-                    let (outcome, attempt) = deliver::run(&p, &e.client, e.public_only).await;
-                    (p, outcome, attempt)
+                    let (outcome, attempt, answer) =
+                        deliver::run(&p, &e.client, e.public_only).await;
+                    (p, outcome, attempt, answer)
                 });
             }
             let Some(done) = set.join_next().await else {
                 break;
             };
-            let Ok((p, outcome, attempt)) = done else {
+            let Ok((p, outcome, attempt, answer)) = done else {
                 continue;
             };
             if let quadra_store::deliveries::Outcome::Retry { error, .. }
@@ -1985,6 +1986,7 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                     attempt,
                     fields: p.fields.clone(),
                     attempts: p.attempts,
+                    answer,
                     reply,
                 })
                 .await

@@ -399,9 +399,11 @@ pub enum Job {
         event: String,
         outcome: quadra_store::deliveries::Outcome,
         attempt: quadra_store::deliveries::Attempt,
-        /// its fields and the attempts made before this one: for the reactions to its outcome
+        /// its fields, the attempts made before this one and the answer: for the reactions to
+        /// its outcome (`d.reply`)
         fields: J,
         attempts: u64,
+        answer: Option<String>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     People {
@@ -750,12 +752,26 @@ impl Engine {
             .into_iter()
             .filter_map(|d| {
                 let o = model.outbounds.iter().find(|o| o.event == d.event)?;
+                // the request its block builds, reading the data as of the emitting commit
+                let built = o.body.as_ref().map(|_| {
+                    quadra_store::ops::build_request(
+                        &self.url,
+                        model,
+                        &checked.report,
+                        at,
+                        o,
+                        &d.fields,
+                        d.tx,
+                    )
+                    .and_then(|v| crate::deliver::built_of(&v))
+                });
                 Some(crate::deliver::plan(
                     &model.manifest,
                     &self.env,
                     d,
                     &o.connection,
                     o.path.as_deref(),
+                    built,
                 ))
             })
             .collect();
@@ -917,6 +933,7 @@ impl Engine {
     /// The reactions to the final outcome of event `id` (`on E delivered as d:`, `on E failed as
     /// f:`), in a transaction of their own with the cause `outbound:E#id`. One that fails leaves
     /// the outcome as it is (it is true: the receiver got it, or not) and goes to the event's log.
+    #[allow(clippy::too_many_arguments)]
     fn outcome_reactions(
         &mut self,
         id: u64,
@@ -925,6 +942,7 @@ impl Engine {
         attempt: &quadra_store::deliveries::Attempt,
         fields: &J,
         attempts: u64,
+        answer: Option<&str>,
     ) {
         use quadra_runtime::V;
         use quadra_store::deliveries::Outcome;
@@ -966,7 +984,34 @@ impl Engine {
         if let Some(e) = &error {
             parts.push((Some("error".to_string()), text(e)));
         }
+        // `reply T`: the answer read as a record `from json` (none if it does not fit, said in
+        // the log)
+        let mut reply_error = None;
+        if let Some(t) = model
+            .outbounds
+            .iter()
+            .find(|o| o.event == event)
+            .and_then(|o| o.reply.clone())
+        {
+            let reply = match answer.map(|a| quadra_runtime::formats::parse_json(model, &t, a)) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => {
+                    reply_error = Some(format!("the answer is not a {t}: {e}"));
+                    V::None
+                }
+                None => V::None,
+            };
+            parts.push((Some("reply".to_string()), reply));
+        }
         let value = V::Tuple(std::rc::Rc::new(parts));
+        if let Some(e) = reply_error {
+            let (ev, stamp) = (
+                event.to_string(),
+                at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            );
+            let _ =
+                self.side(move |c| quadra_store::deliveries::log_reaction(c, id, &ev, &stamp, &e));
+        }
         let r = quadra_store::ops::outcome_reactions(
             &self.url,
             model,
@@ -1207,6 +1252,7 @@ impl Engine {
                     attempt,
                     fields,
                     attempts,
+                    answer,
                     reply,
                 } => {
                     let at = now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -1222,6 +1268,7 @@ impl Engine {
                             &attempt,
                             &fields,
                             attempts + 1,
+                            answer.as_deref(),
                         );
                     }
                     let _ = reply.send(r.map(|_| ()));

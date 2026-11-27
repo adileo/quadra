@@ -285,10 +285,28 @@ impl<'a> Lower<'a> {
                     .filter_map(|t| t.into_token())
                     .find(|t| t.kind() == STRING)
                     .map(|t| unquote(t.text()));
+                // `as e:`: the binding is the name after the keyword
+                let binding = ast::token(item, AS_KW).and_then(|_| {
+                    ast::children(item, NAME)
+                        .nth(2)
+                        .map(|n| n.text().to_string().trim().to_string())
+                });
+                let body = ast::child(item, BLOCK_EXPR).map(|b| self.expr(&b));
+                let reply = ast::children(item, OUTBOUND_CLAUSE)
+                    .find(|c| {
+                        c.children_with_tokens()
+                            .filter_map(|t| t.into_token())
+                            .any(|t| t.text() == "reply")
+                    })
+                    .and_then(|c| ast::child(&c, PATH))
+                    .map(|p| ast::path_text(&p));
                 self.model.outbounds.push(Outbound {
                     event,
                     connection,
                     path,
+                    binding,
+                    body,
+                    reply,
                     span,
                 });
             }

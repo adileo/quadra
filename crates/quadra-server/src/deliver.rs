@@ -49,6 +49,7 @@ pub struct Plan {
 #[derive(Clone, Debug)]
 pub enum Send {
     Http {
+        method: String,
         url: String,
         headers: Vec<(String, String)>,
         body: String,
@@ -63,6 +64,8 @@ pub enum Send {
         to: String,
         subject: String,
         body: String,
+        /// an HTML version, sent with the text one (`email(…, html=…)`)
+        html: Option<String>,
         /// `smtp://` without TLS (`insecure = true`: a local test server)
         plain: bool,
     },
@@ -176,13 +179,65 @@ fn text_field(fields: &J, name: &str) -> Option<String> {
     }
 }
 
-/// The plan of a due event of the outbound `(connection, path)`.
+/// What the block of an `outbound … as e:` built for an event.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Built {
+    Http {
+        method: String,
+        path: String,
+        body: Option<String>,
+        content_type: Option<String>,
+    },
+    Email {
+        to: String,
+        subject: String,
+        body: String,
+        html: Option<String>,
+    },
+}
+
+/// What a block's last expression gave (`Interp::request`), as a request.
+pub fn built_of(v: &quadra_runtime::V) -> Result<Built, String> {
+    use quadra_runtime::V;
+    let V::Tuple(parts) = v else {
+        return Err(format!("the block ended with {v}, not a request"));
+    };
+    let get = |k: &str| -> Option<String> {
+        parts
+            .iter()
+            .find(|(n, _)| n.as_deref() == Some(k))
+            .and_then(|(_, v)| match v {
+                V::None => None,
+                V::Text(t) => Some(t.to_string()),
+                other => Some(other.to_string()),
+            })
+    };
+    let method = get("method").ok_or("the block did not end with a request")?;
+    if method == "EMAIL" {
+        return Ok(Built::Email {
+            to: get("to").ok_or("`email(…)` without `to`")?,
+            subject: get("subject").unwrap_or_default(),
+            body: get("body").unwrap_or_default(),
+            html: get("html"),
+        });
+    }
+    Ok(Built::Http {
+        method,
+        path: get("path").unwrap_or_default(),
+        body: get("body"),
+        content_type: get("content_type"),
+    })
+}
+
+/// The plan of a due event of the outbound `(connection, path)`; `built`, what its block built
+/// (`Err`: the block failed, and the event waits for a fixed deploy).
 pub fn plan(
     manifest: &Manifest,
     env: &BTreeMap<String, String>,
     due: Due,
     connection: &str,
     path: Option<&str>,
+    built: Option<Result<Built, String>>,
 ) -> Plan {
     let base = |send| Plan {
         id: due.id,
@@ -210,6 +265,15 @@ pub fn plan(
             "quadra.toml has no connection `{connection}`"
         )));
     };
+    let built = match built {
+        Some(Err(e)) => {
+            return base(Send::Broken(format!(
+                "the block of the outbound failed: {e} (fixed by a deploy)"
+            )))
+        }
+        Some(Ok(b)) => Some(b),
+        None => None,
+    };
     let send = (|| -> Result<Send, String> {
         match &conn.kind {
             ConnectionKind::Http {
@@ -219,21 +283,50 @@ pub fn plan(
                 timeout_s,
                 ..
             } => {
-                let url = format!(
-                    "{}{}",
-                    setting(url)?.trim_end_matches('/'),
-                    path.unwrap_or("")
-                );
-                let body = json!({
-                    "id": due.id,
-                    "event": due.event,
-                    "tx": due.tx,
-                    "created_at": format!("{}Z", due.created_at),
-                    "data": plain_fields(&due.fields),
-                })
-                .to_string();
+                // the request its block built, or the envelope of the event
+                let (method, path, body, content_type) = match &built {
+                    Some(Built::Http {
+                        method,
+                        path: p,
+                        body,
+                        content_type,
+                    }) => (
+                        method.clone(),
+                        format!("{}{}", path.unwrap_or(""), p),
+                        body.clone().unwrap_or_default(),
+                        content_type.clone(),
+                    ),
+                    Some(Built::Email { .. }) => {
+                        return Err("an email cannot go through an HTTP connection".into())
+                    }
+                    None => (
+                        "POST".to_string(),
+                        path.unwrap_or("").to_string(),
+                        json!({
+                            "id": due.id,
+                            "event": due.event,
+                            "tx": due.tx,
+                            "created_at": format!("{}Z", due.created_at),
+                            "data": plain_fields(&due.fields),
+                        })
+                        .to_string(),
+                        Some("application/json".to_string()),
+                    ),
+                };
+                if !path.is_empty()
+                    && (!path.starts_with('/')
+                        || path.contains("..")
+                        || path.contains("://")
+                        || path.chars().any(|c| c.is_whitespace() || c.is_control()))
+                {
+                    return Err(format!("the path `{path}` is not a path of the connection's url (from `/`, no spaces, no `..`)"));
+                }
+                let url = format!("{}{}", setting(url)?.trim_end_matches('/'), path);
                 let mut headers = vec![
-                    ("Content-Type".to_string(), "application/json".to_string()),
+                    (
+                        "Content-Type".to_string(),
+                        content_type.unwrap_or_else(|| "application/json".to_string()),
+                    ),
                     ("User-Agent".to_string(), "Quadra".to_string()),
                     ("Quadra-Event".to_string(), due.event.clone()),
                     ("Quadra-Delivery".to_string(), due.id.to_string()),
@@ -257,6 +350,7 @@ pub fn plan(
                 }
                 let sign = signing_secret.as_deref().map(value).transpose()?;
                 Ok(Send::Http {
+                    method,
                     url,
                     headers,
                     body,
@@ -279,15 +373,29 @@ pub fn plan(
                     text_field(&due.fields, n)
                         .ok_or_else(|| format!("the event has no `{n}`: an email needs it"))
                 };
+                // what its block built, or the event's `to`, `subject` and `body`
+                let (to, subject, body, html) = match &built {
+                    Some(Built::Email {
+                        to,
+                        subject,
+                        body,
+                        html,
+                    }) => (to.clone(), subject.clone(), body.clone(), html.clone()),
+                    Some(Built::Http { .. }) => {
+                        return Err("an HTTP request cannot go through an SMTP connection".into())
+                    }
+                    None => (field("to")?, field("subject")?, field("body")?, None),
+                };
                 let url = setting(url)?;
                 Ok(Send::Smtp {
                     plain: *insecure && url.starts_with("smtp://"),
                     url,
                     login,
                     from: setting(from)?,
-                    to: field("to")?,
-                    subject: field("subject")?,
-                    body: field("body")?,
+                    to,
+                    subject,
+                    body,
+                    html,
                 })
             }
         }
@@ -403,15 +511,21 @@ enum Failure {
 
 /// Runs a plan: what came of it, given when it was first emitted (after a day it is not tried
 /// again).
-pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> (Outcome, Attempt) {
+pub async fn run(
+    plan: &Plan,
+    client: &reqwest::Client,
+    public_only: bool,
+) -> (Outcome, Attempt, Option<String>) {
     let started = std::time::Instant::now();
     let mut seen = Attempt {
         connection: plan.connection.clone(),
         ..Default::default()
     };
+    let mut answer: Option<String> = None;
     let result = match &plan.send {
         Send::Broken(why) => Err(Failure::Waiting(why.clone())),
         Send::Http {
+            method,
             url,
             headers,
             body,
@@ -420,6 +534,7 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> (O
         } => {
             http(
                 client,
+                method,
                 url,
                 headers,
                 body,
@@ -427,6 +542,7 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> (O
                 *timeout,
                 public_only,
                 &mut seen,
+                &mut answer,
             )
             .await
         }
@@ -437,6 +553,7 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> (O
             to,
             subject,
             body,
+            html,
             plain,
         } => {
             smtp(
@@ -446,6 +563,7 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> (O
                 to,
                 subject,
                 body,
+                html.as_deref(),
                 *plain,
                 public_only,
                 &mut seen,
@@ -454,7 +572,7 @@ pub async fn run(plan: &Plan, client: &reqwest::Client, public_only: bool) -> (O
         }
     };
     seen.duration_ms = started.elapsed().as_millis() as u64;
-    (outcome(plan, result), seen)
+    (outcome(plan, result), seen, answer)
 }
 
 /// What a result means for the event: delivered, tried again when, or failed for good.
@@ -497,6 +615,7 @@ fn outcome(plan: &Plan, result: Result<(), Failure>) -> Outcome {
 
 async fn http(
     client: &reqwest::Client,
+    method: &str,
     url: &str,
     headers: &[(String, String)],
     body: &str,
@@ -504,6 +623,7 @@ async fn http(
     timeout: Duration,
     public_only: bool,
     seen: &mut Attempt,
+    answer: &mut Option<String>,
 ) -> Result<(), Failure> {
     let parsed = reqwest::Url::parse(url).map_err(|e| Failure::Never(format!("{url}: {e}")))?;
     // an address written as such does not go through the resolver
@@ -519,7 +639,12 @@ async fn http(
             }
         }
     }
-    let mut req = client.post(parsed).timeout(timeout).body(body.to_string());
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| Failure::Never(format!("`{method}` is not an HTTP method")))?;
+    let mut req = client.request(method, parsed).timeout(timeout);
+    if !body.is_empty() {
+        req = req.body(body.to_string());
+    }
     for (k, v) in headers {
         req = req.header(k, v);
     }
@@ -545,8 +670,11 @@ async fn http(
     let status = resp.status();
     seen.status = Some(status.as_u16());
     if status.is_success() {
-        let text = excerpt(resp, 500).await;
-        seen.excerpt = (!text.trim().is_empty()).then_some(text);
+        // the whole answer (up to 1 MB) for `reply`, its beginning for the log
+        let text = read_up_to(resp, 1 << 20).await;
+        let short: String = text.chars().take(500).collect();
+        seen.excerpt = (!short.trim().is_empty()).then_some(short);
+        *answer = Some(text);
         return Ok(());
     }
     // `Retry-After` in seconds (a date is read as no hint)
@@ -588,15 +716,25 @@ async fn http(
 
 /// The first `chars` characters of a response's body, reading no more than 64 KB of it: a huge
 /// or endless answer does not fill the node's memory.
-async fn excerpt(mut resp: reqwest::Response, chars: usize) -> String {
+async fn excerpt(resp: reqwest::Response, chars: usize) -> String {
+    read_up_to(resp, 64 << 10)
+        .await
+        .chars()
+        .take(chars)
+        .collect()
+}
+
+/// A response's body, reading no more than `max` bytes of it.
+async fn read_up_to(mut resp: reqwest::Response, max: usize) -> String {
     let mut buf: Vec<u8> = Vec::new();
-    while buf.len() < 64 << 10 {
+    while buf.len() < max {
         match resp.chunk().await {
             Ok(Some(c)) => buf.extend_from_slice(&c),
             _ => break,
         }
     }
-    String::from_utf8_lossy(&buf).chars().take(chars).collect()
+    buf.truncate(max);
+    String::from_utf8_lossy(&buf).to_string()
 }
 
 fn host_of(url: &str) -> String {
@@ -622,6 +760,7 @@ async fn smtp(
     to: &str,
     subject: &str,
     body: &str,
+    html: Option<&str>,
     plain: bool,
     public_only: bool,
     seen: &mut Attempt,
@@ -650,10 +789,17 @@ async fn smtp(
         .to(to
             .parse()
             .map_err(|e| Failure::Never(format!("the address {to}: {e}")))?)
-        .subject(subject)
-        .header(lettre::message::header::ContentType::TEXT_PLAIN)
-        .body(body.to_string())
-        .map_err(|e| Failure::Never(format!("the email: {e}")))?;
+        .subject(subject);
+    let message = match html {
+        None => message
+            .header(lettre::message::header::ContentType::TEXT_PLAIN)
+            .body(body.to_string()),
+        Some(h) => message.multipart(lettre::message::MultiPart::alternative_plain_html(
+            body.to_string(),
+            h.to_string(),
+        )),
+    }
+    .map_err(|e| Failure::Never(format!("the email: {e}")))?;
     // connect to an address checked here, with the certificate checked for the name
     let addr = addresses(&host, port, public_only)
         .await
@@ -798,7 +944,7 @@ mod tests {
             commit: "0123456789abcdef0123".into(),
         };
         let mut env = BTreeMap::new();
-        let p = plan(&m, &env, due.clone(), "shop", Some("/hooks"));
+        let p = plan(&m, &env, due.clone(), "shop", Some("/hooks"), None);
         assert!(
             matches!(&p.send, Send::Broken(e) if e.contains("TOKEN")),
             "{:?}",
@@ -812,7 +958,7 @@ mod tests {
             body,
             sign,
             ..
-        } = plan(&m, &env, due, "shop", Some("/hooks")).send
+        } = plan(&m, &env, due, "shop", Some("/hooks"), None).send
         else {
             panic!()
         };

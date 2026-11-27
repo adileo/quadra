@@ -173,10 +173,47 @@ or whose commit could still be lost, never leaves. An event has at most one `out
 | ``an email event has `to`, `subject` and `body`: `Bad` has no `subject` `` | an SMTP connection sends the event's `to`, `subject` and `body` (Text or Email) |
 | ``the path `x` is a path of the connection's url: from `/`, no spaces, no `..` `` | |
 
+### The request: `outbound … as e:`
+
+Without a block, an event goes out as the webhook below (or, by SMTP, as the email of its `to`,
+`subject` and `body`). With a block, the code builds the request in the shape the receiver
+wants, from the event and the data:
+
+```quadra
+record ErpShipment from json:
+    order: Text at "order.number"
+    weight: Decimal at "parcel.weight_kg"
+
+record ErpAck from json:
+    tracking: Text
+
+event OrderPlaced(order: Order)
+
+outbound OrderPlaced via erp as e:
+    reply ErpAck
+    let o = e.order
+    put(f"/shipments/{o.number}", ErpShipment(order=o.number, weight=o.weight))
+
+on OrderPlaced delivered as d:
+    d.event.order.note = d.reply?.tracking ?? "no tracking"
+```
+
+| Rule | Detail |
+|---|---|
+| `e` | the event: its fields, as they were emitted |
+| The data | read **as it was when the event was emitted**: every attempt builds the same request, even a day later and after the order changed. The content is decided at `emit`; the block decides its shape |
+| No writes | the block builds the request and nothing else: an assignment or an `emit` there is an error (write in the transaction that emits, or in `on … delivered`) |
+| The request | the block ends with it. HTTP: `post(path, body)`, `put(path, body)`, `patch(path, body)`, `delete(path)`; the path is appended to the connection's url (and to the outbound's `path`), the body is a record `from json` (sent as `application/json`) or text. SMTP: `email(to=…, subject=…, body=…, html=…)` (with `html`, the email has both versions) |
+| `reply T` | the first line of the block: the answer of a 2xx, read as a record `from json`, is `d.reply` in `on … delivered` (none when it does not fit, said in the log) |
+| A block that fails | (a bug, a record that no longer exists) the event waits, without a time limit, for a deploy that fixes it; the error is in its log |
+
+The headers, the authentication, the signature and the `Idempotency-Key` are the connection's,
+as for a webhook.
+
 ### Webhooks
 
-Through an HTTP connection an event is a `POST` of JSON to the connection's `url` followed by
-the `path`:
+Without a block, through an HTTP connection an event is a `POST` of JSON to the connection's
+`url` followed by the `path`:
 
 ```json
 {"id": 41, "event": "OrderShipped", "tx": 1207, "created_at": "2026-11-27T10:14:03Z", "data": {"number": "A-1042"}}
@@ -254,6 +291,7 @@ on OrderPlaced failed as f:
 | In the reaction | Value |
 |---|---|
 | `d.event` | the event's fields, as they were emitted (`d.event.order`, `d.event.number`) |
+| `d.reply` | with `reply T` on the outbound: the answer, read as a `T` (optional) |
 | `d.at` | when the outcome came |
 | `d.attempts` | the attempts made, this one included |
 | `d.status` | the HTTP status or the SMTP reply code (optional) |

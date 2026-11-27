@@ -782,6 +782,47 @@ pub fn outcome_reactions(
         .map_err(|e| flow("the reaction", e))
 }
 
+/// The request the block of an `outbound … as e:` builds for one event: its code run as the
+/// system, with `e` its fields (`fields`, as the outbox keeps them), reading the data as it was
+/// at transaction `tx`, the one that emitted it. Every attempt builds the same request.
+pub fn build_request(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    outbound: &quadra_ir::Outbound,
+    fields: &serde_json::Value,
+    tx: u64,
+) -> Result<V, String> {
+    let (Some(binding), Some(body)) = (&outbound.binding, &outbound.body) else {
+        return Err("this outbound has no block".into());
+    };
+    let db = Database::open(url, model, report)?;
+    let src = crate::source::DbSource::open(url, db.schema.clone(), None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.system += 1;
+    interp.building_request = true;
+    let event: Vec<(Option<String>, V)> = fields
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (Some(k.clone()), quadra_runtime::codec::from_json(v)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut ctx = Ctx {
+        as_of: Some(tx),
+        ..Default::default()
+    };
+    ctx.bind(binding, V::Tuple(std::rc::Rc::new(event)));
+    interp
+        .eval(body, &mut ctx)
+        .map_err(|e| flow(&format!("the block of outbound {}", outbound.event), e))
+}
+
 /// When a project next needs a sweep, from its database (`quadra_analysis::clock`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Due {

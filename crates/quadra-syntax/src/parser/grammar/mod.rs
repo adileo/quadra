@@ -462,7 +462,43 @@ fn outbound(p: &mut Parser) {
         p.bump_ctx();
         p.expect(STRING);
     }
-    end_line(p);
+    // `as e:` and a block: lines of policy (`reply ErpAck`), then the code that builds the
+    // request from the event
+    if p.at(AS_KW) {
+        p.bump();
+        name(p);
+        p.expect(COLON);
+        if p.at(NEWLINE) && p.nth(1) == INDENT {
+            p.bump();
+            p.bump();
+            while p.eat(NEWLINE) {}
+            while p.at_ctx("reply") && p.nth(1) == IDENT {
+                let c = p.start();
+                p.bump_ctx();
+                path(p);
+                end_line(p);
+                c.complete(p, OUTBOUND_CLAUSE);
+                while p.eat(NEWLINE) {}
+            }
+            let b = p.start();
+            let blk = p.start();
+            while !p.at(DEDENT) && !p.at_eof() {
+                if p.eat(NEWLINE) {
+                    continue;
+                }
+                let before = p.position();
+                stmts::stmt(p);
+                ensure_progress(p, before);
+            }
+            blk.complete(p, BLOCK);
+            b.complete(p, BLOCK_EXPR);
+            p.eat(DEDENT);
+        } else {
+            p.error("expected an indented block: the request built from the event");
+        }
+    } else {
+        end_line(p);
+    }
     m.complete(p, OUTBOUND);
 }
 

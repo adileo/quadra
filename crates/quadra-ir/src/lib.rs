@@ -775,6 +775,13 @@ pub struct Outbound {
     pub event: String,
     pub connection: String,
     pub path: Option<String>,
+    /// `as e:` and its block: the code that builds the request from the event (its last
+    /// expression: `post(…)`, `put(…)`, `email(…)`…), reading the data as it was when the
+    /// event was emitted
+    pub binding: Option<String>,
+    pub body: Option<Expr>,
+    /// `reply ErpAck`: the answer read as a record `from json` (`d.reply` in `on … delivered`)
+    pub reply: Option<String>,
     pub span: Span,
 }
 

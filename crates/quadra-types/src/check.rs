@@ -1803,6 +1803,15 @@ impl<'m> Checker<'m> {
         if r.trigger == Trigger::Failed {
             out.push((Some("error".to_string()), T::text()));
         }
+        // `reply T` on the outbound: the answer, read (none when it does not fit)
+        if let Some(t) = m
+            .outbounds
+            .iter()
+            .find(|o| o.event == ev.name)
+            .and_then(|o| o.reply.clone())
+        {
+            out.push((Some("reply".to_string()), T::Opt(Box::new(T::Ent(t)))));
+        }
         T::Tuple(out)
     }
 
@@ -1852,6 +1861,93 @@ impl<'m> Checker<'m> {
         }
     }
 
+    /// The block of `outbound E via c as e:`: `e` is the event (its fields), the code reads but
+    /// never writes, and its last expression is the request for the connection's kind
+    /// (`post`, `put`, `patch`, `delete` over HTTP, `email` over SMTP). `reply` names a record
+    /// `from json`.
+    fn check_outbound_block(
+        &mut self,
+        o: &'m quadra_ir::Outbound,
+        ev: &'m quadra_ir::Event,
+        binding: &str,
+        body: &'m Expr,
+        kind: &str,
+    ) {
+        let fields: Vec<(Option<String>, T)> = ev
+            .fields
+            .iter()
+            .map(|(n, ty)| (Some(n.clone()), self.decl_ty(ty, &["self".into()])))
+            .collect();
+        let saved = std::mem::replace(&mut self.context, format!("outbound {}", o.event));
+        self.entity = None;
+        self.push();
+        self.bind(binding, T::Tuple(fields));
+        self.infer(body);
+        self.pop();
+        self.context = saved;
+        let ExprKind::Block(stmts) = &body.kind else {
+            return;
+        };
+        // no write: the block only builds what is sent
+        fn writes(stmts: &[Stmt], out: &mut Vec<Span>) {
+            for s in stmts {
+                match &s.kind {
+                    StmtKind::Assign { .. } | StmtKind::Emit(_) => out.push(s.span),
+                    StmtKind::If {
+                        then, otherwise, ..
+                    } => {
+                        writes(then, out);
+                        if let Some(e) = otherwise {
+                            writes(e, out);
+                        }
+                    }
+                    StmtKind::For { body, .. } => writes(body, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut w = Vec::new();
+        writes(stmts, &mut w);
+        for span in w {
+            self.error(span, "the block of an `outbound` builds the request: it does not write (do it in the transaction that emits the event, or in `on … delivered`)");
+        }
+        let request = stmts.last().and_then(|s| match &s.kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Call { callee, .. } => match &callee.kind {
+                    ExprKind::Name(n) => Some(n.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        });
+        let fits = matches!(
+            (kind, request),
+            ("http", Some("post" | "put" | "patch" | "delete")) | ("smtp", Some("email"))
+        );
+        if !fits {
+            let what = if kind == "smtp" {
+                "`email(to=…, subject=…, body=…)`"
+            } else {
+                "the request: `post(path, body)`, `put(…)`, `patch(…)` or `delete(path)`"
+            };
+            self.error(
+                o.span,
+                format!("the block of `outbound {}` ends with {what}", o.event),
+            );
+        }
+        if let Some(r) = &o.reply {
+            if kind != "http" {
+                self.error(o.span, "`reply` reads the answer of an HTTP connection");
+            } else if !self.m.entity(r).is_some_and(|e| e.format.is_some()) {
+                self.error(
+                    o.span,
+                    format!("`reply {r}`: a record `from json`, to read the answer"),
+                );
+            }
+        }
+    }
+
     /// `outbound Event via connection`: the event and the connection exist, one outbound per
     /// event, and an email event has what an email needs.
     fn check_outbounds(&mut self) {
@@ -1887,6 +1983,9 @@ impl<'m> Checker<'m> {
                 );
                 continue;
             };
+            if let (Some(binding), Some(body)) = (&o.binding, &o.body) {
+                self.check_outbound_block(o, ev, binding, body, c.kind_name());
+            }
             match &c.kind {
                 quadra_sema::manifest::ConnectionKind::Http { .. } => {
                     if let Some(p) = &o.path {
@@ -1905,6 +2004,10 @@ impl<'m> Checker<'m> {
                             o.span,
                             "an email has no path: `outbound SendEmail via mail`",
                         );
+                    }
+                    // a block builds the email itself
+                    if o.body.is_some() {
+                        continue;
                     }
                     let text = |t: &Ty| matches!(t, Ty::Path { segments, .. } if segments.len() == 1 && ["Text", "Email"].contains(&segments[0].as_str()));
                     for need in ["to", "subject", "body"] {
@@ -2436,6 +2539,32 @@ impl<'m> Checker<'m> {
             return self.call_fn(&f, args);
         }
         match n {
+            // the request of an `outbound … as e:` block (`check_outbounds`)
+            "post" | "put" | "patch" | "delete" | "email"
+                if self.context.starts_with("outbound ") =>
+            {
+                for a in args {
+                    let t = self.infer(&a.value);
+                    let ok = match (n, a.name.as_deref()) {
+                        // the body: a record `from json` (sent as JSON) or text
+                        (_, Some("body")) | ("post" | "put" | "patch", None)
+                            if args.iter().position(|x| std::ptr::eq(x, a)) == Some(1)
+                                || a.name.as_deref() == Some("body") =>
+                        {
+                            match t.unopt() {
+                                T::Ent(r) => self.m.entity(r).is_some_and(|e| e.format.is_some()),
+                                T::Text(_) | T::Unknown => true,
+                                _ => false,
+                            }
+                        }
+                        _ => matches!(t.unopt(), T::Text(_) | T::Unknown),
+                    };
+                    if !ok {
+                        self.error(a.value.span, format!("`{n}(…)`: the body is a record `from json` or text; the others are text"));
+                    }
+                }
+                return T::Unknown;
+            }
             "now" | "today" => {
                 if self.in_formula {
                     self.error(span, format!("{n}() is not allowed in a formula: formulas must give the same result every time (use `default` or an action)"));

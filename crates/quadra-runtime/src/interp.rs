@@ -70,6 +70,53 @@ pub enum CommitError {
 pub type R<T> = Result<T, Flow>;
 
 impl<'m> Interp<'m> {
+    /// `post(path, body)`, `put`, `patch`, `delete(path)`, `email(to=, subject=, body=, html=)`:
+    /// what an `outbound … as e:` block sends, as a tuple the engine reads (`method`, `path`,
+    /// `body`, `content_type`; for an email `to`, `subject`, `body`, `html`). A body that is a
+    /// record `from json` is written as its document.
+    fn request(&mut self, n: &str, pos: Vec<V>, named: Vec<(String, V)>) -> R<V> {
+        let get = |k: &str, i: Option<usize>| -> V {
+            named
+                .iter()
+                .find(|(x, _)| x == k)
+                .map(|(_, v)| v.clone())
+                .or_else(|| i.and_then(|i| pos.get(i).cloned()))
+                .unwrap_or(V::None)
+        };
+        let as_text = |v: &V| -> Option<String> {
+            match v {
+                V::None => None,
+                V::Text(t) => Some(t.to_string()),
+                other => Some(other.to_string()),
+            }
+        };
+        let mut out: Vec<(Option<String>, V)> = Vec::new();
+        if n == "email" {
+            out.push((Some("method".into()), text("EMAIL")));
+            for k in ["to", "subject", "body", "html"] {
+                out.push((Some(k.into()), get(k, None)));
+            }
+        } else {
+            let path = as_text(&get("path", Some(0))).unwrap_or_default();
+            let (body, ctype) = match get("body", Some(1)) {
+                V::None => (V::None, V::None),
+                rec @ V::Rec { .. } => (
+                    text(&crate::formats::render_json(self.m, &rec).or_else(|e| fail(e))?),
+                    text("application/json"),
+                ),
+                other => (
+                    as_text(&other).map(|t| text(&t)).unwrap_or(V::None),
+                    text("text/plain; charset=utf-8"),
+                ),
+            };
+            out.push((Some("method".into()), text(&n.to_uppercase())));
+            out.push((Some("path".into()), text(&path)));
+            out.push((Some("body".into()), body));
+            out.push((Some("content_type".into()), ctype));
+        }
+        Ok(V::Tuple(Rc::new(out)))
+    }
+
     /// `env.NAME`: the value of a variable where the model runs (its default when the
     /// environment has none), as its declared type.
     fn env_value(&self, name: &str) -> R<V> {
@@ -232,6 +279,8 @@ pub struct Interp<'m> {
     pub statics: Rc<Statics>,
     /// re-evaluate the rules that read the clock on every record (a periodic sweep)
     pub sweep: bool,
+    /// evaluating the block of an `outbound … as e:`: `post(…)`, `email(…)`… build its request
+    pub building_request: bool,
     /// when the previous sweep ran: what a `becomes` condition that reads the clock was then
     pub last_sweep: Option<NaiveDateTime>,
     /// checking every existing record against a new model (a deploy): the broken rules are
@@ -386,6 +435,7 @@ impl<'m> Interp<'m> {
             depth: 0,
             statics: Rc::new(Statics::default()),
             sweep: false,
+            building_request: false,
             last_sweep: None,
             whole_data: false,
             violations: Vec::new(),
@@ -3265,6 +3315,11 @@ impl<'m> Interp<'m> {
         if let Some(f) = ctx.local(n).cloned() {
             let (pos, _) = self.eval_args(args, ctx)?;
             return self.apply(&f, pos);
+        }
+        // the request an `outbound … as e:` block ends with
+        if self.building_request && matches!(n, "post" | "put" | "patch" | "delete" | "email") {
+            let (pos, named) = self.eval_args(args, ctx)?;
+            return self.request(n, pos, named);
         }
         if let Some((f, captured)) = self.local_fns.get(n).cloned() {
             let (pos, named) = self.eval_args(args, ctx)?;

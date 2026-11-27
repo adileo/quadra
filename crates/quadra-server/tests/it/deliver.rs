@@ -58,12 +58,16 @@ fn receiver(answers: Vec<u16>) -> Receiver {
                     }
                 }
             };
-            let headers: HashMap<String, String> = head
+            let mut headers: HashMap<String, String> = head
                 .lines()
                 .skip(1)
                 .filter_map(|l| l.split_once(':'))
                 .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
                 .collect();
+            // the request line: `:method` and `:path`
+            let mut first = head.lines().next().unwrap_or("").split_whitespace();
+            headers.insert(":method".into(), first.next().unwrap_or("").to_string());
+            headers.insert(":path".into(), first.next().unwrap_or("").to_string());
             g.lock().unwrap().push((headers, body));
             let status = match answers.next() {
                 Some(s) => {
@@ -77,8 +81,13 @@ fn receiver(answers: Vec<u16>) -> Receiver {
             } else {
                 ""
             };
+            let answer = if status == 200 {
+                "{\"tracking\":\"TRK-42\",\"x\":1}"
+            } else {
+                "no"
+            };
             let _ = s.write_all(
-                format!("HTTP/1.1 {status} X\r\n{extra}Content-Length: 2\r\nConnection: close\r\n\r\nno")
+                format!("HTTP/1.1 {status} X\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len())
                     .as_bytes(),
             );
         }
@@ -598,7 +607,9 @@ fn call(port: u16, token: &str, method: &str, path: &str, body: Option<J>) -> (u
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    let req = format!("{method} {path} HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    static KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let key = KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nIdempotency-Key: call-{}-{key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", std::process::id(), body.len());
     s.write_all(req.as_bytes()).unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();
@@ -751,6 +762,89 @@ fn the_outcome_of_a_delivery_is_a_transaction_the_code_reacts_to() {
     assert!(
         note.starts_with("not sent:") && note.contains("422"),
         "{note}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const SHAPED: &str = "entity Order:\n    number: Text\n    weight: Decimal\n    note: Text?\n\nrecord ErpShipment from json:\n    order: Text at \"order.number\"\n    weight: Decimal at \"parcel.weight_kg\"\n\nrecord ErpAck from json:\n    tracking: Text\n\nevent OrderPlaced(order: Order)\n\non Order created as o:\n    emit OrderPlaced(order=o)\n\noutbound OrderPlaced via hooks as e:\n    reply ErpAck\n    let o = e.order\n    put(f\"/shipments/{o.number}\", ErpShipment(order=o.number, weight=o.weight))\n\non OrderPlaced delivered as d:\n    d.event.order.note = d.reply?.tracking ?? \"no tracking\"\n";
+
+#[test]
+fn an_outbound_block_builds_the_request_in_the_shape_of_the_receiver() {
+    let r = receiver(vec![200]);
+    let dir = temp("shaped");
+    let (cfg, token) = project_with(&dir, r.port, SHAPED);
+    let (_host, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    let body = json!({ "ops": [{ "op": "create", "entity": "Order", "values": { "number": "S1", "weight": 2.5 } }] }).to_string();
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.write_all(format!("POST /v1/tx HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nIdempotency-Key: s1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    assert!(raw.starts_with("HTTP/1.1 200"), "{raw}");
+    outbox_row(&cfg, |r| r[1].is_some());
+    let got = r.got.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    let (h, body) = &got[0];
+    assert_eq!(h[":method"], "PUT");
+    assert_eq!(h[":path"], "/shipments/S1");
+    assert_eq!(h["content-type"], "application/json");
+    assert_eq!(
+        body,
+        "{\"order\":{\"number\":\"S1\"},\"parcel\":{\"weight_kg\":2.5}}"
+    );
+    assert!(h.contains_key("idempotency-key"));
+    // the answer, read as the `reply` record, reached the reaction
+    let start = Instant::now();
+    while note_of(&cfg, "S1").is_none() && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(note_of(&cfg, "S1").as_deref(), Some("TRK-42"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_block_reads_the_data_as_it_was_when_the_event_was_emitted() {
+    let r = receiver(vec![200]);
+    let dir = temp("asof");
+    let (mut cfg, token) = project_with(&dir, r.port, SHAPED);
+    // made and emitted, then changed, while nothing is delivered
+    cfg.outside.deliver = false;
+    {
+        let (_host, _rt, port) = serve(HostOptions::default(), cfg.clone());
+        let (s, v) = call(
+            port,
+            &token,
+            "POST",
+            "/v1/tx",
+            Some(
+                json!({ "ops": [{ "op": "create", "entity": "Order", "ref": "o", "values": { "number": "A1", "weight": 1 } }] }),
+            ),
+        );
+        assert_eq!(s, 200, "{v}");
+        let id = v["created"]["o"].as_u64().unwrap();
+        let base = v["base"].clone();
+        let (s, v) = call(
+            port,
+            &token,
+            "POST",
+            "/v1/tx",
+            Some(
+                json!({ "base": base, "ops": [{ "op": "update", "entity": "Order", "id": id, "values": { "number": "A2", "weight": 9 } }] }),
+            ),
+        );
+        assert_eq!(s, 200, "{v}");
+    }
+    // delivered later: what the block reads is the order as it was at the emit
+    cfg.outside.deliver = true;
+    let (_host, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    // (the test's host starts the app at its first request; `quadra serve` at once)
+    call(port, &token, "GET", "/v1/me", None);
+    outbox_row(&cfg, |r| r[1].is_some());
+    let got = r.got.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0[":path"], "/shipments/A1");
+    assert_eq!(
+        got[0].1,
+        "{\"order\":{\"number\":\"A1\"},\"parcel\":{\"weight_kg\":1}}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
