@@ -848,3 +848,162 @@ fn the_block_reads_the_data_as_it_was_when_the_event_was_emitted() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The project of `REACTING`'s orders with an outbound whose block holds `policy` lines.
+fn with_policy(policy: &str) -> String {
+    format!("entity Order:\n    number: Text\n    customer: Text\n    note: Text?\n\nevent OrderPlaced(order: Order, customer: Text)\n\non Order created as o:\n    emit OrderPlaced(order=o, customer=o.customer)\n\noutbound OrderPlaced via hooks path \"/orders\" as e:\n{}\n", policy.lines().map(|l| format!("    {l}\n")).collect::<String>())
+}
+
+fn create(port: u16, token: &str, number: &str, customer: &str, note: Option<&str>) {
+    let mut values = json!({ "number": number, "customer": customer });
+    if let Some(n) = note {
+        values["note"] = json!(n);
+    }
+    let (s, v) = call(
+        port,
+        token,
+        "POST",
+        "/v1/tx",
+        Some(json!({ "ops": [{ "op": "create", "entity": "Order", "values": values }] })),
+    );
+    assert_eq!(s, 200, "{v}");
+}
+
+/// The states of the outbox, in the order of the events, once `ready` says so (within 15 s).
+fn states(cfg: &Config, ready: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let start = Instant::now();
+    loop {
+        let s: Vec<String> = Conn::open(&cfg.url)
+            .unwrap()
+            .query(
+                "SELECT \"state\" FROM \"_quadra_outbox\" ORDER BY \"id\"",
+                &[],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r[0].clone().unwrap_or_default())
+            .collect();
+        if ready(&s) || start.elapsed() > Duration::from_secs(15) {
+            return s;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn the_policy_of_an_outbound_decides_how_long_and_whether_it_goes() {
+    // retry 2 times: failed after the second attempt
+    let r = receiver(vec![503]);
+    let dir = temp("p-times");
+    let (cfg, token) = project_with(
+        &dir,
+        r.port,
+        &with_policy("retry 2 times\nbackoff 1 seconds .. 1 seconds"),
+    );
+    let (h, rt, port) = serve(HostOptions::default(), cfg.clone());
+    create(port, &token, "T1", "ann", None);
+    assert_eq!(states(&cfg, |s| s == ["failed"]), ["failed"]);
+    assert_eq!(r.got.lock().unwrap().len(), 2);
+    drop((h, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // expires after: not delivered in time, expired
+    let r = receiver(vec![503]);
+    let dir = temp("p-expires");
+    let (cfg, token) = project_with(
+        &dir,
+        r.port,
+        &with_policy("expires after 2 seconds\nbackoff 1 seconds .. 1 seconds"),
+    );
+    let (h, rt, port) = serve(HostOptions::default(), cfg.clone());
+    create(port, &token, "X1", "ann", None);
+    assert_eq!(states(&cfg, |s| s == ["expired"]), ["expired"]);
+    drop((h, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // unless, on the data as it is: skipped, never sent; delay: not yet
+    let r = receiver(vec![200]);
+    let dir = temp("p-unless");
+    let (cfg, token) = project_with(
+        &dir,
+        r.port,
+        &with_policy("unless e.order.note == \"cancelled\"\ndelay 0 seconds"),
+    );
+    let (h, rt, port) = serve(HostOptions::default(), cfg.clone());
+    create(port, &token, "U1", "ann", Some("cancelled"));
+    create(port, &token, "U2", "bob", None);
+    assert_eq!(
+        states(&cfg, |s| s == ["skipped", "delivered"]),
+        ["skipped", "delivered"]
+    );
+    assert_eq!(r.got.lock().unwrap().len(), 1);
+    drop((h, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let r = receiver(vec![200]);
+    let dir = temp("p-delay");
+    let (cfg, token) = project_with(
+        &dir,
+        r.port,
+        &with_policy("delay 1 hours\nkey f\"order-{e.order.number}\""),
+    );
+    let (h, rt, port) = serve(HostOptions::default(), cfg.clone());
+    create(port, &token, "D1", "ann", None);
+    std::thread::sleep(Duration::from_secs(2));
+    let row = outbox_row(&cfg, |r| r[2].is_some());
+    assert_eq!(row[0].as_deref(), Some("0"), "not tried: {row:?}");
+    assert!(r.got.lock().unwrap().is_empty());
+    drop((h, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ordered_by_sends_one_at_a_time_per_key_and_latest_by_only_the_newest() {
+    // ordered by the customer: ann's second order waits for her first, bob's goes
+    let r = receiver(vec![503]);
+    let dir = temp("p-ordered");
+    let (cfg, token) = project_with(&dir, r.port, &with_policy("ordered by e.customer\nbackoff 60 seconds .. 60 seconds\nkey f\"order-{e.order.number}\""));
+    let (h, rt, port) = serve(HostOptions::default(), cfg.clone());
+    create(port, &token, "A1", "ann", None);
+    create(port, &token, "A2", "ann", None);
+    create(port, &token, "B1", "bob", None);
+    std::thread::sleep(Duration::from_secs(3));
+    let paths: Vec<String> = r
+        .got
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(h, _)| h["idempotency-key"].clone())
+        .collect();
+    assert!(
+        paths.contains(&"order-A1".to_string()) && paths.contains(&"order-B1".to_string()),
+        "{paths:?}"
+    );
+    assert!(
+        !paths.contains(&"order-A2".to_string()),
+        "A2 waits for A1: {paths:?}"
+    );
+    drop((h, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // latest by the customer: three events while nothing is delivered, only the last goes
+    let r = receiver(vec![200]);
+    let dir = temp("p-latest");
+    let (mut cfg, token) = project_with(&dir, r.port, &with_policy("latest by e.customer"));
+    cfg.outside.deliver = false;
+    {
+        let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+        for n in ["L1", "L2", "L3"] {
+            create(port, &token, n, "ann", None);
+        }
+    }
+    cfg.outside.deliver = true;
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    call(port, &token, "GET", "/v1/me", None);
+    assert_eq!(
+        states(&cfg, |s| s.last().map(String::as_str) == Some("delivered")),
+        ["superseded", "superseded", "delivered"]
+    );
+    assert_eq!(r.got.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

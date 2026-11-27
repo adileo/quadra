@@ -170,7 +170,7 @@ division:
 10.00 EUR / qty    # Money<EUR> divided by the value of `qty`
 ```
 
-`minute(s)`, `hour(s)`, `day(s)` and `week(s)` make a `Duration` instead of a quantity:
+`second(s)`, `minute(s)`, `hour(s)`, `day(s)` and `week(s)` make a `Duration` instead of a quantity:
 `8 hours`, `1 hour + 30 minutes`, `30 days`, `1 week`. (`h` and `min` are units of measure:
 `10 min` is a `Qty<min>`; a duration becomes one with `.to(h)`.)
 

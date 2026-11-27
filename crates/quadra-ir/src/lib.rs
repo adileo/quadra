@@ -782,7 +782,36 @@ pub struct Outbound {
     pub body: Option<Expr>,
     /// `reply ErpAck`: the answer read as a record `from json` (`d.reply` in `on … delivered`)
     pub reply: Option<String>,
+    /// the lines of policy at the top of the block
+    pub policy: Policy,
     pub span: Span,
+}
+
+/// How an outbound delivers (`outbound … as e:`, its first lines). The durations are fixed
+/// (`3 days`); `unless`, `key`, `ordered by` and `latest by` are read for each event.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Policy {
+    /// `retry for 3 days`: how long it is tried (a day when not said)
+    pub retry_for: Option<Expr>,
+    /// `retry 10 times`: how many attempts at most
+    pub retry_times: Option<Expr>,
+    /// `backoff 30 seconds .. 1 hour`: the first wait, doubled up to the second
+    pub backoff: Option<Expr>,
+    /// `expires after 1 day`: after that, not sent (`expired`)
+    pub expires: Option<Expr>,
+    /// `unless e.order.cancelled`: read on the data as it is now before each attempt; true: not
+    /// sent (`skipped`)
+    pub unless: Option<Expr>,
+    /// `delay 10 minutes`: not before that long after the emit
+    pub delay: Option<Expr>,
+    /// `window "02:00" .. "04:00"`: only between those times of day, in the project's zone
+    pub window: Option<Expr>,
+    /// `key f"ship-{e.order.number}"`: the idempotency key (else the event's own)
+    pub key: Option<Expr>,
+    /// `ordered by e.customer`: one at a time per value, in the order emitted
+    pub ordered: Option<Expr>,
+    /// `latest by e.product`: an event waiting is superseded by a newer one of the same value
+    pub latest: Option<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

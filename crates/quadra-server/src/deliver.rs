@@ -43,7 +43,44 @@ pub struct Plan {
     pub created_at: String,
     /// its fields, as the outbox keeps them (for the reactions to its outcome)
     pub fields: J,
+    /// how long and how often it is tried (its outbound's `retry` and `backoff`)
+    pub retry: Retry,
     pub send: Send,
+}
+
+/// How an event is tried again: for how long or how many times, and how long it waits
+/// (doubled from `first_s` up to `max_s`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retry {
+    pub for_s: u64,
+    pub times: Option<u64>,
+    pub first_s: u64,
+    pub max_s: u64,
+}
+
+impl Default for Retry {
+    /// For a day, waiting 30 s, doubled up to an hour.
+    fn default() -> Self {
+        Retry {
+            for_s: 86_400,
+            times: None,
+            first_s: 30,
+            max_s: 3600,
+        }
+    }
+}
+
+impl Plan {
+    /// The idempotency key of its request: `key` of its outbound instead of the event's own.
+    pub fn set_key(&mut self, key: &str) {
+        if let Send::Http { headers, .. } = &mut self.send {
+            for h in headers.iter_mut() {
+                if h.0 == "Idempotency-Key" {
+                    h.1 = key.to_string();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +283,7 @@ pub fn plan(
         attempts: due.attempts,
         created_at: due.created_at.clone(),
         fields: due.fields.clone(),
+        retry: Retry::default(),
         send,
     };
     let value = |name: &str| -> Result<String, String> {
@@ -401,6 +439,64 @@ pub fn plan(
         }
     })();
     base(send.unwrap_or_else(Send::Broken))
+}
+
+/// A duration said as a person would: `1 day`, `3 hours`, `90 s`.
+pub fn human(s: u64) -> String {
+    match s {
+        s if s % 86_400 == 0 => format!("{} day{}", s / 86_400, if s == 86_400 { "" } else { "s" }),
+        s if s % 3600 == 0 => format!("{} hour{}", s / 3600, if s == 3600 { "" } else { "s" }),
+        s if s % 60 == 0 => format!("{} minute{}", s / 60, if s == 60 { "" } else { "s" }),
+        s => format!("{s} s"),
+    }
+}
+
+/// When the `window "02:00" .. "04:00"` of an outbound next opens after `now` (UTC), in the
+/// project's zone (`zone`, an IANA name; UTC when empty): `None` when it is open now.
+pub fn window_opens(
+    zone: &str,
+    window: &quadra_ir::Expr,
+    now: chrono::NaiveDateTime,
+) -> Option<chrono::NaiveDateTime> {
+    use chrono::TimeZone;
+    let quadra_ir::ExprKind::Binary { lhs, rhs, .. } = &window.kind else {
+        return None;
+    };
+    let time = |e: &quadra_ir::Expr| match &e.kind {
+        quadra_ir::ExprKind::Lit(quadra_ir::Lit::Str(s)) => {
+            chrono::NaiveTime::parse_from_str(s, "%H:%M").ok()
+        }
+        _ => None,
+    };
+    let (from, to) = (time(lhs)?, time(rhs)?);
+    let tz: chrono_tz::Tz = if zone.is_empty() {
+        chrono_tz::UTC
+    } else {
+        zone.parse().unwrap_or(chrono_tz::UTC)
+    };
+    let local = tz.from_utc_datetime(&now).naive_local();
+    let t = local.time();
+    let open = if from <= to {
+        t >= from && t < to
+    } else {
+        t >= from || t < to
+    };
+    if open {
+        return None;
+    }
+    // the next time it opens: today at `from`, or tomorrow
+    let day = if t < from {
+        local.date()
+    } else {
+        local.date() + chrono::Duration::days(1)
+    };
+    let at = day.and_time(from);
+    let utc = tz
+        .from_local_datetime(&at)
+        .earliest()
+        .map(|d| d.naive_utc())
+        .unwrap_or(at);
+    Some(utc)
 }
 
 /// HMAC-SHA256 of `message` with `key`, in hex.
@@ -592,15 +688,28 @@ fn outcome(plan: &Plan, result: Result<(), Failure>) -> Outcome {
             let first =
                 chrono::NaiveDateTime::parse_from_str(&plan.created_at, "%Y-%m-%dT%H:%M:%S")
                     .unwrap_or(now);
-            if ages && now - first > chrono::Duration::hours(24) {
+            let r = plan.retry;
+            let limit = chrono::Duration::try_seconds(r.for_s.min(10 * 365 * 86_400) as i64)
+                .unwrap_or(chrono::Duration::days(3650));
+            if ages && now - first > limit {
                 return Outcome::Failed {
-                    error: format!("{e} (tried for a day)"),
+                    error: format!("{e} (tried for {})", human(r.for_s)),
+                };
+            }
+            if ages && r.times.is_some_and(|n| plan.attempts + 1 >= n) {
+                return Outcome::Failed {
+                    error: format!("{e} (tried {} times)", plan.attempts + 1),
                 };
             }
             // a jitter of its own, the same for the same event and attempt
             let jitter =
                 ((plan.id.wrapping_mul(2654435761) ^ plan.attempts) % 1000) as f64 / 1000.0;
-            let mut wait = quadra_store::deliveries::backoff(plan.attempts + 1, jitter);
+            let mut wait = quadra_store::deliveries::backoff_between(
+                plan.attempts + 1,
+                jitter,
+                r.first_s,
+                r.max_s,
+            );
             if let Some(d) = at_least {
                 wait = wait.max(d.min(Duration::from_secs(3600)));
             }
@@ -910,6 +1019,7 @@ mod tests {
             attempts: 40,
             created_at: "2020-01-01T00:00:00".into(),
             fields: J::Null,
+            retry: Retry::default(),
             send: Send::Broken("the variable TOKEN is not set where the app runs".into()),
         };
         let client = http_client(false);
@@ -917,6 +1027,50 @@ mod tests {
             Outcome::Retry { error, .. } => assert!(error.contains("TOKEN"), "{error}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_window_opens_at_its_time_of_day_in_the_project_zone() {
+        use quadra_ir::{BinOp, Expr, ExprKind, Lit};
+        let span =
+            quadra_ir::Span::new(quadra_sema::FileId(0), quadra_syntax::TextRange::default());
+        let t = |s: &str| {
+            Box::new(Expr {
+                kind: ExprKind::Lit(Lit::Str(s.into())),
+                span,
+            })
+        };
+        let window = |a: &str, b: &str| Expr {
+            kind: ExprKind::Binary {
+                op: BinOp::Range,
+                lhs: t(a),
+                rhs: t(b),
+            },
+            span,
+        };
+        let at = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").unwrap();
+        // 02:00–04:00 in Rome (UTC+1 in November): 01:00–03:00 UTC
+        let w = window("02:00", "04:00");
+        assert_eq!(
+            window_opens("Europe/Rome", &w, at("2026-11-27T01:30")),
+            None
+        );
+        assert_eq!(
+            window_opens("Europe/Rome", &w, at("2026-11-27T00:10")),
+            Some(at("2026-11-27T01:00"))
+        );
+        assert_eq!(
+            window_opens("Europe/Rome", &w, at("2026-11-27T10:00")),
+            Some(at("2026-11-28T01:00"))
+        );
+        // across midnight: 22:00–06:00 UTC
+        let night = window("22:00", "06:00");
+        assert_eq!(window_opens("", &night, at("2026-11-27T23:00")), None);
+        assert_eq!(window_opens("", &night, at("2026-11-27T05:00")), None);
+        assert_eq!(
+            window_opens("", &night, at("2026-11-27T12:00")),
+            Some(at("2026-11-27T22:00"))
+        );
     }
 
     #[test]

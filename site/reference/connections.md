@@ -210,6 +210,48 @@ on OrderPlaced delivered as d:
 The headers, the authentication, the signature and the `Idempotency-Key` are the connection's,
 as for a webhook.
 
+### The policy: how long, when, in what order
+
+The first lines of an `outbound … as e:` block say how it is delivered. They are all optional;
+a block may have only them (then the request is the usual webhook or email):
+
+```quadra
+outbound ShippedEmail via mail as e:
+    expires after 1 days                          # an email a day late is not worth sending
+    unless e.order.state is Cancelled             # nor one about an order cancelled meanwhile
+    window "08:00" .. "20:00"                     # and not at night (the project's zone)
+    email(to=e.order.customer.email, subject=f"Order {e.order.number} shipped", body="On its way")
+
+outbound StockChanged via shop as e:
+    latest by e.product                           # only the newest stock of a product goes
+    retry for 3 days
+    backoff 10 seconds .. 10 minutes
+    put(f"/inventory/{e.product.code}", ShopStock(available=e.available))
+
+outbound LedgerPosted via erp as e:
+    ordered by e.company                          # one at a time per company, in order
+    key f"posting-{e.posting.number}"
+    post("/postings", ErpPosting(number=e.posting.number, amount=e.posting.amount))
+```
+
+| Line | Effect |
+|---|---|
+| `retry for D` | tried again for `D` after the emit (a day when not said), then failed for good |
+| `retry N times` | at most `N` attempts |
+| `backoff A .. B` | the wait after a failed attempt: `A`, doubled each time up to `B` (30 seconds .. 1 hour when not said) |
+| `expires after D` | not sent once `D` has passed since the emit: `expired` |
+| `unless C` | read before each attempt **on the data as it is now**; true: not sent, `skipped`, with the condition as the reason |
+| `delay D` | not sent before `D` after the emit |
+| `window "HH:MM" .. "HH:MM"` | sent only between those times of day, in the project's zone (across midnight when the first is later) |
+| `key K` | the `Idempotency-Key`: text of your own (`f"ship-{e.order.number}"`), the same for the same thing even if emitted twice |
+| `ordered by K` | one at a time per value of `K`, in the order emitted: the next waits for the outcome of the one before. One that failed for good holds its value back (not the others) until it is retried or skipped, since skipping it silently would break the sequence |
+| `latest by K` | an event still waiting is `superseded` by a newer one with the same value: only the newest goes (a stock level, a price) |
+
+Without `ordered by`, events are sent in parallel and their order is not guaranteed. The
+durations are fixed (`3 days`); `unless`, `key`, `ordered by` and `latest by` are read for each
+event, the last three on the data as it was at the emit. Every decision (`expired`, `skipped`,
+`superseded`, a wait) is in the event's log.
+
 ### Webhooks
 
 Without a block, through an HTTP connection an event is a `POST` of JSON to the connection's
@@ -315,7 +357,8 @@ got the event, or not): the error goes to the event's log (`quadra outbox log`),
 | a value missing where the app runs (a variable the connection needs) | waits, without a time limit, until the configuration is fixed |
 
 Each event has a state: `pending` (waiting for its next attempt), `delivered`, `failed` (for
-good), or `skipped` (by hand, with a reason). Every attempt is written to the event's **log**
+good), `skipped` (by `unless`, or by hand with a reason), `expired` (`expires after`) or
+`superseded` (`latest by`). Every attempt is written to the event's **log**
 with the date and time, the connection, how long it took, the HTTP status or SMTP reply, the
 error and the beginning of the answer; so is every `retry` and `skip`, with who asked and why.
 The log is kept with the data (on Quadra Cloud, in the bucket like any write) and never

@@ -1870,7 +1870,7 @@ impl<'m> Checker<'m> {
         o: &'m quadra_ir::Outbound,
         ev: &'m quadra_ir::Event,
         binding: &str,
-        body: &'m Expr,
+        body: Option<&'m Expr>,
         kind: &str,
     ) {
         let fields: Vec<(Option<String>, T)> = ev
@@ -1882,9 +1882,15 @@ impl<'m> Checker<'m> {
         self.entity = None;
         self.push();
         self.bind(binding, T::Tuple(fields));
-        self.infer(body);
+        self.check_policy(o);
+        if let Some(body) = body {
+            self.infer(body);
+        }
         self.pop();
         self.context = saved;
+        let Some(body) = body else {
+            return;
+        };
         let ExprKind::Block(stmts) = &body.kind else {
             return;
         };
@@ -1948,6 +1954,80 @@ impl<'m> Checker<'m> {
         }
     }
 
+    /// The lines of policy of an outbound: fixed durations, an integer of attempts, a window of
+    /// two times of day, a condition, a key of text.
+    fn check_policy(&mut self, o: &'m quadra_ir::Outbound) {
+        let p = &o.policy;
+        let fixed = |e: &Expr| -> bool {
+            fn lit(e: &Expr) -> bool {
+                match &e.kind {
+                    ExprKind::Lit(_) | ExprKind::Quantity { .. } => true,
+                    ExprKind::Binary { lhs, rhs, .. } => lit(lhs) && lit(rhs),
+                    _ => false,
+                }
+            }
+            lit(e)
+        };
+        for (what, e) in [
+            ("retry for", &p.retry_for),
+            ("expires after", &p.expires),
+            ("delay", &p.delay),
+        ] {
+            if let Some(e) = e {
+                let t = self.infer(e);
+                if !matches!(t, T::Duration | T::Unknown) || !fixed(e) {
+                    self.error(
+                        e.span,
+                        format!("`{what}` takes a fixed duration: `3 days`, `2 hours`"),
+                    );
+                }
+            }
+        }
+        if let Some(e) = &p.retry_times {
+            if !matches!(&e.kind, ExprKind::Lit(Lit::Number(n)) if n.parse::<u32>().is_ok_and(|n| n >= 1))
+            {
+                self.error(e.span, "`retry N times`: N is a whole number from 1");
+            }
+        }
+        if let Some(e) = &p.backoff {
+            let ok = matches!(&e.kind, ExprKind::Binary { op: BinOp::Range, lhs, rhs } if {
+                let (a, b) = (self.infer(lhs), self.infer(rhs));
+                matches!(a, T::Duration | T::Unknown) && matches!(b, T::Duration | T::Unknown) && fixed(lhs) && fixed(rhs)
+            });
+            if !ok {
+                self.error(
+                    e.span,
+                    "`backoff` takes two fixed durations: `backoff 30 seconds .. 1 hour`",
+                );
+            }
+        }
+        if let Some(e) = &p.window {
+            let time = |x: &Expr| matches!(&x.kind, ExprKind::Lit(Lit::Str(s)) if chrono::NaiveTime::parse_from_str(s, "%H:%M").is_ok());
+            let ok = matches!(&e.kind, ExprKind::Binary { op: BinOp::Range, lhs, rhs } if time(lhs) && time(rhs));
+            if !ok {
+                self.error(e.span, "`window` takes two times of day: `window \"02:00\" .. \"04:00\"` (in the project's zone)");
+            }
+        }
+        if let Some(e) = &p.unless {
+            let t = self.infer(e);
+            if !matches!(t.unopt(), T::Bool | T::Unknown) {
+                self.error(
+                    e.span,
+                    "`unless` takes a condition: `unless e.order.state is Cancelled`",
+                );
+            }
+        }
+        if let Some(e) = &p.key {
+            let t = self.infer(e);
+            if !matches!(t.unopt(), T::Text(_) | T::Unknown) {
+                self.error(e.span, "`key` is text: `key f\"ship-{e.order.number}\"`");
+            }
+        }
+        for e in [&p.ordered, &p.latest].into_iter().flatten() {
+            self.infer(e);
+        }
+    }
+
     /// `outbound Event via connection`: the event and the connection exist, one outbound per
     /// event, and an email event has what an email needs.
     fn check_outbounds(&mut self) {
@@ -1983,8 +2063,8 @@ impl<'m> Checker<'m> {
                 );
                 continue;
             };
-            if let (Some(binding), Some(body)) = (&o.binding, &o.body) {
-                self.check_outbound_block(o, ev, binding, body, c.kind_name());
+            if let Some(binding) = &o.binding {
+                self.check_outbound_block(o, ev, binding, o.body.as_ref(), c.kind_name());
             }
             match &c.kind {
                 quadra_sema::manifest::ConnectionKind::Http { .. } => {

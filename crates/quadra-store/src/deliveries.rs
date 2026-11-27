@@ -64,7 +64,7 @@ pub fn due(
     params.push(Sql::Text(now.to_string()));
     params.push(Sql::Int(durable.min(i64::MAX as u64) as i64));
     let rows = conn.query(
-        &format!("SELECT CAST(o.\"id\" AS TEXT), CAST(o.\"tx\" AS TEXT), o.\"event\", o.\"fields\", o.\"created_at\", CAST(o.\"attempts\" AS TEXT), c.\"hash\" FROM \"_quadra_outbox\" o LEFT JOIN \"_quadra_commits\" c ON c.\"tx\" = o.\"tx\" WHERE o.\"state\" = 'pending' AND o.\"event\" IN ({marks}) AND (o.\"next_at\" IS NULL OR o.\"next_at\" <= ?text) AND o.\"tx\" <= ?bigint ORDER BY o.\"id\" LIMIT {limit}"),
+        &format!("SELECT CAST(o.\"id\" AS TEXT), CAST(o.\"tx\" AS TEXT), o.\"event\", o.\"fields\", o.\"created_at\", CAST(o.\"attempts\" AS TEXT), c.\"hash\" FROM \"_quadra_outbox\" o LEFT JOIN \"_quadra_commits\" c ON c.\"tx\" = o.\"tx\" WHERE o.\"state\" = 'pending' AND o.\"event\" IN ({marks}) AND (o.\"next_at\" IS NULL OR o.\"next_at\" <= ?text) AND o.\"tx\" <= ?bigint AND (o.\"lane\" IS NULL OR NOT EXISTS (SELECT 1 FROM \"_quadra_outbox\" b WHERE b.\"event\" = o.\"event\" AND b.\"lane\" = o.\"lane\" AND b.\"id\" < o.\"id\" AND b.\"state\" IN ('pending', 'failed'))) ORDER BY o.\"id\" LIMIT {limit}"),
         &params,
     )?;
     let num = |v: &Option<String>| v.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0u64);
@@ -103,6 +103,132 @@ pub fn next_at(conn: &mut Conn, events: &[String]) -> Result<Option<String>, Str
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
     Ok((count > 0).then(|| row.get(1).cloned().flatten().unwrap_or_default()))
+}
+
+/// Pending events of kind `event` whose keys (`ordered by`, `latest by`) are not computed yet,
+/// oldest first, at most `limit`: the engine computes them before choosing what is due.
+pub fn without_keys(
+    conn: &mut Conn,
+    event: &str,
+    durable: u64,
+    limit: usize,
+) -> Result<Vec<Due>, String> {
+    let rows = conn.query(
+        &format!("SELECT CAST(o.\"id\" AS TEXT), CAST(o.\"tx\" AS TEXT), o.\"event\", o.\"fields\", o.\"created_at\", CAST(o.\"attempts\" AS TEXT), c.\"hash\" FROM \"_quadra_outbox\" o LEFT JOIN \"_quadra_commits\" c ON c.\"tx\" = o.\"tx\" WHERE o.\"state\" = 'pending' AND o.\"event\" = ?text AND o.\"lane\" IS NULL AND o.\"latest\" IS NULL AND o.\"tx\" <= ?bigint ORDER BY o.\"id\" LIMIT {limit}"),
+        &[Sql::Text(event.to_string()), Sql::Int(durable.min(i64::MAX as u64) as i64)],
+    )?;
+    let num = |v: &Option<String>| v.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0u64);
+    Ok(rows
+        .into_iter()
+        .map(|r| Due {
+            id: num(&r[0]),
+            tx: num(&r[1]),
+            event: r[2].clone().unwrap_or_default(),
+            fields: r[3]
+                .as_deref()
+                .and_then(|f| serde_json::from_str(f).ok())
+                .unwrap_or(J::Null),
+            created_at: r[4].clone().unwrap_or_default(),
+            attempts: num(&r[5]),
+            commit: r[6].clone().unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Records the keys of event `id` (an empty text when its outbound has none: computed). With a
+/// `latest` key, the older events still pending with the same one are superseded: only the
+/// newest goes out. Returns how many were superseded.
+pub fn set_keys(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    now: &str,
+    lane: &str,
+    latest: &str,
+) -> Result<usize, String> {
+    conn.exec(
+        "UPDATE \"_quadra_outbox\" SET \"lane\" = ?text, \"latest\" = ?text WHERE \"id\" = ?bigint",
+        &[
+            Sql::Text(lane.to_string()),
+            Sql::Text(latest.to_string()),
+            Sql::Int(id as i64),
+        ],
+    )?;
+    if latest.is_empty() {
+        return Ok(0);
+    }
+    let older: Vec<u64> = conn
+        .query(
+            "SELECT CAST(\"id\" AS TEXT) FROM \"_quadra_outbox\" WHERE \"event\" = ?text AND \"latest\" = ?text AND \"id\" < ?bigint AND \"state\" = 'pending'",
+            &[
+                Sql::Text(name.to_string()),
+                Sql::Text(latest.to_string()),
+                Sql::Int(id as i64),
+            ],
+        )?
+        .into_iter()
+        .filter_map(|r| r[0].as_deref().and_then(|v| v.parse().ok()))
+        .collect();
+    for o in &older {
+        conn.exec(
+            "UPDATE \"_quadra_outbox\" SET \"state\" = 'superseded', \"next_at\" = NULL WHERE \"id\" = ?bigint AND \"state\" = 'pending'",
+            &[Sql::Int(*o as i64)],
+        )?;
+        log_step(
+            conn,
+            *o,
+            name,
+            now,
+            "supersede",
+            "superseded",
+            None,
+            None,
+            None,
+            Some(&format!("a newer one, #{id}, has the same `latest by`")),
+        )?;
+    }
+    Ok(older.len())
+}
+
+/// A pending event that will not be sent, by its outbound's policy: `expired` (`expires
+/// after`) or `skipped` (`unless`), with why. Returns whether it changed.
+pub fn finish(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    now: &str,
+    state: &str,
+    reason: &str,
+) -> Result<bool, String> {
+    let n = conn.exec(
+        "UPDATE \"_quadra_outbox\" SET \"state\" = ?text, \"next_at\" = NULL WHERE \"id\" = ?bigint AND \"state\" = 'pending'",
+        &[Sql::Text(state.to_string()), Sql::Int(id as i64)],
+    )?;
+    if n > 0 {
+        let step = if state == "expired" { "expire" } else { "skip" };
+        log_step(
+            conn,
+            id,
+            name,
+            now,
+            step,
+            state,
+            None,
+            None,
+            Some("policy"),
+            Some(reason),
+        )?;
+    }
+    Ok(n > 0)
+}
+
+/// A pending event not to be tried before `at` (`delay`, `window`), without an attempt.
+pub fn defer(conn: &mut Conn, id: u64, at: &str) -> Result<(), String> {
+    conn.exec(
+        "UPDATE \"_quadra_outbox\" SET \"next_at\" = ?text WHERE \"id\" = ?bigint AND \"state\" = 'pending'",
+        &[Sql::Text(at.to_string()), Sql::Int(id as i64)],
+    )?;
+    Ok(())
 }
 
 /// What an attempt was, besides its outcome: for the log.
@@ -455,9 +581,20 @@ pub fn settle(
 /// an hour; `jitter` in 0..1 moves it by up to a fifth either way, so that many events that
 /// failed together are not all tried again at once.
 pub fn backoff(attempts: u64, jitter: f64) -> std::time::Duration {
-    let base = 30u64
-        .saturating_mul(1u64 << attempts.saturating_sub(1).min(20))
-        .min(3600);
+    backoff_between(attempts, jitter, 30, 3600)
+}
+
+/// The same, from `first_s` doubled up to `max_s` (`backoff 10 seconds .. 5 minutes`).
+pub fn backoff_between(
+    attempts: u64,
+    jitter: f64,
+    first_s: u64,
+    max_s: u64,
+) -> std::time::Duration {
+    let base = first_s
+        .max(1)
+        .saturating_mul(1u64 << attempts.saturating_sub(1).min(30))
+        .min(max_s.max(first_s));
     let factor = 0.8 + 0.4 * jitter.clamp(0.0, 1.0);
     std::time::Duration::from_secs_f64(base as f64 * factor)
 }

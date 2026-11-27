@@ -32,7 +32,7 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_idempotency\" (\"user_id\" BIGINT NOT NULL, \"key\" TEXT NOT NULL, \"request_hash\" TEXT NOT NULL, \"response\" TEXT NOT NULL, \"tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, PRIMARY KEY (\"user_id\", \"key\"))",
     "CREATE TABLE \"_quadra_applied\" (\"key\" TEXT PRIMARY KEY, \"tx\" BIGINT NOT NULL)",
     "CREATE TABLE \"_quadra_renames\" (\"seq\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"entity\" TEXT NOT NULL, \"old_name\" TEXT NOT NULL, \"new_name\" TEXT NOT NULL)",
-    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT, \"state\" TEXT NOT NULL DEFAULT 'pending', \"lease_until\" TEXT)",
+    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT, \"state\" TEXT NOT NULL DEFAULT 'pending', \"lease_until\" TEXT, \"lane\" TEXT, \"latest\" TEXT)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
     // (crate::deliveries), written with what it records and never changed
     "CREATE TABLE \"_quadra_exchanges\" (\"id\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"message\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"connection\" TEXT, \"step\" TEXT NOT NULL, \"outcome\" TEXT NOT NULL, \"status\" BIGINT, \"duration_ms\" BIGINT, \"error\" TEXT, \"excerpt\" TEXT, \"by\" TEXT, \"reason\" TEXT)",
@@ -387,6 +387,21 @@ impl Database {
             self.conn.batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"state\" TEXT NOT NULL DEFAULT 'pending'")?;
             self.conn.batch("UPDATE \"_quadra_outbox\" SET \"state\" = 'delivered' WHERE \"delivered_at\" IS NOT NULL")?;
             self.conn.batch("UPDATE \"_quadra_outbox\" SET \"state\" = 'failed' WHERE \"delivered_at\" IS NULL AND \"failed_at\" IS NOT NULL")?;
+        }
+        // the keys of `ordered by` and `latest by` (crate::deliveries)
+        if self.conn.table_exists("_quadra_outbox")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"lane\" FROM \"_quadra_outbox\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            self.conn
+                .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"lane\" TEXT")?;
+            self.conn
+                .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"latest\" TEXT")?;
         }
         // the lease of an event taken by an integration (`GET /v1/outbox`)
         if self.conn.table_exists("_quadra_outbox")?

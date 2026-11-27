@@ -300,6 +300,34 @@ impl<'a> Lower<'a> {
                     })
                     .and_then(|c| ast::child(&c, PATH))
                     .map(|p| ast::path_text(&p));
+                let mut policy = Policy::default();
+                for c in ast::children(item, OUTBOUND_CLAUSE) {
+                    let mut words = ctx_words(&c);
+                    // `retry for`: `for` is a keyword, not a contextual word
+                    if ast::token(&c, FOR_KW).is_some() {
+                        words.insert(1, "for".into());
+                    }
+                    let value = exprs(&c).first().map(|x| self.expr(x));
+                    let slot = match (
+                        words.first().map(String::as_str),
+                        words.get(1).map(String::as_str),
+                    ) {
+                        (Some("retry"), Some("for")) => &mut policy.retry_for,
+                        (Some("retry"), _) => &mut policy.retry_times,
+                        (Some("backoff"), _) => &mut policy.backoff,
+                        (Some("expires"), _) => &mut policy.expires,
+                        (Some("unless"), _) => &mut policy.unless,
+                        (Some("delay"), _) => &mut policy.delay,
+                        (Some("window"), _) => &mut policy.window,
+                        (Some("key"), _) => &mut policy.key,
+                        (Some("ordered"), _) => &mut policy.ordered,
+                        (Some("latest"), _) => &mut policy.latest,
+                        _ => continue,
+                    };
+                    *slot = value;
+                }
+                // a block of policy lines only: the request stays the default one
+                let body = body.filter(|b| !matches!(&b.kind, ExprKind::Block(s) if s.is_empty()));
                 self.model.outbounds.push(Outbound {
                     event,
                     connection,
@@ -307,6 +335,7 @@ impl<'a> Lower<'a> {
                     binding,
                     body,
                     reply,
+                    policy,
                     span,
                 });
             }

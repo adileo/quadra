@@ -782,20 +782,24 @@ pub fn outcome_reactions(
         .map_err(|e| flow("the reaction", e))
 }
 
-/// The request the block of an `outbound … as e:` builds for one event: its code run as the
-/// system, with `e` its fields (`fields`, as the outbox keeps them), reading the data as it was
-/// at transaction `tx`, the one that emitted it. Every attempt builds the same request.
-pub fn build_request(
+/// An expression of an `outbound … as e:` for one event: `e` its fields (`fields`, as the
+/// outbox keeps them), the code run as the system, reading the data as it was at transaction
+/// `tx` (the one that emitted it: every attempt reads the same) or, with `as_of` false, as it
+/// is now (`unless`).
+#[allow(clippy::too_many_arguments)]
+pub fn eval_for_event(
     url: &str,
     model: &Model,
     report: &Report,
     time: NaiveDateTime,
     outbound: &quadra_ir::Outbound,
+    expr: &quadra_ir::Expr,
     fields: &serde_json::Value,
     tx: u64,
+    as_of: bool,
 ) -> Result<V, String> {
-    let (Some(binding), Some(body)) = (&outbound.binding, &outbound.body) else {
-        return Err("this outbound has no block".into());
+    let Some(binding) = &outbound.binding else {
+        return Err("this outbound has no `as e:`".into());
     };
     let db = Database::open(url, model, report)?;
     let src = crate::source::DbSource::open(url, db.schema.clone(), None)?;
@@ -814,13 +818,38 @@ pub fn build_request(
         })
         .unwrap_or_default();
     let mut ctx = Ctx {
-        as_of: Some(tx),
+        as_of: as_of.then_some(tx),
         ..Default::default()
     };
     ctx.bind(binding, V::Tuple(std::rc::Rc::new(event)));
     interp
-        .eval(body, &mut ctx)
-        .map_err(|e| flow(&format!("the block of outbound {}", outbound.event), e))
+        .eval(expr, &mut ctx)
+        .map_err(|e| flow(&format!("outbound {}", outbound.event), e))
+}
+
+/// The request the block of an `outbound … as e:` builds for one event, reading the data as
+/// it was at the emit (`eval_for_event`). Every attempt builds the same request.
+pub fn build_request(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    outbound: &quadra_ir::Outbound,
+    fields: &serde_json::Value,
+    tx: u64,
+) -> Result<V, String> {
+    let Some(body) = &outbound.body else {
+        return Err("this outbound has no block".into());
+    };
+    eval_for_event(url, model, report, time, outbound, body, fields, tx, true)
+}
+
+/// A fixed value of a policy (`3 days`): evaluated without data.
+pub fn eval_fixed(model: &Model, expr: &quadra_ir::Expr) -> Result<V, String> {
+    let mut interp = Interp::new(model);
+    interp
+        .eval(expr, &mut Ctx::default())
+        .map_err(|e| flow("the policy", e))
 }
 
 /// When a project next needs a sweep, from its database (`quadra_analysis::clock`).

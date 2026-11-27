@@ -20,6 +20,7 @@ pub use ty::{Num, Unit, T};
 /// seconds of one. `h` and `min` stay units of measure (`Qty<h>`), converted with `.to(h)`.
 pub fn duration_unit(unit: &str) -> Option<i64> {
     match unit {
+        "second" | "seconds" => Some(1),
         "minute" | "minutes" => Some(60),
         "hour" | "hours" => Some(3600),
         "day" | "days" => Some(86400),

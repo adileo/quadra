@@ -741,40 +741,184 @@ impl Engine {
             Some(s) => s.durable()?,
             None => u64::MAX,
         };
-        let due = quadra_store::deliveries::due(
-            &mut self.conn,
-            &events,
-            &at.format("%Y-%m-%dT%H:%M:%S").to_string(),
-            durable,
-            limit,
-        )?;
-        let plans: Vec<crate::deliver::Plan> = due
-            .into_iter()
-            .filter_map(|d| {
-                let o = model.outbounds.iter().find(|o| o.event == d.event)?;
-                // the request its block builds, reading the data as of the emitting commit
-                let built = o.body.as_ref().map(|_| {
-                    quadra_store::ops::build_request(
-                        &self.url,
-                        model,
-                        &checked.report,
-                        at,
-                        o,
-                        &d.fields,
-                        d.tx,
-                    )
-                    .and_then(|v| crate::deliver::built_of(&v))
-                });
-                Some(crate::deliver::plan(
-                    &model.manifest,
-                    &self.env,
-                    d,
-                    &o.connection,
-                    o.path.as_deref(),
-                    built,
-                ))
-            })
-            .collect();
+        let stamp = |t: chrono::NaiveDateTime| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now_s = stamp(at);
+        // the keys of `ordered by` and `latest by`, computed once per event, as of its emit
+        for o in model
+            .outbounds
+            .iter()
+            .filter(|o| o.policy.ordered.is_some() || o.policy.latest.is_some())
+        {
+            let todo =
+                quadra_store::deliveries::without_keys(&mut self.conn, &o.event, durable, 200)?;
+            for d in todo {
+                let key = |e: &Option<quadra_ir::Expr>| -> String {
+                    e.as_ref()
+                        .map(|e| {
+                            quadra_store::ops::eval_for_event(
+                                &self.url,
+                                model,
+                                &checked.report,
+                                at,
+                                o,
+                                e,
+                                &d.fields,
+                                d.tx,
+                                true,
+                            )
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|e| format!("error: {e}"))
+                        })
+                        .unwrap_or_default()
+                };
+                let (lane, latest) = (key(&o.policy.ordered), key(&o.policy.latest));
+                let (name, stamp_now) = (o.event.clone(), now_s.clone());
+                self.side(move |c| {
+                    quadra_store::deliveries::set_keys(c, d.id, &name, &stamp_now, &lane, &latest)
+                })?;
+            }
+        }
+        let due = quadra_store::deliveries::due(&mut self.conn, &events, &now_s, durable, limit)?;
+        let mut plans: Vec<crate::deliver::Plan> = Vec::new();
+        for d in due {
+            let Some(o) = model.outbounds.iter().find(|o| o.event == d.event) else {
+                continue;
+            };
+            let p = &o.policy;
+            let seconds = |e: &Option<quadra_ir::Expr>| -> Option<u64> {
+                let v = quadra_store::ops::eval_fixed(model, e.as_ref()?).ok()?;
+                match v {
+                    quadra_runtime::V::Duration(s) => Some(s.max(0) as u64),
+                    _ => None,
+                }
+            };
+            let created = chrono::NaiveDateTime::parse_from_str(&d.created_at, "%Y-%m-%dT%H:%M:%S")
+                .unwrap_or(at);
+            // `expires after`: no longer worth sending
+            if let Some(s) = seconds(&p.expires) {
+                if at > created + chrono::Duration::seconds(s as i64) {
+                    let (name, t) = (o.event.clone(), now_s.clone());
+                    let why = format!(
+                        "expired: not sent within {} of its emit",
+                        crate::deliver::human(s)
+                    );
+                    self.side(move |c| {
+                        quadra_store::deliveries::finish(c, d.id, &name, &t, "expired", &why)
+                    })?;
+                    continue;
+                }
+            }
+            // `delay`, `window`: not yet
+            let mut not_before =
+                seconds(&p.delay).map(|s| created + chrono::Duration::seconds(s as i64));
+            if let Some(w) = &p.window {
+                if let Some(open) = crate::deliver::window_opens(&model.timezone, w, at) {
+                    not_before = Some(not_before.map_or(open, |n| n.max(open)));
+                }
+            }
+            if let Some(nb) = not_before.filter(|nb| *nb > at) {
+                let t = stamp(nb);
+                self.side(move |c| quadra_store::deliveries::defer(c, d.id, &t))?;
+                continue;
+            }
+            // `unless`: on the data as it is now
+            if let Some(u) = &p.unless {
+                let r = quadra_store::ops::eval_for_event(
+                    &self.url,
+                    model,
+                    &checked.report,
+                    at,
+                    o,
+                    u,
+                    &d.fields,
+                    d.tx,
+                    false,
+                );
+                if matches!(r, Ok(quadra_runtime::V::Bool(true))) {
+                    let (name, t) = (o.event.clone(), now_s.clone());
+                    let why = format!("unless {}", quadra_ir::print::expr(u));
+                    self.side(move |c| {
+                        quadra_store::deliveries::finish(c, d.id, &name, &t, "skipped", &why)
+                    })?;
+                    continue;
+                }
+            }
+            let key = p.key.as_ref().map(|k| {
+                quadra_store::ops::eval_for_event(
+                    &self.url,
+                    model,
+                    &checked.report,
+                    at,
+                    o,
+                    k,
+                    &d.fields,
+                    d.tx,
+                    true,
+                )
+                .map(|v| match v {
+                    quadra_runtime::V::Text(t) => t.to_string(),
+                    other => other.to_string(),
+                })
+            });
+            // the request its block builds, reading the data as of the emitting commit
+            let built = o.body.as_ref().map(|_| {
+                quadra_store::ops::build_request(
+                    &self.url,
+                    model,
+                    &checked.report,
+                    at,
+                    o,
+                    &d.fields,
+                    d.tx,
+                )
+                .and_then(|v| crate::deliver::built_of(&v))
+            });
+            let mut plan = crate::deliver::plan(
+                &model.manifest,
+                &self.env,
+                d,
+                &o.connection,
+                o.path.as_deref(),
+                built,
+            );
+            let mut retry = crate::deliver::Retry::default();
+            if let Some(s) = seconds(&p.retry_for) {
+                retry.for_s = s;
+            }
+            if let Some(quadra_ir::Expr {
+                kind: quadra_ir::ExprKind::Lit(quadra_ir::Lit::Number(n)),
+                ..
+            }) = &p.retry_times
+            {
+                retry.times = n.parse().ok();
+                // the attempts decide, not the time (ten years)
+                retry.for_s = 10 * 365 * 86_400;
+            }
+            if let Some(quadra_ir::Expr {
+                kind: quadra_ir::ExprKind::Binary { lhs, rhs, .. },
+                ..
+            }) = &p.backoff
+            {
+                let one = |e: &quadra_ir::Expr| match quadra_store::ops::eval_fixed(model, e) {
+                    Ok(quadra_runtime::V::Duration(s)) => Some(s.max(1) as u64),
+                    _ => None,
+                };
+                if let (Some(a), Some(b)) = (one(lhs), one(rhs)) {
+                    retry.first_s = a;
+                    retry.max_s = b;
+                }
+            }
+            plan.retry = retry;
+            match key {
+                Some(Ok(k)) => plan.set_key(&k),
+                Some(Err(e)) => {
+                    plan.send =
+                        crate::deliver::Send::Broken(format!("the key of the outbound failed: {e}"))
+                }
+                None => {}
+            }
+            plans.push(plan);
+        }
         let next = quadra_store::deliveries::next_at(&mut self.conn, &events)?
             .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S").unwrap_or(at));
         Ok((plans, next, true))

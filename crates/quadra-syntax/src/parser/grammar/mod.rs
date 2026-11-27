@@ -472,10 +472,51 @@ fn outbound(p: &mut Parser) {
             p.bump();
             p.bump();
             while p.eat(NEWLINE) {}
-            while p.at_ctx("reply") && p.nth(1) == IDENT {
+            // the lines of policy, each a keyword and its value
+            loop {
                 let c = p.start();
-                p.bump_ctx();
-                path(p);
+                if p.at_ctx("reply") && p.nth(1) == IDENT {
+                    p.bump_ctx();
+                    path(p);
+                } else if p.at_ctx("retry") && p.nth(1) == FOR_KW {
+                    // `retry for 3 days`
+                    p.bump_ctx();
+                    p.bump();
+                    expr(p);
+                } else if p.at_ctx("retry") && !p.nth_at_ctx(1, "times") && p.nth(1) != L_PAREN {
+                    // `retry 10 times` (the number alone: `10 times` is not a quantity)
+                    p.bump_ctx();
+                    let n = p.start();
+                    p.expect(NUMBER);
+                    n.complete(p, LITERAL);
+                    if p.at_ctx("times") {
+                        p.bump_ctx();
+                    } else {
+                        p.error("expected `times`: `retry 10 times` (or `retry for 3 days`)");
+                    }
+                } else if (p.at_ctx("ordered") || p.at_ctx("latest")) && p.nth_at_ctx(1, "by") {
+                    // `ordered by e.customer`, `latest by e.product`
+                    p.bump_ctx();
+                    p.bump_ctx();
+                    expr(p);
+                } else if p.at_ctx("expires") && p.nth_at_ctx(1, "after") {
+                    // `expires after 1 day`
+                    p.bump_ctx();
+                    p.bump_ctx();
+                    expr(p);
+                } else if ["backoff", "unless", "delay", "window", "key"]
+                    .iter()
+                    .any(|k| p.at_ctx(k))
+                    && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ)
+                {
+                    // `backoff 30 seconds .. 1 hour`, `unless e.order.cancelled`, `delay 10
+                    // minutes`, `window "02:00" .. "04:00"`, `key f"ship-{e.order.number}"`
+                    p.bump_ctx();
+                    expr(p);
+                } else {
+                    c.abandon(p);
+                    break;
+                }
                 end_line(p);
                 c.complete(p, OUTBOUND_CLAUSE);
                 while p.eat(NEWLINE) {}
