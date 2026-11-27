@@ -588,6 +588,8 @@ pub struct Engine {
     /// the tenant's sequencer: commits go through it (none: written directly, as the
     /// command line does)
     sequencer: Option<quadra_store::Sequencer>,
+    /// when the log of the integrations was last pruned (`[integrations] log_days`)
+    pruned_at: Option<std::time::Instant>,
     /// the analysis of each model in use (the project's, an app's), shared by the requests: kept
     /// with the model it is of, so that it never outlives it
     statics: Vec<(Rc<Checked>, Rc<quadra_runtime::Statics>)>,
@@ -734,6 +736,7 @@ impl Engine {
             cache_mb: cfg.cache_mb,
             snapshot: false,
             sequencer: None,
+            pruned_at: None,
             statics: Vec::new(),
             tickets: Rc::new(RefCell::new(Vec::new())),
             unlogged: false,
@@ -809,6 +812,20 @@ impl Engine {
         let Some(model) = checked.model.as_ref() else {
             return Ok((Vec::new(), None, false));
         };
+        // once an hour: the log older than `[integrations] log_days` goes
+        if self
+            .pruned_at
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3600))
+            && limit > 0
+        {
+            self.pruned_at = Some(std::time::Instant::now());
+            let before = (now() - chrono::Duration::days(model.manifest.log_days() as i64))
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string();
+            if let Err(e) = self.side(move |c| quadra_store::deliveries::prune_log(c, &before)) {
+                eprintln!("integrations: the old log was not pruned: {e}");
+            }
+        }
         if model.outbounds.is_empty() {
             return Ok((Vec::new(), None, false));
         }

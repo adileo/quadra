@@ -1226,6 +1226,16 @@ fn a_signed_message_comes_in_once_and_a_bad_one_never_touches_the_data() {
         "{text}"
     );
     assert_eq!(orders(&cfg), ["#1001"]);
+    // the log is pruned by date; the messages and their states stay
+    assert_eq!(
+        quadra_store::deliveries::prune_log(&mut c, "2000-01-01T00:00:00").unwrap(),
+        0
+    );
+    assert!(quadra_store::deliveries::prune_log(&mut c, "2999-01-01T00:00:00").unwrap() > 0);
+    assert!(quadra_store::deliveries::inbox_log(&mut c, 1)
+        .unwrap()
+        .is_empty());
+    assert_eq!(inbox_states(&cfg), ["done", "rejected", "rejected"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

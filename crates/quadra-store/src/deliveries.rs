@@ -862,6 +862,15 @@ pub fn handled_versions(
         .collect())
 }
 
+/// The steps of the log before `before` removed (`[integrations] log_days`): the events and
+/// messages themselves, with their final states, stay. Returns how many.
+pub fn prune_log(conn: &mut Conn, before: &str) -> Result<usize, String> {
+    Ok(conn.exec(
+        "DELETE FROM \"_quadra_exchanges\" WHERE \"at\" < ?text",
+        &[Sql::Text(before.to_string())],
+    )? as usize)
+}
+
 /// When the next message waiting to be tried again is due (`retry for`).
 pub fn inbox_next_at(conn: &mut Conn) -> Result<Option<String>, String> {
     Ok(conn

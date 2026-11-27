@@ -309,9 +309,17 @@ impl Connection {
 pub struct Manifest {
     pub vars: Vec<Var>,
     pub connections: Vec<Connection>,
+    /// `[integrations] log_days`: how long the log of the deliveries and of the messages
+    /// received is kept (their final states stay)
+    pub log_days: Option<u32>,
 }
 
 impl Manifest {
+    /// The days the log of the integrations is kept: 90 when not said.
+    pub fn log_days(&self) -> u32 {
+        self.log_days.unwrap_or(90)
+    }
+
     pub fn var(&self, name: &str) -> Option<&Var> {
         self.vars.iter().find(|v| v.name == name)
     }
@@ -417,6 +425,28 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             .ok_or("quadra.toml: [vars] is a table of variables")?;
         for (name, decl) in vars {
             m.vars.push(var(name, decl)?);
+        }
+    }
+    if let Some(i) = doc.get("integrations") {
+        let t = i
+            .as_table()
+            .ok_or("quadra.toml: [integrations] is a table")?;
+        for (k, v) in t {
+            match k.as_str() {
+                "log_days" => {
+                    m.log_days = Some(
+                        v.as_integer()
+                            .filter(|d| (1..=3650).contains(d))
+                            .ok_or("quadra.toml, [integrations]: log_days is a number of days, from 1 to 3650")?
+                            as u32,
+                    )
+                }
+                other => {
+                    return Err(format!(
+                        "quadra.toml, [integrations]: `{other}` is not a setting of the integrations (log_days)"
+                    ))
+                }
+            }
         }
     }
     if let Some(conns) = doc.get("connections") {
@@ -1031,6 +1061,21 @@ user = "noreply@acme.example.com"
 password = { var = "SMTP_PASSWORD" }
 from = "Acme <noreply@acme.example.com>"
 "#;
+
+    #[test]
+    fn the_log_of_the_integrations_is_kept_as_said() {
+        assert_eq!(parse("").unwrap().log_days(), 90);
+        assert_eq!(
+            parse("[integrations]\nlog_days = 30\n").unwrap().log_days(),
+            30
+        );
+        assert!(parse("[integrations]\nlog_days = 0\n")
+            .unwrap_err()
+            .contains("from 1 to 3650"));
+        assert!(parse("[integrations]\nkeep = 1\n")
+            .unwrap_err()
+            .contains("not a setting"));
+    }
 
     #[test]
     fn oauth2_certificates_and_signatures_are_read_and_checked() {

@@ -357,6 +357,24 @@ changes a product's stock, or a reaction to the outcome of a delivery to `shop` 
 product, the product is not published to `shop` again (no echo between two systems that keep
 each other in step). A change made by anyone else, or through another connection, is.
 
+### Who owns a field
+
+When both systems change a record (the shop and Quadra each edit products), say which side
+owns each field, and let each side send only what it owns: `publish … on` lists the fields
+Quadra owns, and the `inbound` writes only the fields the other system owns. A change of the
+shop's fields that comes in is then never sent back, and the shop never overwrites Quadra's:
+
+```quadra
+publish Product to shop as p:
+    on price, name                      # Quadra owns price and name
+    put(f"/products/{p.sku}", ShopProduct(sku=p.sku, price=p.price, name=p.name))
+
+inbound StockIn via shop path "/inventory" as m: ShopStock:
+    latest by m.sku using m.updated_at
+    let p = Product.where(x => x.sku == m.sku).first() ?? fail "unknown sku"
+    p.stock = m.available               # the shop owns the stock
+```
+
 ### The other system's ids
 
 Another system has its own id for each record. Keep it in a field of the record, one per
@@ -542,6 +560,15 @@ quadra outbox skip 42 --reason "the order was cancelled"
 ([CLI](/reference/cli#events-quadra-outbox)). Delivery is **at least once**: if the
 server stops between sending and recording the answer, the event is sent again with the same
 `Idempotency-Key`, which the receiver should use to ignore what it has already seen.
+
+The log of every step, of the events going out and of the messages coming in, is kept 90
+days, then pruned; the events and messages themselves stay, with their final state, error and
+attempts. Another period:
+
+```toml
+[integrations]
+log_days = 365
+```
 
 On Quadra Cloud connections only reach public addresses: a name that resolves to a private,
 loopback or link-local address (the clouds' metadata, `169.254.169.254`) is refused, and so
