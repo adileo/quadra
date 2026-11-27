@@ -5140,6 +5140,7 @@ dependencies = [
  "quadra-label",
  "quadra-print",
  "quadra-sema",
+ "quadra-sign",
  "quadra-syntax",
  "quadra-types",
  "quick-xml 0.42.0",

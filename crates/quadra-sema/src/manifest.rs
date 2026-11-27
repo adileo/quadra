@@ -220,6 +220,70 @@ pub enum ConnectionKind {
         timeout_s: u64,
         insecure: bool,
     },
+    /// a printer: raw printing to its port (`tcp://host:9100`, "JetDirect": ZPL, or PDF for a
+    /// printer that takes it), or a queue of the system where the connection runs (`lp://NAME`,
+    /// CUPS). Only `print(content)` goes to it: nothing is read from a printer
+    Printer {
+        url: Setting,
+        timeout_s: u64,
+        /// how many times each job is printed, 1 to 99
+        copies: u32,
+    },
+}
+
+/// Where a printer is: its address (raw printing) or the name of a queue of the system.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrinterAt {
+    /// `tcp://host[:port]`, 9100 when not said
+    Tcp { host: String, port: u16 },
+    /// `lp://NAME`: printed with `lp -d NAME`
+    Lp { name: String },
+}
+
+/// The url of a printer: `tcp://192.168.1.50:9100`, `tcp://zebra.lan`, `lp://Brother_HL_L2350DW`.
+pub fn printer_at(url: &str) -> Result<PrinterAt, String> {
+    if let Some(rest) = url.strip_prefix("tcp://") {
+        let rest = rest.strip_suffix('/').unwrap_or(rest);
+        if rest.is_empty() || rest.contains('/') || rest.contains('@') || rest.contains('?') {
+            return Err("a printer's address is tcp://host or tcp://host:port, nothing after it (tcp://192.168.1.50:9100)".into());
+        }
+        // `host`, `host:9100`, `[::1]`, `[::1]:9100`
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((h, p)) if !rest.starts_with('[') || h.ends_with(']') => (
+                h,
+                p.parse::<u16>()
+                    .ok()
+                    .filter(|p| *p > 0)
+                    .ok_or("the port of a printer is a number from 1 to 65535 (9100)")?,
+            ),
+            _ => (rest, 9100),
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(
+                "a printer's address is tcp://host or tcp://host:port (tcp://192.168.1.50:9100)"
+                    .into(),
+            );
+        }
+        return Ok(PrinterAt::Tcp {
+            host: host.to_string(),
+            port,
+        });
+    }
+    if let Some(name) = url.strip_prefix("lp://") {
+        if name.is_empty()
+            || name.starts_with('-')
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            return Err("a printer of the system is lp://NAME, its name as `lpstat -p` shows it: letters, digits, `_`, `-`, `.` (lp://Brother_HL_L2350DW)".into());
+        }
+        return Ok(PrinterAt::Lp {
+            name: name.to_string(),
+        });
+    }
+    Err("a printer's url is tcp://host:port (raw printing, port 9100) or lp://NAME (a printer of the system, CUPS)".into())
 }
 
 /// The protocol of a connection to files.
@@ -325,6 +389,7 @@ impl Connection {
                 DbEngine::Odbc => "odbc",
             },
             ConnectionKind::Mail { .. } => "imap",
+            ConnectionKind::Printer { .. } => "printer",
         }
     }
 
@@ -335,7 +400,7 @@ impl Connection {
             ConnectionKind::Files { .. } => "files",
             ConnectionKind::Database { .. } => "table",
             ConnectionKind::Mail { .. } => "mailbox",
-            ConnectionKind::Smtp { .. } => "nothing",
+            ConnectionKind::Smtp { .. } | ConnectionKind::Printer { .. } => "nothing",
         }
     }
 
@@ -451,6 +516,7 @@ impl Connection {
                     c.vars(&mut out);
                 }
             }
+            ConnectionKind::Printer { url, .. } => setting(url, &mut out),
         }
         out
     }
@@ -822,7 +888,7 @@ fn setting(m: &Manifest, at: &str, key: &str, v: &toml::Value) -> Result<Setting
 
 /// The kinds of connection.
 const KINDS: &str =
-    "\"http\", \"smtp\", \"sftp\", \"ftp\", \"postgres\", \"mysql\", \"sqlserver\", \"odbc\", \"imap\"";
+    "\"http\", \"smtp\", \"sftp\", \"ftp\", \"postgres\", \"mysql\", \"sqlserver\", \"odbc\", \"imap\", \"printer\"";
 
 /// What the other side accepts (`rate`, `concurrency`, `pause_after`).
 fn limits_of(at: &str, t: &toml::Table) -> Result<Limits, String> {
@@ -845,6 +911,61 @@ fn limits_of(at: &str, t: &toml::Table) -> Result<Limits, String> {
                 .ok_or(format!("{at}: pause_after is from 1 to 1000"))? as u32;
     }
     Ok(limits)
+}
+
+/// A printer: `url` (`tcp://host:9100` or `lp://NAME`), `timeout`, `copies`.
+fn printer(m: &Manifest, at: &str, t: &toml::Table) -> Result<ConnectionKind, String> {
+    const KEYS: &[&str] = &[
+        "kind",
+        "url",
+        "timeout",
+        "copies",
+        "rate",
+        "concurrency",
+        "pause_after",
+        "location",
+    ];
+    for k in t.keys() {
+        if !KEYS.contains(&k.as_str()) {
+            return Err(format!(
+                "{at}: `{k}` is not a key of a printer connection ({})",
+                KEYS[1..].join(", ")
+            ));
+        }
+    }
+    let url = setting(
+        m,
+        at,
+        "url",
+        t.get("url").ok_or(format!(
+            "{at}: url is needed: tcp://host:9100 (raw printing) or lp://NAME (a printer of the system)"
+        ))?,
+    )?;
+    if let Setting::Literal(u) = &url {
+        printer_at(u).map_err(|e| format!("{at}: {e}"))?;
+    }
+    let timeout_s = match t.get("timeout") {
+        None => 30,
+        Some(v) => v
+            .as_str()
+            .and_then(parse_seconds)
+            .filter(|s| (1..=600).contains(s))
+            .ok_or(format!(
+                "{at}: timeout is a duration from 1 to 600 seconds (\"30s\")"
+            ))?,
+    };
+    let copies = match t.get("copies") {
+        None => 1,
+        Some(v) => v
+            .as_integer()
+            .filter(|n| (1..=99).contains(n))
+            .ok_or(format!("{at}: copies is from 1 to 99"))? as u32,
+    };
+    Ok(ConnectionKind::Printer {
+        url,
+        timeout_s,
+        copies,
+    })
 }
 
 /// A connection to files, a database or a mailbox.
@@ -1154,6 +1275,22 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
     };
     // inline, so that it reads back as one value (`name = { kind = …, url = { var = … } }`)
     let decl = toml::Value::Table(t.clone()).to_string();
+    // a printer takes one job at a time: one at once, unless said
+    if kind == "printer" {
+        let kind = printer(m, &at, t)?;
+        let mut limits = limits_of(&at, t)?;
+        if !t.contains_key("concurrency") {
+            limits.concurrency = 1;
+        }
+        return Ok(Connection {
+            name: name.to_string(),
+            kind,
+            inbound: None,
+            limits,
+            agent,
+            decl,
+        });
+    }
     if matches!(
         kind,
         "sftp" | "ftp" | "postgres" | "mysql" | "sqlserver" | "odbc" | "imap"
@@ -1677,6 +1814,94 @@ from = "Acme <noreply@acme.example.com>"
         .contains("secret = true"));
         assert!(bad("kind = \"sftp\"\nurl = \"sftp://h\"\nuser = \"q\"\npassword = { var = \"PASS\" }\nknown_host = \"x\"\nlocation = \"milano\"\n").contains("agent:<name>"));
         assert!(bad("kind = \"gopher\"\nurl = \"x\"\n").contains("not known"));
+    }
+
+    #[test]
+    fn a_printer_is_a_connection_by_its_address_or_its_queue() {
+        let vars = "[vars]\nPRINTER = {}\n\n";
+        let ok = |c: &str| {
+            parse(&format!("{vars}[connections.x]\n{c}"))
+                .map(|m| m.connection("x").unwrap().clone())
+        };
+        let zebra = ok("kind = \"printer\"\nurl = \"tcp://192.168.1.50:9100\"\nlocation = \"agent:backoffice\"\ntimeout = \"10s\"\n").unwrap();
+        assert_eq!(
+            (zebra.kind_name(), zebra.pulls(), zebra.agent.as_deref()),
+            ("printer", "nothing", Some("backoffice"))
+        );
+        assert_eq!(
+            zebra.kind,
+            ConnectionKind::Printer {
+                url: Setting::Literal("tcp://192.168.1.50:9100".into()),
+                timeout_s: 10,
+                copies: 1,
+            }
+        );
+        // one job at a time, unless said
+        assert_eq!(zebra.limits.concurrency, 1);
+        let office = ok(
+            "kind = \"printer\"\nurl = \"lp://Brother_HL_L2350DW\"\ncopies = 2\nconcurrency = 2\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            office.kind,
+            ConnectionKind::Printer {
+                copies: 2,
+                timeout_s: 30,
+                ..
+            }
+        ));
+        assert_eq!(office.limits.concurrency, 2);
+        let by_var = ok("kind = \"printer\"\nurl = { var = \"PRINTER\" }\n").unwrap();
+        assert_eq!(by_var.vars(), ["PRINTER"]);
+        assert_eq!(
+            printer_at("tcp://zebra.lan").unwrap(),
+            PrinterAt::Tcp {
+                host: "zebra.lan".into(),
+                port: 9100
+            }
+        );
+        assert_eq!(
+            printer_at("tcp://[fe80::1]:9101").unwrap(),
+            PrinterAt::Tcp {
+                host: "fe80::1".into(),
+                port: 9101
+            }
+        );
+        assert_eq!(
+            printer_at("lp://Office.2").unwrap(),
+            PrinterAt::Lp {
+                name: "Office.2".into()
+            }
+        );
+        let bad = |c: &str| ok(c).unwrap_err();
+        assert!(
+            bad("kind = \"printer\"\nurl = \"http://192.168.1.50\"\n").contains("tcp://host:port")
+        );
+        assert!(
+            bad("kind = \"printer\"\nurl = \"tcp://192.168.1.50:printer\"\n").contains("the port")
+        );
+        assert!(
+            bad("kind = \"printer\"\nurl = \"tcp://h:9100/queue\"\n").contains("nothing after it")
+        );
+        assert!(bad("kind = \"printer\"\nurl = \"lp://my printer\"\n").contains("lpstat"));
+        assert!(bad("kind = \"printer\"\nurl = \"lp://-o\"\n").contains("lpstat"));
+        assert!(bad("kind = \"printer\"\n").contains("url is needed"));
+        assert!(bad("kind = \"printer\"\nurl = \"tcp://h\"\ncopies = 0\n")
+            .contains("copies is from 1 to 99"));
+        assert!(bad("kind = \"printer\"\nurl = \"tcp://h\"\ncopies = 100\n")
+            .contains("copies is from 1 to 99"));
+        assert!(
+            bad("kind = \"printer\"\nurl = \"tcp://h\"\ntimeout = \"20min\"\n").contains("timeout")
+        );
+        let unknown = bad("kind = \"printer\"\nurl = \"tcp://h\"\nuser = \"q\"\n");
+        assert!(
+            unknown.contains("`user` is not a key of a printer connection"),
+            "{unknown}"
+        );
+        assert!(
+            bad("kind = \"printer\"\nurl = \"tcp://h\"\nlocation = \"backoffice\"\n")
+                .contains("agent:<name>")
+        );
     }
 
     #[test]

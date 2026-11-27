@@ -178,6 +178,9 @@ fn describe(job: &Job) -> String {
             transport::Put::File { path, .. } => format!("{}: write {path}", conn.name),
             transport::Put::Row { table, .. } => format!("{}: insert into {table}", conn.name),
             transport::Put::Http { method, path, .. } => format!("{}: {method} {path}", conn.name),
+            transport::Put::Print { body, .. } => {
+                format!("{}: print {} bytes", conn.name, body.len())
+            }
         },
     }
 }

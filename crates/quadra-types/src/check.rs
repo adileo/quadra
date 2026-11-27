@@ -2274,12 +2274,14 @@ impl<'m> Checker<'m> {
             "smtp" => n == "email",
             "sftp" | "ftp" => n == "write",
             "postgres" | "mysql" | "sqlserver" | "odbc" => n == "insert",
+            "printer" => n == "print",
             _ => false,
         });
         if !fits {
             let what = match kind {
                 "smtp" => "`email(to=…, subject=…, body=…)`",
                 "sftp" | "ftp" => "the file: `write(path, content)`",
+                "printer" => "what is printed: `print(content)` (ZPL or text, `zpl(…)`, or a document, `render(…)`)",
                 "postgres" | "mysql" | "sqlserver" | "odbc" => {
                     "the row: `insert(table, record)`, in an exchange table agreed with the other system"
                 }
@@ -2332,6 +2334,7 @@ impl<'m> Checker<'m> {
             match m.manifest.connection(&i.connection) {
                 None => self.error(i.span, format!("no connection `{}` in quadra.toml ([connections.{}])", i.connection, i.connection)),
                 Some(c) if c.kind_name() == "smtp" => self.error(i.span, format!("`{}` sends emails: a mailbox is read with an imap connection", i.connection)),
+                Some(c) if c.kind_name() == "printer" => self.error(i.span, format!("`{}` is a printer: nothing comes in from it (it takes `print(…)` at the end of an outbound)", i.connection)),
                 // files, a database, a mailbox: only pulled
                 Some(c) if pulls != "path" && (i.pull.is_none() || i.path.is_some()) => self.error(i.span, format!("the messages of `{}` ({}) are fetched: `inbound {} via {} as m: {}:` with `pull \"{}\" every 5 minutes`", i.connection, c.kind_name(), i.name, i.connection, i.ty, match pulls { "files" => "in/*.csv", "table" => "ORDERS", _ => "INBOX" })),
                 Some(_) if pulls != "path" => {}
@@ -2744,6 +2747,14 @@ impl<'m> Checker<'m> {
                 }
                 quadra_sema::manifest::ConnectionKind::Mail { .. } => {
                     self.error(o.span, format!("`{}` is a mailbox read over IMAP: emails are sent by an smtp connection", o.connection));
+                }
+                quadra_sema::manifest::ConnectionKind::Printer { .. } => {
+                    if o.path.is_some() || o.body.is_none() {
+                        self.error(
+                            o.span,
+                            format!("an event goes to a printer by a block that ends with `print(content)`: `outbound {} via {} as e:`", o.event, o.connection),
+                        );
+                    }
                 }
                 quadra_sema::manifest::ConnectionKind::Smtp { .. } => {
                     if o.path.is_some() {
@@ -3396,6 +3407,28 @@ impl<'m> Checker<'m> {
                     };
                     if !ok {
                         self.error(args[1].value.span, if n == "write" { "the content is text, a record with a format, or the rows of a file (a list of a record `from csv` or `from fixed`)" } else { "the row is a record `from json` (its fields, or their `at`, are the columns)" });
+                    }
+                }
+                return T::Unknown;
+            }
+            // what a printer connection prints: `print(zpl(ParcelLabel(p)))`,
+            // `print(render(InvoicePdf(inv)))`, or raw text
+            "print" if self.context.starts_with("outbound ") => {
+                let ts: Vec<T> = args.iter().map(|a| self.infer(&a.value)).collect();
+                if args.len() != 1 || args[0].name.is_some() {
+                    self.error(
+                        span,
+                        "`print` takes one value: `print(zpl(ParcelLabel(p)))`, `print(render(InvoicePdf(inv)))`",
+                    );
+                } else {
+                    let ok = match ts[0].unopt() {
+                        T::Text(_) | T::Unknown => true,
+                        // a document rendered (`render(…)`, `sign(…)`): its bytes
+                        T::Tuple(f) => f.iter().any(|(k, _)| k.as_deref() == Some("hash")),
+                        _ => false,
+                    };
+                    if !ok {
+                        self.error(args[0].value.span, "what is printed is text (ZPL, or the raw text the printer takes: `zpl(ParcelLabel(p))`) or a document (`render(InvoicePdf(inv))`)");
                     }
                 }
                 return T::Unknown;

@@ -1,6 +1,6 @@
 //! The systems that do not speak HTTP: files on SFTP and FTP servers (`files`), the databases
-//! of other systems (`db`), mailboxes read over IMAP (`mail`). A pull asks a connection for its
-//! new messages ([`Ask`]), an outbound puts something there ([`Put`]).
+//! of other systems (`db`), mailboxes read over IMAP (`mail`), printers (`printer`). A pull asks
+//! a connection for its new messages ([`Ask`]), an outbound puts something there ([`Put`]).
 //!
 //! A job carries its connection as it is declared ([`Conn`]: the `[connections.<name>]` table
 //! and the declarations of the variables it uses, never their values), so that whoever runs it
@@ -11,6 +11,7 @@
 pub mod db;
 pub mod files;
 pub mod mail;
+pub mod printer;
 
 use base64::Engine as _;
 use quadra_sema::manifest::{Connection, ConnectionKind, Manifest};
@@ -176,6 +177,12 @@ pub enum Put {
         row: serde_json::Value,
         key: String,
     },
+    /// a job for a printer: its bytes (ZPL, text, a PDF), `content_type` saying which
+    Print {
+        #[serde(with = "b64")]
+        body: Vec<u8>,
+        content_type: String,
+    },
 }
 
 /// Why a job failed, and whether trying again may help.
@@ -312,6 +319,9 @@ async fn send(c: &Resolved, put: &Put, public_only: bool) -> Result<(), Failed> 
     match (&c.connection.kind, put) {
         (ConnectionKind::Files { .. }, Put::File { .. }) => files::put(c, put, public_only).await,
         (ConnectionKind::Database { .. }, Put::Row { .. }) => db::put(c, put, public_only).await,
+        (ConnectionKind::Printer { .. }, Put::Print { .. }) => {
+            printer::put(c, put, public_only).await
+        }
         _ => Err(Failed::Never(format!(
             "`{}` ({}) does not take that",
             c.connection.name,
