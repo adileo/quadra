@@ -144,6 +144,20 @@ quadra.toml, [connections.shop]: bearer is a credential: not written in quadra.t
 | `timeout` | from `"1s"` to `"120s"`; `"10s"` when not given |
 | `insecure` | `true` allows `http://`: for a test receiver on your machine |
 
+### Limits of the other side
+
+Both kinds take what the system on the other side accepts, per tenant:
+
+| Key | Meaning |
+|---|---|
+| `rate` | at most so many requests: `"2/s"`, `"100/min"`, `"1000/h"` (none when not given) |
+| `concurrency` | requests at once, from 1 to 64 (4 when not given) |
+| `pause_after` | failures of transport in a row (no answer, a 5xx) before the connection is paused (5 when not given); a 401 or 403 (credentials refused) pauses it at once |
+
+While a connection is paused its events wait, without costing attempts, for 30 seconds, then
+twice as long each time up to an hour; then one event goes alone, as a probe, and the first
+answer resumes the others. (The pause is kept in memory: a restart starts afresh.)
+
 ### `kind = "smtp"`
 
 | Key | Meaning |

@@ -133,6 +133,42 @@ pub enum ConnectionKind {
 pub struct Connection {
     pub name: String,
     pub kind: ConnectionKind,
+    /// what the other side accepts: requests per second or minute (`rate = "2/s"`), at once
+    /// (`concurrency`), and how many failures of transport in a row pause it (`pause_after`)
+    pub limits: Limits,
+}
+
+/// The limits of a connection: those of the system on the other side, not of an event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// at most this many requests per `per_s` seconds (`None`: no limit)
+    pub rate: Option<(u32, u32)>,
+    pub concurrency: u32,
+    pub pause_after: u32,
+}
+
+impl Default for Limits {
+    /// No rate, four at once, paused after five failures of transport in a row.
+    fn default() -> Self {
+        Limits {
+            rate: None,
+            concurrency: 4,
+            pause_after: 5,
+        }
+    }
+}
+
+/// `"2/s"`, `"100/min"`, `"1000/h"`: (requests, seconds).
+fn parse_rate(s: &str) -> Option<(u32, u32)> {
+    let (n, per) = s.split_once('/')?;
+    let n: u32 = n.trim().parse().ok().filter(|n| *n > 0)?;
+    let per = match per.trim() {
+        "s" | "second" => 1,
+        "min" | "minute" => 60,
+        "h" | "hour" => 3600,
+        _ => return None,
+    };
+    Some((n, per))
 }
 
 impl Connection {
@@ -464,8 +500,21 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             "signing_secret",
             "timeout",
             "insecure",
+            "rate",
+            "concurrency",
+            "pause_after",
         ],
-        "smtp" => &["kind", "url", "user", "password", "from", "insecure"],
+        "smtp" => &[
+            "kind",
+            "url",
+            "user",
+            "password",
+            "from",
+            "insecure",
+            "rate",
+            "concurrency",
+            "pause_after",
+        ],
         _ => {
             return Err(format!(
                 "{at}: kind `{kind}` is not known (\"http\", \"smtp\")"
@@ -599,9 +648,28 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             insecure,
         }
     };
+    let mut limits = Limits::default();
+    if let Some(v) = t.get("rate") {
+        limits.rate = Some(v.as_str().and_then(parse_rate).ok_or(format!(
+            "{at}: rate is requests per second, minute or hour: \"2/s\", \"100/min\""
+        ))?);
+    }
+    if let Some(v) = t.get("concurrency") {
+        limits.concurrency =
+            v.as_integer()
+                .filter(|n| (1..=64).contains(n))
+                .ok_or(format!("{at}: concurrency is from 1 to 64"))? as u32;
+    }
+    if let Some(v) = t.get("pause_after") {
+        limits.pause_after =
+            v.as_integer()
+                .filter(|n| (1..=1000).contains(n))
+                .ok_or(format!("{at}: pause_after is from 1 to 1000"))? as u32;
+    }
     Ok(Connection {
         name: name.to_string(),
         kind,
+        limits,
     })
 }
 
@@ -708,6 +776,21 @@ from = "Acme <noreply@acme.example.com>"
             }
         );
         assert_eq!(m.connection("mail").unwrap().kind_name(), "smtp");
+        assert_eq!(m.connection("mail").unwrap().limits, Limits::default());
+        let l = parse("[connections.x]\nkind = \"http\"\nurl = \"https://a\"\nrate = \"100/min\"\nconcurrency = 2\npause_after = 3\n").unwrap();
+        assert_eq!(
+            l.connections[0].limits,
+            Limits {
+                rate: Some((100, 60)),
+                concurrency: 2,
+                pause_after: 3
+            }
+        );
+        assert!(
+            parse("[connections.x]\nkind = \"http\"\nurl = \"https://a\"\nrate = \"fast\"\n")
+                .unwrap_err()
+                .contains("rate")
+        );
         assert_eq!(m.connection("mail").unwrap().vars(), vec!["SMTP_PASSWORD"]);
     }
 

@@ -1923,13 +1923,69 @@ fn start(
     t
 }
 
-/// A tenant's deliveries (`crate::deliver`): the due events of the outbox sent, a few at a time,
-/// and their outcomes written; then a wait until the next one is due or a commit may have
-/// brought new ones (looked at every second, at most a minute apart).
+/// The state of a connection of a tenant, as its deliveries go (in memory: a restart starts
+/// it afresh). What the other side accepts: requests at once (`concurrency`), how fast (`rate`,
+/// the next free slot), and a pause after failures of transport in a row (`pause_after`) or a
+/// refusal of the credentials, during which its events wait without costing attempts; then one
+/// event goes alone, as a probe.
+#[derive(Default)]
+struct Lane {
+    inflight: u32,
+    next_slot: Option<Instant>,
+    failures: u32,
+    paused_until: Option<Instant>,
+    pause: Duration,
+    probing: bool,
+}
+
+impl Lane {
+    fn paused(&self, now: Instant) -> Option<Instant> {
+        self.paused_until.filter(|u| *u > now)
+    }
+
+    /// What an outcome says of the connection.
+    fn after(
+        &mut self,
+        attempt: &quadra_store::deliveries::Attempt,
+        outcome: &quadra_store::deliveries::Outcome,
+        limits: &quadra_sema::manifest::Limits,
+    ) -> Option<Duration> {
+        use quadra_store::deliveries::Outcome;
+        self.inflight = self.inflight.saturating_sub(1);
+        let refused = matches!(attempt.status, Some(401 | 403));
+        let transport = match outcome {
+            Outcome::Retry { .. } => attempt.status.is_none_or(|s| s >= 500) || refused,
+            _ => false,
+        };
+        if !transport {
+            // it answered: whatever the answer, the connection works
+            if !matches!(outcome, Outcome::Retry { .. }) {
+                self.failures = 0;
+                self.paused_until = None;
+                self.pause = Duration::ZERO;
+                self.probing = false;
+            }
+            return None;
+        }
+        self.failures += 1;
+        if refused || self.failures >= limits.pause_after {
+            self.pause = (self.pause * 2).clamp(Duration::from_secs(30), Duration::from_secs(3600));
+            self.paused_until = Some(Instant::now() + self.pause);
+            self.probing = true;
+            return Some(self.pause);
+        }
+        None
+    }
+}
+
+/// A tenant's deliveries (`crate::deliver`): the due events of the outbox sent, as their
+/// connections allow (`Lane`), and their outcomes written; then a wait until the next one is
+/// due or a commit may have brought new ones (looked at every second, at most a minute apart).
 async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
-    const BATCH: usize = 16;
-    const AT_ONCE: usize = 4;
+    const BATCH: usize = 32;
+    const AT_ONCE: usize = 16;
     let mut seen = None;
+    let mut lanes: HashMap<String, Lane> = HashMap::new();
     loop {
         let (plans, next, serves) = match t
             .ask(|reply| Job::Deliveries {
@@ -1954,19 +2010,54 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
             }
             continue;
         }
-        let busy = !plans.is_empty();
+        let mut sent = false;
         let mut set = tokio::task::JoinSet::new();
-        let mut plans = plans.into_iter();
+        let mut queue: std::collections::VecDeque<deliver::Plan> = plans.into_iter().collect();
         loop {
+            // start what the connections allow; the others wait for a free place
+            let mut held = std::collections::VecDeque::new();
             while set.len() < AT_ONCE {
-                let Some(p) = plans.next() else { break };
+                let Some(p) = queue.pop_front() else { break };
+                let now = Instant::now();
+                let lane = lanes.entry(p.connection.clone()).or_default();
+                if let Some(until) = lane.paused(now) {
+                    // paused: it waits, without an attempt
+                    let at = chrono::Utc::now().naive_utc()
+                        + chrono::Duration::from_std(until - now).unwrap_or_default();
+                    let id = p.id;
+                    let _ = t.ask(|reply| Job::Defer { id, at, reply }).await;
+                    continue;
+                }
+                let room = if lane.probing {
+                    1
+                } else {
+                    p.limits.concurrency.max(1)
+                };
+                if lane.inflight >= room {
+                    held.push_back(p);
+                    continue;
+                }
+                // the next free slot of its rate
+                let start = match p.limits.rate {
+                    Some((n, per)) => {
+                        let gap = Duration::from_secs_f64(per as f64 / n.max(1) as f64);
+                        let slot = lane.next_slot.map_or(now, |s| s.max(now));
+                        lane.next_slot = Some(slot + gap);
+                        slot
+                    }
+                    None => now,
+                };
+                lane.inflight += 1;
+                sent = true;
                 let e = egress.clone();
                 set.spawn(async move {
+                    tokio::time::sleep_until(start.into()).await;
                     let (outcome, attempt, answer) =
                         deliver::run(&p, &e.client, e.public_only).await;
                     (p, outcome, attempt, answer)
                 });
             }
+            queue.extend(held);
             let Some(done) = set.join_next().await else {
                 break;
             };
@@ -1977,6 +2068,18 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
             | quadra_store::deliveries::Outcome::Failed { error } = &outcome
             {
                 eprintln!("{}: {} #{}: {error}", t.id, p.event, p.id);
+            }
+            if let Some(pause) = lanes
+                .entry(p.connection.clone())
+                .or_default()
+                .after(&attempt, &outcome, &p.limits)
+            {
+                eprintln!(
+                    "{}: connection {} paused for {} s: its events wait",
+                    t.id,
+                    p.connection,
+                    pause.as_secs()
+                );
             }
             match t
                 .ask(|reply| Job::Delivered {
@@ -1999,7 +2102,7 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                 None => return,
             }
         }
-        if busy {
+        if sent {
             if t.stopped() {
                 return;
             }

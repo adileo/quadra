@@ -30,6 +30,7 @@ fn receiver(answers: Vec<u16>) -> Receiver {
     let port = l.local_addr().unwrap().port();
     let got = Arc::new(Mutex::new(Vec::new()));
     let g = got.clone();
+    let t0 = Instant::now();
     std::thread::spawn(move || {
         let mut answers = answers.into_iter().peekable();
         let mut last = 200;
@@ -67,6 +68,7 @@ fn receiver(answers: Vec<u16>) -> Receiver {
             // the request line: `:method` and `:path`
             let mut first = head.lines().next().unwrap_or("").split_whitespace();
             headers.insert(":method".into(), first.next().unwrap_or("").to_string());
+            headers.insert(":at".into(), format!("{}", t0.elapsed().as_millis()));
             headers.insert(":path".into(), first.next().unwrap_or("").to_string());
             g.lock().unwrap().push((headers, body));
             let status = match answers.next() {
@@ -117,11 +119,16 @@ fn project(dir: &Path, port: u16) -> (Config, String) {
 }
 
 fn project_with(dir: &Path, port: u16, code: &str) -> (Config, String) {
+    project_full(dir, port, code, "")
+}
+
+/// The same, with more settings of the connection (`rate = "2/s"`).
+fn project_full(dir: &Path, port: u16, code: &str, settings: &str) -> (Config, String) {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
         dir.join("quadra.toml"),
-        format!("[project]\nname = \"d\"\n\n[vars]\nHOOK_SECRET = {{ secret = true }}\n\n[connections.hooks]\nkind = \"http\"\nurl = \"http://127.0.0.1:{port}\"\ninsecure = true\nsigning_secret = {{ var = \"HOOK_SECRET\" }}\ntimeout = \"3s\"\n"),
+        format!("[project]\nname = \"d\"\n\n[vars]\nHOOK_SECRET = {{ secret = true }}\n\n[connections.hooks]\nkind = \"http\"\nurl = \"http://127.0.0.1:{port}\"\ninsecure = true\nsigning_secret = {{ var = \"HOOK_SECRET\" }}\ntimeout = \"3s\"\n{settings}"),
     )
     .unwrap();
     std::fs::write(dir.join("main.qd"), code).unwrap();
@@ -1004,6 +1011,55 @@ fn ordered_by_sends_one_at_a_time_per_key_and_latest_by_only_the_newest() {
         states(&cfg, |s| s.last().map(String::as_str) == Some("delivered")),
         ["superseded", "superseded", "delivered"]
     );
+    assert_eq!(r.got.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_connection_keeps_to_its_rate_and_pauses_when_it_keeps_failing() {
+    // rate 2/s: four events, half a second apart at least
+    let r = receiver(vec![200]);
+    let dir = temp("rate");
+    let (cfg, token) = project_full(&dir, r.port, CODE, "rate = \"2/s\"\n");
+    let (h, rt, port) = serve(HostOptions::default(), cfg.clone());
+    for n in ["R1", "R2", "R3", "R4"] {
+        place_order(port, &token, n);
+    }
+    let start = Instant::now();
+    while r.got.lock().unwrap().len() < 4 && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let at: Vec<u64> = r
+        .got
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(h, _)| h[":at"].parse().unwrap())
+        .collect();
+    assert_eq!(at.len(), 4);
+    assert!(at[3] - at[0] >= 1400, "{at:?}");
+    drop((h, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // pause_after 1: the first failure pauses it; the other event waits, without an attempt
+    let r = receiver(vec![503]);
+    let dir = temp("pause");
+    let (cfg, token) = project_full(&dir, r.port, CODE, "pause_after = 1\nconcurrency = 1\n");
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "P1");
+    place_order(port, &token, "P2");
+    std::thread::sleep(Duration::from_secs(3));
+    let rows = Conn::open(&cfg.url)
+        .unwrap()
+        .query("SELECT CAST(\"attempts\" AS TEXT), \"next_at\" FROM \"_quadra_outbox\" ORDER BY \"id\"", &[])
+        .unwrap();
+    assert_eq!(rows[0][0].as_deref(), Some("1"), "{rows:?}");
+    assert_eq!(
+        rows[1][0].as_deref(),
+        Some("0"),
+        "the second waits: {rows:?}"
+    );
+    assert!(rows[1][1].is_some(), "until the pause ends: {rows:?}");
     assert_eq!(r.got.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

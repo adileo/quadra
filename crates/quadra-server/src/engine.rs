@@ -393,6 +393,12 @@ pub enum Job {
             >,
         >,
     },
+    /// event `id` not tried before `at` (its connection is paused), without an attempt
+    Defer {
+        id: u64,
+        at: chrono::NaiveDateTime,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// what came of the delivery of event `id`, written through the sequencer
     Delivered {
         id: u64,
@@ -1388,6 +1394,11 @@ impl Engine {
                 }
                 Job::Deliveries { limit, reply } => {
                     let _ = reply.send(self.deliveries(limit));
+                }
+                Job::Defer { id, at, reply } => {
+                    let at = at.format("%Y-%m-%dT%H:%M:%S").to_string();
+                    let _ =
+                        reply.send(self.side(move |c| quadra_store::deliveries::defer(c, id, &at)));
                 }
                 Job::Delivered {
                     id,

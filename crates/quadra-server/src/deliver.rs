@@ -45,6 +45,8 @@ pub struct Plan {
     pub fields: J,
     /// how long and how often it is tried (its outbound's `retry` and `backoff`)
     pub retry: Retry,
+    /// what its connection's other side accepts (`rate`, `concurrency`, `pause_after`)
+    pub limits: quadra_sema::manifest::Limits,
     pub send: Send,
 }
 
@@ -284,6 +286,10 @@ pub fn plan(
         created_at: due.created_at.clone(),
         fields: due.fields.clone(),
         retry: Retry::default(),
+        limits: manifest
+            .connection(connection)
+            .map(|c| c.limits)
+            .unwrap_or_default(),
         send,
     };
     let value = |name: &str| -> Result<String, String> {
@@ -1020,6 +1026,7 @@ mod tests {
             created_at: "2020-01-01T00:00:00".into(),
             fields: J::Null,
             retry: Retry::default(),
+            limits: Default::default(),
             send: Send::Broken("the variable TOKEN is not set where the app runs".into()),
         };
         let client = http_client(false);
