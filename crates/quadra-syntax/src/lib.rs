@@ -50,7 +50,12 @@ impl Parse {
                     }
                     rowan::NodeOrToken::Token(t) => {
                         if !t.kind().is_trivia() {
-                            out.push_str(&format!("{indent}{:?}@{:?} {:?}\n", t.kind(), t.text_range(), t.text()))
+                            out.push_str(&format!(
+                                "{indent}{:?}@{:?} {:?}\n",
+                                t.kind(),
+                                t.text_range(),
+                                t.text()
+                            ))
                         }
                     }
                 }

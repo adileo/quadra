@@ -25,7 +25,12 @@ use std::path::Path;
 
 /// The file of an app or a view of a file: `interfaces/sales/cockpit.qdi`.
 pub fn file_label(v: &ViewRow) -> Option<String> {
-    (v.origin.as_deref() == Some("file")).then(|| format!("interfaces/{}.qdi", store::file_of(v.path.as_deref().unwrap_or(""))))
+    (v.origin.as_deref() == Some("file")).then(|| {
+        format!(
+            "interfaces/{}.qdi",
+            store::file_of(v.path.as_deref().unwrap_or(""))
+        )
+    })
 }
 
 /// The items of a project's interface files, those that convert (the others are reported
@@ -35,7 +40,13 @@ fn file_items(root: &Path, project: &Project) -> (Vec<FileItem>, Vec<String>) {
     let mut skipped = Vec::new();
     let base = root.join(quadra_sema::INTERFACES_DIR);
     for f in project.interface_files() {
-        let rel = f.path.strip_prefix(&base).unwrap_or(&f.path).with_extension("").to_string_lossy().replace('\\', "/");
+        let rel = f
+            .path
+            .strip_prefix(&base)
+            .unwrap_or(&f.path)
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
         let defs = match quadra_qdi::to_json(&f.text) {
             Ok(d) => d,
             Err(_) => {
@@ -43,11 +54,24 @@ fn file_items(root: &Path, project: &Project) -> (Vec<FileItem>, Vec<String>) {
                 continue;
             }
         };
-        let dirs: Vec<String> = rel.split('/').collect::<Vec<_>>().split_last().map(|(_, d)| d.iter().map(|s| s.to_string()).collect()).unwrap_or_default();
+        let dirs: Vec<String> = rel
+            .split('/')
+            .collect::<Vec<_>>()
+            .split_last()
+            .map(|(_, d)| d.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
         for d in defs {
             let app = d["kind"] == json!("app");
-            let path = if app { rel.clone() } else { format!("{rel}#{}", d["name"].as_str().unwrap_or("")) };
-            items.push(FileItem { path, dirs: if app { dirs.clone() } else { Vec::new() }, def: d });
+            let path = if app {
+                rel.clone()
+            } else {
+                format!("{rel}#{}", d["name"].as_str().unwrap_or(""))
+            };
+            items.push(FileItem {
+                path,
+                dirs: if app { dirs.clone() } else { Vec::new() },
+                def: d,
+            });
         }
     }
     (items, skipped)
@@ -63,13 +87,19 @@ impl Engine {
         let (items, skipped) = file_items(&self.root, project);
         if !skipped.is_empty() {
             // a file that does not convert keeps what was installed of it
-            return Err(format!("interface files with errors: {}", skipped.join(", ")));
+            return Err(format!(
+                "interface files with errors: {}",
+                skipped.join(", ")
+            ));
         }
         let key = self.model_key();
         let done = self.side(move |c| store::install_files(c, &items, &at_now(), Some(&key)))?;
         if done.created + done.changed + done.removed > 0 {
             self.installed_any = true;
-            eprintln!("interfaces: {} created, {} changed, {} removed", done.created, done.changed, done.removed);
+            eprintln!(
+                "interfaces: {} created, {} changed, {} removed",
+                done.created, done.changed, done.removed
+            );
         }
         Ok(())
     }
@@ -85,12 +115,21 @@ impl Engine {
 
     /// In production, may these shares replace those of a file's app or view? Only the
     /// shares with users and teams change (roles and everyone are the file's).
-    pub(super) fn file_shares_ok(&self, v: &ViewRow, old: &[Share], new: &[Share]) -> Result<(), Fail> {
+    pub(super) fn file_shares_ok(
+        &self,
+        v: &ViewRow,
+        old: &[Share],
+        new: &[Share],
+    ) -> Result<(), Fail> {
         if v.origin.as_deref() != Some("file") || self.dev_mode() {
             return Ok(());
         }
         let file = |s: &[Share]| -> Vec<Share> {
-            let mut x: Vec<Share> = s.iter().filter(|s| !(s.target.starts_with("user:") || s.target.starts_with("team:"))).cloned().collect();
+            let mut x: Vec<Share> = s
+                .iter()
+                .filter(|s| !(s.target.starts_with("user:") || s.target.starts_with("team:")))
+                .cloned()
+                .collect();
             x.sort();
             x
         };
@@ -109,13 +148,20 @@ impl Engine {
         let mut rows = rows;
         // the app first, then the views in the order they were installed
         rows.sort_by_key(|r| (r.kind != "app", r.id));
-        let defs: Vec<J> = rows.iter().map(|r| definition(r, shares.get(&r.id).map(Vec::as_slice).unwrap_or(&[]))).collect();
-        let path = self.root.join(quadra_sema::INTERFACES_DIR).join(format!("{file}.qdi"));
+        let defs: Vec<J> = rows
+            .iter()
+            .map(|r| definition(r, shares.get(&r.id).map(Vec::as_slice).unwrap_or(&[])))
+            .collect();
+        let path = self
+            .root
+            .join(quadra_sema::INTERFACES_DIR)
+            .join(format!("{file}.qdi"));
         if defs.is_empty() {
             let _ = std::fs::remove_file(&path);
             return Ok(());
         }
-        let (text, _) = quadra_qdi::from_json(&defs).map_err(|e| (500, format!("{file}.qdi: {e}")))?;
+        let (text, _) =
+            quadra_qdi::from_json(&defs).map_err(|e| (500, format!("{file}.qdi: {e}")))?;
         write_atomically(&path, &text).map_err(|e| (500, format!("{}: {e}", path.display())))?;
         self.seen_interfaces = None;
         Ok(())
@@ -123,14 +169,21 @@ impl Engine {
 
     /// `quadra dev`: an app of a file moved to another folder: its file moves to the folder's
     /// directory (made as needed).
-    pub(super) fn move_file_app(&mut self, _id: u64, path: &str, parent: Option<u64>) -> Result<(), Fail> {
+    pub(super) fn move_file_app(
+        &mut self,
+        _id: u64,
+        path: &str,
+        parent: Option<u64>,
+    ) -> Result<(), Fail> {
         let file = store::file_of(path).to_string();
         let base = file.rsplit('/').next().unwrap_or(&file).to_string();
         let mut chain: Vec<String> = Vec::new();
         let mut cur = parent;
         let mut guard = 0;
         while let Some(id) = cur {
-            let f = store::view(&mut self.conn, id).map_err(|e| (500, e))?.ok_or((404, format!("folder {id} not found")))?;
+            let f = store::view(&mut self.conn, id)
+                .map_err(|e| (500, e))?
+                .ok_or((404, format!("folder {id} not found")))?;
             chain.push(f.name.clone());
             cur = f.parent;
             guard += 1;
@@ -146,10 +199,14 @@ impl Engine {
         }
         let dir = self.root.join(quadra_sema::INTERFACES_DIR);
         if dir.join(format!("{to}.qdi")).exists() {
-            return Err((409, format!("interfaces/{to}.qdi exists already: rename one of the apps first")));
+            return Err((
+                409,
+                format!("interfaces/{to}.qdi exists already: rename one of the apps first"),
+            ));
         }
         let (from, into) = (file.clone(), to.clone());
-        self.side(move |c| store::move_file(c, &from, &into)).map_err(|e| (500, e))?;
+        self.side(move |c| store::move_file(c, &from, &into))
+            .map_err(|e| (500, e))?;
         self.write_back(&to)?;
         let _ = std::fs::remove_file(dir.join(format!("{file}.qdi")));
         Ok(())
@@ -160,26 +217,41 @@ impl Engine {
     pub(super) fn view_qdi(&mut self, who: &Who, id: u64) -> Result<Reply, Fail> {
         let (v, shares, _) = self.visible(who, id)?;
         if v.kind == "folder" {
-            return Err(bad("a folder is a directory of interfaces/: export its apps"));
+            return Err(bad(
+                "a folder is a directory of interfaces/: export its apps",
+            ));
         }
         let def = definition(&v, &shares);
         let (text, warnings) = quadra_qdi::from_json(&[def]).map_err(|e| (500, e))?;
         let name = file_name(&v.name);
-        Ok(reply(200, json!({ "file": format!("{name}.qdi"), "text": text, "warnings": warnings, "defined_in": file_label(&v) })))
+        Ok(reply(
+            200,
+            json!({ "file": format!("{name}.qdi"), "text": text, "warnings": warnings, "defined_in": file_label(&v) }),
+        ))
     }
 
     // ---- custom forms -------------------------------------------------------------------------
 
     /// `POST /v1/apps/{id}/forms/{component}/submit`: `{values: {field: value}, params: [...],
     /// idempotency_key}`. The statements of the form of the stored app run as the caller.
-    pub(super) fn form_submit(&mut self, p: &Principal, who: &Who, app_id: u64, comp_id: &str, body: &J) -> Result<Reply, Fail> {
+    pub(super) fn form_submit(
+        &mut self,
+        p: &Principal,
+        who: &Who,
+        app_id: u64,
+        comp_id: &str,
+        body: &J,
+    ) -> Result<Reply, Fail> {
         let (app, _, _) = self.visible(who, app_id)?;
         if app.kind != "app" {
             return Err((404, format!("app {app_id} not found")));
         }
         if let Some(v) = body["version"].as_u64() {
             if v != app.version {
-                return Ok(reply(409, json!({ "error": "the app changed since you opened it: open it again", "version": app.version })));
+                return Ok(reply(
+                    409,
+                    json!({ "error": "the app changed since you opened it: open it again", "version": app.version }),
+                ));
             }
         }
         let comp = app.config["pages"]
@@ -191,11 +263,20 @@ impl Engine {
             .ok_or((404, format!("no form `{comp_id}` in app {app_id}")))?;
         let cfg = &comp["config"];
         if cfg["mode"] != json!("custom") {
-            return Err(bad(format!("form `{comp_id}` is not a custom form: it creates or edits records with `/v1/tx`")));
+            return Err(bad(format!(
+                "form `{comp_id}` is not a custom form: it creates or edits records with `/v1/tx`"
+            )));
         }
         let key = body["idempotency_key"].as_str().unwrap_or("").to_string();
-        if key.is_empty() || key.len() > 100 || !key.chars().all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c)) {
-            return Err(bad("`idempotency_key`: 1 to 100 characters among letters, digits, - _ : ."));
+        if key.is_empty()
+            || key.len() > 100
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c))
+        {
+            return Err(bad(
+                "`idempotency_key`: 1 to 100 characters among letters, digits, - _ : .",
+            ));
         }
         let fields: Vec<J> = cfg["fields"].as_array().cloned().unwrap_or_default();
         let code = cfg["submit"].as_str().unwrap_or("").to_string();
@@ -217,9 +298,15 @@ impl Engine {
         }
         let mut names = Vec::new();
         for f in &fields {
-            let (n, t) = (f["name"].as_str().unwrap_or(""), f["type"].as_str().unwrap_or(""));
+            let (n, t) = (
+                f["name"].as_str().unwrap_or(""),
+                f["type"].as_str().unwrap_or(""),
+            );
             if !quadra_qdi::text::is_ident(n) || t.is_empty() || t.contains('\n') {
-                return Err((500, format!("form `{comp_id}`: field `{n}` has no valid name or type")));
+                return Err((
+                    500,
+                    format!("form `{comp_id}`: field `{n}` has no valid name or type"),
+                ));
             }
             names.push(n.to_string());
             src.push_str(&format!("    {n}: {t},\n"));
@@ -228,25 +315,46 @@ impl Engine {
         // `where` of a field: `> 0`, `0..10`
         let mut wheres: Vec<(String, String)> = Vec::new();
         for f in &fields {
-            let (n, w) = (f["name"].as_str().unwrap_or(""), f["where"].as_str().unwrap_or("").trim());
+            let (n, w) = (
+                f["name"].as_str().unwrap_or(""),
+                f["where"].as_str().unwrap_or("").trim(),
+            );
             if w.is_empty() {
                 continue;
             }
-            let op = ["==", "!=", "<=", ">=", "<", ">"].iter().any(|o| w.starts_with(o));
-            let cond = if op { format!("{n} {w}") } else if w.contains("..") { format!("{n} in {w}") } else { continue };
+            let op = ["==", "!=", "<=", ">=", "<", ">"]
+                .iter()
+                .any(|o| w.starts_with(o));
+            let cond = if op {
+                format!("{n} {w}")
+            } else if w.contains("..") {
+                format!("{n} in {w}")
+            } else {
+                continue;
+            };
             let k = wheres.len();
             let opt = f["type"].as_str().unwrap_or("").ends_with('?');
-            let cond = if opt { format!("{n} == none or {}", cond) } else { cond };
-            src.push_str(&format!("    require {}, \"__where_{k}\"\n", super::params::rewrite_params(&expand_lets(&cond, &lets), &params.list).map_err(|e| (500, e))?));
+            let cond = if opt {
+                format!("{n} == none or {}", cond)
+            } else {
+                cond
+            };
+            src.push_str(&format!(
+                "    require {}, \"__where_{k}\"\n",
+                super::params::rewrite_params(&expand_lets(&cond, &lets), &params.list)
+                    .map_err(|e| (500, e))?
+            ));
             wheres.push((n.to_string(), w.to_string()));
         }
         let message = cfg["message"].as_str().filter(|m| !m.trim().is_empty());
         if let Some(m) = message {
-            let m = super::params::rewrite_params(&expand_lets(m, &lets), &params.list).map_err(|e| (500, e))?;
+            let m = super::params::rewrite_params(&expand_lets(m, &lets), &params.list)
+                .map_err(|e| (500, e))?;
             src.push_str(&format!("    let __message = {m}\n"));
         }
         for line in code.lines() {
-            let l = super::params::rewrite_params(&expand_lets(line, &lets), &params.list).map_err(|e| (500, e))?;
+            let l = super::params::rewrite_params(&expand_lets(line, &lets), &params.list)
+                .map_err(|e| (500, e))?;
             src.push_str(&format!("    {l}\n"));
         }
         if code.trim().is_empty() {
@@ -254,19 +362,33 @@ impl Engine {
         }
         let (over, errors) = self.form_check(&src)?;
         let Some(over) = over.filter(|_| errors.is_empty()) else {
-            return Ok(reply(422, json!({ "error": format!("the form does not check: {}", errors.join("; ")), "diagnostics": errors })));
+            return Ok(reply(
+                422,
+                json!({ "error": format!("the form does not check: {}", errors.join("; ")), "diagnostics": errors }),
+            ));
         };
         let omodel = over.model.as_ref().unwrap();
-        let f = omodel.function("__form").ok_or((500, "the form does not check".to_string()))?.clone();
+        let f = omodel
+            .function("__form")
+            .ok_or((500, "the form does not check".to_string()))?
+            .clone();
         // the values of the fields, as their types read them
         let hash = auth::sha256_hex(&json!({ "app": app_id, "form": comp_id, "values": body["values"], "params": body["params"] }).to_string());
-        if let Some((h, resp, tx)) = auth::idempotent(&mut self.conn, who.id, &key).map_err(|e| (500, e))? {
+        if let Some((h, resp, tx)) =
+            auth::idempotent(&mut self.conn, who.id, &key).map_err(|e| (500, e))?
+        {
             if h != hash {
-                return Ok(reply(409, json!({ "error": "this idempotency key was already used for another submit" })));
+                return Ok(reply(
+                    409,
+                    json!({ "error": "this idempotency key was already used for another submit" }),
+                ));
             }
             if let Some(s) = &self.sequencer {
                 if s.durable().map_or(true, |d| d < tx) {
-                    return Ok(reply(503, json!({ "error": "the first submit with this key is not kept yet: send it again in a moment" })));
+                    return Ok(reply(
+                        503,
+                        json!({ "error": "the first submit with this key is not kept yet: send it again in a moment" }),
+                    ));
                 }
             }
             let mut r: J = serde_json::from_str(&resp).unwrap_or(json!({}));
@@ -282,7 +404,11 @@ impl Engine {
         }
         let mut field_errors = serde_json::Map::new();
         for (k, n) in names.iter().enumerate() {
-            let ty = f.params.iter().find(|x| &x.name == n).and_then(|x| x.ty.clone());
+            let ty = f
+                .params
+                .iter()
+                .find(|x| &x.name == n)
+                .and_then(|x| x.ty.clone());
             let raw = body["values"].get(n).cloned().unwrap_or(J::Null);
             let optional = fields[k]["type"].as_str().unwrap_or("").ends_with('?');
             let v = if raw.is_null() || raw == json!("") {
@@ -299,14 +425,18 @@ impl Engine {
                             V::None
                         }
                     },
-                    None => quadra_api::json::decode(&mut i, omodel, None, &raw, &|_| None).unwrap_or(V::None),
+                    None => quadra_api::json::decode(&mut i, omodel, None, &raw, &|_| None)
+                        .unwrap_or(V::None),
                 }
             };
             ctx.bind(n, v);
         }
         if !field_errors.is_empty() {
             let first = field_errors.keys().next().cloned().unwrap_or_default();
-            return Ok(reply(422, json!({ "error": format!("{first}: {}", field_errors[&first].as_str().unwrap_or("")), "field": first, "fields": field_errors })));
+            return Ok(reply(
+                422,
+                json!({ "error": format!("{first}: {}", field_errors[&first].as_str().unwrap_or("")), "field": first, "fields": field_errors }),
+            ));
         }
         let conn = Pooled::take(&self.pool, &self.url).map_err(|e| (500, e))?;
         let db = Database::with(conn, self.schema.clone());
@@ -347,20 +477,40 @@ impl Engine {
         match r {
             Ok(()) => {
                 let res = record_json(&mut i, &v);
-                Ok(reply(200, json!({ "tx": i.store.tx, "result": res, "message": msg })))
+                Ok(reply(
+                    200,
+                    json!({ "tx": i.store.tx, "result": res, "message": msg }),
+                ))
             }
             Err(Flow::Conflict(c)) => {
                 let list: Vec<J> = c.iter().map(|x| json!({ "tx": x.tx, "at": x.at, "user": x.user, "cause": x.cause, "what": x.what })).collect();
-                Ok(reply(409, json!({ "error": "changed by others meanwhile: submit again", "conflicts": list })))
+                Ok(reply(
+                    409,
+                    json!({ "error": "changed by others meanwhile: submit again", "conflicts": list }),
+                ))
             }
             Err(Flow::Fail(m)) => {
                 // a `where` of a field: at the field
-                if let Some(k) = m.strip_prefix("__where_").and_then(|k| k.trim().parse::<usize>().ok()) {
+                if let Some(k) = m
+                    .strip_prefix("__where_")
+                    .and_then(|k| k.trim().parse::<usize>().ok())
+                {
                     let (n, w) = wheres.get(k).cloned().unwrap_or_default();
-                    return Ok(reply(422, json!({ "error": format!("{n}: must be {w}"), "field": n })));
+                    return Ok(reply(
+                        422,
+                        json!({ "error": format!("{n}: must be {w}"), "field": n }),
+                    ));
                 }
-                let field = names.iter().find(|n| m.contains(&format!("`{n}`")) || m.starts_with(&format!("{n}:"))).cloned();
-                let status = if m.starts_with("permission denied") || m.contains(": permission denied") { 403 } else { 422 };
+                let field = names
+                    .iter()
+                    .find(|n| m.contains(&format!("`{n}`")) || m.starts_with(&format!("{n}:")))
+                    .cloned();
+                let status =
+                    if m.starts_with("permission denied") || m.contains(": permission denied") {
+                        403
+                    } else {
+                        422
+                    };
                 Ok(reply(status, json!({ "error": m, "field": field })))
             }
             Err(other) => Ok(reply(422, json!({ "error": describe(other) }))),
@@ -368,7 +518,10 @@ impl Engine {
     }
 
     /// The form's function checked with the project (cached by its source, as workbooks are).
-    fn form_check(&mut self, src: &str) -> Result<(Option<Rc<quadra_analysis::Checked>>, Vec<String>), Fail> {
+    fn form_check(
+        &mut self,
+        src: &str,
+    ) -> Result<(Option<Rc<quadra_analysis::Checked>>, Vec<String>), Fail> {
         let key = format!("form\u{1}{src}");
         if let Some(c) = self.form_checks.get(&key) {
             return Ok(c.clone());
@@ -383,7 +536,13 @@ impl Engine {
             .diagnostics
             .iter()
             .filter(|d| d.severity == quadra_sema::Severity::Error)
-            .map(|d| if Some(d.file) == file { d.message.replace("__p_", "@") } else { format!("the code: {}", d.message) })
+            .map(|d| {
+                if Some(d.file) == file {
+                    d.message.replace("__p_", "@")
+                } else {
+                    format!("the code: {}", d.message)
+                }
+            })
             .collect();
         let out = (c.model.is_some().then_some(c), errors);
         if self.form_checks.len() > 32 {
@@ -398,7 +557,9 @@ impl Engine {
 fn record_json(i: &mut Interp, v: &V) -> J {
     match v {
         V::None => J::Null,
-        V::Ref { ent, id, .. } => json!({ "entity": ent.to_string(), "id": id, "display": i.display(v) }),
+        V::Ref { ent, id, .. } => {
+            json!({ "entity": ent.to_string(), "id": id, "display": i.display(v) })
+        }
         other => json!({ "value": i.display(other) }),
     }
 }
@@ -463,7 +624,17 @@ pub fn expand_lets(src: &str, lets: &[(String, String)]) -> String {
     }
     use quadra_syntax::SyntaxKind as K;
     let (toks, _) = quadra_syntax::lexer::tokenize(src);
-    let sig: Vec<usize> = toks.iter().enumerate().filter(|(_, t)| !matches!(t.kind, K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT)).map(|(k, _)| k).collect();
+    let sig: Vec<usize> = toks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            !matches!(
+                t.kind,
+                K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT
+            )
+        })
+        .map(|(k, _)| k)
+        .collect();
     let mut out = String::with_capacity(src.len() + 32);
     let mut last = 0usize;
     for (n, &k) in sig.iter().enumerate() {
@@ -472,10 +643,14 @@ pub fn expand_lets(src: &str, lets: &[(String, String)]) -> String {
             continue;
         }
         let name = &src[t.range];
-        let Some((_, e)) = lets.iter().find(|(l, _)| l == name) else { continue };
+        let Some((_, e)) = lets.iter().find(|(l, _)| l == name) else {
+            continue;
+        };
         let prev = n.checked_sub(1).map(|p| toks[sig[p]].kind);
         let next = sig.get(n + 1).map(|&x| toks[x].kind);
-        if matches!(prev, Some(K::DOT | K::QUESTION_DOT | K::AT)) || matches!(next, Some(K::EQ | K::FAT_ARROW)) {
+        if matches!(prev, Some(K::DOT | K::QUESTION_DOT | K::AT))
+            || matches!(next, Some(K::EQ | K::FAT_ARROW))
+        {
             continue;
         }
         let (a, b) = (usize::from(t.range.start()), usize::from(t.range.end()));
@@ -495,9 +670,14 @@ mod tests {
 
     #[test]
     fn lets() {
-        let l = lets_of(&json!({ "lets": [{ "name": "sold", "expr": "Order.where(o => o.state is Confirmed)" }, { "name": "n", "expr": "sold.count()" }] }));
+        let l = lets_of(
+            &json!({ "lets": [{ "name": "sold", "expr": "Order.where(o => o.state is Confirmed)" }, { "name": "n", "expr": "sold.count()" }] }),
+        );
         assert_eq!(l[1].1, "(Order.where(o => o.state is Confirmed)).count()");
-        assert_eq!(expand_lets("n + o.n + f(n=1) + \"n\"", &l), "((Order.where(o => o.state is Confirmed)).count()) + o.n + f(n=1) + \"n\"");
+        assert_eq!(
+            expand_lets("n + o.n + f(n=1) + \"n\"", &l),
+            "((Order.where(o => o.state is Confirmed)).count()) + o.n + f(n=1) + \"n\""
+        );
     }
 
     #[test]

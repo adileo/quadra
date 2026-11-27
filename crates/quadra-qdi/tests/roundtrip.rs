@@ -16,16 +16,23 @@ fn data(name: &str) -> String {
 }
 
 fn cockpit_json() -> Vec<J> {
-    let path = format!("{}/../../examples/stress/apps/sales-cockpit.json", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../examples/stress/apps/sales-cockpit.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let doc: J = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     doc["views"].as_array().unwrap().clone()
 }
 
 fn diags(src: &str) -> Vec<String> {
-    parse(src).1.iter().map(|d| {
-        let (l, c) = line_col(src, d.span.start);
-        format!("{l}:{c}: {}", d.message)
-    }).collect()
+    parse(src)
+        .1
+        .iter()
+        .map(|d| {
+            let (l, c) = line_col(src, d.span.start);
+            format!("{l}:{c}: {}", d.message)
+        })
+        .collect()
 }
 
 /// Where two JSON values differ (for the assertion messages).
@@ -87,10 +94,19 @@ fn drop_empty(o: &mut Map<String, J>, keys: &[&str]) {
 
 fn normalize_view(v: &mut Map<String, J>) {
     drop_nulls(v);
-    drop_empty(v, &["widths", "where", "order", "columns", "colors", "search", "drill"]);
+    drop_empty(
+        v,
+        &[
+            "widths", "where", "order", "columns", "colors", "search", "drill",
+        ],
+    );
     drop_if(v, "grouped", json!(false));
     drop_if(v, "board", json!(false));
-    if let Some(keys) = v.get_mut("group").and_then(|g| g.get_mut("keys")).and_then(J::as_array_mut) {
+    if let Some(keys) = v
+        .get_mut("group")
+        .and_then(|g| g.get_mut("keys"))
+        .and_then(J::as_array_mut)
+    {
         for k in keys {
             if let Some(m) = k.as_object_mut() {
                 drop_nulls(m);
@@ -103,11 +119,32 @@ fn normalize(defs: &[J]) -> Vec<J> {
     defs.iter()
         .map(|d| {
             let mut out = Map::new();
-            for k in ["kind", "entity", "type", "name", "description", "config", "shares"] {
-                out.insert(k.to_string(), d.get(k).cloned().unwrap_or(if k == "description" { json!("") } else { J::Null }));
+            for k in [
+                "kind",
+                "entity",
+                "type",
+                "name",
+                "description",
+                "config",
+                "shares",
+            ] {
+                out.insert(
+                    k.to_string(),
+                    d.get(k).cloned().unwrap_or(if k == "description" {
+                        json!("")
+                    } else {
+                        J::Null
+                    }),
+                );
             }
             // shares with users and teams stay data
-            let shares: Vec<J> = d["shares"].as_array().into_iter().flatten().filter(|s| matches!(s["type"].as_str(), Some("role" | "everyone"))).cloned().collect();
+            let shares: Vec<J> = d["shares"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| matches!(s["type"].as_str(), Some("role" | "everyone")))
+                .cloned()
+                .collect();
             out.insert("shares".into(), J::Array(shares));
             let mut cfg = out["config"].clone();
             if d["kind"] == "view" {
@@ -131,7 +168,9 @@ fn normalize(defs: &[J]) -> Vec<J> {
                         let m = comp.as_object_mut().unwrap();
                         m.entry("bindings").or_insert(json!({}));
                         let ty = m["type"].as_str().unwrap().to_string();
-                        let Some(k) = m.get_mut("config").and_then(J::as_object_mut) else { continue };
+                        let Some(k) = m.get_mut("config").and_then(J::as_object_mut) else {
+                            continue;
+                        };
                         drop_nulls(k);
                         match ty.as_str() {
                             "button" => {
@@ -152,7 +191,12 @@ fn normalize(defs: &[J]) -> Vec<J> {
                                 }
                             }
                             "sheet" => {
-                                for s in k.get_mut("sheets").and_then(J::as_array_mut).into_iter().flatten() {
+                                for s in k
+                                    .get_mut("sheets")
+                                    .and_then(J::as_array_mut)
+                                    .into_iter()
+                                    .flatten()
+                                {
                                     if let Some(s) = s.as_object_mut() {
                                         s.entry("cells").or_insert(json!({}));
                                     }
@@ -161,7 +205,9 @@ fn normalize(defs: &[J]) -> Vec<J> {
                             "filter" => {
                                 // the first filter bar (in the grid's order) showing a filter defines it
                                 let mut names: Vec<String> = Vec::new();
-                                for f in k.get("filters").and_then(J::as_array).into_iter().flatten() {
+                                for f in
+                                    k.get("filters").and_then(J::as_array).into_iter().flatten()
+                                {
                                     names.push(f["name"].as_str().unwrap().into());
                                 }
                                 for n in k.get("show").and_then(J::as_array).into_iter().flatten() {
@@ -186,7 +232,9 @@ fn normalize(defs: &[J]) -> Vec<J> {
                             _ => {}
                         }
                         if let Some(b) = m.get_mut("bindings").and_then(J::as_object_mut) {
-                            if b.get("filters").is_some_and(|f| f.as_object().is_some_and(Map::is_empty)) {
+                            if b.get("filters")
+                                .is_some_and(|f| f.as_object().is_some_and(Map::is_empty))
+                            {
                                 b.remove("filters");
                             }
                         }
@@ -207,7 +255,10 @@ fn sales_cockpit() {
     let (text, warnings) = from_json(&json).unwrap();
     // the file in the repository is what the JSON prints as
     let golden = data("sales-cockpit.qdi");
-    assert_eq!(text, golden, "examples/stress/apps/sales-cockpit.json no longer prints as tests/data/sales-cockpit.qdi");
+    assert_eq!(
+        text, golden,
+        "examples/stress/apps/sales-cockpit.json no longer prints as tests/data/sales-cockpit.qdi"
+    );
     assert_eq!(warnings.len(), 1, "{warnings:?}"); // its owner
     assert!(diags(&golden).is_empty(), "{:?}", diags(&golden));
     // .qdi → JSON → .qdi: the same bytes
@@ -216,10 +267,15 @@ fn sales_cockpit() {
     // JSON → .qdi → JSON: the same JSON, normalized
     assert_same(&back, &normalize(&json));
     // the formulas and the layout as the server reads them
-    let comps = back[0]["config"]["pages"][0]["components"].as_array().unwrap();
+    let comps = back[0]["config"]["pages"][0]["components"]
+        .as_array()
+        .unwrap();
     assert_eq!(comps.len(), 13);
     let b = comps.iter().find(|c| c["id"] == "b_confirm").unwrap();
-    assert_eq!(b["config"]["target"], json!({ "from": "param", "name": "order" }));
+    assert_eq!(
+        b["config"]["target"],
+        json!({ "from": "param", "name": "order" })
+    );
     assert_eq!(b["layout"], json!({ "x": 16, "y": 14, "w": 8, "h": 2 }));
 }
 
@@ -245,39 +301,95 @@ fn everything_is_canonical() {
 fn everything_means_what_it_says() {
     let json = to_json(&data("everything.qdi")).unwrap();
     let app = &json[0];
-    assert_eq!(app["shares"], json!([{ "type": "role", "name": "Admin", "edit": true }, { "type": "role", "name": "Sales", "edit": false }, { "type": "everyone", "edit": false }]));
+    assert_eq!(
+        app["shares"],
+        json!([{ "type": "role", "name": "Admin", "edit": true }, { "type": "role", "name": "Sales", "edit": false }, { "type": "everyone", "edit": false }])
+    );
     assert_eq!(app["config"]["theme"], "dark");
     assert_eq!(app["config"]["lets"][1]["expr"], "sold.group_by(o => o.date.start_of_month()).map(g => (month: g.key, revenue: g.items.sum(o => o.total)))");
-    let comps: Vec<&J> = app["config"]["pages"][0]["components"].as_array().unwrap().iter().collect();
-    let c = |id: &str| *comps.iter().find(|c| c["id"] == id).unwrap_or_else(|| panic!("no {id}"));
+    let comps: Vec<&J> = app["config"]["pages"][0]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .collect();
+    let c = |id: &str| {
+        *comps
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("no {id}"))
+    };
     // filters: defined by the first bar showing them, borrowed by the others
     assert_eq!(c("bar")["config"]["filters"].as_array().unwrap().len(), 4);
     assert_eq!(c("side")["config"]["show"], json!(["region"]));
-    assert_eq!(c("side")["config"]["filters"][1]["extra"], json!({ "a": 1, "b c": [1, 2.5, null] }));
+    assert_eq!(
+        c("side")["config"]["filters"][1]["extra"],
+        json!({ "a": 1, "b c": [1, 2.5, null] })
+    );
     // layout
-    assert_eq!(c("k3")["layout"], json!({ "x": 14, "y": 2, "w": 4, "h": 3 }));
-    assert_eq!(c("b4")["layout"], json!({ "x": 15, "y": 21, "w": 4, "h": 2 }));
-    assert_eq!(c("f1")["layout"], json!({ "x": 10, "y": 23, "w": 14, "h": 2 }));
-    assert_eq!(c("floating")["layout"], json!({ "x": 2, "y": 50, "w": 6, "h": 3 }));
-    assert_eq!(c("g1")["layout"], json!({ "x": 0, "y": 54, "w": 6, "h": 4 }));
+    assert_eq!(
+        c("k3")["layout"],
+        json!({ "x": 14, "y": 2, "w": 4, "h": 3 })
+    );
+    assert_eq!(
+        c("b4")["layout"],
+        json!({ "x": 15, "y": 21, "w": 4, "h": 2 })
+    );
+    assert_eq!(
+        c("f1")["layout"],
+        json!({ "x": 10, "y": 23, "w": 14, "h": 2 })
+    );
+    assert_eq!(
+        c("floating")["layout"],
+        json!({ "x": 2, "y": 50, "w": 6, "h": 3 })
+    );
+    assert_eq!(
+        c("g1")["layout"],
+        json!({ "x": 0, "y": 54, "w": 6, "h": 4 })
+    );
     // components in the grid's order
-    let ys: Vec<(u64, u64)> = comps.iter().map(|c| (c["layout"]["y"].as_u64().unwrap(), c["layout"]["x"].as_u64().unwrap())).collect();
+    let ys: Vec<(u64, u64)> = comps
+        .iter()
+        .map(|c| {
+            (
+                c["layout"]["y"].as_u64().unwrap(),
+                c["layout"]["x"].as_u64().unwrap(),
+            )
+        })
+        .collect();
     let mut sorted = ys.clone();
     sorted.sort();
     assert_eq!(ys, sorted);
     // sources, runs, sections, custom forms
-    assert_eq!(c("k2")["config"]["source"], json!({ "type": "cell", "component": "grid1", "cell": "Sheet1!B2" }));
+    assert_eq!(
+        c("k2")["config"]["source"],
+        json!({ "type": "cell", "component": "grid1", "cell": "Sheet1!B2" })
+    );
     assert_eq!(c("k4")["config"]["source"]["expr"], "Order.cnt((");
-    assert_eq!(c("c2")["config"]["source"], json!({ "type": "range", "component": "grid1", "range": "Sheet1!A1:C10" }));
-    assert_eq!(c("b2")["config"]["target"], json!({ "from": "param", "name": "region" }));
+    assert_eq!(
+        c("c2")["config"]["source"],
+        json!({ "type": "range", "component": "grid1", "range": "Sheet1!A1:C10" })
+    );
+    assert_eq!(
+        c("b2")["config"]["target"],
+        json!({ "from": "param", "name": "region" })
+    );
     assert_eq!(c("b2")["config"]["entity"], "Customer");
     assert_eq!(c("b4")["config"].get("target"), None);
-    assert_eq!(c("b5")["config"]["target"], json!({ "from": "cell", "component": "grid1", "cell": "A1" }));
-    assert_eq!(c("f1")["config"]["defaults"]["date"], json!({ "from": "value", "value": "2026-01-01" }));
+    assert_eq!(
+        c("b5")["config"]["target"],
+        json!({ "from": "cell", "component": "grid1", "cell": "A1" })
+    );
+    assert_eq!(
+        c("f1")["config"]["defaults"]["date"],
+        json!({ "from": "value", "value": "2026-01-01" })
+    );
     let m = &c("move_stock")["config"];
     assert_eq!(m["mode"], "custom");
     assert_eq!(m["submit"], "let t = Transfer(product=product, qty=qty, to=to, note=note)\nt.confirm()\n\n# the record the form publishes\nt");
-    assert_eq!(m["select"], json!({ "name": "transfer", "entity": "Transfer" }));
+    assert_eq!(
+        m["select"],
+        json!({ "name": "transfer", "entity": "Transfer" })
+    );
     assert_eq!(c("quick")["config"]["fields"][0]["where"], "1..100");
     // a sheet's formulas with references, kept as written
     let cells = &c("grid1")["config"]["sheets"][0]["cells"];
@@ -287,11 +399,17 @@ fn everything_means_what_it_says() {
     assert_eq!(cells["E1"], json!({ "s": {} }));
     assert_eq!(cells["A3"], json!({}));
     // a text block
-    assert_eq!(app["config"]["pages"][1]["components"][0]["config"]["text"], "## A story\nOver two lines, with \"quotes\" and \\ a backslash.");
+    assert_eq!(
+        app["config"]["pages"][1]["components"][0]["config"]["text"],
+        "## A story\nOver two lines, with \"quotes\" and \\ a backslash."
+    );
     // saved views
     assert_eq!(json[1]["config"]["comment"], "Orders waiting to be shipped");
     assert_eq!(json[2]["type"], "kanban");
-    assert_eq!(json[2]["config"]["kanban"], json!({ "field": "state", "cards": ["customer", "total"], "hidden": [], "collapsed": [], "wip": {}, "aggregate": "total" }));
+    assert_eq!(
+        json[2]["config"]["kanban"],
+        json!({ "field": "state", "cards": ["customer", "total"], "hidden": [], "collapsed": [], "wip": {}, "aggregate": "total" })
+    );
 }
 
 // ---- JSON as the UI writes it, and shapes without a syntax ---------------------------------------------------------
@@ -355,7 +473,12 @@ fn json_shapes_round_trip() {
     if std::env::var("QDI_SHOW").is_ok() {
         println!("{text}");
     }
-    assert!(warnings.iter().any(|w| w.contains("user")) && warnings.iter().any(|w| w.contains("team")) && warnings.iter().any(|w| w.contains("owner")), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("user"))
+            && warnings.iter().any(|w| w.contains("team"))
+            && warnings.iter().any(|w| w.contains("owner")),
+        "{warnings:?}"
+    );
     assert!(diags(&text).is_empty(), "{:?}\n{text}", diags(&text));
     let back = to_json(&text).unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_same(&back, &normalize(&json));
@@ -399,7 +522,15 @@ fn sizes_left_out_are_shared() {
     let src = "app \"A\":\n    page p:\n        row height 4:\n            kpi a:\n                source: 1\n            kpi b width 10:\n                source: 2\n            column:\n                kpi c:\n                    source: 3\n                kpi d height 1:\n                    source: 4\n                kpi e:\n                    source: 5\n        row:\n            kpi f height 3:\n                source: 6\n";
     assert!(diags(src).is_empty(), "{:?}", diags(src));
     let json = to_json(src).unwrap();
-    let l = |id: &str| json[0]["config"]["pages"][0]["components"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap()["layout"].clone();
+    let l = |id: &str| {
+        json[0]["config"]["pages"][0]["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()["layout"]
+            .clone()
+    };
     // 24 - 10 = 14 for two: 7 each
     assert_eq!(l("a"), json!({ "x": 0, "y": 0, "w": 7, "h": 4 }));
     assert_eq!(l("b"), json!({ "x": 7, "y": 0, "w": 10, "h": 4 }));
@@ -410,7 +541,10 @@ fn sizes_left_out_are_shared() {
     // a row as high as its highest child
     assert_eq!(l("f"), json!({ "x": 0, "y": 4, "w": 24, "h": 3 }));
     let canonical = format(src).unwrap();
-    assert!(canonical.contains("kpi a width 7:") && canonical.contains("row height 3:"), "{canonical}");
+    assert!(
+        canonical.contains("kpi a width 7:") && canonical.contains("row height 3:"),
+        "{canonical}"
+    );
     assert_eq!(format(&canonical).unwrap(), canonical);
 }
 
@@ -428,7 +562,9 @@ fn long_chains_are_cut_and_joined() {
     let src = "app \"A\":\n    let a = Order.where(o => o.state is Confirmed)\n               .group_by(o => o.customer)\n               .map(g => (g.key, g.items.count()))\n    let b = f(\n        1,\n        2\n    )\n";
     let (file, d) = parse(src);
     assert!(d.is_empty(), "{d:?}");
-    let quadra_qdi::ast::Item::App(app) = &file.items[0] else { panic!() };
+    let quadra_qdi::ast::Item::App(app) = &file.items[0] else {
+        panic!()
+    };
     assert_eq!(app.lets[0].expr.text, "Order.where(o => o.state is Confirmed).group_by(o => o.customer).map(g => (g.key, g.items.count()))");
     assert_eq!(app.lets[1].expr.text, "f(1, 2)");
     // each token of the text knows its place in the file
@@ -443,9 +579,21 @@ fn long_chains_are_cut_and_joined() {
 fn problems_are_reported_at_their_line() {
     let src = "app \"A\":\n    page p:\n        row height 2:\n            kpi a width 30:\n                source: Order.count(\n                colour: red\n            button b width 4:\n                run: @nobody.confirm()\n            chart c:\n                kind: radar\n        kpi floating:\n            source: 1\n";
     let d = diags(src);
-    assert!(d.iter().any(|m| m.starts_with("6:17: unknown option `colour`")), "{d:?}");
-    assert!(d.iter().any(|m| m.starts_with("10:23: `kind`: one of bar, line")), "{d:?}");
-    assert!(d.iter().any(|m| m.starts_with("11:9: a component of a page is in a `row`")), "{d:?}");
+    assert!(
+        d.iter()
+            .any(|m| m.starts_with("6:17: unknown option `colour`")),
+        "{d:?}"
+    );
+    assert!(
+        d.iter()
+            .any(|m| m.starts_with("10:23: `kind`: one of bar, line")),
+        "{d:?}"
+    );
+    assert!(
+        d.iter()
+            .any(|m| m.starts_with("11:9: a component of a page is in a `row`")),
+        "{d:?}"
+    );
     // the expression left open swallows nothing after its line
     let src2 = "app \"A\":\n    page p:\n        row height 2:\n            kpi a width 30:\n                source: Order.count() +\n            button b width 4:\n                run: @nobody.confirm()\n";
     let d2 = diags(src2);
@@ -454,12 +602,23 @@ fn problems_are_reported_at_their_line() {
     let src3 = "app \"A\":\n    page p:\n        row height 2:\n            kpi a width 30:\n                source: 1\n            button b width 4:\n                run: @nobody.confirm()\n";
     assert!(diags(src3).is_empty(), "{:?}", diags(src3));
     let e = to_json(src3).unwrap_err();
-    let msgs: Vec<String> = e.iter().map(|d| {
-        let (l, c) = line_col(src3, d.span.start);
-        format!("{l}:{c}: {}", d.message)
-    }).collect();
-    assert!(msgs.iter().any(|m| m.starts_with("3:9: the row is 24 columns wide: its parts take 34")), "{msgs:?}");
-    assert!(msgs.iter().any(|m| m.starts_with("7:22: `@nobody` is not a record selected in the app")), "{msgs:?}");
+    let msgs: Vec<String> = e
+        .iter()
+        .map(|d| {
+            let (l, c) = line_col(src3, d.span.start);
+            format!("{l}:{c}: {}", d.message)
+        })
+        .collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.starts_with("3:9: the row is 24 columns wide: its parts take 34")),
+        "{msgs:?}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.starts_with("7:22: `@nobody` is not a record selected in the app")),
+        "{msgs:?}"
+    );
 }
 
 #[test]
@@ -468,10 +627,23 @@ fn unknown_filters_and_duplicates() {
     let d = diags(src);
     assert!(d.iter().any(|m| m.starts_with("4:15: a widget")), "{d:?}");
     let src = "app \"A\":\n    filter s: multi Order.state\n    filter s: multi Order.state\n    page p:\n        row height 2:\n            kpi a width 4:\n                source: 1\n            kpi a width 4:\n                source: 2\n";
-    let e: Vec<String> = to_json(src).unwrap_err().into_iter().map(|d| d.message).collect();
-    assert!(e.iter().any(|m| m.contains("two filters named `s`")), "{e:?}");
-    assert!(e.iter().any(|m| m.contains("two components named `a`")), "{e:?}");
-    assert!(e.iter().any(|m| m.contains("the filter `s` is not shown")), "{e:?}");
+    let e: Vec<String> = to_json(src)
+        .unwrap_err()
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert!(
+        e.iter().any(|m| m.contains("two filters named `s`")),
+        "{e:?}"
+    );
+    assert!(
+        e.iter().any(|m| m.contains("two components named `a`")),
+        "{e:?}"
+    );
+    assert!(
+        e.iter().any(|m| m.contains("the filter `s` is not shown")),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -479,7 +651,10 @@ fn no_panics_on_broken_files() {
     // every prefix of the files, and the files with a line removed: problems, never a panic
     for name in ["everything.qdi", "sales-cockpit.qdi"] {
         let src = data(name);
-        for k in (0..src.len()).filter(|k| src.is_char_boundary(*k)).step_by(3) {
+        for k in (0..src.len())
+            .filter(|k| src.is_char_boundary(*k))
+            .step_by(3)
+        {
             let part = &src[..k];
             let (file, d) = parse(part);
             if d.is_empty() {
@@ -506,5 +681,12 @@ fn regenerate() {
         return;
     }
     let (text, _) = from_json(&cockpit_json()).unwrap();
-    std::fs::write(format!("{}/tests/data/sales-cockpit.qdi", env!("CARGO_MANIFEST_DIR")), text).unwrap();
+    std::fs::write(
+        format!(
+            "{}/tests/data/sales-cockpit.qdi",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+        text,
+    )
+    .unwrap();
 }

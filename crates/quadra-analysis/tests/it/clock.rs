@@ -7,8 +7,14 @@ use std::path::Path;
 
 fn of(src: &str) -> Schedule {
     let root = Path::new("/clock-test");
-    let checked = quadra_analysis::check(&Project::from_sources(root, vec![(root.join("main.qd"), src.to_string())]));
-    let m = checked.model.as_ref().unwrap_or_else(|| panic!("{:#?}", checked.diagnostics));
+    let checked = quadra_analysis::check(&Project::from_sources(
+        root,
+        vec![(root.join("main.qd"), src.to_string())],
+    ));
+    let m = checked
+        .model
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:#?}", checked.diagnostics));
     schedule(m)
 }
 
@@ -21,13 +27,43 @@ fn a_model_without_the_clock_never_needs_a_sweep() {
 
 #[test]
 fn a_comparison_of_now_with_a_stored_datetime_is_a_threshold() {
-    let s = of(&format!("{BASE}on Reminder becomes at <= now() and not sent as r:\n    Fired(reminder=r)\n"));
-    assert_eq!(s, Schedule::At(vec![Threshold { entity: "Reminder".into(), field: "at".into(), days: 0, secs: 0 }]));
+    let s = of(&format!(
+        "{BASE}on Reminder becomes at <= now() and not sent as r:\n    Fired(reminder=r)\n"
+    ));
+    assert_eq!(
+        s,
+        Schedule::At(vec![Threshold {
+            entity: "Reminder".into(),
+            field: "at".into(),
+            days: 0,
+            secs: 0
+        }])
+    );
     // either side, with an amount of time
-    let s = of(&format!("{BASE}on Reminder becomes now() > at + 2 hours as r:\n    Fired(reminder=r)\n"));
-    assert_eq!(s, Schedule::At(vec![Threshold { entity: "Reminder".into(), field: "at".into(), days: 0, secs: 7200 }]));
-    let s = of(&format!("{BASE}on Reminder becomes at - 3 days < now() as r:\n    Fired(reminder=r)\n"));
-    assert_eq!(s, Schedule::At(vec![Threshold { entity: "Reminder".into(), field: "at".into(), days: -3, secs: 0 }]));
+    let s = of(&format!(
+        "{BASE}on Reminder becomes now() > at + 2 hours as r:\n    Fired(reminder=r)\n"
+    ));
+    assert_eq!(
+        s,
+        Schedule::At(vec![Threshold {
+            entity: "Reminder".into(),
+            field: "at".into(),
+            days: 0,
+            secs: 7200
+        }])
+    );
+    let s = of(&format!(
+        "{BASE}on Reminder becomes at - 3 days < now() as r:\n    Fired(reminder=r)\n"
+    ));
+    assert_eq!(
+        s,
+        Schedule::At(vec![Threshold {
+            entity: "Reminder".into(),
+            field: "at".into(),
+            days: -3,
+            secs: 0
+        }])
+    );
 }
 
 #[test]

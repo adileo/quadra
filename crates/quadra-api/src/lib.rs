@@ -19,8 +19,13 @@ use std::rc::Rc;
 pub type Fail = (u16, String);
 
 /// Entities, fields, actions and flows the user of `i` may see, with what they may do.
-pub fn model_json(i: &mut Interp, model: &Model, report: &Report, module_of: &dyn Fn(&Span) -> String) -> Vec<J> {
-        let mut entities = Vec::new();
+pub fn model_json(
+    i: &mut Interp,
+    model: &Model,
+    report: &Report,
+    module_of: &dyn Fn(&Span) -> String,
+) -> Vec<J> {
+    let mut entities = Vec::new();
     for e in &model.entities {
         if e.temporary || e.kind != EntityKind::Entity || !i.can("read", &e.name, None, None) {
             continue;
@@ -33,42 +38,95 @@ pub fn model_json(i: &mut Interp, model: &Model, report: &Report, module_of: &dy
             let t = report.field_types.get(&(e.name.clone(), f.name.clone()));
             let mut k = t.map(kind).unwrap_or(json!({ "kind": "other" }));
             // a value record (an address): edited as a small form of its fields
-            if let Some(re) = k["entity"].as_str().and_then(|n| model.entity(n)).filter(|r| r.kind == EntityKind::Record) {
+            if let Some(re) = k["entity"]
+                .as_str()
+                .and_then(|n| model.entity(n))
+                .filter(|r| r.kind == EntityKind::Record)
+            {
                 let subs: Vec<J> = model
                     .all_fields(re)
                     .iter()
                     .filter(|sf| sf.formula.is_none())
                     .map(|sf| {
-                        let mut sk = report.field_types.get(&(re.name.clone(), sf.name.clone())).map(kind).unwrap_or(json!({ "kind": "other" }));
+                        let mut sk = report
+                            .field_types
+                            .get(&(re.name.clone(), sf.name.clone()))
+                            .map(kind)
+                            .unwrap_or(json!({ "kind": "other" }));
                         sk["name"] = json!(sf.name);
-                        sk["optional"] = json!(matches!(sf.ty, Some(Ty::Optional(_))) || sf.required_when.is_some() || sf.default.is_some());
+                        sk["optional"] = json!(
+                            matches!(sf.ty, Some(Ty::Optional(_)))
+                                || sf.required_when.is_some()
+                                || sf.default.is_some()
+                        );
                         sk
                     })
                     .collect();
                 k = json!({ "kind": "record", "entity": re.name, "fields": subs });
             }
-            let optional = matches!(f.ty, Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)));
+            let optional = matches!(
+                f.ty,
+                Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_))
+            );
             let o = k.as_object_mut().unwrap();
             o.insert("name".into(), json!(f.name));
             o.insert("formula".into(), json!(f.formula.is_some()));
-            o.insert("required".into(), json!(f.formula.is_none() && !optional && f.default.is_none() && f.required_when.is_none() && !e.is_ledger));
+            o.insert(
+                "required".into(),
+                json!(
+                    f.formula.is_none()
+                        && !optional
+                        && f.default.is_none()
+                        && f.required_when.is_none()
+                        && !e.is_ledger
+                ),
+            );
             o.insert("has_default".into(), json!(f.default.is_some()));
-            o.insert("optional".into(), json!(matches!(f.ty, Some(Ty::Optional(_))) || f.required_when.is_some()));
-            o.insert("editable".into(), json!(f.formula.is_none() && !e.is_ledger && i.can("edit", &e.name, Some(&f.name), None) && !e.flows.iter().any(|fl| fl.field == f.name)));
+            o.insert(
+                "optional".into(),
+                json!(matches!(f.ty, Some(Ty::Optional(_))) || f.required_when.is_some()),
+            );
+            o.insert(
+                "editable".into(),
+                json!(
+                    f.formula.is_none()
+                        && !e.is_ledger
+                        && i.can("edit", &e.name, Some(&f.name), None)
+                        && !e.flows.iter().any(|fl| fl.field == f.name)
+                ),
+            );
             o.insert("parent".into(), json!(f.parent));
             // a list of records: its own references (`members: [User]`), the lines that belong
             // to the record (`lines: [OrderLine]`, their `parent`), or the records that point
             // to it (`orders: [Order] via customer`)
             if let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty {
                 if let Some(target) = entity_named(inner).and_then(|n| model.entity(&n)) {
-                    let children = model.all_fields(target).iter().any(|tf| tf.parent && tf.ty.as_ref().and_then(entity_named).as_deref() == Some(e.name.as_str()));
-                    let link = if f.via.is_some() || f.through.is_some() { "via" } else if children { "children" } else { "refs" };
+                    let children = model.all_fields(target).iter().any(|tf| {
+                        tf.parent
+                            && tf.ty.as_ref().and_then(entity_named).as_deref()
+                                == Some(e.name.as_str())
+                    });
+                    let link = if f.via.is_some() || f.through.is_some() {
+                        "via"
+                    } else if children {
+                        "children"
+                    } else {
+                        "refs"
+                    };
                     o.insert("link".into(), json!(link));
                     // the field of the other side holding this record: its lines are a query
                     // `refs: {back: id}` (paged)
                     if f.through.is_none() && quadra_store_is_inverse(model, e, f) {
                         let back = f.via.clone().or_else(|| {
-                            target.fields.iter().find(|x| x.ty.as_ref().and_then(entity_named).map_or(false, |n| n == e.name || e.traits.contains(&n))).map(|x| x.name.clone())
+                            target
+                                .fields
+                                .iter()
+                                .find(|x| {
+                                    x.ty.as_ref()
+                                        .and_then(entity_named)
+                                        .map_or(false, |n| n == e.name || e.traits.contains(&n))
+                                })
+                                .map(|x| x.name.clone())
                         });
                         if let Some(b) = back {
                             o.insert("back".into(), json!(b));
@@ -96,7 +154,9 @@ pub fn model_json(i: &mut Interp, model: &Model, report: &Report, module_of: &dy
             .collect();
         for fl in &e.flows {
             for t in fl.transitions.iter().filter_map(|t| t.by.as_ref()) {
-                if !actions.iter().any(|a| a["name"] == json!(t)) && i.can("run", &e.name, Some(t), None) {
+                if !actions.iter().any(|a| a["name"] == json!(t))
+                    && i.can("run", &e.name, Some(t), None)
+                {
                     actions.push(json!({ "name": t, "params": [] }));
                 }
             }
@@ -134,7 +194,10 @@ fn action_params(a: &quadra_ir::Action) -> Vec<J> {
 
 /// The formulas a query adds to its entity: the `where` filter and personal columns.
 pub fn query_items(q: &J) -> Result<(String, Vec<(String, String)>, Vec<String>), Fail> {
-    let entity = q["entity"].as_str().ok_or((400, "`entity` is required".to_string()))?.to_string();
+    let entity = q["entity"]
+        .as_str()
+        .ok_or((400, "`entity` is required".to_string()))?
+        .to_string();
     let mut items: Vec<(String, String)> = Vec::new();
     if let Some(w) = q["where"].as_str().filter(|w| !w.trim().is_empty()) {
         items.push(("__where".into(), w.to_string()));
@@ -142,18 +205,28 @@ pub fn query_items(q: &J) -> Result<(String, Vec<(String, String)>, Vec<String>)
     let mut columns: Vec<String> = Vec::new();
     if let Some(cols) = q["columns"].as_object() {
         for (n, e) in cols {
-            let ok = !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            let ok = !n.is_empty()
+                && n.len() <= 40
+                && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !ok {
-                return Err((400, format!("column name `{n}`: letters, digits and _ only")));
+                return Err((
+                    400,
+                    format!("column name `{n}`: letters, digits and _ only"),
+                ));
             }
-            let e = e.as_str().ok_or((400, format!("column `{n}`: an expression as text")))?;
+            let e = e
+                .as_str()
+                .ok_or((400, format!("column `{n}`: an expression as text")))?;
             items.push((format!("__col_{n}"), e.to_string()));
             columns.push(n.clone());
         }
     }
     for (_, e) in &items {
         if e.contains('\n') || e.contains('\r') || e.len() > 2000 || e.trim().is_empty() {
-            return Err((400, "an expression must be one line of at most 2000 characters".into()));
+            return Err((
+                400,
+                "an expression must be one line of at most 2000 characters".into(),
+            ));
         }
     }
     Ok((entity, items, columns))
@@ -175,11 +248,23 @@ pub fn same_shape(base: &Model, over: &Model, entity: &str, items: &[(String, St
         && base.reactions.len() == over.reactions.len()
         && base.roles.len() == over.roles.len()
         && base.rules.len() == over.rules.len()
-        && base.entities.iter().zip(over.entities.iter()).all(|(a, b)| {
-            let extra = if a.name == entity { items.len() } else { 0 };
-            a.name == b.name && a.actions.len() == b.actions.len() && a.checks.len() == b.checks.len() && a.posts.len() == b.posts.len() && a.fields.len() + extra == b.fields.len()
+        && base
+            .entities
+            .iter()
+            .zip(over.entities.iter())
+            .all(|(a, b)| {
+                let extra = if a.name == entity { items.len() } else { 0 };
+                a.name == b.name
+                    && a.actions.len() == b.actions.len()
+                    && a.checks.len() == b.checks.len()
+                    && a.posts.len() == b.posts.len()
+                    && a.fields.len() + extra == b.fields.len()
+            })
+        && over.entity(entity).map_or(false, |e| {
+            items
+                .iter()
+                .all(|(n, _)| e.fields.iter().any(|f| &f.name == n && f.formula.is_some()))
         })
-        && over.entity(entity).map_or(false, |e| items.iter().all(|(n, _)| e.fields.iter().any(|f| &f.name == n && f.formula.is_some())))
 }
 
 /// A field path (`customer.name`) of a record, respecting hidden fields and read rules.
@@ -219,13 +304,24 @@ pub fn sort_key(v: &J) -> (u8, rust_decimal::Decimal, String) {
     let raw = &v["v"];
     let num = match raw {
         J::Number(n) => n.to_string().parse().ok(),
-        J::Object(o) => o.get("money").or_else(|| o.get("qty")).or_else(|| o.get("d")).or_else(|| o.get("pct")).or_else(|| o.get("price")).and_then(|x| x.as_str()).and_then(|s| s.parse().ok()),
+        J::Object(o) => o
+            .get("money")
+            .or_else(|| o.get("qty"))
+            .or_else(|| o.get("d"))
+            .or_else(|| o.get("pct"))
+            .or_else(|| o.get("price"))
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse().ok()),
         _ => None,
     };
     match (raw, num) {
         (J::Null, _) => (2, Default::default(), String::new()),
         (_, Some(n)) => (0, n, String::new()),
-        _ => (1, Default::default(), v["d"].as_str().unwrap_or("").to_ascii_lowercase()),
+        _ => (
+            1,
+            Default::default(),
+            v["d"].as_str().unwrap_or("").to_ascii_lowercase(),
+        ),
     }
 }
 
@@ -258,35 +354,67 @@ fn decode_cursor(s: &str) -> Result<J, Fail> {
     if s.len() % 2 != 0 || s.len() > 4000 {
         return Err(bad());
     }
-    let bytes: Result<Vec<u8>, _> = (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16)).collect();
+    let bytes: Result<Vec<u8>, _> = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect();
     let text = String::from_utf8(bytes.map_err(|_| bad())?).map_err(|_| bad())?;
     serde_json::from_str(&text).map_err(|_| bad())
 }
 
 /// The order of a query: (field path, descending), at most 5 keys.
 fn order_of(q: &J) -> Vec<(String, bool)> {
-    q["order_by"].as_array().map(|a| a.iter().filter_map(|o| Some((o["field"].as_str()?.to_string(), o["desc"].as_bool().unwrap_or(false)))).take(5).collect()).unwrap_or_default()
+    q["order_by"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| {
+                    Some((
+                        o["field"].as_str()?.to_string(),
+                        o["desc"].as_bool().unwrap_or(false),
+                    ))
+                })
+                .take(5)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The `where` of a query: the formula the overlay added.
-fn where_expr<'m>(model: &'m Model, entity: &str, items: &[(String, String)]) -> Option<&'m quadra_ir::Expr> {
+fn where_expr<'m>(
+    model: &'m Model,
+    entity: &str,
+    items: &[(String, String)],
+) -> Option<&'m quadra_ir::Expr> {
     if items.first().map_or(true, |(n, _)| n != "__where") {
         return None;
     }
-    model.entity(entity)?.fields.iter().find(|f| f.name == "__where")?.formula.as_ref()
+    model
+        .entity(entity)?
+        .fields
+        .iter()
+        .find(|f| f.name == "__where")?
+        .formula
+        .as_ref()
 }
 
 /// The lines of a record: `refs: {"order": 12}` (a reference, or a set holding the record).
 fn refs_of(model: &Model, entity: &str, q: &J) -> Result<Vec<(String, u64)>, Fail> {
     let mut out = Vec::new();
     if let Some(o) = q["refs"].as_object() {
-        let e = model.entity(entity).ok_or((404, "unknown entity".to_string()))?;
+        let e = model
+            .entity(entity)
+            .ok_or((404, "unknown entity".to_string()))?;
         for (k, v) in o.iter().take(5) {
-            let f = model.find_field(e, k).ok_or((400, format!("`refs`: `{entity}` has no field `{k}`")))?;
+            let f = model
+                .find_field(e, k)
+                .ok_or((400, format!("`refs`: `{entity}` has no field `{k}`")))?;
             if f.formula.is_some() {
                 return Err((400, format!("`refs`: `{k}` is a formula")));
             }
-            let id = v.as_u64().ok_or((400, format!("`refs`: `{k}` needs a record id")))?;
+            let id = v
+                .as_u64()
+                .ok_or((400, format!("`refs`: `{k}` needs a record id")))?;
             out.push((k.clone(), id));
         }
     }
@@ -296,7 +424,12 @@ fn refs_of(model: &Model, entity: &str, q: &J) -> Result<Vec<(String, u64)>, Fai
 /// The grid's keys that SQL may order by: a field hidden on the path orders nothing (every
 /// cell is hidden); a path through records whose reading depends on the row is the
 /// interpreter's.
-fn grid_keys(i: &mut Interp, model: &Model, entity: &str, order: &[(String, bool)]) -> Option<Vec<(Vec<String>, bool)>> {
+fn grid_keys(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    order: &[(String, bool)],
+) -> Option<Vec<(Vec<String>, bool)>> {
     let mut out = Vec::new();
     'keys: for (path, desc) in order {
         let segs: Vec<String> = path.split('.').map(str::to_string).collect();
@@ -311,7 +444,11 @@ fn grid_keys(i: &mut Interp, model: &Model, entity: &str, order: &[(String, bool
             let e = model.entity(&ent)?;
             let f = model.find_field(e, seg)?;
             let next = f.ty.as_ref().and_then(entity_named)?;
-            if model.entity(&next).map_or(true, |x| x.kind != EntityKind::Entity) || !i.read_unconditional(&next) {
+            if model
+                .entity(&next)
+                .map_or(true, |x| x.kind != EntityKind::Entity)
+                || !i.read_unconditional(&next)
+            {
                 return None;
             }
             ent = next;
@@ -326,7 +463,10 @@ fn grid_keys(i: &mut Interp, model: &Model, entity: &str, order: &[(String, bool
 fn aggregate(i: &mut Interp, ent: &str, ids: &[u64], path: &str, func: &str) -> Result<V, String> {
     let mut vals = Vec::new();
     for id in ids {
-        let mut cur = V::Ref { ent: Rc::from(ent), id: *id };
+        let mut cur = V::Ref {
+            ent: Rc::from(ent),
+            id: *id,
+        };
         for seg in path.split('.') {
             cur = match &cur {
                 V::None => V::None,
@@ -343,13 +483,16 @@ fn aggregate(i: &mut Interp, ent: &str, ids: &[u64], path: &str, func: &str) -> 
         "sum" | "avg" => {
             let mut acc = V::Int(0);
             for v in &vals {
-                acc = i.binop(quadra_ir::BinOp::Add, acc, v.clone()).map_err(fail)?;
+                acc = i
+                    .binop(quadra_ir::BinOp::Add, acc, v.clone())
+                    .map_err(fail)?;
             }
             if func == "avg" {
                 if vals.is_empty() {
                     V::None
                 } else {
-                    i.binop(quadra_ir::BinOp::Div, acc, V::Int(vals.len() as i64)).map_err(fail)?
+                    i.binop(quadra_ir::BinOp::Div, acc, V::Int(vals.len() as i64))
+                        .map_err(fail)?
                 }
             } else {
                 acc
@@ -361,8 +504,15 @@ fn aggregate(i: &mut Interp, ent: &str, ids: &[u64], path: &str, func: &str) -> 
                 best = Some(match best {
                     None => v,
                     Some(b) => {
-                        let lt = i.binop(quadra_ir::BinOp::Lt, v.clone(), b.clone()).map_err(fail)?.truthy();
-                        if lt == (func == "min") && i.binop(quadra_ir::BinOp::Ne, v.clone(), b.clone()).map_err(fail)?.truthy() {
+                        let lt = i
+                            .binop(quadra_ir::BinOp::Lt, v.clone(), b.clone())
+                            .map_err(fail)?
+                            .truthy();
+                        if lt == (func == "min")
+                            && i.binop(quadra_ir::BinOp::Ne, v.clone(), b.clone())
+                                .map_err(fail)?
+                                .truthy()
+                        {
                             v
                         } else {
                             b
@@ -376,7 +526,14 @@ fn aggregate(i: &mut Interp, ent: &str, ids: &[u64], path: &str, func: &str) -> 
 }
 
 /// The value of an aggregate from SQL's answer (None: the interpreter computes it).
-fn aggregate_value(i: &mut Interp, model: &Model, entity: &str, path: &str, func: &str, a: &quadra_runtime::query::AggOut) -> Option<V> {
+fn aggregate_value(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    path: &str,
+    func: &str,
+    a: &quadra_runtime::query::AggOut,
+) -> Option<V> {
     use rust_decimal::Decimal;
     use std::str::FromStr;
     let d = |s: &Option<String>| s.as_deref().and_then(|x| Decimal::from_str(x).ok());
@@ -393,7 +550,9 @@ fn aggregate_value(i: &mut Interp, model: &Model, entity: &str, path: &str, func
     let ty = last.and_then(|f| f.ty.clone());
     let named = |t: &Option<Ty>, n: &str| match t {
         Some(Ty::Path { segments, .. }) => segments.last().map(String::as_str) == Some(n),
-        Some(Ty::Optional(x)) => matches!(x.as_ref(), Ty::Path { segments, .. } if segments.last().map(String::as_str) == Some(n)),
+        Some(Ty::Optional(x)) => {
+            matches!(x.as_ref(), Ty::Path { segments, .. } if segments.last().map(String::as_str) == Some(n))
+        }
         _ => false,
     };
     let pct = named(&ty, "Percent");
@@ -404,11 +563,25 @@ fn aggregate_value(i: &mut Interp, model: &Model, entity: &str, path: &str, func
             "duration" => V::Duration(x.parse().ok()?),
             "num" if pct => V::Pct(Decimal::from_str(x).ok()?),
             "num" => V::Dec(Decimal::from_str(x).ok()?),
-            "money" => V::Money { amt: Decimal::from_str(x).ok()?, cur: Rc::from(a.unit.as_deref()?) },
-            "qty" => V::Qty { v: Decimal::from_str(x).ok()?, unit: Rc::from(a.unit.as_deref()?) },
+            "money" => V::Money {
+                amt: Decimal::from_str(x).ok()?,
+                cur: Rc::from(a.unit.as_deref()?),
+            },
+            "qty" => V::Qty {
+                v: Decimal::from_str(x).ok()?,
+                unit: Rc::from(a.unit.as_deref()?),
+            },
             "date" => V::Date(chrono::NaiveDate::parse_from_str(x, "%Y-%m-%d").ok()?),
-            "datetime" => V::DateTime(chrono::NaiveDateTime::parse_from_str(&x[..x.len().min(19)], "%Y-%m-%d %H:%M:%S").ok()?),
-            _ if matches!(ty.as_ref().map(|t| matches!(t, Ty::Enum(_))), Some(true)) => V::Variant { name: Rc::from(x.as_str()), fields: Rc::new(Vec::new()) },
+            "datetime" => V::DateTime(
+                chrono::NaiveDateTime::parse_from_str(&x[..x.len().min(19)], "%Y-%m-%d %H:%M:%S")
+                    .ok()?,
+            ),
+            _ if matches!(ty.as_ref().map(|t| matches!(t, Ty::Enum(_))), Some(true)) => {
+                V::Variant {
+                    name: Rc::from(x.as_str()),
+                    fields: Rc::new(Vec::new()),
+                }
+            }
             _ => V::Text(Rc::from(x.as_str())),
         })
     };
@@ -434,7 +607,8 @@ fn aggregate_value(i: &mut Interp, model: &Model, entity: &str, path: &str, func
             } else if a.rows == 0 {
                 V::None
             } else {
-                i.binop(quadra_ir::BinOp::Div, sum, V::Int(a.rows as i64)).ok()?
+                i.binop(quadra_ir::BinOp::Div, sum, V::Int(a.rows as i64))
+                    .ok()?
             }
         }
         _ => {
@@ -458,7 +632,14 @@ fn aggregate_value(i: &mut Interp, model: &Model, entity: &str, path: &str, func
 /// On a database the page is read in SQL when the query translates (the interpreter decides
 /// the rows SQL flags, the conditions it cannot translate and the row permissions); in memory
 /// every record is evaluated.
-pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(String, String)], columns: &[String]) -> Result<J, Fail> {
+pub fn query_rows(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    q: &J,
+    items: &[(String, String)],
+    columns: &[String],
+) -> Result<J, Fail> {
     if !q["group_by"].is_null() {
         return groups::group_rows(i, model, entity, q, items);
     }
@@ -467,11 +648,26 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
         return Err((403, format!("permission denied: cannot read {entity}")));
     }
     let fields: Vec<String> = match q["fields"].as_array() {
-        Some(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).take(100).collect(),
+        Some(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .take(100)
+            .collect(),
         None => {
             let e = model.entity(&entity).unwrap();
-            let names: Vec<String> = model.all_fields(e).iter().filter(|f| !matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_))) && !f.name.starts_with("__")).map(|f| f.name.clone()).collect();
-            names.into_iter().filter(|n| !i.hidden(&entity, n)).collect()
+            let names: Vec<String> = model
+                .all_fields(e)
+                .iter()
+                .filter(|f| {
+                    !matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_)))
+                        && !f.name.starts_with("__")
+                })
+                .map(|f| f.name.clone())
+                .collect();
+            names
+                .into_iter()
+                .filter(|n| !i.hidden(&entity, n))
+                .collect()
         }
     };
     let order = order_of(q);
@@ -483,30 +679,48 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
     };
     let want_count = q["count"].as_bool().unwrap_or(true);
     let aggs: Vec<(String, String)> = match q["aggregates"].as_object() {
-        Some(o) => o.iter().take(20).map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect(),
+        Some(o) => o
+            .iter()
+            .take(20)
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect(),
         None => Vec::new(),
     };
     for (f, func) in &aggs {
         if !matches!(func.as_str(), "sum" | "count" | "min" | "max" | "avg") {
-            return Err((400, format!("aggregate of `{f}`: sum, count, min, max or avg")));
+            return Err((
+                400,
+                format!("aggregate of `{f}`: sum, count, min, max or avg"),
+            ));
         }
     }
     let refs = refs_of(model, &entity, q)?;
     let wexpr = where_expr(model, &entity, items);
-    let ids: Option<Vec<u64>> = q["ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).take(1000).collect());
+    let ids: Option<Vec<u64>> = q["ids"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_u64()).take(1000).collect());
     let filter = groups::group_filter(i, model, &entity, q)?;
     let search = groups::search_of(i, model, &entity, q)?;
     let flt = groups::filters_of(i, model, &entity, q)?;
 
     let this = quadra_runtime::query::Binder::This;
-    let conjuncts: Vec<&quadra_ir::Expr> = wexpr.map(quadra_runtime::query::conjuncts).unwrap_or_default();
+    let conjuncts: Vec<&quadra_ir::Expr> = wexpr
+        .map(quadra_runtime::query::conjuncts)
+        .unwrap_or_default();
     let mut spec = quadra_runtime::Spec::new(&entity);
     spec.read_check = true;
     spec.ids = ids.clone();
     spec.refs = refs.clone();
     spec.keys = filter.clone();
     spec.search = search.clone();
-    spec.conds = conjuncts.iter().map(|e| quadra_runtime::query::Cond { binder: &this, expr: e, negate: false }).collect();
+    spec.conds = conjuncts
+        .iter()
+        .map(|e| quadra_runtime::query::Cond {
+            binder: &this,
+            expr: e,
+            negate: false,
+        })
+        .collect();
     spec.conds.extend(flt.conds());
 
     // ---- the page: SQL when the query translates ----
@@ -519,13 +733,27 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
     };
     let keys = grid_keys(i, model, &entity, &order);
     if let (Some(keys), true) = (&keys, after.as_ref().map_or(true, |c| c["k"] == json!("s"))) {
-        spec.order = keys.iter().map(|(p, d)| quadra_runtime::query::Key::Grid { path: p.clone(), desc: *d }).collect();
+        spec.order = keys
+            .iter()
+            .map(|(p, d)| quadra_runtime::query::Key::Grid {
+                path: p.clone(),
+                desc: *d,
+            })
+            .collect();
         // ties by id, in the direction of the first key
         spec.id_desc = order.first().map_or(false, |(_, d)| *d);
         let start = match sql_cursor {
             Some(c) => {
-                let ks: Vec<Option<String>> = c["keys"].as_array().map(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
-                Some(quadra_runtime::query::After { keys: ks, id: c["id"].as_u64().ok_or((400, "`after`: not a cursor of this query".to_string()))? })
+                let ks: Vec<Option<String>> = c["keys"]
+                    .as_array()
+                    .map(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                Some(quadra_runtime::query::After {
+                    keys: ks,
+                    id: c["id"]
+                        .as_u64()
+                        .ok_or((400, "`after`: not a cursor of this query".to_string()))?,
+                })
             }
             None => None,
         };
@@ -536,7 +764,9 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                 if p.scanned > 0 {
                     pass_ratio = p.kept as f64 / p.scanned as f64;
                 }
-                let next = p.next.map(|a| json!({ "k": "s", "keys": a.keys, "id": a.id }));
+                let next = p
+                    .next
+                    .map(|a| json!({ "k": "s", "keys": a.keys, "id": a.id }));
                 page_ids = Some((p.ids, next));
             }
             Ok(None) => {}
@@ -554,14 +784,26 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
         };
         let mut matched: Vec<V> = Vec::new();
         for id in all {
-            let rec = V::Ref { ent: Rc::from(entity.as_str()), id };
-            if !i.store.exists(id, None) || i.store.get(id).map_or(true, |r| *r.ent != *entity) || !i.can("read", &entity, None, Some(&rec)) {
+            let rec = V::Ref {
+                ent: Rc::from(entity.as_str()),
+                id,
+            };
+            if !i.store.exists(id, None)
+                || i.store.get(id).map_or(true, |r| *r.ent != *entity)
+                || !i.can("read", &entity, None, Some(&rec))
+            {
                 continue;
             }
             let mut ok = true;
             for (f, target) in &refs {
                 let v = i.store.read(id, f, None);
-                if !quadra_runtime::store::same(v.as_ref(), &V::Ref { ent: Rc::from(""), id: *target }) {
+                if !quadra_runtime::store::same(
+                    v.as_ref(),
+                    &V::Ref {
+                        ent: Rc::from(""),
+                        id: *target,
+                    },
+                ) {
                     ok = false;
                 }
             }
@@ -583,7 +825,10 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
         if !order.is_empty() {
             let mut keyed: Vec<(Vec<(u8, rust_decimal::Decimal, String)>, V)> = Vec::new();
             for rec in matched {
-                let k = order.iter().map(|(p, _)| sort_key(&path_cell(i, &entity, &rec, p))).collect();
+                let k = order
+                    .iter()
+                    .map(|(p, _)| sort_key(&path_cell(i, &entity, &rec, p)))
+                    .collect();
                 keyed.push((k, rec));
             }
             // ties by id, in the direction of the first key (an index on the key and the id
@@ -598,17 +843,25 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                     }
                 }
                 let (x, y) = (a.1.as_ref_id().unwrap_or(0), b.1.as_ref_id().unwrap_or(0));
-                if first_desc { y.cmp(&x) } else { x.cmp(&y) }
+                if first_desc {
+                    y.cmp(&x)
+                } else {
+                    x.cmp(&y)
+                }
             });
             matched = keyed.into_iter().map(|(_, r)| r).collect();
         }
         let all_ids: Vec<u64> = matched.iter().filter_map(|r| r.as_ref_id()).collect();
         let start = match &after {
-            Some(c) => c["o"].as_u64().ok_or((400, "`after`: not a cursor of this query".to_string()))? as usize,
+            Some(c) => c["o"]
+                .as_u64()
+                .ok_or((400, "`after`: not a cursor of this query".to_string()))?
+                as usize,
             None => offset,
         };
         let page: Vec<u64> = all_ids.iter().skip(start).take(limit).copied().collect();
-        let next = (start + page.len() < all_ids.len()).then(|| json!({ "k": "o", "o": start + page.len() }));
+        let next = (start + page.len() < all_ids.len())
+            .then(|| json!({ "k": "o", "o": start + page.len() }));
         page_ids = Some((page, next));
         matched_all = Some(all_ids);
     }
@@ -624,7 +877,16 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                 let mut cspec = spec.clone();
                 cspec.order = Vec::new();
                 match i.sql_count(&cspec, &mut ctx, Some(count_cap())) {
-                    Ok(Some((n, true))) => Some((((n as f64) * if i.read_unconditional(&entity) { 1.0 } else { pass_ratio }).round() as u64, true)),
+                    Ok(Some((n, true))) => Some((
+                        ((n as f64)
+                            * if i.read_unconditional(&entity) {
+                                1.0
+                            } else {
+                                pass_ratio
+                            })
+                        .round() as u64,
+                        true,
+                    )),
                     Ok(Some(x)) => Some(x),
                     Ok(None) => None,
                     Err(e) => return Err((422, format!("where: {}", describe(e)))),
@@ -635,11 +897,22 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
             // the data changed under SQL: count the interpreter's way
             let mut n = 0u64;
             for id in i.ids(&entity, None) {
-                let rec = V::Ref { ent: Rc::from(entity.as_str()), id };
+                let rec = V::Ref {
+                    ent: Rc::from(entity.as_str()),
+                    id,
+                };
                 if !i.can("read", &entity, None, Some(&rec)) {
                     continue;
                 }
-                if refs.iter().any(|(f, t)| !quadra_runtime::store::same(i.store.read(id, f, None).as_ref(), &V::Ref { ent: Rc::from(""), id: *t })) {
+                if refs.iter().any(|(f, t)| {
+                    !quadra_runtime::store::same(
+                        i.store.read(id, f, None).as_ref(),
+                        &V::Ref {
+                            ent: Rc::from(""),
+                            id: *t,
+                        },
+                    )
+                }) {
                     continue;
                 }
                 if let Some(sel) = &ids {
@@ -654,7 +927,11 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                     continue;
                 }
                 if let Some(w) = wexpr {
-                    if !i.eval_on(&rec, &entity, w).map_err(|e| (422, format!("where: {}", describe(e))))?.truthy() {
+                    if !i
+                        .eval_on(&rec, &entity, w)
+                        .map_err(|e| (422, format!("where: {}", describe(e))))?
+                        .truthy()
+                    {
                         continue;
                     }
                 }
@@ -675,7 +952,15 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
     // every aggregate in one query when they all translate (else one by one below)
     let mut together: HashMap<String, quadra_runtime::query::AggOut> = HashMap::new();
     if sql_paged && aggs.len() > 1 {
-        let list: Vec<quadra_runtime::query::Agg> = aggs.iter().map(|(path, func)| quadra_runtime::query::Agg { of: quadra_runtime::query::AggOf::Path(path.split('.').map(str::to_string).collect()), func: agg_fn(func) }).collect();
+        let list: Vec<quadra_runtime::query::Agg> = aggs
+            .iter()
+            .map(|(path, func)| quadra_runtime::query::Agg {
+                of: quadra_runtime::query::AggOf::Path(
+                    path.split('.').map(str::to_string).collect(),
+                ),
+                func: agg_fn(func),
+            })
+            .collect();
         let mut ctx = flt.ctx();
         let mut aspec = spec.clone();
         aspec.order = Vec::new();
@@ -694,7 +979,11 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                 if i.hidden(&ent, seg) {
                     h = true;
                 }
-                if let Some(n) = model.entity(&ent).and_then(|e| model.find_field(e, seg)).and_then(|f| f.ty.as_ref().and_then(entity_named)) {
+                if let Some(n) = model
+                    .entity(&ent)
+                    .and_then(|e| model.find_field(e, seg))
+                    .and_then(|f| f.ty.as_ref().and_then(entity_named))
+                {
                     ent = n;
                 }
             }
@@ -709,7 +998,10 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
             value = aggregate_value(i, model, &entity, path, func, out).map(Ok);
         }
         if sql_paged && value.is_none() && together.is_empty() {
-            let a = quadra_runtime::query::Agg { of: quadra_runtime::query::AggOf::Path(segs.clone()), func: agg_fn(func) };
+            let a = quadra_runtime::query::Agg {
+                of: quadra_runtime::query::AggOf::Path(segs.clone()),
+                func: agg_fn(func),
+            };
             let mut ctx = flt.ctx();
             let mut aspec = spec.clone();
             aspec.order = Vec::new();
@@ -725,7 +1017,14 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                     let mut ctx = flt.ctx();
                     let mut aspec = spec.clone();
                     aspec.order = Vec::new();
-                    match i.sql_page(&aspec, &mut ctx, None, 0, COUNT_CAP as usize + 1, usize::MAX) {
+                    match i.sql_page(
+                        &aspec,
+                        &mut ctx,
+                        None,
+                        0,
+                        COUNT_CAP as usize + 1,
+                        usize::MAX,
+                    ) {
                         Ok(Some(p)) if p.ids.len() <= COUNT_CAP as usize => Some(p.ids),
                         Ok(_) => None,
                         Err(e) => return Err((422, format!("where: {}", describe(e)))),
@@ -755,7 +1054,10 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
     prefetch_paths(i, model, &entity, &page, &fields);
     let mut rows = Vec::new();
     for id in page {
-        let rec = V::Ref { ent: Rc::from(entity.as_str()), id };
+        let rec = V::Ref {
+            ent: Rc::from(entity.as_str()),
+            id,
+        };
         let mut cells = serde_json::Map::new();
         for f in &fields {
             cells.insert(f.clone(), path_cell(i, &entity, &rec, f));
@@ -767,7 +1069,11 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
             };
             cells.insert(c.clone(), v);
         }
-        let (version, warnings) = i.store.get(id).map(|r| (r.version(), r.warnings.clone())).unwrap_or_default();
+        let (version, warnings) = i
+            .store
+            .get(id)
+            .map(|r| (r.version(), r.warnings.clone()))
+            .unwrap_or_default();
         let frozen = i.frozen_owner(id).is_some();
         rows.push(json!({ "id": id, "version": version, "frozen": frozen, "warnings": warnings, "display": i.display(&rec), "cells": cells }));
     }
@@ -787,7 +1093,14 @@ pub fn query_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
 
 /// The records of the inverse collections of `ids` (records of `e`) that `wanted` names, in one
 /// query per collection; and theirs, when the children have formulas (which may read them).
-fn prefetch_lines(i: &mut Interp, model: &Model, e: &quadra_ir::Entity, ids: &[u64], wanted: &dyn Fn(&str) -> bool, depth: usize) {
+fn prefetch_lines(
+    i: &mut Interp,
+    model: &Model,
+    e: &quadra_ir::Entity,
+    ids: &[u64],
+    wanted: &dyn Fn(&str) -> bool,
+    depth: usize,
+) {
     if ids.is_empty() || depth > 2 {
         return;
     }
@@ -795,12 +1108,26 @@ fn prefetch_lines(i: &mut Interp, model: &Model, e: &quadra_ir::Entity, ids: &[u
         if f.through.is_some() || !quadra_store_is_inverse(model, e, f) || !wanted(&f.name) {
             continue;
         }
-        let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty else { continue };
-        let Some(child) = entity_named(inner).and_then(|n| model.entity(&n)) else { continue };
+        let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty else {
+            continue;
+        };
+        let Some(child) = entity_named(inner).and_then(|n| model.entity(&n)) else {
+            continue;
+        };
         if child.kind != EntityKind::Entity {
             continue;
         }
-        let back = f.via.clone().or_else(|| child.fields.iter().find(|x| x.ty.as_ref().and_then(entity_named).map_or(false, |n| n == e.name || e.traits.contains(&n))).map(|x| x.name.clone()));
+        let back = f.via.clone().or_else(|| {
+            child
+                .fields
+                .iter()
+                .find(|x| {
+                    x.ty.as_ref()
+                        .and_then(entity_named)
+                        .map_or(false, |n| n == e.name || e.traits.contains(&n))
+                })
+                .map(|x| x.name.clone())
+        });
         let Some(b) = back else { continue };
         let found = i.store.prefetch_find(&child.name, &b, ids);
         // (a page's lines, not a whole subtree: a region's customers are read on demand); the
@@ -814,12 +1141,28 @@ fn prefetch_lines(i: &mut Interp, model: &Model, e: &quadra_ir::Entity, ids: &[u
 
 /// The records among `ids` (of `e`, loaded) on which a formula (of those `fields` names, all
 /// when None) is computed when read: not an incremental formula with its stored value.
-fn computing(i: &mut Interp, model: &Model, e: &quadra_ir::Entity, ids: &[u64], fields: Option<&[String]>) -> Vec<u64> {
-    let formulas: Vec<String> = model.all_fields(e).iter().filter(|f| f.formula.is_some() && fields.map_or(true, |fs| fs.iter().any(|x| x == &f.name))).map(|f| f.name.clone()).collect();
+fn computing(
+    i: &mut Interp,
+    model: &Model,
+    e: &quadra_ir::Entity,
+    ids: &[u64],
+    fields: Option<&[String]>,
+) -> Vec<u64> {
+    let formulas: Vec<String> = model
+        .all_fields(e)
+        .iter()
+        .filter(|f| {
+            f.formula.is_some() && fields.map_or(true, |fs| fs.iter().any(|x| x == &f.name))
+        })
+        .map(|f| f.name.clone())
+        .collect();
     if formulas.is_empty() {
         return Vec::new();
     }
-    ids.iter().copied().filter(|id| formulas.iter().any(|f| !i.has_stored(&e.name, *id, f))).collect()
+    ids.iter()
+        .copied()
+        .filter(|id| formulas.iter().any(|f| !i.has_stored(&e.name, *id, f)))
+        .collect()
 }
 
 /// Load, in a few batches, what the cells of a page read: the records the shown paths go
@@ -831,7 +1174,11 @@ fn prefetch_paths(i: &mut Interp, model: &Model, entity: &str, page: &[u64], fie
     if let Some(e) = model.entity(entity) {
         // the collection is shown (on every row), or a formula shown may read it (on the rows
         // where it is computed: not read from its stored value)
-        let shown = |n: &str| fields.iter().any(|f| f == n || f.starts_with(&format!("{n}.")));
+        let shown = |n: &str| {
+            fields
+                .iter()
+                .any(|f| f == n || f.starts_with(&format!("{n}.")))
+        };
         prefetch_lines(i, model, e, page, &shown, 0);
         let computed = computing(i, model, e, page, Some(fields));
         if !computed.is_empty() {
@@ -839,7 +1186,10 @@ fn prefetch_paths(i: &mut Interp, model: &Model, entity: &str, page: &[u64], fie
         }
     }
     let mut level: Vec<(String, Vec<u64>)> = vec![(entity.to_string(), page.to_vec())];
-    let mut paths: Vec<Vec<String>> = fields.iter().map(|f| f.split('.').map(str::to_string).collect()).collect();
+    let mut paths: Vec<Vec<String>> = fields
+        .iter()
+        .map(|f| f.split('.').map(str::to_string).collect())
+        .collect();
     // the shown references (their display) and the parent chain (frozen documents)
     if let Some(e) = model.entity(entity) {
         for f in model.all_fields(e) {
@@ -856,7 +1206,10 @@ fn prefetch_paths(i: &mut Interp, model: &Model, entity: &str, page: &[u64], fie
             for p in &paths {
                 if let Some(seg) = p.get(depth) {
                     if let Some(f) = model.find_field(e, seg) {
-                        if f.formula.is_none() && entity_named(f.ty.as_ref().unwrap_or(&Ty::Error)).is_some() && !fields_here.iter().any(|x| x.name == f.name) {
+                        if f.formula.is_none()
+                            && entity_named(f.ty.as_ref().unwrap_or(&Ty::Error)).is_some()
+                            && !fields_here.iter().any(|x| x.name == f.name)
+                        {
                             fields_here.push(f);
                         }
                     }
@@ -871,7 +1224,10 @@ fn prefetch_paths(i: &mut Interp, model: &Model, entity: &str, page: &[u64], fie
             }
             for f in fields_here {
                 let target = entity_named(f.ty.as_ref().unwrap()).unwrap_or_default();
-                let mut t: Vec<u64> = ids.iter().filter_map(|id| i.store.read(*id, &f.name, None).and_then(|v| v.as_ref_id())).collect();
+                let mut t: Vec<u64> = ids
+                    .iter()
+                    .filter_map(|id| i.store.read(*id, &f.name, None).and_then(|v| v.as_ref_id()))
+                    .collect();
                 t.sort();
                 t.dedup();
                 if !t.is_empty() {
@@ -895,8 +1251,18 @@ fn prefetch_paths(i: &mut Interp, model: &Model, entity: &str, page: &[u64], fie
 /// search (every word of the text begins a word of a stored text field the user may see:
 /// `query::searchable`), each group by the display text and id; only records the user may
 /// read. `{id, name}` rows and the cursor of the next page.
-pub fn search_rows(i: &mut Interp, model: &Model, entity: &str, text: &str, limit: usize, after: Option<&str>) -> Result<J, Fail> {
-    let e = model.entity(entity).filter(|e| e.kind == EntityKind::Entity && !e.temporary).ok_or((404, format!("unknown entity `{entity}`")))?;
+pub fn search_rows(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    text: &str,
+    limit: usize,
+    after: Option<&str>,
+) -> Result<J, Fail> {
+    let e = model
+        .entity(entity)
+        .filter(|e| e.kind == EntityKind::Entity && !e.temporary)
+        .ok_or((404, format!("unknown entity `{entity}`")))?;
     if !i.can("read", entity, None, None) {
         return Err((403, format!("permission denied: cannot read {entity}")));
     }
@@ -915,19 +1281,34 @@ pub fn search_rows(i: &mut Interp, model: &Model, entity: &str, text: &str, limi
     let start = match after {
         Some(c) if !c.is_empty() => {
             let c = decode_cursor(c)?;
-            let keys: Vec<Option<String>> = c["keys"].as_array().map(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
-            Some(quadra_runtime::query::After { keys, id: c["id"].as_u64().ok_or((400, "`after`: not a cursor of this search".to_string()))? })
+            let keys: Vec<Option<String>> = c["keys"]
+                .as_array()
+                .map(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            Some(quadra_runtime::query::After {
+                keys,
+                id: c["id"]
+                    .as_u64()
+                    .ok_or((400, "`after`: not a cursor of this search".to_string()))?,
+            })
         }
         _ => None,
     };
     // then the full-text search: every word begins a word of a stored text field the user may see
     let words = quadra_runtime::query::TextSearch {
         words: quadra_runtime::query::search_words(text),
-        fields: quadra_runtime::query::searchable(model, entity).into_iter().filter(|f| !i.hidden(entity, f)).collect(),
+        fields: quadra_runtime::query::searchable(model, entity)
+            .into_iter()
+            .filter(|f| !i.hidden(entity, f))
+            .collect(),
     };
     let permission = !i.read_unconditional(entity);
     // the row rules, applied in SQL when they translate
-    let perm = if permission { i.perm_of("read", entity) } else { None };
+    let perm = if permission {
+        i.perm_of("read", entity)
+    } else {
+        None
+    };
     let mut frees = quadra_runtime::query::Frees::default();
     if let Some(p) = &perm {
         i.perm_frees(p, &mut frees);
@@ -943,7 +1324,15 @@ pub fn search_rows(i: &mut Interp, model: &Model, entity: &str, text: &str, limi
         let mut each = false;
         'pages: loop {
             let batch = if each { 200 } else { limit + 1 };
-            let found = src.borrow_mut().search(entity, &fields, &needle, Some(&words), cursor.as_ref(), batch, perm.as_ref().map(|p| (model, p, &frees)));
+            let found = src.borrow_mut().search(
+                entity,
+                &fields,
+                &needle,
+                Some(&words),
+                cursor.as_ref(),
+                batch,
+                perm.as_ref().map(|p| (model, p, &frees)),
+            );
             let found = match found {
                 Ok(r) => r,
                 Err(_) => {
@@ -958,7 +1347,10 @@ pub fn search_rows(i: &mut Interp, model: &Model, entity: &str, text: &str, limi
             i.store.prefetch_as(&entity, &ids);
             for (id, c, check) in rows {
                 scanned += 1;
-                let rec = V::Ref { ent: Rc::from(entity), id };
+                let rec = V::Ref {
+                    ent: Rc::from(entity),
+                    id,
+                };
                 if permission && (each || check) && !i.can("read", entity, None, Some(&rec)) {
                     cursor = Some(c);
                     continue;
@@ -985,41 +1377,75 @@ pub fn search_rows(i: &mut Interp, model: &Model, entity: &str, text: &str, limi
         next = None;
         let mut found: Vec<(String, String, u64)> = Vec::new();
         for id in i.ids(entity, None) {
-            let rec = V::Ref { ent: Rc::from(entity), id };
+            let rec = V::Ref {
+                ent: Rc::from(entity),
+                id,
+            };
             if permission && !i.can("read", entity, None, Some(&rec)) {
                 continue;
             }
-            let vals: Vec<String> = fields.iter().filter_map(|f| i.store.read(id, f, None)).filter(|v| !v.is_none()).map(|v| v.to_string().to_ascii_lowercase()).collect();
+            let vals: Vec<String> = fields
+                .iter()
+                .filter_map(|f| i.store.read(id, f, None))
+                .filter(|v| !v.is_none())
+                .map(|v| v.to_string().to_ascii_lowercase())
+                .collect();
             // (as SQL: an entity without text to search by lists every record)
-            let rec_v = V::Ref { ent: Rc::from(entity), id };
-            let phase = if needle.is_empty() || fields.is_empty() || vals.iter().any(|v| v.starts_with(&needle)) {
+            let rec_v = V::Ref {
+                ent: Rc::from(entity),
+                id,
+            };
+            let phase = if needle.is_empty()
+                || fields.is_empty()
+                || vals.iter().any(|v| v.starts_with(&needle))
+            {
                 "1"
             } else if i.searched(&rec_v, &words) {
                 "2"
             } else {
                 continue;
             };
-            let key = quadra_store_display_fields().iter().find_map(|k| i.store.read(id, k, None).filter(|v| !v.is_none()).map(|v| v.to_string().to_ascii_lowercase())).unwrap_or_default();
+            let key = quadra_store_display_fields()
+                .iter()
+                .find_map(|k| {
+                    i.store
+                        .read(id, k, None)
+                        .filter(|v| !v.is_none())
+                        .map(|v| v.to_string().to_ascii_lowercase())
+                })
+                .unwrap_or_default();
             found.push((phase.to_string(), key, id));
         }
         found.sort();
         let from = match &start {
             Some(a) => {
-                let k = (a.keys.first().cloned().flatten().unwrap_or_default(), a.keys.get(1).cloned().flatten().unwrap_or_default(), a.id);
+                let k = (
+                    a.keys.first().cloned().flatten().unwrap_or_default(),
+                    a.keys.get(1).cloned().flatten().unwrap_or_default(),
+                    a.id,
+                );
                 found.iter().position(|x| *x > k).unwrap_or(found.len())
             }
             None => 0,
         };
         for (ph, key, id) in found.iter().skip(from).take(limit) {
-            let rec = V::Ref { ent: Rc::from(entity), id: *id };
+            let rec = V::Ref {
+                ent: Rc::from(entity),
+                id: *id,
+            };
             out.push(json!({ "id": id, "name": i.display(&rec) }));
-            next = Some(quadra_runtime::query::After { keys: vec![Some(ph.clone()), Some(key.clone())], id: *id });
+            next = Some(quadra_runtime::query::After {
+                keys: vec![Some(ph.clone()), Some(key.clone())],
+                id: *id,
+            });
         }
         if from + limit >= found.len() {
             next = None;
         }
     }
-    Ok(json!({ "entity": entity, "rows": out, "next": next.map(|a| encode_cursor(&json!({ "keys": a.keys, "id": a.id }))) }))
+    Ok(
+        json!({ "entity": entity, "rows": out, "next": next.map(|a| encode_cursor(&json!({ "keys": a.keys, "id": a.id }))) }),
+    )
 }
 
 fn quadra_store_display_fields() -> &'static [&'static str] {
@@ -1038,12 +1464,21 @@ fn text_field(f: &quadra_ir::Field) -> bool {
 /// A record: every field, what may be edited now, the actions allowed now.
 pub fn record_json(i: &mut Interp, model: &Model, entity: &str, id: u64) -> Result<J, Fail> {
     i.store.load_as(id, entity);
-    let actual = i.store.get(id).map(|r| r.ent.to_string()).ok_or((404, format!("{entity}#{id} not found")))?;
-    let e = model.entity(&actual).ok_or((404, "not found".to_string()))?;
+    let actual = i
+        .store
+        .get(id)
+        .map(|r| r.ent.to_string())
+        .ok_or((404, format!("{entity}#{id} not found")))?;
+    let e = model
+        .entity(&actual)
+        .ok_or((404, "not found".to_string()))?;
     if actual != entity && !model.implements(e, entity) {
         return Err((404, format!("{entity}#{id} not found")));
     }
-    let rec = V::Ref { ent: Rc::from(actual.as_str()), id };
+    let rec = V::Ref {
+        ent: Rc::from(actual.as_str()),
+        id,
+    };
     if !i.can("read", &actual, None, Some(&rec)) {
         return Err((403, format!("permission denied: cannot read {actual}#{id}")));
     }
@@ -1072,9 +1507,18 @@ pub fn record_json(i: &mut Interp, model: &Model, entity: &str, id: u64) -> Resu
         let in_flow = e.flows.iter().any(|fl| fl.field == f.name);
         let frozen_ok = match owner {
             None => true,
-            Some((o, _)) => o == id && e.frozen.as_ref().map_or(false, |fr| fr.except.iter().any(|x| x == &f.name)),
+            Some((o, _)) => {
+                o == id
+                    && e.frozen
+                        .as_ref()
+                        .map_or(false, |fr| fr.except.iter().any(|x| x == &f.name))
+            }
         };
-        if f.formula.is_none() && !in_flow && frozen_ok && i.can("edit", &actual, Some(&f.name), Some(&rec)) {
+        if f.formula.is_none()
+            && !in_flow
+            && frozen_ok
+            && i.can("edit", &actual, Some(&f.name), Some(&rec))
+        {
             editable.push(f.name.clone());
         }
     }
@@ -1086,7 +1530,10 @@ pub fn record_json(i: &mut Interp, model: &Model, entity: &str, id: u64) -> Resu
         }
     }
     for fl in &e.flows {
-        let state = i.get(&rec, &fl.field, None, None).map(|v| v.to_string()).unwrap_or_default();
+        let state = i
+            .get(&rec, &fl.field, None, None)
+            .map(|v| v.to_string())
+            .unwrap_or_default();
         for t in &fl.transitions {
             let Some(by) = &t.by else { continue };
             if t.from.iter().any(|f| *f == state) && i.can("run", &actual, Some(by), Some(&rec)) {
@@ -1101,7 +1548,11 @@ pub fn record_json(i: &mut Interp, model: &Model, entity: &str, id: u64) -> Resu
         actions.retain(|a| {
             let name = a["name"].as_str().unwrap_or("");
             let tied = fl.transitions.iter().any(|t| t.by.as_deref() == Some(name));
-            !tied || fl.transitions.iter().any(|t| t.by.as_deref() == Some(name) && t.from.iter().any(|f| *f == state))
+            !tied
+                || fl
+                    .transitions
+                    .iter()
+                    .any(|t| t.by.as_deref() == Some(name) && t.from.iter().any(|f| *f == state))
         });
     }
     // the others, with the reason (a button of an app shows it)
@@ -1123,9 +1574,17 @@ pub fn record_json(i: &mut Interp, model: &Model, entity: &str, id: u64) -> Resu
             Ok(()) => {
                 let mut why = String::from("not available now");
                 for fl in &e.flows {
-                    let from: Vec<&str> = fl.transitions.iter().filter(|t| t.by.as_deref() == Some(name)).flat_map(|t| t.from.iter().map(String::as_str)).collect();
+                    let from: Vec<&str> = fl
+                        .transitions
+                        .iter()
+                        .filter(|t| t.by.as_deref() == Some(name))
+                        .flat_map(|t| t.from.iter().map(String::as_str))
+                        .collect();
                     if !from.is_empty() {
-                        let state = i.get(&rec, &fl.field, None, None).map(|v| v.to_string()).unwrap_or_default();
+                        let state = i
+                            .get(&rec, &fl.field, None, None)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
                         why = format!("only from {} (it is {state})", from.join(" or "));
                     }
                 }
@@ -1150,16 +1609,32 @@ pub const LINES_PAGE: usize = 50;
 /// A collection computed from the other side (`customers: [Customer]`, the lines of a
 /// document, `customers: {Customer} via tags`): (the entity of its records, the field of theirs
 /// that holds the record). Its records are a query (`refs: {back: id}`).
-fn lines_of(model: &Model, e: &quadra_ir::Entity, f: &quadra_ir::Field) -> Option<(String, String)> {
+fn lines_of(
+    model: &Model,
+    e: &quadra_ir::Entity,
+    f: &quadra_ir::Field,
+) -> Option<(String, String)> {
     if f.formula.is_some() || f.through.is_some() || !quadra_store_is_inverse(model, e, f) {
         return None;
     }
-    let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty else { return None };
+    let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty else {
+        return None;
+    };
     let target = entity_named(inner).and_then(|n| model.entity(&n))?;
     if target.kind != EntityKind::Entity {
         return None;
     }
-    let back = f.via.clone().or_else(|| target.fields.iter().find(|x| x.ty.as_ref().and_then(entity_named).map_or(false, |n| n == e.name || e.traits.contains(&n))).map(|x| x.name.clone()))?;
+    let back = f.via.clone().or_else(|| {
+        target
+            .fields
+            .iter()
+            .find(|x| {
+                x.ty.as_ref()
+                    .and_then(entity_named)
+                    .map_or(false, |n| n == e.name || e.traits.contains(&n))
+            })
+            .map(|x| x.name.clone())
+    })?;
     Some((target.name.clone(), back))
 }
 
@@ -1169,7 +1644,9 @@ fn lines_of(model: &Model, e: &quadra_ir::Entity, f: &quadra_ir::Field) -> Optio
 /// "after": next}` for the others (none when they are all here). In memory the collection is
 /// read whole, then cut the same way.
 fn lines_cell(i: &mut Interp, model: &Model, rec: &V, field: &str, child: &str, back: &str) -> J {
-    let V::Ref { id, .. } = rec else { return json!({ "error": "not a record" }) };
+    let V::Ref { id, .. } = rec else {
+        return json!({ "error": "not a record" });
+    };
     if !i.can("read", child, None, None) {
         return json!({ "hidden": true });
     }
@@ -1178,9 +1655,25 @@ fn lines_cell(i: &mut Interp, model: &Model, rec: &V, field: &str, child: &str, 
         match query_rows(i, model, child, &q, &[], &[]) {
             Ok(page) => {
                 let ent: Rc<str> = Rc::from(child);
-                let items: Vec<V> = page["rows"].as_array().map(|rows| rows.iter().filter_map(|r| r["id"].as_u64()).map(|id| V::Ref { ent: ent.clone(), id }).collect()).unwrap_or_default();
+                let items: Vec<V> = page["rows"]
+                    .as_array()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|r| r["id"].as_u64())
+                            .map(|id| V::Ref {
+                                ent: ent.clone(),
+                                id,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let count = page["total"].as_u64().unwrap_or(items.len() as u64);
-                (items, count, page["estimated"].as_bool().unwrap_or(false), page["next"].as_str().map(str::to_string))
+                (
+                    items,
+                    count,
+                    page["estimated"].as_bool().unwrap_or(false),
+                    page["next"].as_str().map(str::to_string),
+                )
             }
             Err((_, m)) => return json!({ "error": m }),
         }
@@ -1206,7 +1699,11 @@ fn lines_cell(i: &mut Interp, model: &Model, rec: &V, field: &str, child: &str, 
     let list = V::List(Rc::new(items.clone()));
     let names: Vec<String> = items.iter().map(|x| i.display(x)).collect();
     let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-    let d = if count > 3 { format!("{shown} … ({}{count})", if estimated { "~" } else { "" }) } else { shown };
+    let d = if count > 3 {
+        format!("{shown} … ({}{count})", if estimated { "~" } else { "" })
+    } else {
+        shown
+    };
     let mut c = json!({ "v": json::wire(&list), "d": d, "count": count, "next": next });
     if !names.is_empty() {
         c["names"] = json!(names);
@@ -1219,13 +1716,22 @@ fn lines_cell(i: &mut Interp, model: &Model, rec: &V, field: &str, child: &str, 
 
 /// The operations of a transaction (`create`, `update`, `action`), inside the caller's
 /// transaction. Returns the ids of the records created with a `ref`.
-pub fn apply_ops(i: &mut Interp, model: &Model, ops: &[J]) -> Result<serde_json::Map<String, J>, Flow> {
+pub fn apply_ops(
+    i: &mut Interp,
+    model: &Model,
+    ops: &[J],
+) -> Result<serde_json::Map<String, J>, Flow> {
     let created: RefCell<serde_json::Map<String, J>> = RefCell::new(serde_json::Map::new());
     let refs: RefCell<HashMap<String, V>> = RefCell::new(HashMap::new());
     for (n, op) in ops.iter().enumerate() {
         let fail = |m: String| Flow::Fail(format!("operation {}: {m}", n + 1));
-        let ent = op["entity"].as_str().ok_or_else(|| fail("`entity` is required".into()))?;
-        let e = model.entity(ent).filter(|e| e.kind == EntityKind::Entity && !e.temporary && !e.is_ledger).ok_or_else(|| fail(format!("unknown entity `{ent}`")))?;
+        let ent = op["entity"]
+            .as_str()
+            .ok_or_else(|| fail("`entity` is required".into()))?;
+        let e = model
+            .entity(ent)
+            .filter(|e| e.kind == EntityKind::Entity && !e.temporary && !e.is_ledger)
+            .ok_or_else(|| fail(format!("unknown entity `{ent}`")))?;
         let lookup = |r: &str| refs.borrow().get(r).cloned();
         let empty = serde_json::Map::new();
         let values = op["values"].as_object().unwrap_or(&empty);
@@ -1244,44 +1750,80 @@ pub fn apply_ops(i: &mut Interp, model: &Model, ops: &[J]) -> Result<serde_json:
                 }
             }
             Some("update") => {
-                let id = op["id"].as_u64().ok_or_else(|| fail("`id` is required".into()))?;
-                let rec = V::Ref { ent: Rc::from(ent), id };
+                let id = op["id"]
+                    .as_u64()
+                    .ok_or_else(|| fail("`id` is required".into()))?;
+                let rec = V::Ref {
+                    ent: Rc::from(ent),
+                    id,
+                };
                 // the record must be of the entity the operation names (its rights were checked
                 // for that one): an id of another entity does not exist here
                 let of_it = i.store.exists(id, None)
-                    && i.store.get(id).is_some_and(|r| &*r.ent == ent || model.entity(&r.ent).is_some_and(|a| model.implements(a, ent)));
+                    && i.store.get(id).is_some_and(|r| {
+                        &*r.ent == ent
+                            || model
+                                .entity(&r.ent)
+                                .is_some_and(|a| model.implements(a, ent))
+                    });
                 if !of_it {
                     return Err(fail(format!("{ent}#{id} does not exist")));
                 }
                 for (k, v) in values {
-                    let f = model.find_field(e, k).ok_or_else(|| fail(format!("`{ent}` has no field `{k}`")))?;
-                    let val = decode(i, model, f.ty.as_ref(), v, &lookup).map_err(|m| fail(format!("{ent}.{k}: {m}")))?;
+                    let f = model
+                        .find_field(e, k)
+                        .ok_or_else(|| fail(format!("`{ent}` has no field `{k}`")))?;
+                    let val = decode(i, model, f.ty.as_ref(), v, &lookup)
+                        .map_err(|m| fail(format!("{ent}.{k}: {m}")))?;
                     let company = i.company;
                     i.set(&rec, k, val, company)?;
                     i.coerce_field(&rec, k)?;
                 }
             }
             Some("action") => {
-                let id = op["id"].as_u64().ok_or_else(|| fail("`id` is required".into()))?;
-                let name = op["action"].as_str().ok_or_else(|| fail("`action` is required".into()))?;
-                let rec = V::Ref { ent: Rc::from(ent), id };
+                let id = op["id"]
+                    .as_u64()
+                    .ok_or_else(|| fail("`id` is required".into()))?;
+                let name = op["action"]
+                    .as_str()
+                    .ok_or_else(|| fail("`action` is required".into()))?;
+                let rec = V::Ref {
+                    ent: Rc::from(ent),
+                    id,
+                };
                 // the record must be of the entity the operation names (its rights were checked
                 // for that one): an id of another entity does not exist here
                 let of_it = i.store.exists(id, None)
-                    && i.store.get(id).is_some_and(|r| &*r.ent == ent || model.entity(&r.ent).is_some_and(|a| model.implements(a, ent)));
+                    && i.store.get(id).is_some_and(|r| {
+                        &*r.ent == ent
+                            || model
+                                .entity(&r.ent)
+                                .is_some_and(|a| model.implements(a, ent))
+                    });
                 if !of_it {
                     return Err(fail(format!("{ent}#{id} does not exist")));
                 }
                 let action = e.actions.iter().find(|a| a.name == name);
-                let is_flow = e.flows.iter().any(|fl| fl.transitions.iter().any(|t| t.by.as_deref() == Some(name)));
+                let is_flow = e
+                    .flows
+                    .iter()
+                    .any(|fl| fl.transitions.iter().any(|t| t.by.as_deref() == Some(name)));
                 if action.is_none() && !is_flow {
                     return Err(fail(format!("`{ent}` has no action `{name}`")));
                 }
                 let mut named = Vec::new();
                 if let (Some(a), Some(args)) = (action, op["args"].as_object()) {
                     for (k, v) in args {
-                        let p = a.params.iter().find(|p| &p.name == k).ok_or_else(|| fail(format!("`{name}` has no parameter `{k}`")))?;
-                        named.push((k.clone(), decode(i, model, p.ty.as_ref(), v, &lookup).map_err(|m| fail(format!("{k}: {m}")))?));
+                        let p = a
+                            .params
+                            .iter()
+                            .find(|p| &p.name == k)
+                            .ok_or_else(|| fail(format!("`{name}` has no parameter `{k}`")))?;
+                        named.push((
+                            k.clone(),
+                            decode(i, model, p.ty.as_ref(), v, &lookup)
+                                .map_err(|m| fail(format!("{k}: {m}")))?,
+                        ));
                     }
                 }
                 i.run_action(&rec, ent, name, action, Vec::new(), named)?;
@@ -1294,16 +1836,26 @@ pub fn apply_ops(i: &mut Interp, model: &Model, ops: &[J]) -> Result<serde_json:
 
 /// Whether a collection field is computed from the other side (`schema::is_inverse`).
 fn quadra_store_is_inverse(model: &Model, owner: &quadra_ir::Entity, f: &quadra_ir::Field) -> bool {
-    let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty else { return false };
-    let Ty::Path { segments, .. } = inner.as_ref() else { return false };
-    let Some(child) = model.entity(&segments[0]) else { return false };
+    let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty else {
+        return false;
+    };
+    let Ty::Path { segments, .. } = inner.as_ref() else {
+        return false;
+    };
+    let Some(child) = model.entity(&segments[0]) else {
+        return false;
+    };
     if child.kind == EntityKind::Record {
         return false;
     }
     if f.through.is_some() || f.via.is_some() {
         return true;
     }
-    child.fields.iter().any(|x| x.ty.as_ref().and_then(entity_named).map_or(false, |n| n == owner.name || owner.traits.contains(&n)))
+    child.fields.iter().any(|x| {
+        x.ty.as_ref()
+            .and_then(entity_named)
+            .map_or(false, |n| n == owner.name || owner.traits.contains(&n))
+    })
 }
 
 /// The entity a type names, through `?`: `Customer`, `Customer?`.

@@ -1,7 +1,9 @@
 //! Statements and statement blocks.
 
 use super::super::Parser;
-use super::{at_item, end_line, expr, item, meta_value, name, name_ref, path, recover_line, type_, value};
+use super::{
+    at_item, end_line, expr, item, meta_value, name, name_ref, path, recover_line, type_, value,
+};
 use crate::syntax_kind::SyntaxKind::*;
 
 /// A block after `:`. Either an indented block on the following lines or a single
@@ -41,7 +43,10 @@ fn block_inner(p: &mut Parser) {
 /// immediately used as a value (`expect.x`, `fail = 1`). A following `(` or `[` starts the
 /// statement's expression: `expect (a + b) == c`, `expect [1, 2].count() == 2`.
 fn kw_position(p: &Parser) -> bool {
-    !matches!(p.nth(1), DOT | QUESTION_DOT | EQ | PLUS_EQ | MINUS_EQ | COLON_EQ | NEWLINE | COMMA | R_PAREN)
+    !matches!(
+        p.nth(1),
+        DOT | QUESTION_DOT | EQ | PLUS_EQ | MINUS_EQ | COLON_EQ | NEWLINE | COMMA | R_PAREN
+    )
 }
 
 pub(crate) fn stmt(p: &mut Parser) {

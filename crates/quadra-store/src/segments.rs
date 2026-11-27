@@ -63,21 +63,46 @@ pub struct Segment {
 
 /// The bytes of a batch's segment.
 pub fn encode(b: &Batch) -> Vec<u8> {
-    let statements: Vec<J> = b.statements.iter().map(|(sql, ps)| json!([sql, ps.iter().map(param).collect::<Vec<_>>()])).collect();
+    let statements: Vec<J> = b
+        .statements
+        .iter()
+        .map(|(sql, ps)| json!([sql, ps.iter().map(param).collect::<Vec<_>>()]))
+        .collect();
     json!({ "first": b.first_number, "number": b.number, "first_tx": b.first_tx, "last_tx": b.last_tx, "hash": b.hash, "statements": statements }).to_string().into_bytes()
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Segment, String> {
     let v: J = serde_json::from_slice(bytes).map_err(|e| format!("not a segment: {e}"))?;
-    let n = |k: &str| v[k].as_u64().ok_or_else(|| format!("not a segment: no {k}"));
+    let n = |k: &str| {
+        v[k].as_u64()
+            .ok_or_else(|| format!("not a segment: no {k}"))
+    };
     let mut statements = Vec::new();
-    for s in v["statements"].as_array().ok_or("not a segment: no statements")? {
-        let sql = s[0].as_str().ok_or("not a segment: a statement without SQL")?.to_string();
-        let ps = s[1].as_array().ok_or("not a segment: a statement without parameters")?.iter().map(unparam).collect::<Result<Vec<_>, _>>()?;
+    for s in v["statements"]
+        .as_array()
+        .ok_or("not a segment: no statements")?
+    {
+        let sql = s[0]
+            .as_str()
+            .ok_or("not a segment: a statement without SQL")?
+            .to_string();
+        let ps = s[1]
+            .as_array()
+            .ok_or("not a segment: a statement without parameters")?
+            .iter()
+            .map(unparam)
+            .collect::<Result<Vec<_>, _>>()?;
         statements.push((sql, ps));
     }
     let number = n("number")?;
-    Ok(Segment { first: v["first"].as_u64().unwrap_or(number), number, first_tx: n("first_tx")?, last_tx: n("last_tx")?, hash: v["hash"].as_str().unwrap_or_default().to_string(), statements })
+    Ok(Segment {
+        first: v["first"].as_u64().unwrap_or(number),
+        number,
+        first_tx: n("first_tx")?,
+        last_tx: n("last_tx")?,
+        hash: v["hash"].as_str().unwrap_or_default().to_string(),
+        statements,
+    })
 }
 
 /// The name of a segment's file or object.
@@ -88,7 +113,11 @@ pub fn name(first: u64, last: u64, last_tx: u64) -> String {
 /// The batches a segment name covers, and its last transaction: (first, last, last_tx).
 pub fn parse_name(name: &str) -> Option<(u64, u64, u64)> {
     let mut it = name.strip_suffix(".json")?.split('-');
-    let r = (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+    let r = (
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+    );
     it.next().is_none().then_some(r)
 }
 
@@ -111,7 +140,13 @@ pub fn head(conn: &mut Conn) -> Result<u64, String> {
 /// Where a database stands in its log: its last batch and its last transaction.
 pub fn position(conn: &mut Conn) -> Result<(u64, u64), String> {
     let batch = if conn.table_exists("_quadra_batches")? {
-        conn.query("SELECT CAST(MAX(\"number\") AS TEXT) FROM \"_quadra_batches\"", &[])?.first().and_then(|r| r[0].as_deref().and_then(|v| v.parse().ok())).unwrap_or(0)
+        conn.query(
+            "SELECT CAST(MAX(\"number\") AS TEXT) FROM \"_quadra_batches\"",
+            &[],
+        )?
+        .first()
+        .and_then(|r| r[0].as_deref().and_then(|v| v.parse().ok()))
+        .unwrap_or(0)
     } else {
         0
     };
@@ -158,13 +193,19 @@ fn cut(statements: &[(String, Vec<Sql>)], tx: u64) -> Option<(Vec<(String, Vec<S
         .iter()
         .enumerate()
         .filter_map(|(i, (sql, ps))| match ps.first() {
-            Some(Sql::Int(t)) if sql.starts_with("INSERT INTO \"_quadra_commits\"") && *t as u64 <= tx => Some((i, *t as u64)),
+            Some(Sql::Int(t))
+                if sql.starts_with("INSERT INTO \"_quadra_commits\"") && *t as u64 <= tx =>
+            {
+                Some((i, *t as u64))
+            }
             _ => None,
         })
         .last()?;
     let mut out = statements[..=end].to_vec();
     // the state row says where the database is: at the cut
-    for (sql, ps) in statements.iter().filter(|(sql, _)| sql.starts_with("INSERT INTO \"_quadra_meta\"") && sql.contains("'state'")) {
+    for (sql, ps) in statements.iter().filter(|(sql, _)| {
+        sql.starts_with("INSERT INTO \"_quadra_meta\"") && sql.contains("'state'")
+    }) {
         let ps = ps
             .iter()
             .map(|p| match p {
@@ -186,10 +227,17 @@ fn cut(statements: &[(String, Vec<Sql>)], tx: u64) -> Option<(Vec<(String, Vec<S
 /// `apply`, stopping at transaction `until` when given (a point in time inside the log): the
 /// batches without a transaction of their own before the next one are applied too. Returns the
 /// last transaction of the database.
-pub fn apply_until(conn: &mut Conn, segments: &[Segment], until: Option<u64>) -> Result<u64, String> {
+pub fn apply_until(
+    conn: &mut Conn,
+    segments: &[Segment],
+    until: Option<u64>,
+) -> Result<u64, String> {
     let (mut batch, mut at) = position(conn)?;
     if until.is_some_and(|u| u < at) {
-        return Err(format!("the database is already past transaction {}: at {at}", until.unwrap()));
+        return Err(format!(
+            "the database is already past transaction {}: at {at}",
+            until.unwrap()
+        ));
     }
     for s in segments {
         for (number, first, last, statements) in batches(s) {
@@ -214,7 +262,11 @@ pub fn apply_until(conn: &mut Conn, segments: &[Segment], until: Option<u64>) ->
                 },
                 _ => (statements, last),
             };
-            let begin = if conn.dialect() == Dialect::Sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" };
+            let begin = if conn.dialect() == Dialect::Sqlite {
+                "BEGIN IMMEDIATE"
+            } else {
+                "BEGIN"
+            };
             conn.batch(begin)?;
             let r = (|| -> Result<(), String> {
                 for (sql, ps) in statements {
@@ -241,11 +293,16 @@ pub fn apply_until(conn: &mut Conn, segments: &[Segment], until: Option<u64>) ->
 pub fn snapshot(url: &str, path: &Path) -> Result<(u64, u64), String> {
     let mut conn = Conn::open(url)?;
     if conn.dialect() != Dialect::Sqlite {
-        return Err("snapshots are taken of SQLite databases (PostgreSQL has its own backups)".into());
+        return Err(
+            "snapshots are taken of SQLite databases (PostgreSQL has its own backups)".into(),
+        );
     }
     let _ = std::fs::remove_file(path);
     // the copy is of one moment; what it holds is read from the copy itself
-    conn.exec("VACUUM INTO ?text", &[Sql::Text(path.display().to_string())])?;
+    conn.exec(
+        "VACUUM INTO ?text",
+        &[Sql::Text(path.display().to_string())],
+    )?;
     position(&mut Conn::open(&format!("sqlite:{}", path.display()))?)
 }
 
@@ -255,7 +312,12 @@ pub fn restore(snapshot: &Path, segments: &[Segment], target: &Path) -> Result<u
 }
 
 /// `restore`, as of transaction `until` when given.
-pub fn restore_until(snapshot: &Path, segments: &[Segment], target: &Path, until: Option<u64>) -> Result<u64, String> {
+pub fn restore_until(
+    snapshot: &Path,
+    segments: &[Segment],
+    target: &Path,
+    until: Option<u64>,
+) -> Result<u64, String> {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", target.display()));
     }
@@ -284,7 +346,10 @@ impl Folder {
         Ok(std::fs::read_dir(&self.dir)
             .map_err(|e| e.to_string())?
             .flatten()
-            .filter_map(|e| parse_snapshot(&e.file_name().to_string_lossy(), SNAPSHOT).map(|(b, t)| (b, t, e.path())))
+            .filter_map(|e| {
+                parse_snapshot(&e.file_name().to_string_lossy(), SNAPSHOT)
+                    .map(|(b, t)| (b, t, e.path()))
+            })
             .collect())
     }
 
@@ -295,7 +360,11 @@ impl Folder {
 
     /// The latest snapshot of a transaction at or before `tx`.
     pub fn snapshot_at_or_before(&self, tx: u64) -> Result<Option<(u64, u64, PathBuf)>, String> {
-        Ok(self.snapshots()?.into_iter().filter(|(_, t, _)| *t <= tx).max_by_key(|(b, _, _)| *b))
+        Ok(self
+            .snapshots()?
+            .into_iter()
+            .filter(|(_, t, _)| *t <= tx)
+            .max_by_key(|(b, _, _)| *b))
     }
 
     /// The database rebuilt at `target` from the latest snapshot and the segments after it.
@@ -307,8 +376,14 @@ impl Folder {
     /// latest snapshot before it and the segments after that. Older than the oldest snapshot the
     /// folder keeps, it cannot go (the database's own history goes further back).
     pub fn restore_to(&self, target: &Path, tx: Option<u64>) -> Result<u64, String> {
-        let (batch, _, snap) = self.snapshot_at_or_before(tx.unwrap_or(u64::MAX))?.ok_or("no snapshot in the folder at or before that transaction")?;
-        let segments: Vec<Segment> = self.segments()?.into_iter().filter(|s| s.number > batch).collect();
+        let (batch, _, snap) = self
+            .snapshot_at_or_before(tx.unwrap_or(u64::MAX))?
+            .ok_or("no snapshot in the folder at or before that transaction")?;
+        let segments: Vec<Segment> = self
+            .segments()?
+            .into_iter()
+            .filter(|s| s.number > batch)
+            .collect();
         restore_until(&snap, &segments, target, tx)
     }
 
@@ -317,17 +392,29 @@ impl Folder {
         let mut names: Vec<(u64, u64, PathBuf)> = std::fs::read_dir(&self.dir)
             .map_err(|e| e.to_string())?
             .filter_map(|e| e.ok())
-            .filter_map(|e| parse_name(&e.file_name().to_string_lossy()).map(|(a, b, _)| (a, b, e.path())))
+            .filter_map(|e| {
+                parse_name(&e.file_name().to_string_lossy()).map(|(a, b, _)| (a, b, e.path()))
+            })
             .collect();
         names.sort();
-        names.into_iter().map(|(_, _, p)| std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| decode(&b))).collect()
+        names
+            .into_iter()
+            .map(|(_, _, p)| {
+                std::fs::read(&p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| decode(&b))
+            })
+            .collect()
     }
 }
 
 impl DurabilitySink for Folder {
     fn last(&mut self) -> Result<Option<(u64, u64)>, String> {
         let mut last = self.latest_snapshot()?.map(|(b, t, _)| (b, t));
-        for e in std::fs::read_dir(&self.dir).map_err(|e| e.to_string())?.flatten() {
+        for e in std::fs::read_dir(&self.dir)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
             if let Some((_, b, t)) = parse_name(&e.file_name().to_string_lossy()) {
                 last = Some(last.map_or((b, t), |l| l.max((b, t))));
             }
@@ -336,7 +423,11 @@ impl DurabilitySink for Folder {
     }
 
     fn segments_after(&mut self, batch: u64) -> Result<Vec<Segment>, String> {
-        Ok(self.segments()?.into_iter().filter(|s| s.number > batch).collect())
+        Ok(self
+            .segments()?
+            .into_iter()
+            .filter(|s| s.number > batch)
+            .collect())
     }
 
     fn snapshot(&mut self, batch: u64, tx: u64, file: &Path) -> Result<(), String> {
@@ -344,7 +435,9 @@ impl DurabilitySink for Folder {
         let target = self.dir.join(format!("{stem}{SNAPSHOT}"));
         let tmp = self.dir.join(format!(".{stem}.snapshot.tmp"));
         std::fs::copy(file, &tmp).map_err(|e| e.to_string())?;
-        std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        std::fs::File::open(&tmp)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
         if let Ok(d) = std::fs::File::open(&self.dir) {
             let _ = d.sync_all();
@@ -353,7 +446,10 @@ impl DurabilitySink for Folder {
     }
 
     fn prune(&mut self, batch: u64) -> Result<(), String> {
-        for e in std::fs::read_dir(&self.dir).map_err(|e| e.to_string())?.flatten() {
+        for e in std::fs::read_dir(&self.dir)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
             let name = e.file_name().to_string_lossy().to_string();
             let old_segment = parse_name(&name).is_some_and(|(_, b, _)| b <= batch);
             let old_snapshot = parse_snapshot(&name, SNAPSHOT).is_some_and(|(b, _)| b < batch);

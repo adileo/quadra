@@ -30,7 +30,11 @@ impl<'a> LineIndex<'a> {
     pub fn offset(&self, pos: Position) -> TextSize {
         let line = (pos.line as usize).min(self.line_starts.len() - 1);
         let start = self.line_starts[line];
-        let end = self.line_starts.get(line + 1).copied().unwrap_or(self.text.len());
+        let end = self
+            .line_starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.text.len());
         let mut utf16 = 0usize;
         let mut offset = start;
         for ch in self.text[start..end].chars() {

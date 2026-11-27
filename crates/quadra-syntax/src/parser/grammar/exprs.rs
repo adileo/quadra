@@ -10,8 +10,19 @@ pub(crate) fn expr(p: &mut Parser) -> Option<CompletedMarker> {
 
 /// Contextual keywords that can follow a number without being its unit (`0..4 default 2`).
 const NOT_UNITS: &[&str] = &[
-    "implies", "default", "required", "unless", "by", "per", "except", "live", "via", "through", "parent",
-    "unique", "converges",
+    "implies",
+    "default",
+    "required",
+    "unless",
+    "by",
+    "per",
+    "except",
+    "live",
+    "via",
+    "through",
+    "parent",
+    "unique",
+    "converges",
 ];
 
 const BP_TERNARY: u8 = 2;
@@ -93,7 +104,10 @@ fn lhs(p: &mut Parser) -> Option<CompletedMarker> {
             expr_bp(p, 1);
             Some(m.complete(p, AS_EXPR))
         }
-        IDENT if p.nth_text(0) == "fail" && !matches!(p.nth(1), DOT | EQ | COMMA | R_PAREN | NEWLINE) => {
+        IDENT
+            if p.nth_text(0) == "fail"
+                && !matches!(p.nth(1), DOT | EQ | COMMA | R_PAREN | NEWLINE) =>
+        {
             let m = p.start();
             p.bump_ctx();
             expr_bp(p, BP_TERNARY);
@@ -215,7 +229,8 @@ fn atom_inner(p: &mut Parser) -> Option<CompletedMarker> {
                 LITERAL
             }
         }
-        PERCENT | STRING | FSTRING | DATE | DATETIME | YEAR_MONTH | TRUE_KW | FALSE_KW | NONE_KW => {
+        PERCENT | STRING | FSTRING | DATE | DATETIME | YEAR_MONTH | TRUE_KW | FALSE_KW
+        | NONE_KW => {
             p.bump();
             LITERAL
         }
@@ -272,8 +287,10 @@ fn atom_inner(p: &mut Parser) -> Option<CompletedMarker> {
         _ => {
             m.abandon(p);
             p.error("expected an expression");
-            if !matches!(p.current(), NEWLINE | INDENT | DEDENT | R_PAREN | R_BRACK | R_BRACE | COLON | COMMA)
-                && !p.at_eof()
+            if !matches!(
+                p.current(),
+                NEWLINE | INDENT | DEDENT | R_PAREN | R_BRACK | R_BRACE | COLON | COMMA
+            ) && !p.at_eof()
             {
                 p.err_and_bump("unexpected token");
             }

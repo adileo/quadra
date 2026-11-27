@@ -23,7 +23,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 struct One(TenantSpec);
@@ -56,11 +59,28 @@ fn http(port: u16, token: &str, method: &str, path: &str, body: Option<&J>) -> (
     let mut raw = String::new();
     let _ = s.read_to_string(&mut raw);
     let (head, rest) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
-    let status = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     // what the users need of an answer: its base, and the message of an error (a person's
     // browser parses the rest; here it would only take the CPU from the server)
-    let base = rest.find("\"base\":").and_then(|i| rest[i + 7..].trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse::<u64>().ok());
-    let error = if status >= 400 { serde_json::from_str::<J>(rest).ok().map(|b| b["error"].clone()) } else { None };
+    let base = rest.find("\"base\":").and_then(|i| {
+        rest[i + 7..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse::<u64>()
+            .ok()
+    });
+    let error = if status >= 400 {
+        serde_json::from_str::<J>(rest)
+            .ok()
+            .map(|b| b["error"].clone())
+    } else {
+        None
+    };
     LAST_ERROR.with(|e| *e.borrow_mut() = error.as_ref().map(|x| x.to_string()));
     (status, json!({ "base": base, "error": error }))
 }
@@ -96,10 +116,32 @@ struct World {
 
 fn world(url: &str, users: usize) -> World {
     let mut conn = Conn::open(url).unwrap();
-    let one = |conn: &mut Conn, sql: &str| -> Vec<Vec<Option<String>>> { conn.query(sql, &[]).unwrap() };
-    let admin: u64 = one(&mut conn, "SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'")[0][0].as_deref().unwrap().parse().unwrap();
+    let one =
+        |conn: &mut Conn, sql: &str| -> Vec<Vec<Option<String>>> { conn.query(sql, &[]).unwrap() };
+    let admin: u64 = one(
+        &mut conn,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'",
+    )[0][0]
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
     let now = chrono::Local::now().naive_local();
-    let tokens = (0..users).map(|i| quadra_store::auth::create(&mut conn, "token", admin, &format!("load-{}-{i}", std::process::id()), false, now, None).unwrap().0).collect();
+    let tokens = (0..users)
+        .map(|i| {
+            quadra_store::auth::create(
+                &mut conn,
+                "token",
+                admin,
+                &format!("load-{}-{i}", std::process::id()),
+                false,
+                now,
+                None,
+            )
+            .unwrap()
+            .0
+        })
+        .collect();
     let orders = one(&mut conn, "SELECT CAST(\"id\" AS TEXT) FROM \"order\" WHERE \"state\" = 'Confirmed' ORDER BY \"id\" LIMIT 2000").iter().map(|r| r[0].as_deref().unwrap().parse().unwrap()).collect();
     let lines = conn
         .query(
@@ -110,7 +152,11 @@ fn world(url: &str, users: usize) -> World {
         .iter()
         .map(|r| (r[0].as_deref().unwrap().parse().unwrap(), r[1].as_deref().unwrap().parse().unwrap()))
         .collect();
-    World { tokens, orders, lines }
+    World {
+        tokens,
+        orders,
+        lines,
+    }
 }
 
 #[derive(Default)]
@@ -131,13 +177,24 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
 }
 
 fn rss_mb() -> f64 {
-    let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().unwrap_or(0.0) / 1024.0
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0)
+        / 1024.0
 }
 
 /// The load with `readers` readers: per kind of request, its latencies.
 fn run(world: &Arc<World>, url: &str, readers: usize, writers: usize) {
-    let (users, seconds, think) = (world.tokens.len(), env("QUADRA_LOAD_SECONDS", 30u64), env("QUADRA_LOAD_THINK_MS", 2000.0f64));
+    let (users, seconds, think) = (
+        world.tokens.len(),
+        env("QUADRA_LOAD_SECONDS", 30u64),
+        env("QUADRA_LOAD_THINK_MS", 2000.0f64),
+    );
     // the share of requests that commit (the rest of the 10% becomes searches)
     let writes = env("QUADRA_LOAD_WRITES", 0.10f64).clamp(0.0, 0.10);
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stress");
@@ -153,20 +210,42 @@ fn run(world: &Arc<World>, url: &str, readers: usize, writers: usize) {
         sweep_every: 0,
         editors: vec![],
         watch: false,
-        limits: Limits { job: Some(Duration::from_secs(30)), max_queue: None, ..Limits::default() },
+        limits: Limits {
+            job: Some(Duration::from_secs(30)),
+            max_queue: None,
+            ..Limits::default()
+        },
         engines: Engines { readers, writers },
     };
-    let host = Host::new(HostOptions::default(), Arc::new(One(TenantSpec { id: "load".into(), config })));
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let host = Host::new(
+        HostOptions::default(),
+        Arc::new(One(TenantSpec {
+            id: "load".into(),
+            config,
+        })),
+    );
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
     let h = host.clone();
-    rt.spawn(async move { h.serve(std::net::SocketAddr::from(([127, 0, 0, 1], port))).await.unwrap() });
+    rt.spawn(async move {
+        h.serve(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap()
+    });
     rt.block_on(host.start("load.test")).unwrap();
     let before = rss_mb();
-    let wanted = readers + if url.starts_with("sqlite:") { 1 } else { writers.max(1) };
+    let wanted = readers
+        + if url.starts_with("sqlite:") {
+            1
+        } else {
+            writers.max(1)
+        };
     for _ in 0..600 {
         if host.running().first().is_some_and(|t| t.engines >= wanted) {
             break;
@@ -175,7 +254,13 @@ fn run(world: &Arc<World>, url: &str, readers: usize, writers: usize) {
     }
     // every engine warmed up a little: a read for each, one write
     for t in world.tokens.iter().take(readers + 2) {
-        let _ = http(port, t, "POST", "/v1/query", Some(&json!({ "entity": "Shipment", "limit": 500, "offset": 0 })));
+        let _ = http(
+            port,
+            t,
+            "POST",
+            "/v1/query",
+            Some(&json!({ "entity": "Shipment", "limit": 500, "offset": 0 })),
+        );
     }
 
     let stats: Arc<Mutex<BTreeMap<&'static str, Kind>>> = Arc::new(Mutex::new(BTreeMap::new()));
@@ -255,20 +340,47 @@ fn run(world: &Arc<World>, url: &str, readers: usize, writers: usize) {
     let mut stats = stats.lock().unwrap();
     let total: usize = stats.values().map(|k| k.ms.len()).sum();
     println!("\n{users} users, {readers} readers, {writers} writer(s) ({engines} engines), {seconds} s: {:.0} requests/s, memory {before:.0} → {after:.0} MB", total as f64 / seconds as f64);
-    println!("{:<8} {:>7} {:>9} {:>9} {:>9} {:>9} {:>7} {:>9}", "kind", "count", "p50 ms", "p95 ms", "p99 ms", "max ms", "errors", "conflicts");
+    println!(
+        "{:<8} {:>7} {:>9} {:>9} {:>9} {:>9} {:>7} {:>9}",
+        "kind", "count", "p50 ms", "p95 ms", "p99 ms", "max ms", "errors", "conflicts"
+    );
     let mut reads = Vec::new();
     for (name, k) in stats.iter_mut() {
         if *name != "commit" {
             reads.extend(k.ms.iter().copied());
         }
-        let (p50, p95, p99) = (pct(&mut k.ms, 0.5), pct(&mut k.ms, 0.95), pct(&mut k.ms, 0.99));
+        let (p50, p95, p99) = (
+            pct(&mut k.ms, 0.5),
+            pct(&mut k.ms, 0.95),
+            pct(&mut k.ms, 0.99),
+        );
         let max = k.ms.iter().cloned().fold(0.0, f64::max);
-        println!("{name:<8} {:>7} {p50:>9.1} {p95:>9.1} {p99:>9.1} {max:>9.1} {:>7} {:>9} {}", k.ms.len(), k.errors, k.conflicts, if k.statuses.is_empty() { String::new() } else { format!("{:?}", k.statuses) });
+        println!(
+            "{name:<8} {:>7} {p50:>9.1} {p95:>9.1} {p99:>9.1} {max:>9.1} {:>7} {:>9} {}",
+            k.ms.len(),
+            k.errors,
+            k.conflicts,
+            if k.statuses.is_empty() {
+                String::new()
+            } else {
+                format!("{:?}", k.statuses)
+            }
+        );
     }
-    println!("{:<8} {:>7} {:>9.1} {:>9.1} {:>9.1}", "reads", reads.len(), pct(&mut reads, 0.5), pct(&mut reads, 0.95), pct(&mut reads, 0.99));
+    println!(
+        "{:<8} {:>7} {:>9.1} {:>9.1} {:>9.1}",
+        "reads",
+        reads.len(),
+        pct(&mut reads, 0.5),
+        pct(&mut reads, 0.95),
+        pct(&mut reads, 0.99)
+    );
     for (name, k) in stats.iter() {
         if let Some(e) = &k.first_error {
-            println!("first error of {name}: {}", e.chars().take(300).collect::<String>());
+            println!(
+                "first error of {name}: {}",
+                e.chars().take(300).collect::<String>()
+            );
         }
     }
 }
@@ -283,7 +395,10 @@ fn hundreds_of_people_at_once() {
     let users = env("QUADRA_LOAD_USERS", 300usize);
     let writers = env("QUADRA_LOAD_WRITERS", 1usize);
     let world = Arc::new(world(&url, users));
-    for readers in env("QUADRA_LOAD_READERS", "0,2,4".to_string()).split(',').filter_map(|r| r.trim().parse().ok()) {
+    for readers in env("QUADRA_LOAD_READERS", "0,2,4".to_string())
+        .split(',')
+        .filter_map(|r| r.trim().parse().ok())
+    {
         run(&world, &url, readers, writers);
     }
 }
@@ -298,7 +413,16 @@ fn a_commit_on_an_older_base() {
     };
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stress");
     let mut conn = Conn::open(&url).unwrap();
-    let admin: u64 = conn.query("SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'", &[]).unwrap()[0][0].as_deref().unwrap().parse().unwrap();
+    let admin: u64 = conn
+        .query(
+            "SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'",
+            &[],
+        )
+        .unwrap()[0][0]
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
     let lines: Vec<(u64, f64)> = conn
         .query("SELECT CAST(l.\"id\" AS TEXT), CAST(l.\"qty\" AS TEXT) FROM \"order_line\" l JOIN \"order\" o ON o.\"id\" = l.\"order_id\" WHERE o.\"state\" = 'Confirmed' ORDER BY l.\"id\" LIMIT 2000 OFFSET 5000", &[])
         .unwrap()
@@ -314,9 +438,20 @@ fn a_commit_on_an_older_base() {
         let t = Instant::now();
         let (s, r) = local.tx(admin, &body, &format!("age-{}-{next}", std::process::id()));
         if s == 409 && std::env::var("QUADRA_LOAD_SHOW").is_ok() {
-            println!("409 on OrderLine#{line}: {}", r["conflicts"].to_string().chars().take(700).collect::<String>());
+            println!(
+                "409 on OrderLine#{line}: {}",
+                r["conflicts"]
+                    .to_string()
+                    .chars()
+                    .take(700)
+                    .collect::<String>()
+            );
         }
-        (s, t.elapsed().as_secs_f64() * 1000.0, r["base"].as_u64().unwrap_or(base))
+        (
+            s,
+            t.elapsed().as_secs_f64() * 1000.0,
+            r["base"].as_u64().unwrap_or(base),
+        )
     };
     let mut head = quadra_store::source::head(&mut conn).unwrap();
     println!("\n{:>6} {:>9} {:>7}", "behind", "ms", "status");
@@ -342,7 +477,16 @@ fn a_report_after_a_commit() {
     };
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stress");
     let mut conn = Conn::open(&url).unwrap();
-    let admin: u64 = conn.query("SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'", &[]).unwrap()[0][0].as_deref().unwrap().parse().unwrap();
+    let admin: u64 = conn
+        .query(
+            "SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'",
+            &[],
+        )
+        .unwrap()[0][0]
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
     let line: (u64, f64) = conn
         .query("SELECT CAST(l.\"id\" AS TEXT), CAST(l.\"qty\" AS TEXT) FROM \"order_line\" l JOIN \"order\" o ON o.\"id\" = l.\"order_id\" WHERE o.\"state\" = 'Confirmed' ORDER BY l.\"id\" LIMIT 1 OFFSET 9000", &[])
         .unwrap()
@@ -352,9 +496,18 @@ fn a_report_after_a_commit() {
         .unwrap();
     let mut local = quadra_server::Local::open(&root, &url, 256).unwrap();
     let reports = [
-        ("group", json!({ "entity": "Order", "where": "state in {Confirmed, Shipped}", "group_by": ["customer.region", { "field": "date", "bucket": "month" }], "aggregates": { "total": "sum" }, "limit": 100 })),
-        ("pivot", json!({ "entity": "Product", "group_by": ["category", "active"], "pivot": true, "aggregates": { "units_sold": "sum", "margin": "sum" }, "limit": 100 })),
-        ("grid", json!({ "entity": "Shipment", "limit": 500, "offset": 0 })),
+        (
+            "group",
+            json!({ "entity": "Order", "where": "state in {Confirmed, Shipped}", "group_by": ["customer.region", { "field": "date", "bucket": "month" }], "aggregates": { "total": "sum" }, "limit": 100 }),
+        ),
+        (
+            "pivot",
+            json!({ "entity": "Product", "group_by": ["category", "active"], "pivot": true, "aggregates": { "units_sold": "sum", "margin": "sum" }, "limit": 100 }),
+        ),
+        (
+            "grid",
+            json!({ "entity": "Shipment", "limit": 500, "offset": 0 }),
+        ),
     ];
     let show = |local: &mut quadra_server::Local, when: &str| {
         for (name, q) in &reports {
@@ -370,7 +523,14 @@ fn a_report_after_a_commit() {
     for n in 0..3 {
         let body = json!({ "base": base, "ops": [{ "op": "update", "entity": "OrderLine", "id": line.0, "values": { "qty": format!("{} pcs", line.1 + 1.0 + n as f64) } }] });
         let (s, r) = local.tx(admin, &body, &format!("report-{}-{n}", std::process::id()));
-        println!("commit {n}: {s} {}", if s != 200 { r.to_string() } else { String::new() });
+        println!(
+            "commit {n}: {s} {}",
+            if s != 200 {
+                r.to_string()
+            } else {
+                String::new()
+            }
+        );
         show(&mut local, &format!("after commit {n}"));
     }
 }
@@ -389,19 +549,63 @@ fn writers_at_full_speed() {
     let clients = env("QUADRA_LOAD_CLIENTS", 32usize);
     let seconds = env("QUADRA_LOAD_SECONDS", 20u64);
     let mut conn = Conn::open(&url).unwrap();
-    let admin: u64 = conn.query("SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'", &[]).unwrap()[0][0].as_deref().unwrap().parse().unwrap();
+    let admin: u64 = conn
+        .query(
+            "SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = 'admin'",
+            &[],
+        )
+        .unwrap()[0][0]
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
     let now = chrono::Local::now().naive_local();
-    let tokens: Vec<String> = (0..clients).map(|i| quadra_store::auth::create(&mut conn, "token", admin, &format!("writers-{}-{i}", std::process::id()), false, now, None).unwrap().0).collect();
-    let lines = |conn: &mut Conn, sql: &str| -> Vec<(u64, f64)> { conn.query(sql, &[]).unwrap().iter().map(|r| (r[0].as_deref().unwrap().parse().unwrap(), r[1].as_deref().unwrap().parse().unwrap())).collect() };
+    let tokens: Vec<String> = (0..clients)
+        .map(|i| {
+            quadra_store::auth::create(
+                &mut conn,
+                "token",
+                admin,
+                &format!("writers-{}-{i}", std::process::id()),
+                false,
+                now,
+                None,
+            )
+            .unwrap()
+            .0
+        })
+        .collect();
+    let lines = |conn: &mut Conn, sql: &str| -> Vec<(u64, f64)> {
+        conn.query(sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r[0].as_deref().unwrap().parse().unwrap(),
+                    r[1].as_deref().unwrap().parse().unwrap(),
+                )
+            })
+            .collect()
+    };
     // one line per customer, and the lines of the customer with the most
     let spread = lines(&mut conn, &format!("SELECT CAST(MIN(l.\"id\") AS TEXT), CAST(MIN(l.\"qty\") AS TEXT) FROM \"order_line\" l JOIN \"order\" o ON o.\"id\" = l.\"order_id\" WHERE o.\"state\" = 'Confirmed' GROUP BY o.\"customer_id\" LIMIT {clients}"));
     let hot = lines(&mut conn, &format!("SELECT CAST(l.\"id\" AS TEXT), CAST(l.\"qty\" AS TEXT) FROM \"order_line\" l JOIN \"order\" o ON o.\"id\" = l.\"order_id\" WHERE o.\"state\" = 'Confirmed' AND o.\"customer_id\" = (SELECT o2.\"customer_id\" FROM \"order\" o2 JOIN \"order_line\" l2 ON l2.\"order_id\" = o2.\"id\" WHERE o2.\"state\" = 'Confirmed' GROUP BY o2.\"customer_id\" ORDER BY COUNT(*) DESC LIMIT 1) LIMIT {clients}"));
     let tokens = Arc::new(tokens);
-    println!("\n{clients} clients without pauses, {seconds} s each, {} spread lines, {} hot lines", spread.len(), hot.len());
-    println!("{:<7} {:>8} {:>10} {:>9} {:>9} {:>9} {:>7} {:>7}", "lines", "writers", "commits/s", "p50 ms", "p95 ms", "p99 ms", "409", "other");
+    println!(
+        "\n{clients} clients without pauses, {seconds} s each, {} spread lines, {} hot lines",
+        spread.len(),
+        hot.len()
+    );
+    println!(
+        "{:<7} {:>8} {:>10} {:>9} {:>9} {:>9} {:>7} {:>7}",
+        "lines", "writers", "commits/s", "p50 ms", "p95 ms", "p99 ms", "409", "other"
+    );
     for (mode, set) in [("spread", spread), ("hot", hot)] {
         let set = Arc::new(set);
-        for writers in env("QUADRA_LOAD_WRITERS_LIST", "1,4,16".to_string()).split(',').filter_map(|w| w.trim().parse::<usize>().ok()) {
+        for writers in env("QUADRA_LOAD_WRITERS_LIST", "1,4,16".to_string())
+            .split(',')
+            .filter_map(|w| w.trim().parse::<usize>().ok())
+        {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stress");
             let config = Config {
                 root,
@@ -415,17 +619,49 @@ fn writers_at_full_speed() {
                 sweep_every: 0,
                 editors: vec![],
                 watch: false,
-                limits: Limits { job: Some(Duration::from_secs(30)), max_queue: None, ..Limits::default() },
-                engines: Engines { readers: 0, writers },
+                limits: Limits {
+                    job: Some(Duration::from_secs(30)),
+                    max_queue: None,
+                    ..Limits::default()
+                },
+                engines: Engines {
+                    readers: 0,
+                    writers,
+                },
             };
             // the engine at full speed: no limit per credential; QUADRA_LOAD_SINK_MS: every batch
             // also kept somewhere that takes that long (object storage), before it is confirmed
-            let durability: Option<Arc<dyn quadra_server::Durability>> = std::env::var("QUADRA_LOAD_SINK_MS").ok().and_then(|v| v.parse().ok()).map(|ms| Arc::new(Slow(ms)) as Arc<dyn quadra_server::Durability>);
-            let host = Host::new(HostOptions { requests_per_second: Some(1e9), durability, ..Default::default() }, Arc::new(One(TenantSpec { id: "writers".into(), config })));
-            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let durability: Option<Arc<dyn quadra_server::Durability>> =
+                std::env::var("QUADRA_LOAD_SINK_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .map(|ms| Arc::new(Slow(ms)) as Arc<dyn quadra_server::Durability>);
+            let host = Host::new(
+                HostOptions {
+                    requests_per_second: Some(1e9),
+                    durability,
+                    ..Default::default()
+                },
+                Arc::new(One(TenantSpec {
+                    id: "writers".into(),
+                    config,
+                })),
+            );
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
             let h = host.clone();
-            rt.spawn(async move { h.serve(std::net::SocketAddr::from(([127, 0, 0, 1], port))).await.unwrap() });
+            rt.spawn(async move {
+                h.serve(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                    .await
+                    .unwrap()
+            });
             rt.block_on(host.start("load.test")).unwrap();
             for _ in 0..600 {
                 if host.running().first().is_some_and(|t| t.engines >= writers) {
@@ -470,9 +706,18 @@ fn writers_at_full_speed() {
                 .collect();
             rt.block_on(host.stop("writers"));
             let mut all: Vec<f64> = results.iter().flat_map(|r| r.0.iter().copied()).collect();
-            let (refused, other): (usize, usize) = (results.iter().map(|r| r.1).sum(), results.iter().map(|r| r.2).sum());
+            let (refused, other): (usize, usize) = (
+                results.iter().map(|r| r.1).sum(),
+                results.iter().map(|r| r.2).sum(),
+            );
             let ok = all.len() - refused - other;
-            println!("{mode:<7} {writers:>8} {:>10.0} {:>9.1} {:>9.1} {:>9.1} {refused:>7} {other:>7}", ok as f64 / seconds as f64, pct(&mut all, 0.5), pct(&mut all, 0.95), pct(&mut all, 0.99));
+            println!(
+                "{mode:<7} {writers:>8} {:>10.0} {:>9.1} {:>9.1} {:>9.1} {refused:>7} {other:>7}",
+                ok as f64 / seconds as f64,
+                pct(&mut all, 0.5),
+                pct(&mut all, 0.95),
+                pct(&mut all, 0.99)
+            );
             let mut why: BTreeMap<String, usize> = BTreeMap::new();
             for r in &results {
                 for (k, v) in &r.3 {
@@ -499,7 +744,16 @@ impl quadra_store::sequencer::DurabilitySink for SlowSink {
 }
 
 impl quadra_server::Durability for Slow {
-    fn destinations(&self, _: &str) -> (Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>, quadra_store::sequencer::Rule) {
-        (vec![Box::new(SlowSink(self.0))], quadra_store::sequencer::Rule::All)
+    fn destinations(
+        &self,
+        _: &str,
+    ) -> (
+        Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>,
+        quadra_store::sequencer::Rule,
+    ) {
+        (
+            vec![Box::new(SlowSink(self.0))],
+            quadra_store::sequencer::Rule::All,
+        )
     }
 }

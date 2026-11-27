@@ -10,7 +10,7 @@
 //! costs little, late is a bug.
 
 use crate::deps;
-use quadra_ir::{BinOp, Entity, Expr, ExprKind, Model, Ty, Trigger};
+use quadra_ir::{BinOp, Entity, Expr, ExprKind, Model, Trigger, Ty};
 
 /// An instant a threshold passes for each record: the value of `field` (a stored `DateTime`)
 /// moved by `days` calendar days (in the project's zone, as the interpreter does) and `secs`
@@ -46,7 +46,9 @@ fn reads_clock(e: &Expr) -> bool {
 
 fn is_datetime(ty: &Option<Ty>) -> bool {
     match ty {
-        Some(Ty::Path { segments, args, .. }) => args.is_empty() && segments.len() == 1 && segments[0] == "DateTime",
+        Some(Ty::Path { segments, args, .. }) => {
+            args.is_empty() && segments.len() == 1 && segments[0] == "DateTime"
+        }
         Some(Ty::Optional(t)) => is_datetime(&Some((**t).clone())),
         _ => false,
     }
@@ -61,10 +63,25 @@ fn term(m: &Model, ent: &Entity, e: &Expr) -> Option<(String, i64, i64)> {
     };
     match &e.kind {
         ExprKind::Name(n) => Some((field(n)?, 0, 0)),
-        ExprKind::Field { base, name, optional: false } if matches!(base.kind, ExprKind::SelfRef) => Some((field(name)?, 0, 0)),
-        ExprKind::Binary { op: op @ (BinOp::Add | BinOp::Sub), lhs, rhs } => {
+        ExprKind::Field {
+            base,
+            name,
+            optional: false,
+        } if matches!(base.kind, ExprKind::SelfRef) => Some((field(name)?, 0, 0)),
+        ExprKind::Binary {
+            op: op @ (BinOp::Add | BinOp::Sub),
+            lhs,
+            rhs,
+        } => {
             let (f, d, s) = term(m, ent, lhs)?;
-            let ExprKind::Quantity { value, unit, per: None } = &rhs.kind else { return None };
+            let ExprKind::Quantity {
+                value,
+                unit,
+                per: None,
+            } = &rhs.kind
+            else {
+                return None;
+            };
             let n: i64 = value.parse().ok()?;
             let n = if *op == BinOp::Add { n } else { -n };
             let (dd, ss) = match unit.as_str() {
@@ -86,34 +103,59 @@ fn scan(m: &Model, ent: &Entity, e: &Expr, out: &mut Vec<Threshold>) -> Result<(
     if !reads_clock(e) {
         // the clock may still be read through a function, a formula or another record
         if deps::analyze(m, &ent.name, &[e], &[]).time {
-            return Err(format!("the clock read through something else, on `{}`", ent.name));
+            return Err(format!(
+                "the clock read through something else, on `{}`",
+                ent.name
+            ));
         }
         return Ok(());
     }
     match &e.kind {
-        ExprKind::Binary { op: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, lhs, rhs } => {
+        ExprKind::Binary {
+            op: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
+            lhs,
+            rhs,
+        } => {
             let other = if is_clock_call(lhs, "now") {
                 rhs
             } else if is_clock_call(rhs, "now") {
                 lhs
             } else {
-                return Err(format!("a comparison of `{}` with the clock that is not a threshold", ent.name));
+                return Err(format!(
+                    "a comparison of `{}` with the clock that is not a threshold",
+                    ent.name
+                ));
             };
             match term(m, ent, other) {
                 Some((field, days, secs)) => {
-                    out.push(Threshold { entity: ent.name.clone(), field, days, secs });
+                    out.push(Threshold {
+                        entity: ent.name.clone(),
+                        field,
+                        days,
+                        secs,
+                    });
                     Ok(())
                 }
-                None => Err(format!("`now()` compared with something other than a stored DateTime of `{}`", ent.name)),
+                None => Err(format!(
+                    "`now()` compared with something other than a stored DateTime of `{}`",
+                    ent.name
+                )),
             }
         }
-        ExprKind::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies, lhs, rhs } => {
+        ExprKind::Binary {
+            op: BinOp::And | BinOp::Or | BinOp::Implies,
+            lhs,
+            rhs,
+        } => {
             scan(m, ent, lhs, out)?;
             scan(m, ent, rhs, out)
         }
         ExprKind::Unary { expr, .. } => scan(m, ent, expr, out),
         _ if format!("{:?}", e.kind).contains("Name(\"today\")") => Err("`today()`".into()),
-        _ => Err(format!("the clock read in a way that is not a threshold, on `{}`", ent.name)),
+        _ => Err(format!(
+            "the clock read in a way that is not a threshold, on `{}`",
+            ent.name
+        )),
     }
 }
 
@@ -147,7 +189,10 @@ pub fn schedule(m: &Model) -> Schedule {
             return Schedule::Periodic(why);
         }
         if out.len() == before {
-            return Schedule::Periodic(format!("the clock read in a way that is not a threshold, on `{}`", e.name));
+            return Schedule::Periodic(format!(
+                "the clock read in a way that is not a threshold, on `{}`",
+                e.name
+            ));
         }
     }
     if !any {

@@ -38,7 +38,12 @@ pub fn check(project: &Project) -> Checked {
     if diagnostics.iter().any(|d| d.severity == Severity::Error) {
         // the interface files' own problems (their names and types need a model)
         let interfaces = interfaces(project, None, &mut diagnostics);
-        return Checked { model: None, report: Report::default(), diagnostics, interfaces };
+        return Checked {
+            model: None,
+            report: Report::default(),
+            diagnostics,
+            interfaces,
+        };
     }
     let mut model = quadra_ir::lower(project, &analysis);
     let report = quadra_types::analyze_model(&model);
@@ -51,7 +56,10 @@ pub fn check(project: &Project) -> Checked {
     declarations.extend(verify_lock(project, &model, &report));
     for d in declarations.iter_mut() {
         let text = &project.file(d.file).text;
-        let (start, end) = (usize::from(d.range.start()), usize::from(d.range.end()).min(text.len()));
+        let (start, end) = (
+            usize::from(d.range.start()),
+            usize::from(d.range.end()).min(text.len()),
+        );
         if let Some(nl) = text.get(start..end).and_then(|t| t.find('\n')) {
             let line_end = start + text[start..start + nl].trim_end().len();
             d.range = quadra_syntax::TextRange::new(d.range.start(), (line_end as u32).into());
@@ -61,11 +69,20 @@ pub fn check(project: &Project) -> Checked {
     diagnostics.extend(reactions(&model, &report));
     let interfaces = interfaces(project, Some(&model), &mut diagnostics);
     diagnostics.sort_by_key(|d| (d.file, d.range.start()));
-    Checked { model: Some(model), report, diagnostics, interfaces }
+    Checked {
+        model: Some(model),
+        report,
+        diagnostics,
+        interfaces,
+    }
 }
 
 /// The interface files of the project checked with its model, their problems added.
-fn interfaces(project: &Project, model: Option<&Model>, diagnostics: &mut Vec<Diagnostic>) -> Option<quadra_qdi::check::Interfaces> {
+fn interfaces(
+    project: &Project,
+    model: Option<&Model>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<quadra_qdi::check::Interfaces> {
     project.interface_files().next()?;
     let i = quadra_qdi::check::check(project, model);
     diagnostics.extend(i.diagnostics.iter().cloned());
@@ -94,7 +111,11 @@ fn zeros(model: &Model, report: &Report) -> HashMap<quadra_ir::Span, quadra_ir::
     let mut out = HashMap::new();
     for e in &model.entities {
         for f in &e.fields {
-            if let Some(z) = report.field_types.get(&(e.name.clone(), f.name.clone())).and_then(|t| zero(t)) {
+            if let Some(z) = report
+                .field_types
+                .get(&(e.name.clone(), f.name.clone()))
+                .and_then(|t| zero(t))
+            {
                 out.insert(f.span, z);
             }
         }
@@ -134,7 +155,9 @@ pub fn cycles(model: &Model, report: &Report) -> Vec<Diagnostic> {
     }
     let well_founded = |entity: &str| {
         model.entity(entity).map_or(false, |e| {
-            e.checks.iter().any(|c| quadra_ir::print::expr(&c.cond).contains("closure("))
+            e.checks
+                .iter()
+                .any(|c| quadra_ir::print::expr(&c.cond).contains("closure("))
         })
     };
     let mut out = Vec::new();
@@ -158,7 +181,16 @@ pub fn cycles(model: &Model, report: &Report) -> Vec<Diagnostic> {
                         continue;
                     }
                     cycle.push(start.clone());
-                    let text: Vec<String> = cycle.iter().map(|(e, f)| if f == "*" { e.clone() } else { format!("{e}.{f}") }).collect();
+                    let text: Vec<String> = cycle
+                        .iter()
+                        .map(|(e, f)| {
+                            if f == "*" {
+                                e.clone()
+                            } else {
+                                format!("{e}.{f}")
+                            }
+                        })
+                        .collect();
                     let span = report
                         .reads
                         .get(start)
@@ -194,9 +226,17 @@ pub fn flows(model: &Model) -> Vec<Diagnostic> {
             continue;
         }
         for flow in &e.flows {
-            let Some(field) = model.find_field(e, &flow.field) else { continue };
-            let Some(variants) = field.ty.as_ref().and_then(quadra_ir::inline_enum) else { continue };
-            let initial = field.default.as_ref().map(quadra_ir::print::expr).unwrap_or_else(|| variants[0].name.clone());
+            let Some(field) = model.find_field(e, &flow.field) else {
+                continue;
+            };
+            let Some(variants) = field.ty.as_ref().and_then(quadra_ir::inline_enum) else {
+                continue;
+            };
+            let initial = field
+                .default
+                .as_ref()
+                .map(quadra_ir::print::expr)
+                .unwrap_or_else(|| variants[0].name.clone());
             let mut reached: HashSet<String> = HashSet::from([initial]);
             loop {
                 let before = reached.len();
@@ -215,7 +255,10 @@ pub fn flows(model: &Model) -> Vec<Diagnostic> {
                         file: flow.span.file,
                         range: flow.span.range,
                         severity: Severity::Warning,
-                        message: format!("state `{}` of `{}.{}` can never be reached", v.name, e.name, flow.field),
+                        message: format!(
+                            "state `{}` of `{}.{}` can never be reached",
+                            v.name, e.name, flow.field
+                        ),
                     });
                 }
             }
@@ -236,7 +279,9 @@ pub fn frozen_reads(model: &Model) -> Vec<Diagnostic> {
         if e.kind == quadra_ir::EntityKind::Trait {
             continue;
         }
-        let Some(owner) = model.frozen_owner(e) else { continue };
+        let Some(owner) = model.frozen_owner(e) else {
+            continue;
+        };
         let Some(fr) = &owner.frozen else { continue };
         if frozen_at_the_end(owner, fr) {
             continue;
@@ -244,8 +289,9 @@ pub fn frozen_reads(model: &Model) -> Vec<Diagnostic> {
         let line = owner.name != e.name;
         for f in model.all_fields(e) {
             let Some(formula) = &f.formula else { continue };
-            let live = e.frozen.as_ref().map_or(false, |own| own.live.contains(&f.name) || own.except.contains(&f.name))
-                || e.live_decls.iter().any(|(n, _)| n == &f.name);
+            let live = e.frozen.as_ref().map_or(false, |own| {
+                own.live.contains(&f.name) || own.except.contains(&f.name)
+            }) || e.live_decls.iter().any(|(n, _)| n == &f.name);
             if live {
                 continue;
             }
@@ -256,7 +302,10 @@ pub fn frozen_reads(model: &Model) -> Vec<Diagnostic> {
             for (path, _, _) in &d.reads {
                 for s in path {
                     let Step::Inv { child, back } = s else { break };
-                    let own = model.entity(child).and_then(|c| model.find_field(c, back)).map_or(false, |b| b.parent);
+                    let own = model
+                        .entity(child)
+                        .and_then(|c| model.find_field(c, back))
+                        .map_or(false, |b| b.parent);
                     if !own {
                         later.push(format!("{child} (via {back})"));
                         break;
@@ -268,8 +317,16 @@ pub fn frozen_reads(model: &Model) -> Vec<Diagnostic> {
             if later.is_empty() {
                 continue;
             }
-            let frozen = if line { format!("its {} is frozen", owner.name) } else { "it is frozen".to_string() };
-            let on = if line { format!("a line of a frozen {}", owner.name) } else { format!("a frozen {}", e.name) };
+            let frozen = if line {
+                format!("its {} is frozen", owner.name)
+            } else {
+                "it is frozen".to_string()
+            };
+            let on = if line {
+                format!("a line of a frozen {}", owner.name)
+            } else {
+                format!("a frozen {}", e.name)
+            };
             out.push(Diagnostic {
                 file: f.span.file,
                 range: f.span.range,
@@ -292,14 +349,38 @@ pub fn frozen_reads(model: &Model) -> Vec<Diagnostic> {
 /// out of them): nothing happens to it afterwards, the snapshot is what is wanted.
 fn frozen_at_the_end(e: &quadra_ir::Entity, fr: &quadra_ir::Frozen) -> bool {
     let text = quadra_ir::print::expr(&fr.when);
-    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+        .collect();
     if words.iter().any(|w| matches!(*w, "not" | "or")) {
         return false;
     }
-    let Some(flow) = e.flows.iter().find(|f| words.contains(&f.field.as_str())) else { return false };
-    let states: HashSet<&str> = flow.transitions.iter().flat_map(|t| t.from.iter().map(String::as_str).chain(std::iter::once(t.to.as_str()))).collect();
-    let named: Vec<&str> = words.iter().copied().filter(|w| states.contains(w)).collect();
-    !named.is_empty() && named.iter().all(|s| !flow.transitions.iter().any(|t| t.from.iter().any(|f| f == s || f == "*")))
+    let Some(flow) = e.flows.iter().find(|f| words.contains(&f.field.as_str())) else {
+        return false;
+    };
+    let states: HashSet<&str> = flow
+        .transitions
+        .iter()
+        .flat_map(|t| {
+            t.from
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(t.to.as_str()))
+        })
+        .collect();
+    let named: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| states.contains(w))
+        .collect();
+    !named.is_empty()
+        && named.iter().all(|s| {
+            !flow
+                .transitions
+                .iter()
+                .any(|t| t.from.iter().any(|f| f == s || f == "*"))
+        })
 }
 
 /// A `becomes` reaction whose own writes change what its condition reads can trigger itself
@@ -341,15 +422,22 @@ pub fn reactions(model: &Model, report: &Report) -> Vec<Diagnostic> {
                     continue;
                 }
                 let read = d.globals.iter().any(|g| related(g, &node.0))
-                    || d.reads.iter().any(|(_, ent, field)| *field == node.1 && related(ent, &node.0));
+                    || d.reads
+                        .iter()
+                        .any(|(_, ent, field)| *field == node.1 && related(ent, &node.0));
                 if read {
                     hits.push((node, *span));
                 }
             }
         }
         hits.sort_by_key(|(_, s)| s.range.start());
-        let Some((_, first)) = hits.first() else { continue };
-        let mut names: Vec<String> = hits.iter().map(|(n, _)| format!("`{}.{}`", n.0, n.1)).collect();
+        let Some((_, first)) = hits.first() else {
+            continue;
+        };
+        let mut names: Vec<String> = hits
+            .iter()
+            .map(|(n, _)| format!("`{}.{}`", n.0, n.1))
+            .collect();
         names.dedup();
         out.push(Diagnostic {
             file: first.file,
@@ -372,8 +460,16 @@ pub fn reactions(model: &Model, report: &Report) -> Vec<Diagnostic> {
 /// periodic sweep, and a server that keeps it asleep must wake it for that (a project that
 /// does not read the clock changes only when someone writes).
 pub fn reads_clock(model: &Model) -> bool {
-    let formulas = model.entities.iter().flat_map(|e| model.all_fields(e).into_iter().filter_map(move |f| f.formula.as_ref().map(|x| (e, x))));
-    let checks = model.entities.iter().flat_map(|e| e.checks.iter().map(move |c| (e, &c.cond)));
+    let formulas = model.entities.iter().flat_map(|e| {
+        model
+            .all_fields(e)
+            .into_iter()
+            .filter_map(move |f| f.formula.as_ref().map(|x| (e, x)))
+    });
+    let checks = model
+        .entities
+        .iter()
+        .flat_map(|e| e.checks.iter().map(move |c| (e, &c.cond)));
     for (e, x) in formulas.chain(checks) {
         if deps::analyze(model, &e.name, &[x], &[]).time {
             return true;

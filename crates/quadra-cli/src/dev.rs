@@ -28,7 +28,17 @@ fn ask(interactive: bool, question: &str, default: &str) -> String {
 
 /// A project name from a folder name: lowercase letters, digits, `-` and `_`.
 fn project_name(raw: &str) -> String {
-    let mut s: String = raw.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect();
+    let mut s: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
     while s.contains("--") {
         s = s.replace("--", "-");
     }
@@ -41,7 +51,11 @@ fn project_name(raw: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git").args(args).current_dir(dir).output().map_or(false, |o| o.status.success())
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_or(false, |o| o.status.success())
 }
 
 pub fn init(args: &[String]) -> ExitCode {
@@ -56,25 +70,52 @@ pub fn init(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     if dir.join("main.qd").exists() {
-        eprintln!("error: {} already has a main.qd: use an empty folder", dir.display());
+        eprintln!(
+            "error: {} already has a main.qd: use an empty folder",
+            dir.display()
+        );
         return ExitCode::FAILURE;
     }
-    let interactive = std::io::stdin().is_terminal() && !args.iter().any(|a| a == "--yes" || a == "-y");
-    let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let interactive =
+        std::io::stdin().is_terminal() && !args.iter().any(|a| a == "--yes" || a == "-y");
+    let folder = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     if interactive {
-        println!("\n  \x1b[1mQuadra\x1b[0m · new project in {}\n", dir.display());
+        println!(
+            "\n  \x1b[1mQuadra\x1b[0m · new project in {}\n",
+            dir.display()
+        );
     }
-    let name = project_name(&flag(args, "--name").unwrap_or_else(|| ask(interactive, "Project name", &project_name(&folder))));
-    let db_choice = flag(args, "--db").unwrap_or_else(|| ask(interactive, "Database: sqlite or postgres?", "sqlite"));
+    let name = project_name(
+        &flag(args, "--name")
+            .unwrap_or_else(|| ask(interactive, "Project name", &project_name(&folder))),
+    );
+    let db_choice = flag(args, "--db")
+        .unwrap_or_else(|| ask(interactive, "Database: sqlite or postgres?", "sqlite"));
     let url = if db_choice.starts_with("postgres://") || db_choice.starts_with("postgresql://") {
         Some(db_choice.clone())
     } else if db_choice.to_lowercase().starts_with("p") {
-        Some(ask(interactive, "PostgreSQL URL", &format!("postgres://localhost:5432/{}", name.replace('-', "_"))))
+        Some(ask(
+            interactive,
+            "PostgreSQL URL",
+            &format!("postgres://localhost:5432/{}", name.replace('-', "_")),
+        ))
     } else {
         None
     };
-    let use_git = !args.iter().any(|a| a == "--no-git") && Command::new("git").arg("--version").output().is_ok() && !git(&dir, &["rev-parse", "--is-inside-work-tree"]);
-    let use_git = use_git && ask(interactive, "Create a git repository (the browser code editor commits to it)? [Y/n]", "y").to_lowercase().starts_with('y');
+    let use_git = !args.iter().any(|a| a == "--no-git")
+        && Command::new("git").arg("--version").output().is_ok()
+        && !git(&dir, &["rev-parse", "--is-inside-work-tree"]);
+    let use_git = use_git
+        && ask(
+            interactive,
+            "Create a git repository (the browser code editor commits to it)? [Y/n]",
+            "y",
+        )
+        .to_lowercase()
+        .starts_with('y');
 
     let database = match &url {
         Some(u) => format!("[database]\nurl = \"{u}\"\n"),
@@ -108,12 +149,33 @@ pub fn init(args: &[String]) -> ExitCode {
     }
     let mut committed = false;
     if use_git && git(&dir, &["init", "-q"]) {
-        committed = git(&dir, &["add", "-A"]) && git(&dir, &["commit", "-q", "-m", "New Quadra project"]);
+        committed =
+            git(&dir, &["add", "-A"]) && git(&dir, &["commit", "-q", "-m", "New Quadra project"]);
     }
-    println!("\n  \x1b[32m✓\x1b[0m {name}: quadra.toml, main.qd, tests/main.test.qd{}", if use_git { if committed { ", git repository" } else { ", git repository (nothing committed: set user.name/user.email)" } } else { "" });
-    println!("  database: {}", url.as_deref().unwrap_or("SQLite in .quadra/data.db"));
-    let here = std::env::current_dir().ok().and_then(|c| c.canonicalize().ok());
-    let cd = if here.as_deref() == Some(dir.as_path()) { String::new() } else { format!("cd {} && ", dir.display()) };
+    println!(
+        "\n  \x1b[32m✓\x1b[0m {name}: quadra.toml, main.qd, tests/main.test.qd{}",
+        if use_git {
+            if committed {
+                ", git repository"
+            } else {
+                ", git repository (nothing committed: set user.name/user.email)"
+            }
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  database: {}",
+        url.as_deref().unwrap_or("SQLite in .quadra/data.db")
+    );
+    let here = std::env::current_dir()
+        .ok()
+        .and_then(|c| c.canonicalize().ok());
+    let cd = if here.as_deref() == Some(dir.as_path()) {
+        String::new()
+    } else {
+        format!("cd {} && ", dir.display())
+    };
     println!("\n  Next: \x1b[1m{cd}quadra dev\x1b[0m\n");
     ExitCode::SUCCESS
 }
@@ -123,7 +185,9 @@ fn stamp(root: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
     let mut out = Vec::new();
     let mut todo = vec![root.to_path_buf()];
     while let Some(d) = todo.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
             if n.starts_with('.') || n == "node_modules" || n == "target" {
@@ -132,8 +196,16 @@ fn stamp(root: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
             let p = e.path();
             if p.is_dir() {
                 todo.push(p);
-            } else if matches!(p.extension().and_then(|x| x.to_str()), Some("qd" | "csv" | "toml")) {
-                out.push((p, e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH)));
+            } else if matches!(
+                p.extension().and_then(|x| x.to_str()),
+                Some("qd" | "csv" | "toml")
+            ) {
+                out.push((
+                    p,
+                    e.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH),
+                ));
             }
         }
     }
@@ -158,7 +230,14 @@ pub fn dev(args: &[String]) -> ExitCode {
     };
     let url = database_url(&root, args);
     // the first free port from 8080 (also free on IPv6: browsers try `localhost` there first)
-    let free = |p: u16| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() && std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, p)), std::time::Duration::from_millis(150)).is_err();
+    let free = |p: u16| {
+        std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
+            && std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, p)),
+                std::time::Duration::from_millis(150),
+            )
+            .is_err()
+    };
     let port: u16 = match flag(args, "--port").and_then(|p| p.parse().ok()) {
         Some(p) => p,
         None => (8080..8180).find(|p| free(*p)).unwrap_or(8080),
@@ -171,7 +250,9 @@ pub fn dev(args: &[String]) -> ExitCode {
                 eprintln!("  database reset: {file}");
             }
             _ => {
-                eprintln!("error: --reset only works with SQLite (drop the PostgreSQL database yourself)");
+                eprintln!(
+                    "error: --reset only works with SQLite (drop the PostgreSQL database yourself)"
+                );
                 return ExitCode::FAILURE;
             }
         }
@@ -196,7 +277,11 @@ pub fn dev(args: &[String]) -> ExitCode {
             wait_for_change(&root);
             continue;
         };
-        if checked.diagnostics.iter().any(|d| d.severity == quadra_sema::Severity::Error) {
+        if checked
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == quadra_sema::Severity::Error)
+        {
             let _ = check(&[root.display().to_string()]);
             wait_for_change(&root);
             continue;
@@ -210,14 +295,28 @@ pub fn dev(args: &[String]) -> ExitCode {
             if !status.initialized {
                 let tables = ops::init(&url, model, report, now())?;
                 eprintln!("  \x1b[32m✓\x1b[0m new database {url}: {tables} tables");
-                let fixture = flag(args, "--fixture").or_else(|| model.fixtures.iter().find(|f| f.name == "demo").map(|f| f.name.clone()));
+                let fixture = flag(args, "--fixture").or_else(|| {
+                    model
+                        .fixtures
+                        .iter()
+                        .find(|f| f.name == "demo")
+                        .map(|f| f.name.clone())
+                });
                 if let Some(f) = fixture {
                     ops::fixture(&url, model, report, &f, now())?;
                     eprintln!("  \x1b[32m✓\x1b[0m demo data: fixture `{f}`");
                 }
             } else {
                 // what changed while the server was off: migrations, new defaults, checks
-                ops::deploy(&url, model, report, &root, now(), false, "quadra dev: start")?;
+                ops::deploy(
+                    &url,
+                    model,
+                    report,
+                    &root,
+                    now(),
+                    false,
+                    "quadra dev: start",
+                )?;
             }
             if ops::ensure_user(&url, model, report, &login, now())? {
                 eprintln!("  \x1b[32m✓\x1b[0m user `{login}` to sign in with");
@@ -227,7 +326,11 @@ pub fn dev(args: &[String]) -> ExitCode {
         match prepared {
             Ok(()) => break,
             Err(e) => {
-                let e = e.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n");
+                let e = e
+                    .lines()
+                    .map(|l| format!("  {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 eprintln!("\n  \x1b[31m✗\x1b[0m the data does not fit the code:\n{e}");
                 if e.contains("Either:") {
                     eprintln!("  - or start from empty data with `quadra dev --reset`");
@@ -240,13 +343,25 @@ pub fn dev(args: &[String]) -> ExitCode {
     }
     let name = std::fs::read_to_string(root.join("quadra.toml"))
         .ok()
-        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("name").map(|v| v.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string())))
+        .and_then(|t| {
+            t.lines().find_map(|l| {
+                l.trim().strip_prefix("name").map(|v| {
+                    v.trim_start_matches([' ', '='])
+                        .trim()
+                        .trim_matches('"')
+                        .to_string()
+                })
+            })
+        })
         .unwrap_or_else(|| "project".into());
     eprintln!();
     eprintln!("  \x1b[1mQuadra dev\x1b[0m · {name}");
     eprintln!("  ➜ App          \x1b[36mhttp://127.0.0.1:{port}\x1b[0m");
     eprintln!("  ➜ Code editor  \x1b[36mhttp://127.0.0.1:{port}/#/~code\x1b[0m");
-    eprintln!("  \x1b[2mwatching {}: save a file (here or in the browser) and the app updates\x1b[0m\n", root.display());
+    eprintln!(
+        "  \x1b[2mwatching {}: save a file (here or in the browser) and the app updates\x1b[0m\n",
+        root.display()
+    );
     let cfg = quadra_server::Config {
         url,
         port,

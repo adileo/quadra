@@ -16,7 +16,11 @@ pub struct Item {
 }
 
 fn item(label: impl Into<String>, kind: &'static str, detail: impl Into<String>) -> Item {
-    Item { label: label.into(), kind, detail: detail.into() }
+    Item {
+        label: label.into(),
+        kind,
+        detail: detail.into(),
+    }
 }
 
 fn indent(l: &str) -> usize {
@@ -35,7 +39,11 @@ fn enclosing<'a>(lines: &[&'a str], at: usize) -> Vec<(usize, &'a str, &'a str)>
         }
         let i = indent(l);
         if i < limit {
-            let word = l.trim_start().split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
+            let word = l
+                .trim_start()
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
             out.push((i, word, *l));
             limit = i;
             if i == 0 {
@@ -53,7 +61,9 @@ fn header_kind(line: &str) -> Option<String> {
     if w == "component" {
         return words.next().map(str::to_string);
     }
-    options::KINDS.contains(&w).then(|| options::json_type(w).to_string())
+    options::KINDS
+        .contains(&w)
+        .then(|| options::json_type(w).to_string())
 }
 
 /// The entity a block is about: its `of:` / `entity:` line, or a saved view's header.
@@ -102,9 +112,13 @@ fn lambda_entities(text: &str, entities: &Entities) -> HashMap<String, String> {
         if let Some(before) = before.strip_suffix('(') {
             let before = before.trim_end();
             let m_end = before.len();
-            let m_start = before.rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(0, |x| x + 1);
+            let m_start = before
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |x| x + 1);
             let recv = before[..m_start].strip_suffix('.').map(|r| {
-                let s = r.rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(0, |x| x + 1);
+                let s = r
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map_or(0, |x| x + 1);
                 &r[s..]
             });
             let _ = m_end;
@@ -120,12 +134,19 @@ fn lambda_entities(text: &str, entities: &Entities) -> HashMap<String, String> {
 }
 
 /// What may be written at `offset` of an interface file.
-pub fn complete(text: &str, offset: usize, entities: &Entities, params: &[(String, Option<String>)]) -> Vec<Item> {
+pub fn complete(
+    text: &str,
+    offset: usize,
+    entities: &Entities,
+    params: &[(String, Option<String>)],
+) -> Vec<Item> {
     let offset = offset.min(text.len());
     let before = &text[..offset];
     let line_start = before.rfind('\n').map_or(0, |k| k + 1);
     let line = &before[line_start..];
-    let typed_start = line.rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(0, |k| k + 1);
+    let typed_start = line
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map_or(0, |k| k + 1);
     let typed = &line[typed_start..];
     let head = &line[..typed_start];
     let matches = |s: &str| s.starts_with(typed);
@@ -144,19 +165,39 @@ pub fn complete(text: &str, offset: usize, entities: &Entities, params: &[(Strin
     // after a `.`: the fields of a lambda's record or of a selection, the methods
     if head.ends_with('.') {
         let recv_end = head.len() - 1;
-        let recv_start = head[..recv_end].rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(0, |k| k + 1);
+        let recv_start = head[..recv_end]
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |k| k + 1);
         let recv = &head[recv_start..recv_end];
         let entity = if head[..recv_start].ends_with('@') {
-            params.iter().find(|p| p.0 == recv).and_then(|p| p.1.as_deref()).map(|t| t.trim_end_matches('?').to_string())
+            params
+                .iter()
+                .find(|p| p.0 == recv)
+                .and_then(|p| p.1.as_deref())
+                .map(|t| t.trim_end_matches('?').to_string())
         } else {
             // the expression may start on a line above (a chain): its whole text
             lambda_entities(before, entities).get(recv).cloned()
         };
         if let Some((fields, actions)) = entity.as_deref().and_then(|e| entities.get(e)) {
-            out.extend(fields.iter().filter(|f| matches(f)).map(|f| item(f.clone(), "field", entity.clone().unwrap_or_default())));
-            out.extend(actions.iter().filter(|f| matches(f)).map(|f| item(f.clone(), "method", "action")));
+            out.extend(
+                fields
+                    .iter()
+                    .filter(|f| matches(f))
+                    .map(|f| item(f.clone(), "field", entity.clone().unwrap_or_default())),
+            );
+            out.extend(
+                actions
+                    .iter()
+                    .filter(|f| matches(f))
+                    .map(|f| item(f.clone(), "method", "action")),
+            );
         }
-        out.extend(quadra_sema::ide::method_completions(before, (offset as u32).into()).into_iter().map(|(n, s, _)| item(n, "method", format!(".{s}"))));
+        out.extend(
+            quadra_sema::ide::method_completions(before, (offset as u32).into())
+                .into_iter()
+                .map(|(n, s, _)| item(n, "method", format!(".{s}"))),
+        );
         return out;
     }
     let ctx = enclosing(&lines, at);
@@ -164,32 +205,73 @@ pub fn complete(text: &str, offset: usize, entities: &Entities, params: &[(Strin
     // the start of a line: the options of the block
     if head.trim().is_empty() {
         match ctx.first() {
-            None => out.extend(["app", "view"].iter().map(|k| item(*k, "keyword", "an app, a saved view"))),
-            Some((_, "app", _)) => out.extend(["description", "share", "filter", "let", "page", "meta"].iter().map(|k| item(*k, "keyword", "of an app"))),
-            Some((_, "page", _)) => out.extend(["row", "space", "meta"].iter().map(|k| item(*k, "keyword", "of a page"))),
+            None => out.extend(
+                ["app", "view"]
+                    .iter()
+                    .map(|k| item(*k, "keyword", "an app, a saved view")),
+            ),
+            Some((_, "app", _)) => out.extend(
+                ["description", "share", "filter", "let", "page", "meta"]
+                    .iter()
+                    .map(|k| item(*k, "keyword", "of an app")),
+            ),
+            Some((_, "page", _)) => out.extend(
+                ["row", "space", "meta"]
+                    .iter()
+                    .map(|k| item(*k, "keyword", "of a page")),
+            ),
             Some((_, "row" | "column", _)) => {
-                out.extend(options::KINDS.iter().map(|k| item(*k, "class", "a component")));
-                out.push(item(if ctx[0].1 == "row" { "column" } else { "row" }, "keyword", ""));
+                out.extend(
+                    options::KINDS
+                        .iter()
+                        .map(|k| item(*k, "class", "a component")),
+                );
+                out.push(item(
+                    if ctx[0].1 == "row" { "column" } else { "row" },
+                    "keyword",
+                    "",
+                ));
                 out.push(item("space", "keyword", ""));
             }
             Some((_, "view", l)) if l.trim_start().starts_with("view \"") => {
-                out.extend(options::SAVED_VIEW.iter().chain(options::VIEW_BODY).map(|o| item(o.key, "property", o.doc)));
-                out.extend(["compute", "color", "config", "meta"].iter().map(|k| item(*k, "keyword", "")));
+                out.extend(
+                    options::SAVED_VIEW
+                        .iter()
+                        .chain(options::VIEW_BODY)
+                        .map(|o| item(o.key, "property", o.doc)),
+                );
+                out.extend(
+                    ["compute", "color", "config", "meta"]
+                        .iter()
+                        .map(|k| item(*k, "keyword", "")),
+                );
             }
             Some((_, _, l)) => {
                 if let Some(kind) = header_kind(l) {
-                    let mut keys: Vec<(&str, &str)> = options::table(&kind).iter().map(|o| (o.key, o.doc)).collect();
+                    let mut keys: Vec<(&str, &str)> = options::table(&kind)
+                        .iter()
+                        .map(|o| (o.key, o.doc))
+                        .collect();
                     if kind == "view" {
                         keys.extend(options::VIEW_BODY.iter().map(|o| (o.key, o.doc)));
                         keys.extend([("compute", ""), ("color", "")]);
                     }
                     if kind == "form" {
-                        keys.extend([("field", "a field of a custom form"), ("submit", "what a custom form runs"), ("section", ""), ("default", "")]);
+                        keys.extend([
+                            ("field", "a field of a custom form"),
+                            ("submit", "what a custom form runs"),
+                            ("section", ""),
+                            ("default", ""),
+                        ]);
                     }
                     if kind == "sheet" {
                         keys.push(("tab", "a sheet"));
                     }
-                    keys.extend([("apply", "filters on another entity"), ("config", ""), ("meta", "")]);
+                    keys.extend([
+                        ("apply", "filters on another entity"),
+                        ("config", ""),
+                        ("meta", ""),
+                    ]);
                     out.extend(keys.into_iter().map(|(k, d)| item(k, "property", d)));
                 }
             }
@@ -211,23 +293,42 @@ pub fn complete(text: &str, offset: usize, entities: &Entities, params: &[(Strin
         "edit" => options::VIEW_EDITS,
         _ => &[],
     };
-    out.extend(words.iter().filter(|w| matches(w)).map(|w| item(*w, "enum", key)));
+    out.extend(
+        words
+            .iter()
+            .filter(|w| matches(w))
+            .map(|w| item(*w, "enum", key)),
+    );
     match key {
         "of" | "entity" => {
             let mut names: Vec<&String> = entities.keys().collect();
             names.sort();
-            out.extend(names.into_iter().filter(|e| matches(e)).map(|e| item(e.clone(), "class", "entity")));
+            out.extend(
+                names
+                    .into_iter()
+                    .filter(|e| matches(e))
+                    .map(|e| item(e.clone(), "class", "entity")),
+            );
         }
-        "fields" | "cards" | "by" | "sum" | "card_title" | "sort" | "group" | "widths" | "measure" | "aggregates" => {
+        "fields" | "cards" | "by" | "sum" | "card_title" | "sort" | "group" | "widths"
+        | "measure" | "aggregates" => {
             if let Some((fields, _)) = entity.as_deref().and_then(|e| entities.get(e)) {
-                out.extend(fields.iter().filter(|f| matches(f)).map(|f| item(f.clone(), "field", entity.clone().unwrap_or_default())));
+                out.extend(
+                    fields
+                        .iter()
+                        .filter(|f| matches(f))
+                        .map(|f| item(f.clone(), "field", entity.clone().unwrap_or_default())),
+                );
             }
         }
         "show" => {
             // the app's filters
             for l in &lines {
                 if let Some(rest) = l.trim_start().strip_prefix("filter ") {
-                    let n = rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("");
+                    let n = rest
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap_or("");
                     if matches(n) && !n.is_empty() {
                         out.push(item(n, "variable", "filter"));
                     }
@@ -239,7 +340,12 @@ pub fn complete(text: &str, offset: usize, entities: &Entities, params: &[(Strin
             let mut names: Vec<&String> = entities.keys().collect();
             names.sort();
             if !typed.is_empty() {
-                out.extend(names.into_iter().filter(|e| matches(e)).map(|e| item(e.clone(), "class", "entity")));
+                out.extend(
+                    names
+                        .into_iter()
+                        .filter(|e| matches(e))
+                        .map(|e| item(e.clone(), "class", "entity")),
+                );
             }
         }
     }
@@ -252,7 +358,13 @@ mod tests {
 
     fn model() -> Entities {
         let mut e = Entities::new();
-        e.insert("Order".into(), (vec!["number".into(), "total".into(), "customer".into()], vec!["confirm".into()]));
+        e.insert(
+            "Order".into(),
+            (
+                vec!["number".into(), "total".into(), "customer".into()],
+                vec!["confirm".into()],
+            ),
+        );
         e.insert("Customer".into(), (vec!["name".into()], vec![]));
         e
     }
@@ -260,7 +372,18 @@ mod tests {
     fn labels(text: &str) -> Vec<String> {
         let at = text.find('|').unwrap();
         let t = text.replace('|', "");
-        complete(&t, at, &model(), &[("order".into(), Some("Order?".into())), ("region".into(), Some("[Region]".into()))]).into_iter().map(|i| i.label).collect()
+        complete(
+            &t,
+            at,
+            &model(),
+            &[
+                ("order".into(), Some("Order?".into())),
+                ("region".into(), Some("[Region]".into())),
+            ],
+        )
+        .into_iter()
+        .map(|i| i.label)
+        .collect()
     }
 
     #[test]

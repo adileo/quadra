@@ -40,7 +40,9 @@ pub fn instant(local: NaiveDateTime, tz: Tz) -> NaiveDateTime {
             let mut probe = local;
             for _ in 0..(24 * 4) {
                 probe -= Duration::minutes(15);
-                if let LocalResult::Single(t) | LocalResult::Ambiguous(t, _) = tz.from_local_datetime(&probe) {
+                if let LocalResult::Single(t) | LocalResult::Ambiguous(t, _) =
+                    tz.from_local_datetime(&probe)
+                {
                     let before = t.offset().fix().local_minus_utc() as i64;
                     return local - Duration::seconds(before);
                 }
@@ -73,19 +75,33 @@ pub fn parse_instant(text: &str, tz: Tz) -> Option<NaiveDateTime> {
     if let Ok(d) = chrono::DateTime::parse_from_rfc3339(t) {
         return Some(d.naive_utc());
     }
-    for f in ["%Y-%m-%dT%H:%M%:z", "%Y-%m-%d %H:%M:%S%:z", "%Y-%m-%d %H:%M%:z"] {
+    for f in [
+        "%Y-%m-%dT%H:%M%:z",
+        "%Y-%m-%d %H:%M:%S%:z",
+        "%Y-%m-%d %H:%M%:z",
+    ] {
         if let Ok(d) = chrono::DateTime::parse_from_str(t, f) {
             return Some(d.naive_utc());
         }
     }
     if let Some(z) = t.strip_suffix('Z').or_else(|| t.strip_suffix('z')) {
-        for f in ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S"] {
+        for f in [
+            "%Y-%m-%dT%H:%M",
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%d %H:%M:%S",
+        ] {
             if let Ok(d) = NaiveDateTime::parse_from_str(z, f) {
                 return Some(d);
             }
         }
     }
-    for f in ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"] {
+    for f in [
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
         if let Ok(d) = NaiveDateTime::parse_from_str(t, f) {
             return Some(instant(d, tz));
         }
@@ -107,7 +123,10 @@ mod tests {
     use chrono::NaiveDate;
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(h, min, 0).unwrap()
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(h, min, 0)
+            .unwrap()
     }
 
     #[test]
@@ -126,9 +145,15 @@ mod tests {
     fn the_skipped_hour_moves_forward_and_the_repeated_one_takes_the_first() {
         let rome = zone("Europe/Rome").unwrap();
         // 29 March 2026: 02:00 → 03:00; 02:30 does not exist, it is 03:30 (01:30 UTC)
-        assert_eq!(instant(at(2026, 3, 29, 2, 30), rome), at(2026, 3, 29, 1, 30));
+        assert_eq!(
+            instant(at(2026, 3, 29, 2, 30), rome),
+            at(2026, 3, 29, 1, 30)
+        );
         // 25 October 2026: 03:00 → 02:00; 02:30 happens twice, the first is 00:30 UTC
-        assert_eq!(instant(at(2026, 10, 25, 2, 30), rome), at(2026, 10, 25, 0, 30));
+        assert_eq!(
+            instant(at(2026, 10, 25, 2, 30), rome),
+            at(2026, 10, 25, 0, 30)
+        );
     }
 
     #[test]
@@ -139,7 +164,11 @@ mod tests {
         let next = add_days(nine, 1, rome);
         assert_eq!(local(next, rome), at(2026, 10, 25, 9, 0), "still 9:00");
         assert_eq!(next, at(2026, 10, 25, 8, 0), "25 hours later in UTC");
-        assert_eq!(local(nine + Duration::hours(24), rome), at(2026, 10, 25, 8, 0), "24 hours: 8:00");
+        assert_eq!(
+            local(nine + Duration::hours(24), rome),
+            at(2026, 10, 25, 8, 0),
+            "24 hours: 8:00"
+        );
     }
 
     #[test]
@@ -151,9 +180,15 @@ mod tests {
         assert_eq!(parse_instant("2026-11-24T09:00Z", rome), Some(utc9));
         // without an offset: the project's zone
         assert_eq!(parse_instant("2026-11-24T10:00", rome), Some(utc9));
-        assert_eq!(parse_instant("2026-11-24 10:00:00", Tz::UTC), Some(at(2026, 11, 24, 10, 0)));
+        assert_eq!(
+            parse_instant("2026-11-24 10:00:00", Tz::UTC),
+            Some(at(2026, 11, 24, 10, 0))
+        );
         assert_eq!(iso(utc9), "2026-11-24T09:00:00Z");
-        assert_eq!(time_of_day("9:00"), chrono::NaiveTime::from_hms_opt(9, 0, 0));
+        assert_eq!(
+            time_of_day("9:00"),
+            chrono::NaiveTime::from_hms_opt(9, 0, 0)
+        );
         assert_eq!(parse_instant("tomorrow", rome), None);
     }
 }

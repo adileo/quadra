@@ -14,12 +14,22 @@ fn flow(prefix: &str, e: Flow) -> String {
         Flow::Fail(m) if prefix.is_empty() => m,
         Flow::Fail(m) => format!("{prefix}: {m}"),
         Flow::Return(_) => format!("{prefix}: unexpected return"),
-        Flow::Conflict(c) => format!("{prefix}: changed by others in the meantime: {}", c.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("; ")),
+        Flow::Conflict(c) => format!(
+            "{prefix}: changed by others in the meantime: {}",
+            c.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
     }
 }
 
 /// An interpreter over the committed state of the database, with units and the clock set.
-pub fn loaded<'m>(db: &mut Database, model: &'m Model, time: NaiveDateTime) -> Result<Interp<'m>, String> {
+pub fn loaded<'m>(
+    db: &mut Database,
+    model: &'m Model,
+    time: NaiveDateTime,
+) -> Result<Interp<'m>, String> {
     let mut interp = Interp::new(model);
     interp.set_clock(time);
     interp.store = db.load()?;
@@ -30,7 +40,12 @@ pub fn loaded<'m>(db: &mut Database, model: &'m Model, time: NaiveDateTime) -> R
 /// Create the tables and commit the seeds as the first transaction. Every migration of the
 /// project counts as applied: the schema is born migrated. On failure the database is left
 /// empty. Returns the number of tables.
-pub fn init(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<usize, String> {
+pub fn init(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<usize, String> {
     let mut db = Database::open(url, model, report)?;
     db.init()?;
     crate::deploy::Catalog::of(model, &db.schema, None).write(&mut db)?;
@@ -59,7 +74,12 @@ pub fn init(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> R
 }
 
 /// The events of the outbox, oldest first; with `pending`, only those not delivered yet.
-pub fn outbox(url: &str, model: &Model, report: &Report, pending: bool) -> Result<Vec<crate::OutboxEvent>, String> {
+pub fn outbox(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    pending: bool,
+) -> Result<Vec<crate::OutboxEvent>, String> {
     let mut db = Database::open(url, model, report)?;
     if !db.status()?.initialized {
         return Err("the database is not initialized (run `quadra db init`)".into());
@@ -68,7 +88,13 @@ pub fn outbox(url: &str, model: &Model, report: &Report, pending: bool) -> Resul
 }
 
 /// Mark outbox events delivered; returns how many were pending.
-pub fn outbox_delivered(url: &str, model: &Model, report: &Report, ids: &[u64], time: NaiveDateTime) -> Result<usize, String> {
+pub fn outbox_delivered(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    ids: &[u64],
+    time: NaiveDateTime,
+) -> Result<usize, String> {
     let mut db = Database::open(url, model, report)?;
     if !db.status()?.initialized {
         return Err("the database is not initialized (run `quadra db init`)".into());
@@ -78,13 +104,23 @@ pub fn outbox_delivered(url: &str, model: &Model, report: &Report, ids: &[u64], 
 
 /// Hash chain and tables against the history, a page at a time (`crate::verify`). Returns
 /// the problems and the record count.
-pub fn verify(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<(Vec<String>, usize), String> {
+pub fn verify(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<(Vec<String>, usize), String> {
     crate::verify::verify(url, model, report, time)
 }
 
 /// `verify` with everything loaded in memory and every formula computed from the history
 /// (the reference the tests compare the streamed verify with).
-pub fn verify_in_memory(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<(Vec<String>, usize), String> {
+pub fn verify_in_memory(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<(Vec<String>, usize), String> {
     let mut db = Database::open(url, model, report)?;
     let mut interp = loaded(&mut db, model, time)?;
     interp.materialize = materialized_formulas(&db.schema);
@@ -119,19 +155,43 @@ pub struct MigrateReport {
 
 /// Run the pending migrations and validate the data against the new model, in one
 /// transaction; unless `dry`, rebuild the tables and commit. `None`: nothing to do.
-pub fn migrate(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool) -> Result<Option<MigrateReport>, String> {
+pub fn migrate(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    root: &Path,
+    time: NaiveDateTime,
+    dry: bool,
+) -> Result<Option<MigrateReport>, String> {
     migrate_with(url, model, report, root, time, dry, false, None)
 }
 
 /// A new version of the code: like `migrate`, but always validates every record against the
 /// new model (new checks included) and, unless `dry`, rebuilds the tables (formulas may have
 /// changed even when the schema did not). `label` becomes the cause of the migration commit.
-pub fn deploy(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, label: &str) -> Result<MigrateReport, String> {
+pub fn deploy(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    root: &Path,
+    time: NaiveDateTime,
+    dry: bool,
+    label: &str,
+) -> Result<MigrateReport, String> {
     Ok(migrate_with(url, model, report, root, time, dry, true, Some(label))?.unwrap_or_default())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn migrate_with(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, always: bool, label: Option<&str>) -> Result<Option<MigrateReport>, String> {
+fn migrate_with(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    root: &Path,
+    time: NaiveDateTime,
+    dry: bool,
+    always: bool,
+    label: Option<&str>,
+) -> Result<Option<MigrateReport>, String> {
     match crate::deploy::deploy(url, model, report, root, time, dry, always, label)? {
         Ok(crate::deploy::Done::Nothing) => Ok(None),
         Ok(crate::deploy::Done::Report(r)) => Ok(Some(r)),
@@ -148,24 +208,56 @@ fn migrate_with(url: &str, model: &Model, report: &Report, root: &Path, time: Na
 /// `migrate`/`deploy` by rebuilding every table: the reference behaviour, used when the
 /// database has no catalog of what is deployed (created by an older version) or the change
 /// is one the incremental deploy does not handle. Loads the whole database in memory.
-pub fn deploy_full(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, label: &str) -> Result<MigrateReport, String> {
+pub fn deploy_full(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    root: &Path,
+    time: NaiveDateTime,
+    dry: bool,
+    label: &str,
+) -> Result<MigrateReport, String> {
     Ok(migrate_full(url, model, report, root, time, dry, true, Some(label))?.unwrap_or_default())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn migrate_full(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, always: bool, label: Option<&str>) -> Result<Option<MigrateReport>, String> {
+fn migrate_full(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    root: &Path,
+    time: NaiveDateTime,
+    dry: bool,
+    always: bool,
+    label: Option<&str>,
+) -> Result<Option<MigrateReport>, String> {
     let mut db = Database::open(url, model, report)?;
     let status = db.status()?;
     if !status.initialized {
         return Err("the database is not initialized (run `quadra db init`)".into());
     }
     let mut interp = loaded(&mut db, model, time)?;
-    let pending: Vec<&Block> = model.migrations.iter().filter(|m| !interp.store.applied.contains_key(&format!("migration:{}", m.name))).collect();
+    let pending: Vec<&Block> = model
+        .migrations
+        .iter()
+        .filter(|m| {
+            !interp
+                .store
+                .applied
+                .contains_key(&format!("migration:{}", m.name))
+        })
+        .collect();
     if status.schema_current && pending.is_empty() && !always {
         return Ok(None);
     }
     let (added, removed) = db.plan()?;
-    let mut out = MigrateReport { schema_changed: !status.schema_current, fingerprint: status.fingerprint, added, removed, ..Default::default() };
+    let mut out = MigrateReport {
+        schema_changed: !status.schema_current,
+        fingerprint: status.fingerprint,
+        added,
+        removed,
+        ..Default::default()
+    };
     let before = interp.store.clone();
     let names: Vec<String> = pending.iter().map(|m| m.name.clone()).collect();
     let mut scripts = Vec::new();
@@ -182,7 +274,9 @@ fn migrate_full(url: &str, model: &Model, report: &Report, root: &Path, time: Na
     let r = interp.with_cause(cause.clone(), |i| {
         i.transaction(|i| {
             for m in &pending {
-                let lines = i.run_migration(m, Some(root)).map_err(|e| Flow::Fail(flow(&format!("migration {}", m.name), e)))?;
+                let lines = i
+                    .run_migration(m, Some(root))
+                    .map_err(|e| Flow::Fail(flow(&format!("migration {}", m.name), e)))?;
                 scripts.push((m.name.clone(), lines));
             }
             // new fields with a default get it on every existing record
@@ -194,7 +288,17 @@ fn migrate_full(url: &str, model: &Model, report: &Report, root: &Path, time: Na
                     model
                         .entity(&r.ent)
                         .map(|e| {
-                            model.all_fields(e).into_iter().filter(|f| f.default.is_some() && f.formula.is_none() && !f.per_company && !r.fields.contains_key(&f.name)).map(|f| (r.id, f.name.clone())).collect::<Vec<_>>()
+                            model
+                                .all_fields(e)
+                                .into_iter()
+                                .filter(|f| {
+                                    f.default.is_some()
+                                        && f.formula.is_none()
+                                        && !f.per_company
+                                        && !r.fields.contains_key(&f.name)
+                                })
+                                .map(|f| (r.id, f.name.clone()))
+                                .collect::<Vec<_>>()
                         })
                         .unwrap_or_default()
                 })
@@ -236,7 +340,12 @@ pub struct ChangeStatus {
     pub reverted_tx: Option<u64>,
 }
 
-pub fn list_changes(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<Vec<ChangeStatus>, String> {
+pub fn list_changes(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<Vec<ChangeStatus>, String> {
     let mut db = Database::open(url, model, report)?;
     let mut interp = loaded(&mut db, model, time)?;
     Ok(model
@@ -245,8 +354,16 @@ pub fn list_changes(url: &str, model: &Model, report: &Report, time: NaiveDateTi
         .map(|c| ChangeStatus {
             name: c.name.clone(),
             meta: interp.script_meta(c),
-            applied_tx: interp.store.applied.get(&format!("change:{}", c.name)).copied(),
-            reverted_tx: interp.store.applied.get(&format!("revert:{}", c.name)).copied(),
+            applied_tx: interp
+                .store
+                .applied
+                .get(&format!("change:{}", c.name))
+                .copied(),
+            reverted_tx: interp
+                .store
+                .applied
+                .get(&format!("revert:{}", c.name))
+                .copied(),
         })
         .collect())
 }
@@ -262,15 +379,31 @@ pub struct ChangeOutcome {
 }
 
 fn find_change<'m>(model: &'m Model, name: &str) -> Result<&'m Block, String> {
-    model.changes.iter().find(|c| c.name == name).ok_or_else(|| {
-        let names: Vec<&str> = model.changes.iter().map(|c| c.name.as_str()).collect();
-        format!("unknown change `{name}` (changes: {})", if names.is_empty() { "none".into() } else { names.join(", ") })
-    })
+    model
+        .changes
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| {
+            let names: Vec<&str> = model.changes.iter().map(|c| c.name.as_str()).collect();
+            format!(
+                "unknown change `{name}` (changes: {})",
+                if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join(", ")
+                }
+            )
+        })
 }
 
 fn user_by_login(interp: &mut Interp, login: &str) -> Option<u64> {
     let ids = interp.ids("User", None);
-    ids.into_iter().find(|id| interp.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login))
+    ids.into_iter().find(|id| {
+        interp
+            .store
+            .read(*id, "login", None)
+            .map_or(false, |v| v.to_string() == login)
+    })
 }
 
 /// The user holds `role`, directly or through a role that inherits it (`role Director is
@@ -281,28 +414,48 @@ fn has_role(interp: &mut Interp, user: u64, role: &str) -> bool {
 
 /// "a Manager", "an Accountant".
 fn article(word: &str) -> String {
-    let an = word.chars().next().map_or(false, |c| "AEIOUaeiou".contains(c));
+    let an = word
+        .chars()
+        .next()
+        .map_or(false, |c| "AEIOUaeiou".contains(c));
     format!("{} {word}", if an { "an" } else { "a" })
 }
 
 /// Requester and approver: the requester runs the change; the approver must hold the role
 /// named by `approved_by` and must not be the requester.
-fn authorize(interp: &mut Interp, meta: &ScriptMeta, approver: Option<&str>) -> Result<(Option<u64>, String), String> {
+fn authorize(
+    interp: &mut Interp,
+    meta: &ScriptMeta,
+    approver: Option<&str>,
+) -> Result<(Option<u64>, String), String> {
     let requester = match &meta.requested_by {
-        Some(login) => Some(user_by_login(interp, login).ok_or_else(|| format!("the requester `{login}` is not a user"))?),
+        Some(login) => Some(
+            user_by_login(interp, login)
+                .ok_or_else(|| format!("the requester `{login}` is not a user"))?,
+        ),
         None => None,
     };
     let mut signed = String::new();
     if let Some(role) = &meta.approved_by_role {
         let Some(login) = approver else {
-            return Err(format!("this change needs the approval of {}: pass --approved-by <login>", article(role)));
+            return Err(format!(
+                "this change needs the approval of {}: pass --approved-by <login>",
+                article(role)
+            ));
         };
-        let id = user_by_login(interp, login).ok_or_else(|| format!("the approver `{login}` is not a user"))?;
+        let id = user_by_login(interp, login)
+            .ok_or_else(|| format!("the approver `{login}` is not a user"))?;
         if !has_role(interp, id, role) {
-            return Err(format!("`{login}` is not {}: the change needs the approval of {}", article(role), article(role)));
+            return Err(format!(
+                "`{login}` is not {}: the change needs the approval of {}",
+                article(role),
+                article(role)
+            ));
         }
         if Some(id) == requester {
-            return Err(format!("`{login}` requested the change and cannot approve it too"));
+            return Err(format!(
+                "`{login}` requested the change and cannot approve it too"
+            ));
         }
         signed = format!(", approved by {login}");
     }
@@ -311,7 +464,11 @@ fn authorize(interp: &mut Interp, meta: &ScriptMeta, approver: Option<&str>) -> 
 }
 
 /// Metrics that read one of `fields`, following formulas.
-fn metrics_touched(model: &Model, report: &Report, fields: &HashSet<(String, String)>) -> Vec<String> {
+fn metrics_touched(
+    model: &Model,
+    report: &Report,
+    fields: &HashSet<(String, String)>,
+) -> Vec<String> {
     let mut out = Vec::new();
     for m in &model.metrics {
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
@@ -337,13 +494,23 @@ fn metrics_touched(model: &Model, report: &Report, fields: &HashSet<(String, Str
 }
 
 /// Run a change: as a preview (nothing written) or for real (`apply`).
-pub fn run_change(url: &str, model: &Model, report: &Report, name: &str, approver: Option<&str>, time: NaiveDateTime, apply: bool) -> Result<ChangeOutcome, String> {
+pub fn run_change(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    name: &str,
+    approver: Option<&str>,
+    time: NaiveDateTime,
+    apply: bool,
+) -> Result<ChangeOutcome, String> {
     let change = find_change(model, name)?;
     let mut db = Database::open(url, model, report)?;
     let mut interp = loaded(&mut db, model, time)?;
     let meta = interp.script_meta(change);
     if let Some(tx) = interp.store.applied.get(&format!("change:{name}")) {
-        return Err(format!("change `{name}` was already applied (transaction {tx})"));
+        return Err(format!(
+            "change `{name}` was already applied (transaction {tx})"
+        ));
     }
     if apply {
         if let Some(d) = meta.effective {
@@ -352,15 +519,31 @@ pub fn run_change(url: &str, model: &Model, report: &Report, name: &str, approve
             }
         }
     }
-    let (user, signed) = if apply { authorize(&mut interp, &meta, approver)? } else { (meta.requested_by.as_deref().and_then(|l| user_by_login(&mut interp, l)), String::new()) };
+    let (user, signed) = if apply {
+        authorize(&mut interp, &meta, approver)?
+    } else {
+        (
+            meta.requested_by
+                .as_deref()
+                .and_then(|l| user_by_login(&mut interp, l)),
+            String::new(),
+        )
+    };
     interp.user = user;
     let before: Store = interp.store.clone();
     if apply {
         interp.materialize = materialized_formulas(&db.schema);
         interp.sink = Some(Box::new(Sink { db, model }));
     }
-    let requested = meta.requested_by.as_deref().map(|r| format!(", requested by {r}")).unwrap_or_default();
-    let cause = format!("change {name}: {}{requested}{signed}", meta.reason.clone().unwrap_or_default());
+    let requested = meta
+        .requested_by
+        .as_deref()
+        .map(|r| format!(", requested by {r}"))
+        .unwrap_or_default();
+    let cause = format!(
+        "change {name}: {}{requested}{signed}",
+        meta.reason.clone().unwrap_or_default()
+    );
     let mut diff = ChangeDiff::default();
     interp
         .with_cause(cause, |i| {
@@ -372,14 +555,30 @@ pub fn run_change(url: &str, model: &Model, report: &Report, name: &str, approve
             Ok(())
         })
         .map_err(|e| flow(&format!("change {name}"), e))?;
-    let fields: HashSet<(String, String)> = diff.changed.iter().map(|(e, _, f, _, _)| (e.clone(), f.split('@').next().unwrap_or(f).to_string())).collect();
+    let fields: HashSet<(String, String)> = diff
+        .changed
+        .iter()
+        .map(|(e, _, f, _, _)| (e.clone(), f.split('@').next().unwrap_or(f).to_string()))
+        .collect();
     let metrics = metrics_touched(model, report, &fields);
-    Ok(ChangeOutcome { meta, diff, metrics, tx: if apply { Some(interp.store.tx) } else { None } })
+    Ok(ChangeOutcome {
+        meta,
+        diff,
+        metrics,
+        tx: if apply { Some(interp.store.tx) } else { None },
+    })
 }
 
 /// Undo an applied change with a new transaction (same approval rules). Returns the
 /// number of values restored.
-pub fn revert_change(url: &str, model: &Model, report: &Report, name: &str, approver: Option<&str>, time: NaiveDateTime) -> Result<usize, String> {
+pub fn revert_change(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    name: &str,
+    approver: Option<&str>,
+    time: NaiveDateTime,
+) -> Result<usize, String> {
     let change = find_change(model, name)?;
     let mut db = Database::open(url, model, report)?;
     let mut interp = loaded(&mut db, model, time)?;
@@ -402,7 +601,12 @@ pub fn revert_change(url: &str, model: &Model, report: &Report, name: &str, appr
 }
 
 /// Provisional values: (entity, id, field, reason, until).
-pub fn provisional(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<Vec<(String, u64, String, String, Option<chrono::NaiveDate>)>, String> {
+pub fn provisional(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<Vec<(String, u64, String, String, Option<chrono::NaiveDate>)>, String> {
     let mut db = Database::open(url, model, report)?;
     let interp = loaded(&mut db, model, time)?;
     Ok(interp.provisional_values())
@@ -412,16 +616,29 @@ pub fn provisional(url: &str, model: &Model, report: &Report, time: NaiveDateTim
 /// transitions, `becomes` reactions, postings. Loading on demand evaluates rules only where
 /// data changed, so time-driven ones need this periodic pass. Returns the transaction
 /// written, if anything changed.
-pub fn sweep(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<Option<u64>, String> {
+pub fn sweep(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<Option<u64>, String> {
     sweep_with(url, model, report, time, None)
 }
 
 /// `sweep`, committed through the project's sequencer when it has one running.
-pub fn sweep_with(url: &str, model: &Model, report: &Report, time: NaiveDateTime, sequencer: Option<&crate::Sequencer>) -> Result<Option<u64>, String> {
+pub fn sweep_with(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+) -> Result<Option<u64>, String> {
     let mut db = Database::open(url, model, report)?;
     // when the previous sweep ran: a `becomes` condition that reads the clock is compared with
     // what it was then
-    let last = db.meta("last_sweep")?.and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok());
+    let last = db
+        .meta("last_sweep")?
+        .and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok());
     let schema = db.schema.clone();
     let src = crate::source::DbSource::open(url, schema, None)?;
     let mut interp = Interp::new(model);
@@ -430,15 +647,28 @@ pub fn sweep_with(url: &str, model: &Model, report: &Report, time: NaiveDateTime
     interp.load_units();
     interp.materialize = materialized_formulas(&db.schema);
     interp.sink = Some(match sequencer {
-        Some(s) => Box::new(crate::SequencedSink { db, model, sequencer: s.clone(), tickets: None }),
+        Some(s) => Box::new(crate::SequencedSink {
+            db,
+            model,
+            sequencer: s.clone(),
+            tickets: None,
+        }),
         None => Box::new(Sink { db, model }),
     });
     interp.sweep = true;
     interp.last_sweep = last;
     interp.system += 1;
     let before = interp.store.tx;
-    interp.with_cause("periodic sweep of time-driven rules".into(), |i| i.transaction(|_| Ok(()))).map_err(|e| flow("sweep", e))?;
-    let written = if interp.store.tx > before && !interp.store.dirty.is_empty() { Some(interp.store.tx) } else { None };
+    interp
+        .with_cause("periodic sweep of time-driven rules".into(), |i| {
+            i.transaction(|_| Ok(()))
+        })
+        .map_err(|e| flow("sweep", e))?;
+    let written = if interp.store.tx > before && !interp.store.dirty.is_empty() {
+        Some(interp.store.tx)
+    } else {
+        None
+    };
     drop(interp);
     // through the sequencer when there is one: a database rebuilt from the log knows the last
     // sweep too (else a `becomes` already fired could fire again)
@@ -467,7 +697,12 @@ pub enum Due {
 /// The next sweep a project needs: the nearest instant after its last sweep (`last_sweep` in
 /// the database's meta, or `since`) at which one of its thresholds passes for one of its
 /// records. One column read per threshold, no interpreter. Rounded up to the second after.
-pub fn next_due(url: &str, model: &Model, report: &Report, since: NaiveDateTime) -> Result<Due, String> {
+pub fn next_due(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    since: NaiveDateTime,
+) -> Result<Due, String> {
     use quadra_analysis::clock::{schedule, Schedule};
     let thresholds = match schedule(model) {
         Schedule::Never => return Ok(Due::Never),
@@ -475,34 +710,63 @@ pub fn next_due(url: &str, model: &Model, report: &Report, since: NaiveDateTime)
         Schedule::At(t) => t,
     };
     let mut db = Database::open(url, model, report)?;
-    let after = db.meta("last_sweep")?.and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok()).unwrap_or(since);
-    let tz = quadra_runtime::time::zone(&model.timezone).or_else(|_| quadra_runtime::time::zone("UTC"))?;
+    let after = db
+        .meta("last_sweep")?
+        .and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok())
+        .unwrap_or(since);
+    let tz = quadra_runtime::time::zone(&model.timezone)
+        .or_else(|_| quadra_runtime::time::zone("UTC"))?;
     let schema = db.schema.clone();
     let mut best: Option<NaiveDateTime> = None;
     for t in &thresholds {
         let entities: Vec<String> = match model.entity(&t.entity) {
-            Some(e) if e.kind == quadra_ir::EntityKind::Trait => model.implementors(&t.entity).iter().map(|e| e.name.clone()).collect(),
+            Some(e) if e.kind == quadra_ir::EntityKind::Trait => model
+                .implementors(&t.entity)
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
             _ => vec![t.entity.clone()],
         };
         for ent in entities {
-            let column = schema.tables.iter().find(|tb| matches!(&tb.source, crate::schema::Source::Entity(n) if *n == ent)).and_then(|tb| {
-                let f = tb.fields.iter().find(|f| f.field == t.field && !f.formula)?;
-                Some((tb.name.clone(), f.columns.first()?.name.clone()))
-            });
+            let column = schema
+                .tables
+                .iter()
+                .find(|tb| matches!(&tb.source, crate::schema::Source::Entity(n) if *n == ent))
+                .and_then(|tb| {
+                    let f = tb
+                        .fields
+                        .iter()
+                        .find(|f| f.field == t.field && !f.formula)?;
+                    Some((tb.name.clone(), f.columns.first()?.name.clone()))
+                });
             // a field with no column of its own: only a periodic sweep follows it
-            let Some((table, col)) = column else { return Ok(Due::Periodic) };
+            let Some((table, col)) = column else {
+                return Ok(Due::Periodic);
+            };
             // the due instant grows with the column's value: the smallest values past a bound,
             // in order, give the nearest (days are calendar days of the project's zone: the
             // bound leaves two days of margin and the exact instant is computed for each)
-            let margin = if t.days != 0 { chrono::Duration::days(t.days + 2) } else { chrono::Duration::zero() };
-            let bound = (after - chrono::Duration::seconds(t.secs + 1) - margin).format("%Y-%m-%d %H:%M:%S").to_string();
+            let margin = if t.days != 0 {
+                chrono::Duration::days(t.days + 2)
+            } else {
+                chrono::Duration::zero()
+            };
+            let bound = (after - chrono::Duration::seconds(t.secs + 1) - margin)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
             let mut offset = 0;
             'scan: loop {
                 let rows = db.conn.query(&format!("SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" > ?text ORDER BY \"{col}\" LIMIT 64 OFFSET {offset}"), &[crate::conn::Sql::Text(bound.clone())])?;
                 let n = rows.len();
                 for r in rows {
-                    let Some(at) = r[0].as_deref().and_then(parse_instant) else { continue };
-                    let mut due = if t.days != 0 { quadra_runtime::time::add_days(at, t.days, tz) } else { at };
+                    let Some(at) = r[0].as_deref().and_then(parse_instant) else {
+                        continue;
+                    };
+                    let mut due = if t.days != 0 {
+                        quadra_runtime::time::add_days(at, t.days, tz)
+                    } else {
+                        at
+                    };
                     due += chrono::Duration::seconds(t.secs + 1);
                     if due > after {
                         if best.is_none_or(|b| due < b) {
@@ -522,22 +786,45 @@ pub fn next_due(url: &str, model: &Model, report: &Report, since: NaiveDateTime)
 }
 
 /// When the project's database was last swept, if ever.
-pub fn last_sweep(url: &str, model: &Model, report: &Report) -> Result<Option<NaiveDateTime>, String> {
+pub fn last_sweep(
+    url: &str,
+    model: &Model,
+    report: &Report,
+) -> Result<Option<NaiveDateTime>, String> {
     let mut db = Database::open(url, model, report)?;
-    Ok(db.meta("last_sweep")?.and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok()))
+    Ok(db
+        .meta("last_sweep")?
+        .and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S%.f").ok()))
 }
 
 fn parse_instant(v: &str) -> Option<NaiveDateTime> {
-    ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"].iter().find_map(|f| NaiveDateTime::parse_from_str(v, f).ok())
+    [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+    ]
+    .iter()
+    .find_map(|f| NaiveDateTime::parse_from_str(v, f).ok())
 }
 
 /// Load a fixture of the tests (with the fixtures it extends) into a database, as one
 /// transaction: demo and development data.
-pub fn fixture(url: &str, model: &Model, report: &Report, name: &str, time: NaiveDateTime) -> Result<u64, String> {
+pub fn fixture(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    name: &str,
+    time: NaiveDateTime,
+) -> Result<u64, String> {
     let mut chain = Vec::new();
     let mut cur = Some(name.to_string());
     while let Some(n) = cur {
-        let f = model.fixtures.iter().find(|f| f.name == n).ok_or_else(|| format!("unknown fixture `{n}`"))?;
+        let f = model
+            .fixtures
+            .iter()
+            .find(|f| f.name == n)
+            .ok_or_else(|| format!("unknown fixture `{n}`"))?;
         chain.push(f);
         cur = f.extends.clone();
     }
@@ -569,7 +856,13 @@ pub fn fixture(url: &str, model: &Model, report: &Report, name: &str, time: Naiv
 
 /// `quadra dev`: a user to sign in with, when the database has none (`Admin` role if the
 /// project defines one). Whether it was created.
-pub fn ensure_user(url: &str, model: &Model, report: &Report, login: &str, time: NaiveDateTime) -> Result<bool, String> {
+pub fn ensure_user(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    login: &str,
+    time: NaiveDateTime,
+) -> Result<bool, String> {
     let mut db = Database::open(url, model, report)?;
     let mut interp = loaded(&mut db, model, time)?;
     if !interp.ids("User", None).is_empty() {
@@ -578,11 +871,22 @@ pub fn ensure_user(url: &str, model: &Model, report: &Report, login: &str, time:
     interp.materialize = materialized_formulas(&db.schema);
     interp.sink = Some(Box::new(Sink { db, model }));
     interp.system += 1;
-    let roles: Vec<V> = model.roles.iter().filter(|r| r.name == "Admin").map(|r| V::Role(std::rc::Rc::from(r.name.as_str()))).collect();
+    let roles: Vec<V> = model
+        .roles
+        .iter()
+        .filter(|r| r.name == "Admin")
+        .map(|r| V::Role(std::rc::Rc::from(r.name.as_str())))
+        .collect();
     interp
         .with_cause(format!("quadra dev: user {login}"), |i| {
             i.transaction(|i| {
-                i.create("User", vec![("login".to_string(), V::Text(std::rc::Rc::from(login))), ("roles".to_string(), V::Set(std::rc::Rc::new(roles)))])?;
+                i.create(
+                    "User",
+                    vec![
+                        ("login".to_string(), V::Text(std::rc::Rc::from(login))),
+                        ("roles".to_string(), V::Set(std::rc::Rc::new(roles))),
+                    ],
+                )?;
                 Ok(())
             })
         })

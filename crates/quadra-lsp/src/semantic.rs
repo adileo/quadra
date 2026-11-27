@@ -5,7 +5,9 @@ use crate::line_index::LineIndex;
 use quadra_sema::{Analysis, DeclKind, FileId, MemberKind, Project, Target, BUILTIN_TYPE_NAMES};
 use quadra_syntax::{SyntaxKind::*, SyntaxNode, SyntaxToken};
 use std::collections::HashMap;
-use tower_lsp::lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend};
+use tower_lsp::lsp_types::{
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend,
+};
 
 const TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::KEYWORD,        // 0
@@ -52,7 +54,10 @@ const T_READONLY: u32 = 2;
 const T_BUILTIN: u32 = 4;
 
 pub fn legend() -> SemanticTokensLegend {
-    SemanticTokensLegend { token_types: TYPES.to_vec(), token_modifiers: MODIFIERS.to_vec() }
+    SemanticTokensLegend {
+        token_types: TYPES.to_vec(),
+        token_modifiers: MODIFIERS.to_vec(),
+    }
 }
 
 fn decl_type(kind: DeclKind) -> u32 {
@@ -78,10 +83,18 @@ fn member_type(kind: MemberKind) -> (u32, u32) {
 pub fn tokens(project: &Project, a: &Analysis, file: FileId) -> Vec<SemanticToken> {
     let src = project.file(file);
     let index = LineIndex::new(&src.text);
-    let refs: HashMap<_, _> =
-        a.references.iter().filter(|r| r.file == file).map(|r| (r.range, r.target.clone())).collect();
-    let decl_names: HashMap<_, _> =
-        a.decls.iter().filter(|d| d.file == file).map(|d| (d.name_range, d.kind)).collect();
+    let refs: HashMap<_, _> = a
+        .references
+        .iter()
+        .filter(|r| r.file == file)
+        .map(|r| (r.range, r.target.clone()))
+        .collect();
+    let decl_names: HashMap<_, _> = a
+        .decls
+        .iter()
+        .filter(|d| d.file == file)
+        .map(|d| (d.name_range, d.kind))
+        .collect();
     let member_names: HashMap<_, _> = a
         .members
         .values()
@@ -93,8 +106,13 @@ pub fn tokens(project: &Project, a: &Analysis, file: FileId) -> Vec<SemanticToke
     let mut out = Vec::new();
     let (mut prev_line, mut prev_col) = (0u32, 0u32);
     let root: SyntaxNode = src.parse.syntax();
-    for tok in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
-        let Some((ty, mods)) = classify(&tok, a, &refs, &decl_names, &member_names) else { continue };
+    for tok in root
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
+        let Some((ty, mods)) = classify(&tok, a, &refs, &decl_names, &member_names) else {
+            continue;
+        };
         let text = tok.text();
         if text.is_empty() || text.contains('\n') {
             continue; // multi-line tokens are left to the TextMate grammar
@@ -103,7 +121,13 @@ pub fn tokens(project: &Project, a: &Analysis, file: FileId) -> Vec<SemanticToke
         let length: u32 = text.chars().map(|c| c.len_utf16() as u32).sum();
         let delta_line = line - prev_line;
         let delta_start = if delta_line == 0 { col - prev_col } else { col };
-        out.push(SemanticToken { delta_line, delta_start, length, token_type: ty, token_modifiers_bitset: mods });
+        out.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: ty,
+            token_modifiers_bitset: mods,
+        });
         prev_line = line;
         prev_col = col;
     }
@@ -148,13 +172,15 @@ fn classify(
     let text = tok.text();
     Some(match parent.kind() {
         UNIT => (T_UNIT, 0),
-        NAME_REF if grand.as_ref().map(|g| g.kind()) == Some(PATH)
-            && grand.as_ref().and_then(|g| g.parent()).map(|p| p.kind()) == Some(IMPORT) =>
+        NAME_REF
+            if grand.as_ref().map(|g| g.kind()) == Some(PATH)
+                && grand.as_ref().and_then(|g| g.parent()).map(|p| p.kind()) == Some(IMPORT) =>
         {
             (T_NAMESPACE, 0)
         }
-        NAME_REF if grand.as_ref().map(|g| g.kind()) == Some(PATH)
-            && grand.as_ref().and_then(|g| g.parent()).map(|p| p.kind()) == Some(TYPE_PATH) =>
+        NAME_REF
+            if grand.as_ref().map(|g| g.kind()) == Some(PATH)
+                && grand.as_ref().and_then(|g| g.parent()).map(|p| p.kind()) == Some(TYPE_PATH) =>
         {
             if BUILTIN_TYPE_NAMES.contains(&text) {
                 (T_TYPE, T_BUILTIN)
@@ -169,10 +195,17 @@ fn classify(
                 .prev_sibling_or_token()
                 .map_or(false, |p| matches!(p.kind(), DOT | QUESTION_DOT));
             let called = grand.as_ref().map_or(false, |g| g.kind() == CALL_EXPR)
-                && (is_member && grand.as_ref().and_then(|g| g.parent()).map_or(false, |p| p.kind() == CALL_EXPR)
+                && (is_member
+                    && grand
+                        .as_ref()
+                        .and_then(|g| g.parent())
+                        .map_or(false, |p| p.kind() == CALL_EXPR)
                     || !is_member);
             let callee = if is_member {
-                grand.as_ref().and_then(|g| g.parent()).map_or(false, |p| p.kind() == CALL_EXPR)
+                grand
+                    .as_ref()
+                    .and_then(|g| g.parent())
+                    .map_or(false, |p| p.kind() == CALL_EXPR)
             } else {
                 called
             };

@@ -42,13 +42,20 @@ pub struct Diag {
 
 impl Diag {
     pub fn new(message: impl Into<String>, span: Span) -> Diag {
-        Diag { message: message.into(), span }
+        Diag {
+            message: message.into(),
+            span,
+        }
     }
 }
 
 impl std::fmt::Display for Diag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (at {}..{})", self.message, self.span.start, self.span.end)
+        write!(
+            f,
+            "{} (at {}..{})",
+            self.message, self.span.start, self.span.end
+        )
     }
 }
 
@@ -100,5 +107,7 @@ pub fn from_json(defs: &[J]) -> Result<(String, Vec<String>), String> {
 /// A file in its canonical form (the same definitions, written as the UI writes them).
 pub fn format(src: &str) -> Result<String, Vec<Diag>> {
     let defs = to_json(src)?;
-    from_json(&defs).map(|(t, _)| t).map_err(|m| vec![Diag::new(m, Span::default())])
+    from_json(&defs)
+        .map(|(t, _)| t)
+        .map_err(|m| vec![Diag::new(m, Span::default())])
 }

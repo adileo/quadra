@@ -5,12 +5,20 @@ use quadra_sema::{Analysis, FileKind, Project};
 use quadra_syntax::{ast, SyntaxKind, SyntaxKind::*, SyntaxNode, SyntaxToken};
 
 pub fn lower(project: &Project, analysis: &Analysis) -> Model {
-    let mut l = Lower { analysis, model: Model::default(), file: quadra_sema::FileId(0), pending: Vec::new(), patches: Vec::new() };
+    let mut l = Lower {
+        analysis,
+        model: Model::default(),
+        file: quadra_sema::FileId(0),
+        pending: Vec::new(),
+        patches: Vec::new(),
+    };
     l.model.timezone = project.timezone.clone();
     for f in project.files() {
         let i = f.id.0 as usize;
         if l.model.sources.len() <= i {
-            l.model.sources.resize(i + 1, (String::new(), String::new()));
+            l.model
+                .sources
+                .resize(i + 1, (String::new(), String::new()));
         }
         let rel = f.path.strip_prefix(&project.root).unwrap_or(&f.path);
         l.model.sources[i] = (rel.display().to_string(), f.text.clone());
@@ -113,7 +121,16 @@ const EXPR_KINDS: &[SyntaxKind] = &[
     ERROR,
 ];
 
-const TYPE_KINDS: &[SyntaxKind] = &[TYPE_PATH, TYPE_OPTIONAL, TYPE_UNION, TYPE_ENUM, TYPE_LIST, TYPE_SET, TYPE_PAREN, TYPE_TUPLE];
+const TYPE_KINDS: &[SyntaxKind] = &[
+    TYPE_PATH,
+    TYPE_OPTIONAL,
+    TYPE_UNION,
+    TYPE_ENUM,
+    TYPE_LIST,
+    TYPE_SET,
+    TYPE_PAREN,
+    TYPE_TUPLE,
+];
 
 fn is_expr(n: &SyntaxNode) -> bool {
     EXPR_KINDS.contains(&n.kind())
@@ -128,19 +145,30 @@ fn type_node(n: &SyntaxNode) -> Option<SyntaxNode> {
 }
 
 fn tokens(n: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
-    n.children_with_tokens().filter_map(|e| e.into_token()).filter(|t| !t.kind().is_trivia())
+    n.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
 }
 
 fn ctx_words(n: &SyntaxNode) -> Vec<String> {
-    tokens(n).filter(|t| t.kind() == CONTEXT_KW).map(|t| t.text().to_string()).collect()
+    tokens(n)
+        .filter(|t| t.kind() == CONTEXT_KW)
+        .map(|t| t.text().to_string())
+        .collect()
 }
 
 fn names(list: &SyntaxNode) -> Vec<String> {
-    ast::children(list, NAME_REF).filter_map(|n| ast::token(&n, IDENT)).map(|t| t.text().to_string()).collect()
+    ast::children(list, NAME_REF)
+        .filter_map(|n| ast::token(&n, IDENT))
+        .map(|t| t.text().to_string())
+        .collect()
 }
 
 fn path_segments(p: &SyntaxNode) -> Vec<String> {
-    ast::path_segments(p).iter().map(|t| t.text().to_string()).collect()
+    ast::path_segments(p)
+        .iter()
+        .map(|t| t.text().to_string())
+        .collect()
 }
 
 fn unquote(s: &str) -> String {
@@ -157,8 +185,22 @@ fn unquote(s: &str) -> String {
 /// Remove the common indentation of a multi-line string and trim blank edges.
 fn dedent(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
-    let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
-    let out: Vec<String> = lines.iter().map(|l| if l.len() >= indent { l[indent..].to_string() } else { l.trim().to_string() }).collect();
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let out: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            if l.len() >= indent {
+                l[indent..].to_string()
+            } else {
+                l.trim().to_string()
+            }
+        })
+        .collect();
     out.join("\n").trim_matches('\n').to_string()
 }
 
@@ -166,9 +208,14 @@ impl<'a> Lower<'a> {
     /// The range of a node without the line breaks, blank lines, comments and dedents that
     /// end it: a diagnostic on a field or a declaration does not run over the next lines.
     fn span(&self, n: &SyntaxNode) -> Span {
-        let significant = |t: &SyntaxToken| !t.kind().is_trivia() && !matches!(t.kind(), NEWLINE | INDENT | DEDENT);
+        let significant = |t: &SyntaxToken| {
+            !t.kind().is_trivia() && !matches!(t.kind(), NEWLINE | INDENT | DEDENT)
+        };
         let tokens = || n.descendants_with_tokens().filter_map(|e| e.into_token());
-        let range = match (tokens().find(|t| significant(t)), tokens().filter(|t| significant(t)).last()) {
+        let range = match (
+            tokens().find(|t| significant(t)),
+            tokens().filter(|t| significant(t)).last(),
+        ) {
             (Some(a), Some(b)) => TextRange::new(a.text_range().start(), b.text_range().end()),
             _ => n.text_range(),
         };
@@ -192,8 +239,16 @@ impl<'a> Lower<'a> {
             }
             ENUM => {
                 let name = ast::name_text(item).unwrap_or_default();
-                let variants = item.descendants().filter(|n| n.kind() == VARIANT).map(|v| self.variant(&v)).collect();
-                self.model.enums.push(EnumDef { name, variants, span });
+                let variants = item
+                    .descendants()
+                    .filter(|n| n.kind() == VARIANT)
+                    .map(|v| self.variant(&v))
+                    .collect();
+                self.model.enums.push(EnumDef {
+                    name,
+                    variants,
+                    span,
+                });
             }
             FN => {
                 let f = self.fn_def(item);
@@ -202,20 +257,38 @@ impl<'a> Lower<'a> {
             CONST => {
                 let name = ast::name_text(item).unwrap_or_default();
                 let ty = type_node(item).map(|t| self.ty(&t));
-                let value = ast::child(item, VALUE).map(|v| self.value(&v)).unwrap_or(self.error_expr(item));
-                self.model.consts.push(Const { name, ty, value, span });
+                let value = ast::child(item, VALUE)
+                    .map(|v| self.value(&v))
+                    .unwrap_or(self.error_expr(item));
+                self.model.consts.push(Const {
+                    name,
+                    ty,
+                    value,
+                    span,
+                });
             }
             EVENT => {
                 let name = ast::name_text(item).unwrap_or_default();
-                let fields = ast::child(item, FIELD_LIST).map(|l| self.tuple_fields(&l)).unwrap_or_default();
+                let fields = ast::child(item, FIELD_LIST)
+                    .map(|l| self.tuple_fields(&l))
+                    .unwrap_or_default();
                 self.model.events.push(Event { name, fields, span });
             }
             REACTION => self.reaction(item),
             ROLE => {
                 let name = ast::name_text(item).unwrap_or_default();
-                let parent = ast::child(item, IS_CLAUSE).and_then(|c| ast::child(&c, PATH)).map(|p| ast::path_text(&p));
-                let rules = ast::children(item, RULE).map(|r| self.rule(&r, false)).collect();
-                self.model.roles.push(Role { name, parent, rules, span });
+                let parent = ast::child(item, IS_CLAUSE)
+                    .and_then(|c| ast::child(&c, PATH))
+                    .map(|p| ast::path_text(&p));
+                let rules = ast::children(item, RULE)
+                    .map(|r| self.rule(&r, false))
+                    .collect();
+                self.model.roles.push(Role {
+                    name,
+                    parent,
+                    rules,
+                    span,
+                });
             }
             RULE => {
                 let r = self.rule(item, true);
@@ -223,23 +296,45 @@ impl<'a> Lower<'a> {
             }
             SEED => {
                 let body = self.block_of(item);
-                self.model.seeds.push(Block { name: String::new(), extends: None, body, span });
+                self.model.seeds.push(Block {
+                    name: String::new(),
+                    extends: None,
+                    body,
+                    span,
+                });
             }
             FIXTURE => {
                 let name = ast::name_text(item).unwrap_or_default();
                 let extends = ast::child(item, PATH).map(|p| ast::path_text(&p));
                 let body = self.block_of(item);
-                self.model.fixtures.push(Block { name, extends, body, span });
+                self.model.fixtures.push(Block {
+                    name,
+                    extends,
+                    body,
+                    span,
+                });
             }
             TEST => {
-                let name = tokens(item).find(|t| t.kind() == STRING).map(|t| unquote(t.text())).unwrap_or_default();
+                let name = tokens(item)
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()))
+                    .unwrap_or_default();
                 let body = self.block_of(item);
-                self.model.tests.push(Block { name, extends: None, body, span });
+                self.model.tests.push(Block {
+                    name,
+                    extends: None,
+                    body,
+                    span,
+                });
             }
             METRIC | CONTROL => {
                 let name = ast::name_text(item).unwrap_or_default();
-                let params = ast::child(item, PARAM_LIST).map(|p| self.params(&p)).unwrap_or_default();
-                let ret = ast::child(item, RET_TYPE).and_then(|r| type_node(&r)).map(|t| self.ty(&t));
+                let params = ast::child(item, PARAM_LIST)
+                    .map(|p| self.params(&p))
+                    .unwrap_or_default();
+                let ret = ast::child(item, RET_TYPE)
+                    .and_then(|r| type_node(&r))
+                    .map(|t| self.ty(&t));
                 let mut meta = Vec::new();
                 let mut formulas = Vec::new();
                 if let Some(list) = ast::child(item, MEMBER_LIST) {
@@ -247,7 +342,10 @@ impl<'a> Lower<'a> {
                         let key = ast::name_text(&m).unwrap_or_default();
                         match m.kind() {
                             META => {
-                                let v = exprs(&m).first().map(|e| self.expr(e)).unwrap_or(self.error_expr(&m));
+                                let v = exprs(&m)
+                                    .first()
+                                    .map(|e| self.expr(e))
+                                    .unwrap_or(self.error_expr(&m));
                                 meta.push((key, v));
                             }
                             FIELD => {
@@ -260,12 +358,25 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                self.model.metrics.push(Metric { name, params, ret, meta, formulas, control: item.kind() == CONTROL, span });
+                self.model.metrics.push(Metric {
+                    name,
+                    params,
+                    ret,
+                    meta,
+                    formulas,
+                    control: item.kind() == CONTROL,
+                    span,
+                });
             }
             MIGRATION | CHANGE => {
                 let name = ast::name_text(item).unwrap_or_default();
                 let body = self.block_of(item);
-                let b = Block { name, extends: None, body, span };
+                let b = Block {
+                    name,
+                    extends: None,
+                    body,
+                    span,
+                };
                 if item.kind() == MIGRATION {
                     self.model.migrations.push(b);
                 } else {
@@ -318,7 +429,11 @@ impl<'a> Lower<'a> {
                 return;
             };
             let seg = path_segments(&path).into_iter().next().unwrap_or_default();
-            let target = self.analysis.resolve(self.file, &seg).map(|d| self.analysis.decl(d).name.clone()).unwrap_or(seg);
+            let target = self
+                .analysis
+                .resolve(self.file, &seg)
+                .map(|d| self.analysis.decl(d).name.clone())
+                .unwrap_or(seg);
             let mut tmp = self.empty_entity(target.clone(), EntityKind::Entity, span);
             if let Some(list) = ast::child(item, MEMBER_LIST) {
                 self.members(&list, &mut tmp, true);
@@ -337,13 +452,18 @@ impl<'a> Lower<'a> {
         let mut e = self.empty_entity(name, kind, span);
         e.temporary = words.iter().any(|w| w == "temporary");
         if let Some(clause) = ast::child(item, IS_CLAUSE) {
-            e.traits = ast::children(&clause, PATH).map(|p| ast::path_text(&p)).collect();
+            e.traits = ast::children(&clause, PATH)
+                .map(|p| ast::path_text(&p))
+                .collect();
         }
         if let Some(list) = ast::child(item, MEMBER_LIST) {
             self.members(&list, &mut e, false);
         }
         if e.load_from.is_some() && !e.temporary {
-            let at = ast::child(item, MEMBER_LIST).and_then(|l| l.children().find(|m| m.kind() == LOAD)).map(|m| self.span(&m)).unwrap_or(span);
+            let at = ast::child(item, MEMBER_LIST)
+                .and_then(|l| l.children().find(|m| m.kind() == LOAD))
+                .map(|m| self.span(&m))
+                .unwrap_or(span);
             self.model.errors.push((at, format!("`load from` is only for a `temporary entity` (used by migrations): `{}` is not temporary", e.name)));
         }
         self.model.entities.push(e);
@@ -363,23 +483,42 @@ impl<'a> Lower<'a> {
                         per = names(&list);
                     }
                     let es = exprs(&m);
-                    let cond = es.first().map(|x| self.expr(x)).unwrap_or(self.error_expr(&m));
-                    let message = es.get(1).map(|x| self.expr(x)).unwrap_or(self.error_expr(&m));
-                    e.checks.push(Check { per, cond, message, warn: m.kind() == WARN, span });
+                    let cond = es
+                        .first()
+                        .map(|x| self.expr(x))
+                        .unwrap_or(self.error_expr(&m));
+                    let message = es
+                        .get(1)
+                        .map(|x| self.expr(x))
+                        .unwrap_or(self.error_expr(&m));
+                    e.checks.push(Check {
+                        per,
+                        cond,
+                        message,
+                        warn: m.kind() == WARN,
+                        span,
+                    });
                 }
                 LOAD if extension => {
                     self.model.errors.push((span, "`load from` cannot be used in an `extend`: it belongs in the declaration of a `temporary entity`".to_string()));
                 }
                 LOAD => {
-                    e.load_from = tokens(&m).find(|t| t.kind() == STRING).map(|t| unquote(t.text()));
+                    e.load_from = tokens(&m)
+                        .find(|t| t.kind() == STRING)
+                        .map(|t| unquote(t.text()));
                 }
                 UNIQUE => {
-                    let fields = ast::child(&m, NAME_LIST).map(|l| names(&l)).unwrap_or_default();
+                    let fields = ast::child(&m, NAME_LIST)
+                        .map(|l| names(&l))
+                        .unwrap_or_default();
                     let when = exprs(&m).first().map(|x| self.expr(x));
                     e.uniques.push(Unique { fields, when, span });
                 }
                 FROZEN => {
-                    let when = exprs(&m).first().map(|x| self.expr(x)).unwrap_or(self.error_expr(&m));
+                    let when = exprs(&m)
+                        .first()
+                        .map(|x| self.expr(x))
+                        .unwrap_or(self.error_expr(&m));
                     let mut except = Vec::new();
                     let mut live = Vec::new();
                     let mut current = "";
@@ -404,35 +543,69 @@ impl<'a> Lower<'a> {
                             _ => {}
                         }
                     }
-                    e.frozen = Some(Frozen { when, except, live, span });
+                    e.frozen = Some(Frozen {
+                        when,
+                        except,
+                        live,
+                        span,
+                    });
                 }
                 LIVE => {
                     let span = self.span(&m);
-                    for n in ast::child(&m, NAME_LIST).map(|l| names(&l)).unwrap_or_default() {
+                    for n in ast::child(&m, NAME_LIST)
+                        .map(|l| names(&l))
+                        .unwrap_or_default()
+                    {
                         e.live_decls.push((n, span));
                     }
                 }
                 FLOW => {
-                    let field = ast::child(&m, NAME_REF).and_then(|n| ast::token(&n, IDENT)).map(|t| t.text().to_string()).unwrap_or_default();
-                    let transitions = ast::children(&m, TRANSITION).map(|t| self.transition(&t)).collect();
-                    e.flows.push(Flow { field, transitions, span });
+                    let field = ast::child(&m, NAME_REF)
+                        .and_then(|n| ast::token(&n, IDENT))
+                        .map(|t| t.text().to_string())
+                        .unwrap_or_default();
+                    let transitions = ast::children(&m, TRANSITION)
+                        .map(|t| self.transition(&t))
+                        .collect();
+                    e.flows.push(Flow {
+                        field,
+                        transitions,
+                        span,
+                    });
                 }
                 ACTION => {
                     let name = ast::name_text(&m).unwrap_or_default();
-                    let params = ast::child(&m, PARAM_LIST).map(|p| self.params(&p)).unwrap_or_default();
-                    let ret = ast::child(&m, RET_TYPE).and_then(|r| type_node(&r)).map(|t| self.ty(&t));
+                    let params = ast::child(&m, PARAM_LIST)
+                        .map(|p| self.params(&p))
+                        .unwrap_or_default();
+                    let ret = ast::child(&m, RET_TYPE)
+                        .and_then(|r| type_node(&r))
+                        .map(|t| self.ty(&t));
                     let body = self.block_of(&m);
-                    e.actions.push(Action { name, params, ret, body, span });
+                    e.actions.push(Action {
+                        name,
+                        params,
+                        ret,
+                        body,
+                        span,
+                    });
                 }
                 FN => {
                     let f = self.fn_def(&m);
                     e.methods.push(f);
                 }
                 POST => {
-                    let ledger = ast::child(&m, PATH).map(|p| ast::path_text(&p)).unwrap_or_default();
+                    let ledger = ast::child(&m, PATH)
+                        .map(|p| ast::path_text(&p))
+                        .unwrap_or_default();
                     let when = exprs(&m).first().map(|x| self.expr(x));
                     let body = self.block_of(&m);
-                    e.posts.push(Post { ledger, when, body, span });
+                    e.posts.push(Post {
+                        ledger,
+                        when,
+                        body,
+                        span,
+                    });
                 }
                 _ => {}
             }
@@ -441,7 +614,9 @@ impl<'a> Lower<'a> {
 
     fn field(&mut self, m: &SyntaxNode, extension: bool) -> Field {
         let name = ast::name_text(m).unwrap_or_default();
-        let ledger_kw = tokens(m).find(|t| t.kind() == CONTEXT_KW).map(|t| t.text().to_string());
+        let ledger_kw = tokens(m)
+            .find(|t| t.kind() == CONTEXT_KW)
+            .map(|t| t.text().to_string());
         let ty = type_node(m).map(|t| self.ty(&t));
         let mut f = Field {
             name,
@@ -497,7 +672,10 @@ impl<'a> Lower<'a> {
                     NEQ => Some(BinOp::Ne),
                     _ => None,
                 });
-                let e = exprs(m).first().map(|x| self.expr(x)).unwrap_or(self.error_expr(m));
+                let e = exprs(m)
+                    .first()
+                    .map(|x| self.expr(x))
+                    .unwrap_or(self.error_expr(m));
                 f.where_ = Some(match op {
                     Some(op) => Where::Compare(op, e),
                     None => Where::Expr(e),
@@ -530,7 +708,11 @@ impl<'a> Lower<'a> {
                     _ => {}
                 },
                 rowan::NodeOrToken::Node(n) => {
-                    let text = || ast::token(&n, IDENT).map(|t| t.text().to_string()).unwrap_or_default();
+                    let text = || {
+                        ast::token(&n, IDENT)
+                            .map(|t| t.text().to_string())
+                            .unwrap_or_default()
+                    };
                     match state {
                         0 if n.kind() == NAME_REF => from.push(text()),
                         1 if n.kind() == NAME_REF => to = text(),
@@ -542,20 +724,37 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        Transition { from, to, by, when, unless, span: self.span(t) }
+        Transition {
+            from,
+            to,
+            by,
+            when,
+            unless,
+            span: self.span(t),
+        }
     }
 
     fn reaction(&mut self, item: &SyntaxNode) {
         let words = ctx_words(item);
-        let path = ast::child(item, PATH).map(|p| path_segments(&p)).unwrap_or_default();
+        let path = ast::child(item, PATH)
+            .map(|p| path_segments(&p))
+            .unwrap_or_default();
         let entity = path.first().cloned().unwrap_or_default();
         let trigger = if words.first().map(String::as_str) == Some("before") {
             Trigger::Before(path.get(1).cloned().unwrap_or_default())
         } else if words.iter().any(|w| w == "enters") {
-            let state = ast::child(item, NAME_REF).and_then(|n| ast::token(&n, IDENT)).map(|t| t.text().to_string()).unwrap_or_default();
+            let state = ast::child(item, NAME_REF)
+                .and_then(|n| ast::token(&n, IDENT))
+                .map(|t| t.text().to_string())
+                .unwrap_or_default();
             Trigger::Enters(state)
         } else if words.iter().any(|w| w == "becomes") {
-            Trigger::Becomes(exprs(item).first().map(|x| self.expr(x)).unwrap_or(self.error_expr(item)))
+            Trigger::Becomes(
+                exprs(item)
+                    .first()
+                    .map(|x| self.expr(x))
+                    .unwrap_or(self.error_expr(item)),
+            )
         } else if words.iter().any(|w| w == "created") {
             Trigger::Created
         } else if words.iter().any(|w| w == "changes") {
@@ -575,7 +774,14 @@ impl<'a> Lower<'a> {
         let binding = ast::name_text(item).unwrap_or_default();
         let converges = words.iter().any(|w| w == "converges");
         let body = self.block_of(item);
-        self.model.reactions.push(Reaction { entity, trigger, binding, converges, body, span: self.span(item) });
+        self.model.reactions.push(Reaction {
+            entity,
+            trigger,
+            binding,
+            converges,
+            body,
+            span: self.span(item),
+        });
     }
 
     /// A permission rule. `effect` is `allow`, `deny`, `hide` or `show`; `verbs` never contain
@@ -593,7 +799,9 @@ impl<'a> Lower<'a> {
                     "history" => history = true,
                     v => verbs.push(v.to_string()),
                 },
-                rowan::NodeOrToken::Token(t) if t.kind() == STAR => targets.push(vec!["*".to_string()]),
+                rowan::NodeOrToken::Token(t) if t.kind() == STAR => {
+                    targets.push(vec!["*".to_string()])
+                }
                 rowan::NodeOrToken::Node(n) if n.kind() == PATH => targets.push(path_segments(&n)),
                 _ => {}
             }
@@ -612,36 +820,80 @@ impl<'a> Lower<'a> {
             if verbs.len() > 1 {
                 self.model.errors.push((span, format!("`{vis}` cannot be combined with other permissions: write it on its own line (`{vis} Entity.field`)")));
             } else if top_level {
-                self.model.errors.push((span, format!("`{vis}` is written inside a `role`: it applies to the users of that role")));
+                self.model.errors.push((
+                    span,
+                    format!(
+                        "`{vis}` is written inside a `role`: it applies to the users of that role"
+                    ),
+                ));
             } else if let Some(w) = &word {
-                self.model.errors.push((span, format!("`{w} {vis}` has no meaning: write `{vis} Entity.field`")));
+                self.model.errors.push((
+                    span,
+                    format!("`{w} {vis}` has no meaning: write `{vis} Entity.field`"),
+                ));
             }
             effect = vis;
             verbs.retain(|v| v != "hide" && v != "show");
         }
         let condition = exprs(r).first().map(|x| self.expr(x));
-        Rule { effect, verbs, history, targets, condition, span }
+        Rule {
+            effect,
+            verbs,
+            history,
+            targets,
+            condition,
+            span,
+        }
     }
 
     fn fn_def(&mut self, n: &SyntaxNode) -> FnDef {
         let name = ast::name_text(n).unwrap_or_default();
-        let params = ast::child(n, PARAM_LIST).map(|p| self.params(&p)).unwrap_or_default();
-        let ret = ast::child(n, RET_TYPE).and_then(|r| type_node(&r)).map(|t| self.ty(&t));
+        let params = ast::child(n, PARAM_LIST)
+            .map(|p| self.params(&p))
+            .unwrap_or_default();
+        let ret = ast::child(n, RET_TYPE)
+            .and_then(|r| type_node(&r))
+            .map(|t| self.ty(&t));
         let builtin = ctx_words(n).iter().any(|w| w == "builtin");
         let body = ast::child(n, BLOCK).map(|b| self.stmts(&b));
-        FnDef { name, params, ret, body, builtin, span: self.span(n) }
+        FnDef {
+            name,
+            params,
+            ret,
+            body,
+            builtin,
+            span: self.span(n),
+        }
     }
 
     fn params(&mut self, list: &SyntaxNode) -> Vec<Param> {
-        ast::children(list, PARAM).map(|p| Param { name: ast::name_text(&p).unwrap_or_default(), ty: type_node(&p).map(|t| self.ty(&t)), default: exprs(&p).first().map(|e| self.expr(e)) }).collect()
+        ast::children(list, PARAM)
+            .map(|p| Param {
+                name: ast::name_text(&p).unwrap_or_default(),
+                ty: type_node(&p).map(|t| self.ty(&t)),
+                default: exprs(&p).first().map(|e| self.expr(e)),
+            })
+            .collect()
     }
 
     fn variant(&mut self, v: &SyntaxNode) -> Variant {
-        Variant { name: ast::name_text(v).unwrap_or_default(), fields: ast::child(v, FIELD_LIST).map(|l| self.tuple_fields(&l)).unwrap_or_default() }
+        Variant {
+            name: ast::name_text(v).unwrap_or_default(),
+            fields: ast::child(v, FIELD_LIST)
+                .map(|l| self.tuple_fields(&l))
+                .unwrap_or_default(),
+        }
     }
 
     fn tuple_fields(&mut self, list: &SyntaxNode) -> Vec<(String, Ty)> {
-        ast::children(list, TUPLE_FIELD).map(|f| (ast::name_text(&f).unwrap_or_default(), type_node(&f).map(|t| self.ty(&t)).unwrap_or(Ty::Error))).collect()
+        ast::children(list, TUPLE_FIELD)
+            .map(|f| {
+                (
+                    ast::name_text(&f).unwrap_or_default(),
+                    type_node(&f).map(|t| self.ty(&t)).unwrap_or(Ty::Error),
+                )
+            })
+            .collect()
     }
 
     // ---- types ------------------------------------------------------------------------
@@ -650,17 +902,39 @@ impl<'a> Lower<'a> {
         let inner = |s: &mut Self| type_node(n).map(|t| s.ty(&t)).unwrap_or(Ty::Error);
         match n.kind() {
             TYPE_PATH => {
-                let segments = ast::child(n, PATH).map(|p| path_segments(&p)).unwrap_or_default();
-                let args = ast::child(n, GENERIC_ARGS).map(|g| g.children().filter(|c| TYPE_KINDS.contains(&c.kind())).map(|c| self.ty(&c)).collect()).unwrap_or_default();
-                Ty::Path { segments, args, span: self.span(n) }
+                let segments = ast::child(n, PATH)
+                    .map(|p| path_segments(&p))
+                    .unwrap_or_default();
+                let args = ast::child(n, GENERIC_ARGS)
+                    .map(|g| {
+                        g.children()
+                            .filter(|c| TYPE_KINDS.contains(&c.kind()))
+                            .map(|c| self.ty(&c))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ty::Path {
+                    segments,
+                    args,
+                    span: self.span(n),
+                }
             }
             TYPE_OPTIONAL => Ty::Optional(Box::new(inner(self))),
             TYPE_LIST => Ty::List(Box::new(inner(self))),
             TYPE_SET => Ty::Set(Box::new(inner(self))),
             TYPE_PAREN => inner(self),
             TYPE_TUPLE => Ty::Tuple(self.tuple_fields(n)),
-            TYPE_ENUM => Ty::Enum(ast::children(n, VARIANT).map(|v| self.variant(&v)).collect()),
-            TYPE_UNION => Ty::Union(n.children().filter(|c| TYPE_KINDS.contains(&c.kind())).map(|c| self.ty(&c)).collect()),
+            TYPE_ENUM => Ty::Enum(
+                ast::children(n, VARIANT)
+                    .map(|v| self.variant(&v))
+                    .collect(),
+            ),
+            TYPE_UNION => Ty::Union(
+                n.children()
+                    .filter(|c| TYPE_KINDS.contains(&c.kind()))
+                    .map(|c| self.ty(&c))
+                    .collect(),
+            ),
             _ => Ty::Error,
         }
     }
@@ -669,7 +943,9 @@ impl<'a> Lower<'a> {
 
     /// The statements of the BLOCK child of `n`.
     fn block_of(&mut self, n: &SyntaxNode) -> Vec<Stmt> {
-        ast::child(n, BLOCK).map(|b| self.stmts(&b)).unwrap_or_default()
+        ast::child(n, BLOCK)
+            .map(|b| self.stmts(&b))
+            .unwrap_or_default()
     }
 
     fn stmts(&mut self, block: &SyntaxNode) -> Vec<Stmt> {
@@ -680,97 +956,143 @@ impl<'a> Lower<'a> {
         let span = self.span(s);
         let es = exprs(s);
         let first = |l: &mut Self| es.first().map(|e| l.expr(e)).unwrap_or(l.error_expr(s));
-        let kind =
-            match s.kind() {
-                LET_STMT => {
-                    let name = ast::name_text(s).unwrap_or_default();
-                    let ty = type_node(s).map(|t| self.ty(&t));
-                    let value = ast::child(s, VALUE).map(|v| self.value(&v)).unwrap_or(self.error_expr(s));
-                    StmtKind::Let { name, ty, value }
-                }
-                IF_STMT => {
-                    let binding = ast::token(s, LET_KW).and_then(|_| ast::name_text(s));
-                    let cond = first(self);
-                    let then = ast::child(s, BLOCK).map(|b| self.stmts(&b)).unwrap_or_default();
-                    let otherwise = ast::child(s, ELSE_BRANCH).map(|e| {
-                        if let Some(nested) = ast::child(&e, IF_STMT) {
-                            self.stmt(&nested).into_iter().collect()
-                        } else {
-                            ast::child(&e, BLOCK).map(|b| self.stmts(&b)).unwrap_or_default()
-                        }
-                    });
-                    StmtKind::If { binding, cond, then, otherwise }
-                }
-                FOR_STMT => {
-                    let names = ast::children(s, NAME).filter_map(|n| ast::token(&n, IDENT)).map(|t| t.text().to_string()).collect();
-                    let iter = first(self);
-                    let body = self.block_of(s);
-                    StmtKind::For { names, iter, body }
-                }
-                RETURN_STMT => StmtKind::Return(es.first().map(|e| self.expr(e))),
-                KEYWORD_STMT => {
-                    let kw = ast::ctx_keyword(s).unwrap_or_default();
-                    if let Some(b) = ast::child(s, BLOCK) {
-                        let body = self.stmts(&b);
-                        StmtKind::Block { keyword: kw, body }
+        let kind = match s.kind() {
+            LET_STMT => {
+                let name = ast::name_text(s).unwrap_or_default();
+                let ty = type_node(s).map(|t| self.ty(&t));
+                let value = ast::child(s, VALUE)
+                    .map(|v| self.value(&v))
+                    .unwrap_or(self.error_expr(s));
+                StmtKind::Let { name, ty, value }
+            }
+            IF_STMT => {
+                let binding = ast::token(s, LET_KW).and_then(|_| ast::name_text(s));
+                let cond = first(self);
+                let then = ast::child(s, BLOCK)
+                    .map(|b| self.stmts(&b))
+                    .unwrap_or_default();
+                let otherwise = ast::child(s, ELSE_BRANCH).map(|e| {
+                    if let Some(nested) = ast::child(&e, IF_STMT) {
+                        self.stmt(&nested).into_iter().collect()
                     } else {
-                        match kw.as_str() {
-                            "require" => StmtKind::Require { cond: first(self), message: es.get(1).map(|e| self.expr(e)) },
-                            "fail" => StmtKind::Fail(first(self)),
-                            "emit" => StmtKind::Emit(first(self)),
-                            "expect" => StmtKind::Expect(first(self)),
-                            "clock" => StmtKind::Clock(first(self)),
-                            "use" => StmtKind::Use(s.descendants().find(|n| n.kind() == NAME_REF).and_then(|n| ast::token(&n, IDENT)).map(|t| t.text().to_string()).unwrap_or_default()),
-                            _ => StmtKind::Expr(first(self)),
-                        }
+                        ast::child(&e, BLOCK)
+                            .map(|b| self.stmts(&b))
+                            .unwrap_or_default()
+                    }
+                });
+                StmtKind::If {
+                    binding,
+                    cond,
+                    then,
+                    otherwise,
+                }
+            }
+            FOR_STMT => {
+                let names = ast::children(s, NAME)
+                    .filter_map(|n| ast::token(&n, IDENT))
+                    .map(|t| t.text().to_string())
+                    .collect();
+                let iter = first(self);
+                let body = self.block_of(s);
+                StmtKind::For { names, iter, body }
+            }
+            RETURN_STMT => StmtKind::Return(es.first().map(|e| self.expr(e))),
+            KEYWORD_STMT => {
+                let kw = ast::ctx_keyword(s).unwrap_or_default();
+                if let Some(b) = ast::child(s, BLOCK) {
+                    let body = self.stmts(&b);
+                    StmtKind::Block { keyword: kw, body }
+                } else {
+                    match kw.as_str() {
+                        "require" => StmtKind::Require {
+                            cond: first(self),
+                            message: es.get(1).map(|e| self.expr(e)),
+                        },
+                        "fail" => StmtKind::Fail(first(self)),
+                        "emit" => StmtKind::Emit(first(self)),
+                        "expect" => StmtKind::Expect(first(self)),
+                        "clock" => StmtKind::Clock(first(self)),
+                        "use" => StmtKind::Use(
+                            s.descendants()
+                                .find(|n| n.kind() == NAME_REF)
+                                .and_then(|n| ast::token(&n, IDENT))
+                                .map(|t| t.text().to_string())
+                                .unwrap_or_default(),
+                        ),
+                        _ => StmtKind::Expr(first(self)),
                     }
                 }
-                EXPECT_BLOCK => {
-                    let kw = ast::ctx_keyword(s).unwrap_or_default();
-                    let message = tokens(s).find(|t| t.kind() == STRING).map(|t| unquote(t.text())).unwrap_or_default();
-                    let block = ast::child(s, BLOCK);
-                    if kw == "expect_compile_error" {
-                        let source = block.map(|b| dedent(&b.text().to_string())).unwrap_or_default();
-                        StmtKind::ExpectCompileError { message, source }
-                    } else {
-                        let body = block.map(|b| self.stmts(&b)).unwrap_or_default();
-                        StmtKind::ExpectError { message, body }
-                    }
+            }
+            EXPECT_BLOCK => {
+                let kw = ast::ctx_keyword(s).unwrap_or_default();
+                let message = tokens(s)
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()))
+                    .unwrap_or_default();
+                let block = ast::child(s, BLOCK);
+                if kw == "expect_compile_error" {
+                    let source = block
+                        .map(|b| dedent(&b.text().to_string()))
+                        .unwrap_or_default();
+                    StmtKind::ExpectCompileError { message, source }
+                } else {
+                    let body = block.map(|b| self.stmts(&b)).unwrap_or_default();
+                    StmtKind::ExpectError { message, body }
                 }
-                AS_STMT => {
-                    let user = ast::child(s, NAME_REF).and_then(|n| ast::token(&n, IDENT)).map(|t| t.text().to_string()).unwrap_or_default();
-                    let body = self.block_of(s);
-                    StmtKind::As { user, body }
+            }
+            AS_STMT => {
+                let user = ast::child(s, NAME_REF)
+                    .and_then(|n| ast::token(&n, IDENT))
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default();
+                let body = self.block_of(s);
+                StmtKind::As { user, body }
+            }
+            ASSIGN_STMT => {
+                let op = tokens(s)
+                    .find_map(|t| match t.kind() {
+                        EQ => Some(AssignOp::Set),
+                        PLUS_EQ => Some(AssignOp::Add),
+                        MINUS_EQ => Some(AssignOp::Sub),
+                        _ => None,
+                    })
+                    .unwrap_or(AssignOp::Set);
+                let target = first(self);
+                let value = es
+                    .get(1)
+                    .map(|e| self.expr(e))
+                    .unwrap_or(self.error_expr(s));
+                StmtKind::Assign { target, op, value }
+            }
+            EXPR_STMT => StmtKind::Expr(first(self)),
+            META => {
+                let key = ast::name_text(s).unwrap_or_default();
+                let value = if let Some(p) = ast::child(s, PATH) {
+                    Expr::new(ExprKind::Name(ast::path_text(&p)), self.span(&p))
+                } else {
+                    first(self)
+                };
+                StmtKind::Meta { key, value }
+            }
+            FN => StmtKind::Fn(self.fn_def(s)),
+            MIGRATION_STEP => {
+                let keyword = ast::ctx_keyword(s).unwrap_or_default();
+                let paths = ast::children(s, PATH).map(|p| path_segments(&p)).collect();
+                let body = self.block_of(s);
+                let arms = s
+                    .children()
+                    .filter(|n| n.kind() == MATCH_ARM)
+                    .map(|a| self.arm(&a))
+                    .collect();
+                StmtKind::Migration {
+                    keyword,
+                    paths,
+                    body,
+                    arms,
                 }
-                ASSIGN_STMT => {
-                    let op = tokens(s)
-                        .find_map(|t| match t.kind() {
-                            EQ => Some(AssignOp::Set),
-                            PLUS_EQ => Some(AssignOp::Add),
-                            MINUS_EQ => Some(AssignOp::Sub),
-                            _ => None,
-                        })
-                        .unwrap_or(AssignOp::Set);
-                    let target = first(self);
-                    let value = es.get(1).map(|e| self.expr(e)).unwrap_or(self.error_expr(s));
-                    StmtKind::Assign { target, op, value }
-                }
-                EXPR_STMT => StmtKind::Expr(first(self)),
-                META => {
-                    let key = ast::name_text(s).unwrap_or_default();
-                    let value = if let Some(p) = ast::child(s, PATH) { Expr::new(ExprKind::Name(ast::path_text(&p)), self.span(&p)) } else { first(self) };
-                    StmtKind::Meta { key, value }
-                }
-                FN => StmtKind::Fn(self.fn_def(s)),
-                MIGRATION_STEP => {
-                    let keyword = ast::ctx_keyword(s).unwrap_or_default();
-                    let paths = ast::children(s, PATH).map(|p| path_segments(&p)).collect();
-                    let body = self.block_of(s);
-                    let arms = s.children().filter(|n| n.kind() == MATCH_ARM).map(|a| self.arm(&a)).collect();
-                    StmtKind::Migration { keyword, paths, body, arms }
-                }
-                _ => return None,
-            };
+            }
+            _ => return None,
+        };
         Some(Stmt { kind, span })
     }
 
@@ -789,12 +1111,17 @@ impl<'a> Lower<'a> {
     }
 
     fn arm(&mut self, a: &SyntaxNode) -> Arm {
-        let patterns = ast::children(a, PATTERN).map(|p| self.pattern(&p)).collect();
+        let patterns = ast::children(a, PATTERN)
+            .map(|p| self.pattern(&p))
+            .collect();
         let body = if let Some(b) = ast::child(a, BLOCK) {
             let stmts = self.stmts(&b);
             Expr::new(ExprKind::Block(stmts), self.span(&b))
         } else {
-            exprs(a).first().map(|e| self.expr(e)).unwrap_or(self.error_expr(a))
+            exprs(a)
+                .first()
+                .map(|e| self.expr(e))
+                .unwrap_or(self.error_expr(a))
         };
         Arm { patterns, body }
     }
@@ -802,12 +1129,16 @@ impl<'a> Lower<'a> {
     fn pattern(&mut self, p: &SyntaxNode) -> Pattern {
         let toks: Vec<SyntaxToken> = tokens(p).collect();
         if let Some(nr) = ast::child(p, NAME_REF) {
-            let name = ast::token(&nr, IDENT).map(|t| t.text().to_string()).unwrap_or_default();
+            let name = ast::token(&nr, IDENT)
+                .map(|t| t.text().to_string())
+                .unwrap_or_default();
             if name == "_" {
                 return Pattern::Wildcard;
             }
             if toks.iter().any(|t| t.kind() == L_PAREN) {
-                let args = ast::children(p, PATTERN).map(|c| self.pattern(&c)).collect();
+                let args = ast::children(p, PATTERN)
+                    .map(|c| self.pattern(&c))
+                    .collect();
                 return Pattern::Ctor { name, args };
             }
             return Pattern::Name(name);
@@ -836,7 +1167,11 @@ impl<'a> Lower<'a> {
     /// `f"…{expr}…{expr:spec}…"`: `{{` and `}}` are literal braces, escapes as in strings.
     fn fstring(&mut self, t: &SyntaxToken, span: Span) -> ExprKind {
         let raw = t.text();
-        let body = if raw.starts_with("f\"\"\"") { &raw[4..raw.len().saturating_sub(3)] } else { &raw[2..raw.len().saturating_sub(1)] };
+        let body = if raw.starts_with("f\"\"\"") {
+            &raw[4..raw.len().saturating_sub(3)]
+        } else {
+            &raw[2..raw.len().saturating_sub(1)]
+        };
         let mut parts = Vec::new();
         let mut text = String::new();
         let mut chars = body.char_indices().peekable();
@@ -844,7 +1179,10 @@ impl<'a> Lower<'a> {
             match c {
                 '\\' => {
                     let next = chars.next().map(|(_, n)| n);
-                    text.push_str(&crate::unescape(&format!("\\{}", next.map(String::from).unwrap_or_default())));
+                    text.push_str(&crate::unescape(&format!(
+                        "\\{}",
+                        next.map(String::from).unwrap_or_default()
+                    )));
                 }
                 '{' if chars.peek().map(|(_, n)| *n) == Some('{') => {
                     chars.next();
@@ -911,7 +1249,12 @@ impl<'a> Lower<'a> {
     pub(crate) fn expr(&mut self, n: &SyntaxNode) -> Expr {
         let span = self.span(n);
         let es = exprs(n);
-        let sub = |l: &mut Self, i: usize| es.get(i).map(|e| l.expr(e)).map(Box::new).unwrap_or(Box::new(l.error_expr(n)));
+        let sub = |l: &mut Self, i: usize| {
+            es.get(i)
+                .map(|e| l.expr(e))
+                .map(Box::new)
+                .unwrap_or(Box::new(l.error_expr(n)))
+        };
         let kind = match n.kind() {
             LITERAL => match tokens(n).next() {
                 Some(t) if t.kind() == FSTRING => self.fstring(&t, span),
@@ -919,12 +1262,28 @@ impl<'a> Lower<'a> {
                 None => ExprKind::Error,
             },
             QUANTITY => {
-                let value = tokens(n).next().map(|t| t.text().replace('_', "")).unwrap_or_default();
-                let units: Vec<String> = ast::child(n, UNIT).map(|u| tokens(&u).filter(|t| t.kind() == IDENT).map(|t| t.text().to_string()).collect()).unwrap_or_default();
-                ExprKind::Quantity { value, unit: units.first().cloned().unwrap_or_default(), per: units.get(1).cloned() }
+                let value = tokens(n)
+                    .next()
+                    .map(|t| t.text().replace('_', ""))
+                    .unwrap_or_default();
+                let units: Vec<String> = ast::child(n, UNIT)
+                    .map(|u| {
+                        tokens(&u)
+                            .filter(|t| t.kind() == IDENT)
+                            .map(|t| t.text().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ExprKind::Quantity {
+                    value,
+                    unit: units.first().cloned().unwrap_or_default(),
+                    per: units.get(1).cloned(),
+                }
             }
             NAME_REF => {
-                let text = ast::token(n, IDENT).map(|t| t.text().to_string()).unwrap_or_default();
+                let text = ast::token(n, IDENT)
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default();
                 if text == "self" {
                     ExprKind::SelfRef
                 } else {
@@ -933,19 +1292,41 @@ impl<'a> Lower<'a> {
             }
             FIELD_EXPR => {
                 let base = sub(self, 0);
-                let name = n.children().filter(|c| c.kind() == NAME_REF).last().and_then(|c| ast::token(&c, IDENT)).map(|t| t.text().to_string()).unwrap_or_default();
+                let name = n
+                    .children()
+                    .filter(|c| c.kind() == NAME_REF)
+                    .last()
+                    .and_then(|c| ast::token(&c, IDENT))
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default();
                 let optional = ast::token(n, QUESTION_DOT).is_some();
-                ExprKind::Field { base, name, optional }
+                ExprKind::Field {
+                    base,
+                    name,
+                    optional,
+                }
             }
             CALL_EXPR => {
                 let callee = sub(self, 0);
-                let args = ast::child(n, ARG_LIST).map(|l| ast::children(&l, ARG).map(|a| self.arg(&a)).collect()).unwrap_or_default();
+                let args = ast::child(n, ARG_LIST)
+                    .map(|l| ast::children(&l, ARG).map(|a| self.arg(&a)).collect())
+                    .unwrap_or_default();
                 ExprKind::Call { callee, args }
             }
-            INDEX_EXPR => ExprKind::Index { base: sub(self, 0), index: sub(self, 1) },
+            INDEX_EXPR => ExprKind::Index {
+                base: sub(self, 0),
+                index: sub(self, 1),
+            },
             PREFIX_EXPR => {
-                let op = if ast::token(n, NOT_KW).is_some() { UnOp::Not } else { UnOp::Neg };
-                ExprKind::Unary { op, expr: sub(self, 0) }
+                let op = if ast::token(n, NOT_KW).is_some() {
+                    UnOp::Not
+                } else {
+                    UnOp::Neg
+                };
+                ExprKind::Unary {
+                    op,
+                    expr: sub(self, 0),
+                }
             }
             BIN_EXPR => {
                 let toks: Vec<SyntaxToken> = tokens(n).collect();
@@ -982,20 +1363,45 @@ impl<'a> Lower<'a> {
                         _ => BinOp::Eq,
                     }
                 };
-                ExprKind::Binary { op, lhs: sub(self, 0), rhs: sub(self, 1) }
+                ExprKind::Binary {
+                    op,
+                    lhs: sub(self, 0),
+                    rhs: sub(self, 1),
+                }
             }
-            IF_EXPR => ExprKind::If { then: sub(self, 0), cond: sub(self, 1), otherwise: sub(self, 2) },
+            IF_EXPR => ExprKind::If {
+                then: sub(self, 0),
+                cond: sub(self, 1),
+                otherwise: sub(self, 2),
+            },
             LAMBDA_EXPR => {
-                let params = ast::child(n, PARAM_LIST).map(|l| ast::children(&l, PARAM).filter_map(|p| ast::name_text(&p)).collect()).unwrap_or_default();
-                ExprKind::Lambda { params, body: std::sync::Arc::from(sub(self, 0)) }
+                let params = ast::child(n, PARAM_LIST)
+                    .map(|l| {
+                        ast::children(&l, PARAM)
+                            .filter_map(|p| ast::name_text(&p))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ExprKind::Lambda {
+                    params,
+                    body: std::sync::Arc::from(sub(self, 0)),
+                }
             }
-            PAREN_EXPR => return es.first().map(|e| self.expr(e)).unwrap_or(self.error_expr(n)),
+            PAREN_EXPR => {
+                return es
+                    .first()
+                    .map(|e| self.expr(e))
+                    .unwrap_or(self.error_expr(n))
+            }
             TUPLE_EXPR => {
                 let mut items = Vec::new();
                 for c in n.children() {
                     if c.kind() == NAMED_ITEM {
                         let name = ast::name_text(&c);
-                        let v = exprs(&c).first().map(|e| self.expr(e)).unwrap_or(self.error_expr(&c));
+                        let v = exprs(&c)
+                            .first()
+                            .map(|e| self.expr(e))
+                            .unwrap_or(self.error_expr(&c));
                         items.push((name, v));
                     } else if is_expr(&c) {
                         items.push((None, self.expr(&c)));
@@ -1003,17 +1409,43 @@ impl<'a> Lower<'a> {
                 }
                 ExprKind::Tuple(items)
             }
-            LIST_EXPR => ExprKind::List(n.children().filter(|c| c.kind() == ARG || is_expr(c)).map(|c| if c.kind() == ARG { self.arg(&c) } else { Arg { name: None, value: self.expr(&c), spread: false } }).collect()),
+            LIST_EXPR => ExprKind::List(
+                n.children()
+                    .filter(|c| c.kind() == ARG || is_expr(c))
+                    .map(|c| {
+                        if c.kind() == ARG {
+                            self.arg(&c)
+                        } else {
+                            Arg {
+                                name: None,
+                                value: self.expr(&c),
+                                spread: false,
+                            }
+                        }
+                    })
+                    .collect(),
+            ),
             SET_EXPR => ExprKind::Set(es.iter().map(|e| self.expr(e)).collect()),
             WHEN_EXPR => ExprKind::When(
                 ast::children(n, WHEN_ARM)
                     .map(|a| {
                         let xs = exprs(&a);
                         if ast::token(&a, ELSE_KW).is_some() {
-                            (None, xs.first().map(|e| self.expr(e)).unwrap_or(self.error_expr(&a)))
+                            (
+                                None,
+                                xs.first()
+                                    .map(|e| self.expr(e))
+                                    .unwrap_or(self.error_expr(&a)),
+                            )
                         } else {
-                            let c = xs.first().map(|e| self.expr(e)).unwrap_or(self.error_expr(&a));
-                            let v = xs.get(1).map(|e| self.expr(e)).unwrap_or(self.error_expr(&a));
+                            let c = xs
+                                .first()
+                                .map(|e| self.expr(e))
+                                .unwrap_or(self.error_expr(&a));
+                            let v = xs
+                                .get(1)
+                                .map(|e| self.expr(e))
+                                .unwrap_or(self.error_expr(&a));
                             (Some(c), v)
                         }
                     })
@@ -1024,11 +1456,25 @@ impl<'a> Lower<'a> {
                 let arms = ast::children(n, MATCH_ARM).map(|a| self.arm(&a)).collect();
                 ExprKind::Match { subject, arms }
             }
-            BLOCK_EXPR => ExprKind::Block(ast::child(n, BLOCK).map(|b| self.stmts(&b)).unwrap_or_default()),
+            BLOCK_EXPR => ExprKind::Block(
+                ast::child(n, BLOCK)
+                    .map(|b| self.stmts(&b))
+                    .unwrap_or_default(),
+            ),
             AS_EXPR => {
-                let user = ast::child(n, NAME_REF).and_then(|c| ast::token(&c, IDENT)).map(|t| t.text().to_string()).unwrap_or_default();
-                let body = es.last().filter(|_| es.len() > 1).map(|e| self.expr(e)).unwrap_or(self.error_expr(n));
-                ExprKind::As { user, body: Box::new(body) }
+                let user = ast::child(n, NAME_REF)
+                    .and_then(|c| ast::token(&c, IDENT))
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default();
+                let body = es
+                    .last()
+                    .filter(|_| es.len() > 1)
+                    .map(|e| self.expr(e))
+                    .unwrap_or(self.error_expr(n));
+                ExprKind::As {
+                    user,
+                    body: Box::new(body),
+                }
             }
             FAIL_EXPR => ExprKind::Fail(sub(self, 0)),
             _ => ExprKind::Error,
@@ -1039,8 +1485,15 @@ impl<'a> Lower<'a> {
     fn arg(&mut self, a: &SyntaxNode) -> Arg {
         let name = ast::name_text(a);
         let spread = ast::token(a, STAR).is_some();
-        let value = exprs(a).first().map(|e| self.expr(e)).unwrap_or(self.error_expr(a));
-        Arg { name, value, spread }
+        let value = exprs(a)
+            .first()
+            .map(|e| self.expr(e))
+            .unwrap_or(self.error_expr(a));
+        Arg {
+            name,
+            value,
+            spread,
+        }
     }
 }
 
@@ -1075,7 +1528,11 @@ fn relocate(e: &mut Expr, span: Span) {
             relocate(rhs, span);
         }
         ExprKind::Unary { expr, .. } => relocate(expr, span),
-        ExprKind::If { cond, then, otherwise } => {
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
             relocate(cond, span);
             relocate(then, span);
             relocate(otherwise, span);

@@ -13,7 +13,10 @@
 
 mod engine;
 
-pub use engine::{app_params, bind_for, open_requests, unhex, AppRequest, Config, Engines, Limits, Local, ENGINE_STACK};
+pub use engine::{
+    app_params, bind_for, open_requests, unhex, AppRequest, Config, Engines, Limits, Local,
+    ENGINE_STACK,
+};
 use engine::{Engine, Job, Reply, Req};
 
 use axum::body::Body;
@@ -157,7 +160,13 @@ pub struct Usage {
 
 impl Usage {
     fn plus(self, o: Usage) -> Usage {
-        Usage { requests: self.requests + o.requests, steps: self.steps + o.steps, rows_read: self.rows_read + o.rows_read, rows_written: self.rows_written + o.rows_written, engine_ms: self.engine_ms + o.engine_ms }
+        Usage {
+            requests: self.requests + o.requests,
+            steps: self.steps + o.steps,
+            rows_read: self.rows_read + o.rows_read,
+            rows_written: self.rows_written + o.rows_written,
+            engine_ms: self.engine_ms + o.engine_ms,
+        }
     }
 
     pub fn is_zero(&self) -> bool {
@@ -183,7 +192,11 @@ impl Drop for Waiting {
 
 /// The least busy of the engines that are ready.
 fn least_busy(slots: &[Arc<Slot>]) -> Option<Arc<Slot>> {
-    slots.iter().filter(|s| s.is_ready()).min_by_key(|s| s.load()).cloned()
+    slots
+        .iter()
+        .filter(|s| s.is_ready())
+        .min_by_key(|s| s.load())
+        .cloned()
 }
 
 impl Tenant {
@@ -197,7 +210,14 @@ impl Tenant {
         }
         // writes of data run on any engine once the sequencer orders the commits
         if job.writes_data() && self.sequencer.lock().unwrap().is_some() {
-            let all: Vec<Arc<Slot>> = self.readers.lock().unwrap().iter().chain(self.writers.lock().unwrap().iter()).cloned().collect();
+            let all: Vec<Arc<Slot>> = self
+                .readers
+                .lock()
+                .unwrap()
+                .iter()
+                .chain(self.writers.lock().unwrap().iter())
+                .cloned()
+                .collect();
             if let Some(s) = least_busy(&all) {
                 return Some(s);
             }
@@ -218,6 +238,15 @@ impl Tenant {
         rx.await.ok()
     }
 
+    /// The last transaction its sequencer wrote, if it has one (no engine asked).
+    fn written(&self) -> Option<u64> {
+        self.sequencer
+            .try_lock()
+            .ok()
+            .and_then(|s| s.as_ref().and_then(|s| s.health()))
+            .map(|h| h.written)
+    }
+
     /// A job without an answer.
     fn send(&self, job: Job) {
         if let Some(slot) = self.route(&job) {
@@ -227,7 +256,8 @@ impl Tenant {
 
     /// Too many requests already wait for the engines.
     fn full(&self) -> bool {
-        self.max_queue.is_some_and(|max| self.pending.load(std::sync::atomic::Ordering::Relaxed) >= max)
+        self.max_queue
+            .is_some_and(|max| self.pending.load(std::sync::atomic::Ordering::Relaxed) >= max)
     }
 
     fn stopped(&self) -> bool {
@@ -257,7 +287,10 @@ impl Tenant {
             return Engines::one();
         }
         // the sequencer orders the commits: any number of engines may prepare them, on SQLite too
-        Engines { readers: self.config.engines.readers, writers: self.config.engines.writers.max(1) }
+        Engines {
+            readers: self.config.engines.readers,
+            writers: self.config.engines.writers.max(1),
+        }
     }
 
     /// The engines besides the first, started (again) now: after the first one is up, and
@@ -269,8 +302,36 @@ impl Tenant {
             return;
         }
         let shape = self.shape();
-        let new_readers: Vec<Arc<Slot>> = (0..shape.readers).map(|n| engine_thread(&self.id, &format!("r{n}"), &self.config, false, None, None, self.usage.clone(), self.sequencer.clone(), self.durability.clone())).collect();
-        let new_writers: Vec<Arc<Slot>> = (1..shape.writers).map(|n| engine_thread(&self.id, &format!("w{n}"), &self.config, false, None, None, self.usage.clone(), self.sequencer.clone(), self.durability.clone())).collect();
+        let new_readers: Vec<Arc<Slot>> = (0..shape.readers)
+            .map(|n| {
+                engine_thread(
+                    &self.id,
+                    &format!("r{n}"),
+                    &self.config,
+                    false,
+                    None,
+                    None,
+                    self.usage.clone(),
+                    self.sequencer.clone(),
+                    self.durability.clone(),
+                )
+            })
+            .collect();
+        let new_writers: Vec<Arc<Slot>> = (1..shape.writers)
+            .map(|n| {
+                engine_thread(
+                    &self.id,
+                    &format!("w{n}"),
+                    &self.config,
+                    false,
+                    None,
+                    None,
+                    self.usage.clone(),
+                    self.sequencer.clone(),
+                    self.durability.clone(),
+                )
+            })
+            .collect();
         let old_readers = std::mem::replace(&mut *self.readers.lock().unwrap(), new_readers);
         let old_writers = {
             let mut w = self.writers.lock().unwrap();
@@ -289,11 +350,20 @@ impl Tenant {
         // (the tenant is halted: no engine is added after this)
         let slots: Vec<Arc<Slot>> = {
             let _lifecycle = self.lifecycle.lock().unwrap();
-            self.readers.lock().unwrap().drain(..).chain(self.writers.lock().unwrap().drain(..)).collect()
+            self.readers
+                .lock()
+                .unwrap()
+                .drain(..)
+                .chain(self.writers.lock().unwrap().drain(..))
+                .collect()
         };
         for s in slots {
             let (tx, rx) = oneshot::channel();
-            if s.jobs.lock().map(|j| j.send(Job::Stop { reply: tx })).is_ok_and(|r| r.is_ok()) {
+            if s.jobs
+                .lock()
+                .map(|j| j.send(Job::Stop { reply: tx }))
+                .is_ok_and(|r| r.is_ok())
+            {
                 let _ = rx.await;
             }
         }
@@ -306,7 +376,13 @@ impl Tenant {
 
     /// Its engines that are serving.
     fn engines(&self) -> usize {
-        self.readers.lock().unwrap().iter().chain(self.writers.lock().unwrap().iter()).filter(|s| s.is_ready()).count()
+        self.readers
+            .lock()
+            .unwrap()
+            .iter()
+            .chain(self.writers.lock().unwrap().iter())
+            .filter(|s| s.is_ready())
+            .count()
     }
 }
 
@@ -327,45 +403,71 @@ fn engine_thread(
 ) -> Arc<Slot> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let (jobs, rx) = mpsc::channel::<Job>();
-    let slot = Arc::new(Slot { jobs: Mutex::new(jobs), pending: Arc::new(AtomicUsize::new(0)), ready: Arc::new(AtomicBool::new(false)) });
+    let slot = Arc::new(Slot {
+        jobs: Mutex::new(jobs),
+        pending: Arc::new(AtomicUsize::new(0)),
+        ready: Arc::new(AtomicBool::new(false)),
+    });
     let ready = slot.ready.clone();
-    let (cfg, label) = (Config { web: None, ..cfg.clone() }, format!("{id}/{name}"));
+    let (cfg, label) = (
+        Config {
+            web: None,
+            ..cfg.clone()
+        },
+        format!("{id}/{name}"),
+    );
     let tenant = id.to_string();
     let thread_label = label.clone();
-    let spawned = std::thread::Builder::new().name(format!("quadra-engine-{label}")).stack_size(engine::ENGINE_STACK).spawn(move || {
-        let label = thread_label;
-        let engine = if first { Engine::new(&cfg) } else { Engine::follower(&cfg) };
-        // the first engine has brought the database up to date: its sequencer starts there
-        let engine = engine.and_then(|mut engine| {
-            let mut slot = sequencer.lock().unwrap();
-            if first || slot.is_none() {
-                if let Some(old) = slot.take() {
-                    old.stop();
+    let spawned = std::thread::Builder::new()
+        .name(format!("quadra-engine-{label}"))
+        .stack_size(engine::ENGINE_STACK)
+        .spawn(move || {
+            let label = thread_label;
+            let engine = if first {
+                Engine::new(&cfg)
+            } else {
+                Engine::follower(&cfg)
+            };
+            // the first engine has brought the database up to date: its sequencer starts there
+            let engine = engine.and_then(|mut engine| {
+                let mut slot = sequencer.lock().unwrap();
+                if first || slot.is_none() {
+                    if let Some(old) = slot.take() {
+                        old.stop();
+                    }
+                    let (destinations, rule) = durability
+                        .as_ref()
+                        .map(|d| d.destinations(&tenant))
+                        .unwrap_or((Vec::new(), quadra_store::sequencer::Rule::Local));
+                    let options = quadra_store::sequencer::Options {
+                        max_bytes: cfg.limits.max_bytes,
+                        statement_timeout: cfg.limits.job,
+                        destinations,
+                        rule,
+                        ..Default::default()
+                    };
+                    *slot = Some(quadra_store::Sequencer::start(&cfg.url, options)?);
                 }
-                let (destinations, rule) = durability.as_ref().map(|d| d.destinations(&tenant)).unwrap_or((Vec::new(), quadra_store::sequencer::Rule::Local));
-                let options = quadra_store::sequencer::Options { max_bytes: cfg.limits.max_bytes, statement_timeout: cfg.limits.job, destinations, rule, ..Default::default() };
-                *slot = Some(quadra_store::Sequencer::start(&cfg.url, options)?);
+                engine.set_sequencer(slot.clone());
+                Ok(engine)
+            });
+            match engine {
+                Ok(engine) => {
+                    if let Some(c) = &reads_clock {
+                        c.store(engine.reads_clock(), Ordering::Relaxed);
+                    }
+                    ready.store(true, Ordering::Relaxed);
+                    engine.run(rx, &usage);
+                }
+                Err(e) => {
+                    eprintln!("{label}: the project cannot start: {e}");
+                    // the jobs waiting in the queue get no answer: `the engine is not available`
+                    if let Some(f) = &failed {
+                        *f.lock().unwrap() = Some(e);
+                    }
+                }
             }
-            engine.set_sequencer(slot.clone());
-            Ok(engine)
         });
-        match engine {
-            Ok(engine) => {
-                if let Some(c) = &reads_clock {
-                    c.store(engine.reads_clock(), Ordering::Relaxed);
-                }
-                ready.store(true, Ordering::Relaxed);
-                engine.run(rx, &usage);
-            }
-            Err(e) => {
-                eprintln!("{label}: the project cannot start: {e}");
-                // the jobs waiting in the queue get no answer: `the engine is not available`
-                if let Some(f) = &failed {
-                    *f.lock().unwrap() = Some(e);
-                }
-            }
-        }
-    });
     if let Err(e) = spawned {
         eprintln!("{label}: cannot start a thread: {e}");
     }
@@ -388,7 +490,13 @@ pub enum SignInMail {
 /// Where a tenant's commits are kept besides its database, and when they are confirmed to the
 /// client (`quadra_store::sequencer`): the host decides it per tenant (its plan).
 pub trait Durability: Send + Sync + 'static {
-    fn destinations(&self, tenant: &str) -> (Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>, quadra_store::sequencer::Rule);
+    fn destinations(
+        &self,
+        tenant: &str,
+    ) -> (
+        Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>,
+        quadra_store::sequencer::Rule,
+    );
 }
 
 /// Every batch as a file in a folder of its own per tenant (`quadra serve --log-dir`): a
@@ -396,7 +504,13 @@ pub trait Durability: Send + Sync + 'static {
 pub struct LogFolder(pub std::path::PathBuf);
 
 impl Durability for LogFolder {
-    fn destinations(&self, tenant: &str) -> (Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>, quadra_store::sequencer::Rule) {
+    fn destinations(
+        &self,
+        tenant: &str,
+    ) -> (
+        Vec<Box<dyn quadra_store::sequencer::DurabilitySink>>,
+        quadra_store::sequencer::Rule,
+    ) {
         match quadra_store::segments::Folder::new(self.0.join(tenant)) {
             Ok(f) => (vec![Box::new(f)], quadra_store::sequencer::Rule::All),
             Err(e) => {
@@ -408,7 +522,12 @@ impl Durability for LogFolder {
 }
 
 pub trait SignIn: Send + Sync + 'static {
-    fn send(&self, tenant: &str, host: &str, mail: SignInMail) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+    fn send(
+        &self,
+        tenant: &str,
+        host: &str,
+        mail: SignInMail,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
 }
 
 struct App {
@@ -439,13 +558,25 @@ struct Ten(Arc<Tenant>);
 impl axum::extract::FromRequestParts<Shared> for Ten {
     type Rejection = Response;
 
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, app: &Shared) -> Result<Self, Response> {
-        let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok()).or_else(|| parts.uri.host()).unwrap_or("");
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        app: &Shared,
+    ) -> Result<Self, Response> {
+        let host = parts
+            .headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| parts.uri.host())
+            .unwrap_or("");
         let t = app.tenant(host)?;
         // a backlog the request would only wait in: refused now, to be tried again shortly
         if t.full() {
-            let mut r = fail(503, "the server is busy with this project's requests: try again in a moment");
-            r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            let mut r = fail(
+                503,
+                "the server is busy with this project's requests: try again in a moment",
+            );
+            r.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
             return Err(r);
         }
         Ok(Ten(t))
@@ -467,7 +598,12 @@ const MAX_ENTRIES: usize = 10_000;
 
 /// Takes one token from the bucket of `key` (refilled at `rate` per second up to `burst`);
 /// false when it is empty. Past `MAX_ENTRIES` keys, the full buckets (idle ones) are forgotten.
-fn take(buckets: &Mutex<HashMap<String, (f64, Instant)>>, key: &str, rate: f64, burst: f64) -> bool {
+fn take(
+    buckets: &Mutex<HashMap<String, (f64, Instant)>>,
+    key: &str,
+    rate: f64,
+    burst: f64,
+) -> bool {
     let mut m = buckets.lock().unwrap();
     let now = Instant::now();
     if m.len() >= MAX_ENTRIES && !m.contains_key(key) {
@@ -487,12 +623,19 @@ fn take(buckets: &Mutex<HashMap<String, (f64, Instant)>>, key: &str, rate: f64, 
 /// Whether the bucket of `key` has a token left, without taking it.
 fn has_token(buckets: &Mutex<HashMap<String, (f64, Instant)>>, key: &str, rate: f64) -> bool {
     let m = buckets.lock().unwrap();
-    m.get(key).map_or(true, |(tokens, at)| tokens + Instant::now().duration_since(*at).as_secs_f64() * rate >= 1.0)
+    m.get(key).map_or(true, |(tokens, at)| {
+        tokens + Instant::now().duration_since(*at).as_secs_f64() * rate >= 1.0
+    })
 }
 
 fn json_response(status: u16, body: J) -> Response {
-    let mut r = (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(body)).into_response();
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let mut r = (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(body),
+    )
+        .into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     r
 }
 
@@ -545,7 +688,9 @@ impl App {
 
     fn known(&self, key: &str) -> Option<Principal> {
         let m = self.known.lock().unwrap();
-        m.get(key).filter(|(_, until)| *until > Instant::now()).map(|(p, _)| p.clone())
+        m.get(key)
+            .filter(|(_, until)| *until > Instant::now())
+            .map(|(p, _)| p.clone())
     }
 
     fn remember(&self, key: String, who: &Principal) {
@@ -565,15 +710,29 @@ impl App {
 }
 
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).find_map(|c| {
-        let (k, v) = c.trim().split_once('=')?;
-        (k == name).then(|| v.to_string())
-    })
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| {
+            let (k, v) = c.trim().split_once('=')?;
+            (k == name).then(|| v.to_string())
+        })
 }
 
 /// The caller, or the response to send instead.
-async fn authenticate(app: &App, t: &Tenant, method: &Method, headers: &HeaderMap) -> Result<Principal, Response> {
-    let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::to_string);
+async fn authenticate(
+    app: &App,
+    t: &Tenant,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Result<Principal, Response> {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
     let (secret, from_cookie) = match (bearer, cookie(headers, COOKIE)) {
         (Some(b), _) => (b, false),
         (None, Some(c)) => (c, true),
@@ -585,7 +744,10 @@ async fn authenticate(app: &App, t: &Tenant, method: &Method, headers: &HeaderMa
         None => {
             // a flood of wrong credentials stops here instead of filling the engine's queue
             if !has_token(&app.failures, &t.id, FAIL_RATE) {
-                return Err(fail(429, "too many failed sign-ins on this project: try again in a moment"));
+                return Err(fail(
+                    429,
+                    "too many failed sign-ins on this project: try again in a moment",
+                ));
             }
             match t.ask(|reply| Job::Auth { secret, reply }).await.flatten() {
                 Some(who) => {
@@ -609,8 +771,13 @@ async fn authenticate(app: &App, t: &Tenant, method: &Method, headers: &HeaderMa
         if sent.is_none() || sent != who.csrf.as_deref() {
             return Err(fail(403, "missing or wrong X-CSRF-Token"));
         }
-        if let (Some(origin), Some(host)) = (headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()), headers.get(header::HOST).and_then(|v| v.to_str().ok())) {
-            let o = origin.trim_start_matches("https://").trim_start_matches("http://");
+        if let (Some(origin), Some(host)) = (
+            headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+            headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+        ) {
+            let o = origin
+                .trim_start_matches("https://")
+                .trim_start_matches("http://");
             if o != host {
                 return Err(fail(403, "cross-site request refused"));
             }
@@ -626,59 +793,141 @@ async fn call(t: &Tenant, who: Principal, req: Req) -> Response {
     }
 }
 
-async fn me(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
+async fn me(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::Me).await,
         Err(r) => r,
     }
 }
 
-async fn model(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
+async fn model(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::Model).await,
         Err(r) => r,
     }
 }
 
-async fn query(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn query(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::Query(body)).await,
         Err(r) => r,
     }
 }
 
-async fn record(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Path((entity, id)): Path<(String, u64)>, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn record(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id)): Path<(String, u64)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::Record { entity, id, base: q.get("base").and_then(|b| b.parse().ok()) }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::Record {
+                    entity,
+                    id,
+                    base: q.get("base").and_then(|b| b.parse().ok()),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn history(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Path((entity, id)): Path<(String, u64)>, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn history(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id)): Path<(String, u64)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let limit = q.get("limit").and_then(|v| v.parse().ok());
     let before = q.get("before").and_then(|v| v.parse().ok());
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::History { entity, id, limit, before }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::History {
+                    entity,
+                    id,
+                    limit,
+                    before,
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn search(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Path(entity): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn search(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path(entity): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let text = q.get("q").cloned().unwrap_or_default();
     let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(20);
     let after = q.get("after").cloned();
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::Search { entity, q: text, limit, after }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::Search {
+                    entity,
+                    q: text,
+                    limit,
+                    after,
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn tx(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn tx(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     let who = match authenticate(&app, &t, &method, &headers).await {
         Ok(w) => w,
         Err(r) => return r,
     };
-    let Some(key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(str::to_string) else {
+    let Some(key) = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+    else {
         return fail(400, "Idempotency-Key header required");
     };
     let r = call(&t, who, Req::Tx { body, key }).await;
@@ -693,35 +942,71 @@ async fn tx(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: Hea
 
 // ---- the code editor ---------------------------------------------------------------------
 
-async fn dev_files(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
+async fn dev_files(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::DevFiles).await,
         Err(r) => r,
     }
 }
 
-async fn dev_status(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
+async fn dev_status(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::DevStatus).await,
         Err(r) => r,
     }
 }
 
-async fn dev_diff(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
+async fn dev_diff(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::DevDiff).await,
         Err(r) => r,
     }
 }
 
-async fn dev_read(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn dev_read(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::DevRead { path: q.get("path").cloned().unwrap_or_default() }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::DevRead {
+                    path: q.get("path").cloned().unwrap_or_default(),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn dev_save(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_save(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => {
             let path = body["path"].as_str().unwrap_or("").to_string();
@@ -732,35 +1017,92 @@ async fn dev_save(State(app): State<Shared>, Ten(t): Ten, method: Method, header
     }
 }
 
-async fn dev_delete(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn dev_delete(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::DevDelete { path: q.get("path").cloned().unwrap_or_default() }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::DevDelete {
+                    path: q.get("path").cloned().unwrap_or_default(),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn dev_check(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_check(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::DevCheck { buffers: body["buffers"].clone() }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::DevCheck {
+                    buffers: body["buffers"].clone(),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn dev_test(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_test(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::DevTest { buffers: body["buffers"].clone() }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::DevTest {
+                    buffers: body["buffers"].clone(),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn dev_ide(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_ide(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::DevIde { body }).await,
         Err(r) => r,
     }
 }
 
-async fn dev_schema(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_schema(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => {
             let r = call(&t, who, Req::DevSchema { body }).await;
@@ -774,46 +1116,112 @@ async fn dev_schema(State(app): State<Shared>, Ten(t): Ten, method: Method, head
     }
 }
 
-async fn dev_live(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
+async fn dev_live(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
         Ok(who) => call(&t, who, Req::DevLive).await,
         Err(r) => r,
     }
 }
 
-async fn dev_rename(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_rename(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::DevRename { from: body["from"].as_str().unwrap_or("").into(), to: body["to"].as_str().unwrap_or("").into() }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::DevRename {
+                    from: body["from"].as_str().unwrap_or("").into(),
+                    to: body["to"].as_str().unwrap_or("").into(),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn dev_mkdir(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_mkdir(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::DevMkdir { path: body["path"].as_str().unwrap_or("").into() }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::DevMkdir {
+                    path: body["path"].as_str().unwrap_or("").into(),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn dev_rmdir(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn dev_rmdir(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     match authenticate(&app, &t, &method, &headers).await {
-        Ok(who) => call(&t, who, Req::DevRmdir { path: q.get("path").cloned().unwrap_or_default() }).await,
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::DevRmdir {
+                    path: q.get("path").cloned().unwrap_or_default(),
+                },
+            )
+            .await
+        }
         Err(r) => r,
     }
 }
 
-async fn dev_commit(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn dev_commit(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     let who = match authenticate(&app, &t, &method, &headers).await {
         Ok(w) => w,
         Err(r) => return r,
     };
     let message = body["message"].as_str().unwrap_or("").to_string();
-    match t.ask(|reply| Job::Call { who, req: Req::DevCommit { message }, reply }).await {
+    match t
+        .ask(|reply| Job::Call {
+            who,
+            req: Req::DevCommit { message },
+            reply,
+        })
+        .await
+    {
         Some(Reply { status, body, .. }) => {
             if status == 200 {
                 // the other engines start again on the new code; every client reloads the model
                 t.start_followers();
-                let _ = t.events.send(json!({ "type": "deploy", "sha": body["sha"] }));
+                let _ = t
+                    .events
+                    .send(json!({ "type": "deploy", "sha": body["sha"] }));
             }
             json_response(status, body)
         }
@@ -823,7 +1231,15 @@ async fn dev_commit(State(app): State<Shared>, Ten(t): Ten, method: Method, head
 
 /// Saved views, teams and the directory of whom to share with (engine/views.rs). Every
 /// change is announced to open clients (`views` events), who read their list again.
-async fn views_api(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, uri: axum::http::Uri, Query(query): Query<HashMap<String, String>>, body: axum::body::Bytes) -> Response {
+async fn views_api(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    Query(query): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
     let who = match authenticate(&app, &t, &method, &headers).await {
         Ok(w) => w,
         Err(r) => return r,
@@ -839,7 +1255,12 @@ async fn views_api(State(app): State<Shared>, Ten(t): Ten, method: Method, heade
     // `POST /v1/eval` reads (formulas evaluated as the caller), `POST /v1/complete` completes a
     // formula: no change to announce
     let write = method != Method::GET && uri.path() != "/v1/eval" && uri.path() != "/v1/complete";
-    let req = Req::Views { method: method.to_string(), path: uri.path().to_string(), query, body };
+    let req = Req::Views {
+        method: method.to_string(),
+        path: uri.path().to_string(),
+        query,
+        body,
+    };
     match t.ask(|reply| Job::Call { who, req, reply }).await {
         Some(Reply { status, body, .. }) => {
             if write && status < 300 {
@@ -852,10 +1273,17 @@ async fn views_api(State(app): State<Shared>, Ten(t): Ten, method: Method, heade
                 let Some(bytes) = engine::unhex(f["hex"].as_str().unwrap_or("")) else {
                     return fail(500, "a file could not be sent");
                 };
-                let name: String = f["name"].as_str().unwrap_or("export").chars().filter(|c| c.is_ascii_alphanumeric() || " ._-()".contains(*c)).collect();
+                let name: String = f["name"]
+                    .as_str()
+                    .unwrap_or("export")
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || " ._-()".contains(*c))
+                    .collect();
                 let mut r = Response::new(Body::from(bytes));
                 let h = r.headers_mut();
-                if let Ok(v) = HeaderValue::from_str(f["type"].as_str().unwrap_or("application/octet-stream")) {
+                if let Ok(v) =
+                    HeaderValue::from_str(f["type"].as_str().unwrap_or("application/octet-stream"))
+                {
                     h.insert(header::CONTENT_TYPE, v);
                 }
                 if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
@@ -879,12 +1307,19 @@ async fn dev_login(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>) 
         return fail(429, "too many requests");
     }
     match t.ask(|reply| Job::DevLogin { login, reply }).await {
-        Some(Reply { status, body, session }) => {
+        Some(Reply {
+            status,
+            body,
+            session,
+        }) => {
             let mut r = json_response(status, body);
             if let Some(s) = session {
                 let secure = if app.secure_cookies { "; Secure" } else { "" };
-                let c = format!("{COOKIE}={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{secure}");
-                r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
+                let c = format!(
+                    "{COOKIE}={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{secure}"
+                );
+                r.headers_mut()
+                    .insert(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
             }
             r
         }
@@ -894,7 +1329,10 @@ async fn dev_login(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>) 
 
 /// How users sign in here: what the web client shows.
 async fn auth_methods(State(app): State<Shared>, Ten(_t): Ten) -> Response {
-    json_response(200, json!({ "dev_login": app.dev_login, "code": app.sign_in.is_some() }))
+    json_response(
+        200,
+        json!({ "dev_login": app.dev_login, "code": app.sign_in.is_some() }),
+    )
 }
 
 /// The email's details, taken out of the engine's answer before it goes to the browser.
@@ -903,11 +1341,20 @@ fn take_send(body: &mut J) -> Option<J> {
 }
 
 fn host_of(headers: &HeaderMap) -> String {
-    headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// `POST /v1/auth/code {login}`: a code by email to the user of that login or address.
-async fn code_start(State(app): State<Shared>, Ten(t): Ten, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn code_start(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     let Some(sign_in) = app.sign_in.clone() else {
         return fail(404, "not found");
     };
@@ -922,9 +1369,15 @@ async fn code_start(State(app): State<Shared>, Ten(t): Ten, headers: HeaderMap, 
         return fail(503, "the engine is not available");
     };
     if let Some(send) = take_send(&mut r.body) {
-        let mail = SignInMail::Code { to: send["to"].as_str().unwrap_or("").into(), code: send["code"].as_str().unwrap_or("").into() };
+        let mail = SignInMail::Code {
+            to: send["to"].as_str().unwrap_or("").into(),
+            code: send["code"].as_str().unwrap_or("").into(),
+        };
         if let Err(e) = sign_in.send(&t.id, &host_of(&headers), mail).await {
-            eprintln!("quadra: the sign-in email of {} could not be sent: {e}", t.id);
+            eprintln!(
+                "quadra: the sign-in email of {} could not be sent: {e}",
+                t.id
+            );
             return fail(503, "the email could not be sent: try again in a moment");
         }
     }
@@ -942,12 +1395,20 @@ async fn code_verify(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>
         return fail(429, "too many requests");
     }
     match t.ask(|reply| Job::CodeVerify { id, code, reply }).await {
-        Some(Reply { status, body, session }) => {
+        Some(Reply {
+            status,
+            body,
+            session,
+        }) => {
             let mut r = json_response(status, body);
             if let Some(s) = session {
                 let secure = if app.secure_cookies { "; Secure" } else { "" };
-                let c = format!("{COOKIE}={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}", engine::SESSION_DAYS * 86400);
-                r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
+                let c = format!(
+                    "{COOKIE}={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}",
+                    engine::SESSION_DAYS * 86400
+                );
+                r.headers_mut()
+                    .insert(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
             }
             r
         }
@@ -956,7 +1417,13 @@ async fn code_verify(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>
 }
 
 /// `POST /v1/auth/invite {user_id}`: an admin sends a user the invitation to sign in.
-async fn invite(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Json(body): Json<J>) -> Response {
+async fn invite(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<J>,
+) -> Response {
     let Some(sign_in) = app.sign_in.clone() else {
         return fail(404, "not found");
     };
@@ -971,16 +1438,27 @@ async fn invite(State(app): State<Shared>, Ten(t): Ten, method: Method, headers:
         return fail(503, "the engine is not available");
     };
     if let Some(send) = take_send(&mut r.body) {
-        let mail = SignInMail::Invite { to: send["to"].as_str().unwrap_or("").into(), login: send["login"].as_str().unwrap_or("").into() };
+        let mail = SignInMail::Invite {
+            to: send["to"].as_str().unwrap_or("").into(),
+            login: send["login"].as_str().unwrap_or("").into(),
+        };
         if let Err(e) = sign_in.send(&t.id, &host_of(&headers), mail).await {
             eprintln!("quadra: the invitation of {} could not be sent: {e}", t.id);
-            return fail(503, "the invitation could not be sent: try again in a moment");
+            return fail(
+                503,
+                "the invitation could not be sent: try again in a moment",
+            );
         }
     }
     json_response(r.status, r.body)
 }
 
-async fn logout(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap) -> Response {
+async fn logout(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     if let Err(r) = authenticate(&app, &t, &method, &headers).await {
         return r;
     }
@@ -989,26 +1467,58 @@ async fn logout(State(app): State<Shared>, Ten(t): Ten, method: Method, headers:
         t.send(Job::Logout { secret });
     }
     let mut r = json_response(200, json!({ "ok": true }));
-    r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("quadra_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"));
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static("quadra_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"),
+    );
     r
 }
 
 /// Server-sent events: one `commit` event per transaction, restricted to the entities the
 /// user may read. `?since=<tx>` replays what was missed.
-async fn stream(State(app): State<Shared>, Ten(t): Ten, method: Method, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn stream(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let who = match authenticate(&app, &t, &method, &headers).await {
         Ok(w) => w,
         Err(r) => return r,
     };
-    let readable: HashSet<String> = match t.ask(|reply| Job::Call { who: who.clone(), req: Req::Model, reply }).await {
-        Some(Reply { status: 200, body, .. }) => body["entities"].as_array().map(|a| a.iter().filter_map(|e| e["name"].as_str().map(str::to_string)).collect()).unwrap_or_default(),
+    let readable: HashSet<String> = match t
+        .ask(|reply| Job::Call {
+            who: who.clone(),
+            req: Req::Model,
+            reply,
+        })
+        .await
+    {
+        Some(Reply {
+            status: 200, body, ..
+        }) => body["entities"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => return fail(503, "the engine is not available"),
     };
     let since: u64 = q.get("since").and_then(|s| s.parse().ok()).unwrap_or(0);
     // subscribe before reading the backlog, so that nothing committed in between is lost;
     // a live event already replayed from the backlog is skipped (see `fresh`)
     let rx = t.events.subscribe();
-    let backlog = if since > 0 { t.ask(|reply| Job::Commits { since, reply }).await.map(|(_, e)| e).unwrap_or_default() } else { Vec::new() };
+    let backlog = if since > 0 {
+        t.ask(|reply| Job::Commits { since, reply })
+            .await
+            .map(|(_, e)| e)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let filter = move |mut ev: J| -> Option<Event> {
         if ev["type"] == json!("deploy") {
             return Some(Event::default().event("deploy").data(ev.to_string()));
@@ -1019,32 +1529,49 @@ async fn stream(State(app): State<Shared>, Ten(t): Ten, method: Method, headers:
         if ev["type"] == json!("views") {
             return Some(Event::default().event("views").data(ev.to_string()));
         }
-        let recs: Vec<J> = ev["records"].as_array().cloned().unwrap_or_default().into_iter().filter(|r| r["entity"].as_str().map_or(false, |e| readable.contains(e))).collect();
+        let recs: Vec<J> = ev["records"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r["entity"].as_str().map_or(false, |e| readable.contains(e)))
+            .collect();
         if recs.is_empty() {
             return None;
         }
         ev["records"] = J::Array(recs);
-        Some(Event::default().event("commit").id(ev["tx"].to_string()).data(ev.to_string()))
+        Some(
+            Event::default()
+                .event("commit")
+                .id(ev["tx"].to_string())
+                .data(ev.to_string()),
+        )
     };
     let state = (backlog.into_iter(), rx, filter, since);
-    let s = futures_util::stream::unfold(state, |(mut backlog, mut rx, filter, mut last)| async move {
-        loop {
-            let ev = match backlog.next() {
-                Some(e) => e,
-                None => match rx.recv().await {
-                    Ok(e) => e,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return None,
-                },
-            };
-            if !fresh(&ev, &mut last) {
-                continue;
+    let s = futures_util::stream::unfold(
+        state,
+        |(mut backlog, mut rx, filter, mut last)| async move {
+            loop {
+                let ev = match backlog.next() {
+                    Some(e) => e,
+                    None => match rx.recv().await {
+                        Ok(e) => e,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => return None,
+                    },
+                };
+                if !fresh(&ev, &mut last) {
+                    continue;
+                }
+                if let Some(out) = filter(ev) {
+                    return Some((
+                        Ok::<Event, std::convert::Infallible>(out),
+                        (backlog, rx, filter, last),
+                    ));
+                }
             }
-            if let Some(out) = filter(ev) {
-                return Some((Ok::<Event, std::convert::Infallible>(out), (backlog, rx, filter, last)));
-            }
-        }
-    });
+        },
+    );
     Sse::new(s).keep_alive(KeepAlive::default()).into_response()
 }
 
@@ -1052,7 +1579,11 @@ async fn stream(State(app): State<Shared>, Ten(t): Ten, method: Method, headers:
 /// below the last delivered (`last`) was already replayed. Other events always pass.
 fn fresh(ev: &J, last: &mut u64) -> bool {
     match ev["tx"].as_u64() {
-        Some(tx) if ev["type"] != json!("deploy") && ev["type"] != json!("problems") && ev["type"] != json!("views") => {
+        Some(tx)
+            if ev["type"] != json!("deploy")
+                && ev["type"] != json!("problems")
+                && ev["type"] != json!("views") =>
+        {
             if tx <= *last {
                 return false;
             }
@@ -1066,7 +1597,10 @@ fn fresh(ev: &J, last: &mut u64) -> bool {
 async fn security_headers(req: Request<Body>, next: Next) -> Response {
     let mut r = next.run(req).await;
     let h = r.headers_mut();
-    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     h.insert("x-frame-options", HeaderValue::from_static("DENY"));
     h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     h.insert(
@@ -1081,12 +1615,25 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
 fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenant> {
     use std::sync::atomic::AtomicBool;
     let (events, _) = broadcast::channel::<J>(256);
-    let cfg = Config { web: None, ..spec.config.clone() };
+    let cfg = Config {
+        web: None,
+        ..spec.config.clone()
+    };
     let failed = Arc::new(Mutex::new(None));
     let reads_clock = Arc::new(AtomicBool::new(false));
     let usage = Arc::new(Meter::default());
     let sequencer = Arc::new(Mutex::new(None));
-    let first = engine_thread(&spec.id, "w0", &cfg, true, Some(failed.clone()), Some(reads_clock.clone()), usage.clone(), sequencer.clone(), durability.clone());
+    let first = engine_thread(
+        &spec.id,
+        "w0",
+        &cfg,
+        true,
+        Some(failed.clone()),
+        Some(reads_clock.clone()),
+        usage.clone(),
+        sequencer.clone(),
+        durability.clone(),
+    );
     let t = Arc::new(Tenant {
         id: spec.id.clone(),
         config: cfg.clone(),
@@ -1111,7 +1658,15 @@ fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenan
     // the other engines, once the first has brought the database up to date
     let up = t.clone();
     tokio::spawn(async move {
-        if up.ask(|reply| Job::Commits { since: u64::MAX, reply }).await.is_some() && !up.stopped() {
+        if up
+            .ask(|reply| Job::Commits {
+                since: u64::MAX,
+                reply,
+            })
+            .await
+            .is_some()
+            && !up.stopped()
+        {
             up.start_followers();
         }
     });
@@ -1120,8 +1675,23 @@ fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenan
     let poll = t.clone();
     tokio::spawn(async move {
         // start from the current head: (head, no events)
-        let mut last = poll.ask(|reply| Job::Commits { since: u64::MAX, reply }).await.map(|(l, _)| l).unwrap_or(0);
+        let mut last = poll
+            .ask(|reply| Job::Commits {
+                since: u64::MAX,
+                reply,
+            })
+            .await
+            .map(|(l, _)| l)
+            .unwrap_or(0);
         while poll.pause(Duration::from_millis(500)).await {
+            // nobody listens: no work for the engines, only the head followed (what the
+            // sequencer wrote), so that a listener hears every commit after it came
+            if poll.events.receiver_count() == 0 {
+                if let Some(w) = poll.written() {
+                    last = last.max(w);
+                    continue;
+                }
+            }
             if let Some((l, evs)) = poll.ask(|reply| Job::Commits { since: last, reply }).await {
                 last = l.max(last);
                 for e in evs {
@@ -1152,9 +1722,46 @@ fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenan
     if let Some(every) = t.sweep_every {
         let sweeper = t.clone();
         tokio::spawn(async move {
-            while sweeper.pause(every).await {
-                *sweeper.last_sweep.lock().unwrap() = Instant::now();
-                sweeper.send(Job::Sweep { reply: None });
+            // rules on thresholds (`at <= now()`): the sweep when the nearest one passes, looked
+            // up again after each commit (a new record may bring it closer); any other rule on
+            // the clock: every `every`
+            let written = |t: &Tenant| t.written();
+            let mut due = Instant::now() + every.min(Duration::from_secs(5));
+            let mut seen = written(&sweeper);
+            while sweeper
+                .pause(
+                    due.saturating_duration_since(Instant::now())
+                        .min(Duration::from_secs(2)),
+                )
+                .await
+            {
+                let w = written(&sweeper);
+                if Instant::now() < due && w == seen {
+                    continue;
+                }
+                seen = w;
+                let until = |at: chrono::NaiveDateTime| {
+                    (at - chrono::Utc::now().naive_utc())
+                        .to_std()
+                        .unwrap_or_default()
+                        .clamp(Duration::from_secs(1), every)
+                };
+                let since = sweeper.last_sweep.lock().unwrap().elapsed();
+                let wait = match sweeper.ask(|reply| Job::NextSweep { reply }).await {
+                    Some(Ok(None)) => every,
+                    Some(Ok(Some(at))) if at > chrono::Utc::now().naive_utc() => until(at),
+                    // periodic: `every` after the last sweep
+                    Some(Err(())) if since < every => every - since,
+                    _ => {
+                        *sweeper.last_sweep.lock().unwrap() = Instant::now();
+                        let swept = sweeper.ask(|reply| Job::Sweep { reply: Some(reply) }).await;
+                        match (swept, sweeper.ask(|reply| Job::NextSweep { reply }).await) {
+                            (Some(Ok(_)), Some(Ok(Some(at)))) => until(at),
+                            _ => every,
+                        }
+                    }
+                };
+                due = Instant::now() + wait;
             }
         });
     }
@@ -1201,8 +1808,23 @@ pub struct Host {
 
 impl Host {
     pub fn new(options: HostOptions, resolver: Arc<dyn TenantResolver>) -> Host {
-        let app = Arc::new(App { resolver, running: Mutex::new(HashMap::new()), secure_cookies: options.secure_cookies, dev_login: options.dev_login, sign_in: options.sign_in, rate: options.requests_per_second.unwrap_or(RATE), durability: options.durability.clone(), limiter: Mutex::new(HashMap::new()), failures: Mutex::new(HashMap::new()), known: Mutex::new(HashMap::new()), used: Mutex::new(HashMap::new()) });
-        Host { app, web: options.web }
+        let app = Arc::new(App {
+            resolver,
+            running: Mutex::new(HashMap::new()),
+            secure_cookies: options.secure_cookies,
+            dev_login: options.dev_login,
+            sign_in: options.sign_in,
+            rate: options.requests_per_second.unwrap_or(RATE),
+            durability: options.durability.clone(),
+            limiter: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
+            known: Mutex::new(HashMap::new()),
+            used: Mutex::new(HashMap::new()),
+        });
+        Host {
+            app,
+            web: options.web,
+        }
     }
 
     /// The routes of the API and of the web client.
@@ -1217,9 +1839,18 @@ impl Host {
             .route("/v1/tx", post(tx))
             .route("/v1/stream", get(stream))
             .route("/v1/views", get(views_api).post(views_api))
-            .route("/v1/views/{*rest}", get(views_api).put(views_api).post(views_api).delete(views_api))
+            .route(
+                "/v1/views/{*rest}",
+                get(views_api)
+                    .put(views_api)
+                    .post(views_api)
+                    .delete(views_api),
+            )
             .route("/v1/teams", get(views_api).post(views_api))
-            .route("/v1/teams/{*rest}", get(views_api).put(views_api).delete(views_api))
+            .route(
+                "/v1/teams/{*rest}",
+                get(views_api).put(views_api).delete(views_api),
+            )
             .route("/v1/directory", get(views_api))
             .route("/v1/eval", post(views_api))
             .route("/v1/complete", post(views_api))
@@ -1231,7 +1862,10 @@ impl Host {
             .route("/v1/auth/dev-login", post(dev_login))
             .route("/v1/auth/logout", post(logout))
             .route("/v1/dev/files", get(dev_files))
-            .route("/v1/dev/file", get(dev_read).put(dev_save).delete(dev_delete))
+            .route(
+                "/v1/dev/file",
+                get(dev_read).put(dev_save).delete(dev_delete),
+            )
             .route("/v1/dev/check", post(dev_check))
             .route("/v1/dev/test", post(dev_test))
             .route("/v1/dev/status", get(dev_status))
@@ -1244,21 +1878,41 @@ impl Host {
             .route("/v1/dev/dir", post(dev_mkdir).delete(dev_rmdir));
         if let Some(web) = &self.web {
             let index = web.join("index.html");
-            router = router.fallback_service(tower_http::services::ServeDir::new(web).fallback(tower_http::services::ServeFile::new(index)));
+            router = router.fallback_service(
+                tower_http::services::ServeDir::new(web)
+                    .fallback(tower_http::services::ServeFile::new(index)),
+            );
         } else if !webapp::FILES.is_empty() {
             // the web client built into the binary
             router = router.fallback(embedded);
         }
-        router.layer(DefaultBodyLimit::max(2 << 20)).layer(middleware::from_fn(security_headers)).with_state(self.app.clone())
+        router
+            .layer(DefaultBodyLimit::max(2 << 20))
+            .layer(middleware::from_fn(security_headers))
+            .with_state(self.app.clone())
     }
 
     /// Starts the tenant of an address and waits until its engine serves, or says why it
     /// cannot.
     pub async fn start(&self, host: &str) -> Result<(), String> {
-        let t = self.app.tenant(host).map_err(|_| format!("no project is served at `{host}`"))?;
-        match t.ask(|reply| Job::Commits { since: u64::MAX, reply }).await {
+        let t = self
+            .app
+            .tenant(host)
+            .map_err(|_| format!("no project is served at `{host}`"))?;
+        match t
+            .ask(|reply| Job::Commits {
+                since: u64::MAX,
+                reply,
+            })
+            .await
+        {
             Some(_) => Ok(()),
-            None => Err(t.failed.lock().unwrap().clone().unwrap_or_else(|| "the engine stopped".into())),
+            None => Err(t
+                .failed
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "the engine stopped".into())),
         }
     }
 
@@ -1284,7 +1938,8 @@ impl Host {
     /// used nothing are left out. A host calls it now and then and keeps the totals.
     pub fn take_usage(&self) -> Vec<(String, Usage)> {
         let mut all: HashMap<String, Usage> = std::mem::take(&mut *self.app.used.lock().unwrap());
-        let running: Vec<Arc<Tenant>> = self.app.running.lock().unwrap().values().cloned().collect();
+        let running: Vec<Arc<Tenant>> =
+            self.app.running.lock().unwrap().values().cloned().collect();
         for t in running {
             let u = t.usage.take();
             if !u.is_zero() {
@@ -1298,7 +1953,8 @@ impl Host {
     /// How the log of each running tenant stands (its sequencer: written, kept by the
     /// destinations, whether they are down): for the host's monitoring and alarms.
     pub fn log_health(&self) -> Vec<(String, quadra_store::sequencer::Health)> {
-        let running: Vec<Arc<Tenant>> = self.app.running.lock().unwrap().values().cloned().collect();
+        let running: Vec<Arc<Tenant>> =
+            self.app.running.lock().unwrap().values().cloned().collect();
         running
             .into_iter()
             .filter_map(|t| {
@@ -1326,23 +1982,33 @@ impl Host {
         let Some(r) = t.ask(|reply| Job::People { reply }).await else {
             return Ok(None);
         };
-        r.body["total"].as_u64().map(Some).ok_or_else(|| r.body["error"].as_str().unwrap_or("failed").to_string())
+        r.body["total"]
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| r.body["error"].as_str().unwrap_or("failed").to_string())
     }
-
 
     /// Runs a pass of the rules that read the clock of the tenant of an address now, starting
     /// it if needed, and waits for it: the transaction written, if anything changed. A host
     /// that woke a sleeping tenant because its next sweep was due calls it, then may put it
     /// back to sleep.
     pub async fn sweep(&self, host: &str) -> Result<Option<u64>, String> {
-        let t = self.app.tenant(host).map_err(|_| format!("no project is served at `{host}`"))?;
+        let t = self
+            .app
+            .tenant(host)
+            .map_err(|_| format!("no project is served at `{host}`"))?;
         let r = t.ask(|reply| Job::Sweep { reply: Some(reply) }).await;
         match r {
             Some(r) => {
                 *t.last_sweep.lock().unwrap() = Instant::now();
                 r
             }
-            None => Err(t.failed.lock().unwrap().clone().unwrap_or_else(|| "the engine stopped".into())),
+            None => Err(t
+                .failed
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "the engine stopped".into())),
         }
     }
 
@@ -1355,11 +2021,17 @@ impl Host {
         let t = self.app.tenant(host).ok()?;
         let periodic = || {
             let clock = t.reads_clock.load(std::sync::atomic::Ordering::Relaxed);
-            t.sweep_every.filter(|_| clock).map(|every| (*t.last_sweep.lock().unwrap() + every).saturating_duration_since(Instant::now()))
+            t.sweep_every.filter(|_| clock).map(|every| {
+                (*t.last_sweep.lock().unwrap() + every).saturating_duration_since(Instant::now())
+            })
         };
         match t.ask(|reply| Job::NextSweep { reply }).await {
             Some(Ok(None)) => None,
-            Some(Ok(Some(at))) => Some((at - chrono::Utc::now().naive_utc()).to_std().unwrap_or_default()),
+            Some(Ok(Some(at))) => Some(
+                (at - chrono::Utc::now().naive_utc())
+                    .to_std()
+                    .unwrap_or_default(),
+            ),
             Some(Err(())) | None => periodic(),
         }
     }
@@ -1367,10 +2039,19 @@ impl Host {
     /// The roles of the project of an address and its users (`{roles, users: [{id, login,
     /// email, roles}], total}`), for the host's own console. Starts it if needed.
     pub async fn people(&self, host: &str) -> Result<J, (u16, String)> {
-        let t = self.app.tenant(host).map_err(|_| (404, format!("no project is served at `{host}`")))?;
-        let r = t.ask(|reply| Job::People { reply }).await.ok_or((503, "the engine is not available".to_string()))?;
+        let t = self
+            .app
+            .tenant(host)
+            .map_err(|_| (404, format!("no project is served at `{host}`")))?;
+        let r = t
+            .ask(|reply| Job::People { reply })
+            .await
+            .ok_or((503, "the engine is not available".to_string()))?;
         if r.status != 200 {
-            return Err((r.status, r.body["error"].as_str().unwrap_or("failed").to_string()));
+            return Err((
+                r.status,
+                r.body["error"].as_str().unwrap_or("failed").to_string(),
+            ));
         }
         Ok(r.body)
     }
@@ -1378,17 +2059,46 @@ impl Host {
     /// Adds a user to the project of an address, as the system, with these roles and the
     /// address as login, and sends them an invitation (with the host's SignIn, if any). An
     /// existing user of that address is invited again, unchanged. `{id, login, created, invited}`.
-    pub async fn add_user(&self, host: &str, email: &str, roles: Vec<String>) -> Result<J, (u16, String)> {
-        let t = self.app.tenant(host).map_err(|_| (404, format!("no project is served at `{host}`")))?;
+    pub async fn add_user(
+        &self,
+        host: &str,
+        email: &str,
+        roles: Vec<String>,
+    ) -> Result<J, (u16, String)> {
+        let t = self
+            .app
+            .tenant(host)
+            .map_err(|_| (404, format!("no project is served at `{host}`")))?;
         let email = email.to_string();
-        let mut r = t.ask(|reply| Job::AddUser { email, roles, reply }).await.ok_or((503, "the engine is not available".to_string()))?;
+        let mut r = t
+            .ask(|reply| Job::AddUser {
+                email,
+                roles,
+                reply,
+            })
+            .await
+            .ok_or((503, "the engine is not available".to_string()))?;
         if r.status != 200 {
-            return Err((r.status, r.body["error"].as_str().unwrap_or("failed").to_string()));
+            return Err((
+                r.status,
+                r.body["error"].as_str().unwrap_or("failed").to_string(),
+            ));
         }
         let mut invited = false;
-        if let (Some(send), Some(sign_in)) = (take_send(&mut r.body).filter(|s| !s.is_null()), self.app.sign_in.clone()) {
-            let mail = SignInMail::Invite { to: send["to"].as_str().unwrap_or("").into(), login: send["login"].as_str().unwrap_or("").into() };
-            sign_in.send(&t.id, host, mail).await.map_err(|e| (503, format!("the user is added, but the invitation could not be sent: {e}")))?;
+        if let (Some(send), Some(sign_in)) = (
+            take_send(&mut r.body).filter(|s| !s.is_null()),
+            self.app.sign_in.clone(),
+        ) {
+            let mail = SignInMail::Invite {
+                to: send["to"].as_str().unwrap_or("").into(),
+                login: send["login"].as_str().unwrap_or("").into(),
+            };
+            sign_in.send(&t.id, host, mail).await.map_err(|e| {
+                (
+                    503,
+                    format!("the user is added, but the invitation could not be sent: {e}"),
+                )
+            })?;
             invited = true;
         }
         r.body["invited"] = json!(invited);
@@ -1406,8 +2116,15 @@ impl Host {
             .values()
             .map(|t| {
                 let clock = t.reads_clock.load(std::sync::atomic::Ordering::Relaxed);
-                let next_sweep = t.sweep_every.filter(|_| clock).map(|every| (*t.last_sweep.lock().unwrap() + every).saturating_duration_since(now));
-                TenantStatus { id: t.id.clone(), idle: now.duration_since(*t.last_used.lock().unwrap()), next_sweep, engines: t.engines() }
+                let next_sweep = t.sweep_every.filter(|_| clock).map(|every| {
+                    (*t.last_sweep.lock().unwrap() + every).saturating_duration_since(now)
+                });
+                TenantStatus {
+                    id: t.id.clone(),
+                    idle: now.duration_since(*t.last_used.lock().unwrap()),
+                    next_sweep,
+                    engines: t.engines(),
+                }
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1416,8 +2133,12 @@ impl Host {
 
     /// Serves on `addr` until the process stops.
     pub async fn serve(&self, addr: std::net::SocketAddr) -> Result<(), String> {
-        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("cannot listen on {addr}: {e}"))?;
-        axum::serve(listener, self.router()).await.map_err(|e| e.to_string())
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
+        axum::serve(listener, self.router())
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1429,16 +2150,44 @@ pub fn serve(cfg: Config) -> Result<(), String> {
 /// `serve`, with every commit also kept in `log_dir` (one folder per tenant) before it is
 /// confirmed.
 pub fn serve_with(cfg: Config, log_dir: Option<std::path::PathBuf>) -> Result<(), String> {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
     rt.block_on(async move {
-        let durability: Option<Arc<dyn Durability>> = log_dir.map(|d| Arc::new(LogFolder(d)) as Arc<dyn Durability>);
-        let options = HostOptions { dev_login: cfg.dev_login, secure_cookies: cfg.secure_cookies, web: cfg.web.clone(), sign_in: None, requests_per_second: None, durability };
-        let host = Host::new(options, Arc::new(Single(TenantSpec { id: "default".into(), config: cfg.clone() })));
+        let durability: Option<Arc<dyn Durability>> =
+            log_dir.map(|d| Arc::new(LogFolder(d)) as Arc<dyn Durability>);
+        let options = HostOptions {
+            dev_login: cfg.dev_login,
+            secure_cookies: cfg.secure_cookies,
+            web: cfg.web.clone(),
+            sign_in: None,
+            requests_per_second: None,
+            durability,
+        };
+        let host = Host::new(
+            options,
+            Arc::new(Single(TenantSpec {
+                id: "default".into(),
+                config: cfg.clone(),
+            })),
+        );
         host.start("").await?;
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.port));
-        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("cannot listen on {addr}: {e}"))?;
-        eprintln!("quadra: serving on http://{addr}{}", if cfg.dev_login { " (development login enabled)" } else { "" });
-        axum::serve(listener, host.router()).await.map_err(|e| e.to_string())
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
+        eprintln!(
+            "quadra: serving on http://{addr}{}",
+            if cfg.dev_login {
+                " (development login enabled)"
+            } else {
+                ""
+            }
+        );
+        axum::serve(listener, host.router())
+            .await
+            .map_err(|e| e.to_string())
     })
 }
 
@@ -1458,7 +2207,10 @@ fn signature(root: &std::path::Path) -> Vec<(std::path::PathBuf, std::time::Syst
             let p = e.path();
             if p.is_dir() {
                 todo.push(p);
-            } else if matches!(p.extension().and_then(|x| x.to_str()), Some("qd" | "csv" | "toml" | "lock")) {
+            } else if matches!(
+                p.extension().and_then(|x| x.to_str()),
+                Some("qd" | "csv" | "toml" | "lock")
+            ) {
                 if let Ok(m) = e.metadata() {
                     out.push((p, m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));
                 }
@@ -1477,7 +2229,12 @@ mod webapp {
 /// The embedded web client: its files, and `index.html` for every other path (routing in the page).
 async fn embedded(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    let (name, bytes) = webapp::FILES.iter().find(|(p, _)| *p == path).or_else(|| webapp::FILES.iter().find(|(p, _)| *p == "index.html")).copied().unwrap_or(("", b"" as &[u8]));
+    let (name, bytes) = webapp::FILES
+        .iter()
+        .find(|(p, _)| *p == path)
+        .or_else(|| webapp::FILES.iter().find(|(p, _)| *p == "index.html"))
+        .copied()
+        .unwrap_or(("", b"" as &[u8]));
     let kind = match name.rsplit('.').next() {
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "text/javascript",
@@ -1488,10 +2245,20 @@ async fn embedded(uri: axum::http::Uri) -> Response {
         Some("json") => "application/json",
         _ => "application/octet-stream",
     };
-    let cache = if name == "index.html" { "no-cache" } else { "public, max-age=31536000, immutable" };
-    ([(axum::http::header::CONTENT_TYPE, kind), (axum::http::header::CACHE_CONTROL, cache)], bytes).into_response()
+    let cache = if name == "index.html" {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, kind),
+            (axum::http::header::CACHE_CONTROL, cache),
+        ],
+        bytes,
+    )
+        .into_response()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1503,7 +2270,11 @@ mod tests {
         let commit = |tx: u64| json!({ "tx": tx, "records": [] });
         let mut last = 3;
         // backlog 4, 5; then live 5 (already replayed), 6
-        let delivered: Vec<u64> = [commit(4), commit(5), commit(5), commit(6), commit(2)].iter().filter(|e| fresh(e, &mut last)).map(|e| e["tx"].as_u64().unwrap()).collect();
+        let delivered: Vec<u64> = [commit(4), commit(5), commit(5), commit(6), commit(2)]
+            .iter()
+            .filter(|e| fresh(e, &mut last))
+            .map(|e| e["tx"].as_u64().unwrap())
+            .collect();
         assert_eq!(delivered, vec![4, 5, 6]);
         assert!(fresh(&json!({ "type": "deploy", "sha": "x" }), &mut last));
         // without `since`, every live commit passes

@@ -101,7 +101,8 @@ pub fn target(name: &str) -> Target {
     match name {
         "load" => Target::RowsPerSec(50_000.0),
         "grid" | "grid_where1" | "grid_where3" | "grid_sorted" | "grid_lines" => Target::Ms(100.0),
-        "grid_sales" | "grid_logistics" | "grid_manager" | "grid_deny" | "agg_sales" | "move_read" => Target::Ms(200.0),
+        "grid_sales" | "grid_logistics" | "grid_manager" | "grid_deny" | "agg_sales"
+        | "move_read" => Target::Ms(200.0),
         "search_sales" | "ref_picker_sales" => Target::Ms(100.0),
         // a page of a record's lines, as the panel scrolls
         "record_region_more" => Target::Ms(100.0),
@@ -132,7 +133,11 @@ pub fn target(name: &str) -> Target {
         // a deploy that changes no data: seconds, whatever the number of rows
         "deploy_noop" | "deploy_add_field" | "deploy_rename" => Target::Ms(5_000.0),
         // a deploy that writes or checks every record of an entity: within the time limit
-        "deploy_add_default" | "deploy_add_check" | "deploy_add_required" | "deploy_add_where" | "deploy_add_unique" => Target::Ms(60_000.0),
+        "deploy_add_default"
+        | "deploy_add_check"
+        | "deploy_add_required"
+        | "deploy_add_where"
+        | "deploy_add_unique" => Target::Ms(60_000.0),
         _ => Target::None,
     }
 }
@@ -169,10 +174,26 @@ fn verdict(o: &Outcome) -> &'static str {
 const MAX_TIMEOUT: u64 = 60;
 
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
-const FLAGS: &[&str] = &["--url", "--scale", "--seed", "--out", "--json", "--timeout", "--load-timeout", "--reps", "--only", "--skip", "--commit-size", "--gate"];
+const FLAGS: &[&str] = &[
+    "--url",
+    "--scale",
+    "--seed",
+    "--out",
+    "--json",
+    "--timeout",
+    "--load-timeout",
+    "--reps",
+    "--only",
+    "--skip",
+    "--commit-size",
+    "--gate",
+];
 
 pub fn path_arg(args: &[String]) -> PathBuf {
     args.iter()
@@ -199,7 +220,9 @@ pub fn bench(args: &[String]) -> ExitCode {
 }
 
 fn seed(args: &[String]) -> u64 {
-    flag(args, "--seed").and_then(|s| s.parse().ok()).unwrap_or(1)
+    flag(args, "--seed")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
 }
 
 fn gen(args: &[String]) -> Result<(), String> {
@@ -212,7 +235,11 @@ fn gen(args: &[String]) -> Result<(), String> {
     for (e, n) in &g.counts {
         println!("  {e:<10} {n:>10}");
     }
-    println!("✓ {} rows in {out} ({:.1} s): load them with `quadra db import {out} examples/stress`", g.total(), t.elapsed().as_secs_f64());
+    println!(
+        "✓ {} rows in {out} ({:.1} s): load them with `quadra db import {out} examples/stress`",
+        g.total(),
+        t.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -258,7 +285,11 @@ struct Meter {
 
 impl Meter {
     fn new() -> Meter {
-        Meter { cold: None, warm: Vec::new(), extra: serde_json::Map::new() }
+        Meter {
+            cold: None,
+            warm: Vec::new(),
+            extra: serde_json::Map::new(),
+        }
     }
 
     fn emit(&self, done: bool) {
@@ -267,7 +298,10 @@ impl Meter {
         o.insert("warm_ms".into(), json!(self.warm));
         o.insert("p50_ms".into(), json!(percentile(&self.warm, 50.0)));
         o.insert("p95_ms".into(), json!(percentile(&self.warm, 95.0)));
-        o.insert("rss_mb".into(), json!((peak_rss_mb() * 10.0).round() / 10.0));
+        o.insert(
+            "rss_mb".into(),
+            json!((peak_rss_mb() * 10.0).round() / 10.0),
+        );
         o.insert("done".into(), json!(done));
         println!("{}", J::Object(o));
         let _ = std::io::stdout().flush();
@@ -279,7 +313,11 @@ impl Meter {
 
     /// The first call is the cold one (empty caches), then `reps` warm calls. Each reports
     /// the statements it sent and the records it loaded from the database.
-    fn time(&mut self, reps: usize, mut f: impl FnMut(&mut Meter, bool) -> Result<(), String>) -> Result<(), String> {
+    fn time(
+        &mut self,
+        reps: usize,
+        mut f: impl FnMut(&mut Meter, bool) -> Result<(), String>,
+    ) -> Result<(), String> {
         let (s0, r0) = counters();
         let d0 = quadra_store::conn::db_micros();
         let t = Instant::now();
@@ -290,7 +328,10 @@ impl Meter {
         self.set("cold_records_loaded", json!(r1 - r0));
         // the cold call's time in the database (loading records, the cache's checks); the
         // rest is the engine (formulas, rules, JSON)
-        self.set("cold_db_ms", json!(((quadra_store::conn::db_micros() - d0) as f64 / 100.0).round() / 10.0));
+        self.set(
+            "cold_db_ms",
+            json!(((quadra_store::conn::db_micros() - d0) as f64 / 100.0).round() / 10.0),
+        );
         self.emit(false);
         for _ in 0..reps {
             let (s0, r0) = counters();
@@ -308,7 +349,10 @@ impl Meter {
 
 /// (statements sent, records loaded) by this process so far.
 fn counters() -> (u64, u64) {
-    (quadra_store::conn::statements(), quadra_store::source::RECORDS_LOADED.load(std::sync::atomic::Ordering::Relaxed))
+    (
+        quadra_store::conn::statements(),
+        quadra_store::source::RECORDS_LOADED.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 fn ms(t: Instant) -> f64 {
@@ -326,13 +370,21 @@ struct Outcome {
 
 fn run(args: &[String]) -> Result<(), String> {
     let path = path_arg(args);
-    let url = flag(args, "--url").ok_or("--url is required (sqlite:path or postgres://…#schema=name)")?;
+    let url =
+        flag(args, "--url").ok_or("--url is required (sqlite:path or postgres://…#schema=name)")?;
     let scale = flag(args, "--scale").ok_or("--scale is required")?;
     if !stress::SCALES.iter().any(|s| s.0 == scale) {
-        return Err(format!("unknown scale `{scale}` ({})", stress::scale_names()));
+        return Err(format!(
+            "unknown scale `{scale}` ({})",
+            stress::scale_names()
+        ));
     }
-    let timeout: u64 = flag(args, "--timeout").and_then(|v| v.parse().ok()).unwrap_or(MAX_TIMEOUT);
-    let load_timeout: u64 = flag(args, "--load-timeout").and_then(|v| v.parse().ok()).unwrap_or(timeout);
+    let timeout: u64 = flag(args, "--timeout")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_TIMEOUT);
+    let load_timeout: u64 = flag(args, "--load-timeout")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(timeout);
     if timeout > MAX_TIMEOUT || load_timeout > MAX_TIMEOUT {
         return Err(format!("a scenario may take at most {MAX_TIMEOUT} s: anything longer is a failure (--timeout, --load-timeout)"));
     }
@@ -341,13 +393,24 @@ fn run(args: &[String]) -> Result<(), String> {
         Some(list) => list.split(',').map(str::to_string).collect(),
         None => Vec::new(),
     };
-    if let Some(bad) = gate.iter().find(|g| !STEPS.iter().any(|s| s.0 == g.as_str())) {
+    if let Some(bad) = gate
+        .iter()
+        .find(|g| !STEPS.iter().any(|s| s.0 == g.as_str()))
+    {
         return Err(format!("--gate: unknown scenario `{bad}`"));
     }
     let reps = flag(args, "--reps").unwrap_or_else(|| "5".into());
-    let only: Option<Vec<String>> = flag(args, "--only").map(|s| s.split(',').map(str::to_string).collect());
-    let skip: Vec<String> = flag(args, "--skip").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let steps: Vec<&(&str, &str)> = STEPS.iter().filter(|(n, _)| only.as_ref().map_or(true, |o| o.iter().any(|x| x == n)) && !skip.iter().any(|x| x == n)).collect();
+    let only: Option<Vec<String>> =
+        flag(args, "--only").map(|s| s.split(',').map(str::to_string).collect());
+    let skip: Vec<String> = flag(args, "--skip")
+        .map(|s| s.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
+    let steps: Vec<&(&str, &str)> = STEPS
+        .iter()
+        .filter(|(n, _)| {
+            only.as_ref().map_or(true, |o| o.iter().any(|x| x == n)) && !skip.iter().any(|x| x == n)
+        })
+        .collect();
     if steps.iter().any(|(n, _)| *n == "load") {
         wipe(&url)?;
     }
@@ -355,15 +418,39 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut outcomes: Vec<Outcome> = Vec::new();
     eprintln!("quadra bench: scale {scale}, {url}, timeout {timeout} s per scenario\n");
     for (name, what) in steps {
-        let limit = if *name == "load" { load_timeout } else { timeout };
+        let limit = if *name == "load" {
+            load_timeout
+        } else {
+            timeout
+        };
         eprintln!("▶ {name}: {what}");
         let mut cmd = Command::new(&exe);
-        cmd.arg("bench").arg("step").arg(name).arg(&path).args(["--url", &url, "--scale", &scale, "--seed", &seed(args).to_string(), "--reps", &reps]);
+        cmd.arg("bench").arg("step").arg(name).arg(&path).args([
+            "--url",
+            &url,
+            "--scale",
+            &scale,
+            "--seed",
+            &seed(args).to_string(),
+            "--reps",
+            &reps,
+        ]);
         if let Some(c) = flag(args, "--commit-size") {
             cmd.args(["--commit-size", &c]);
         }
         let o = supervise(cmd, name, Duration::from_secs(limit));
-        eprintln!("  {}  {}  [{} {}{}]", o.status, summary(&o.last), verdict(&o), target_text(target(name)), if gate.iter().any(|g| g == name) { ", gated" } else { "" });
+        eprintln!(
+            "  {}  {}  [{} {}{}]",
+            o.status,
+            summary(&o.last),
+            verdict(&o),
+            target_text(target(name)),
+            if gate.iter().any(|g| g == name) {
+                ", gated"
+            } else {
+                ""
+            }
+        );
         let failed_load = *name == "load" && o.status != "ok";
         outcomes.push(o);
         if failed_load {
@@ -393,21 +480,41 @@ fn run(args: &[String]) -> Result<(), String> {
                 v
             }).collect::<Vec<_>>(),
         });
-        std::fs::write(&file, serde_json::to_string_pretty(&doc).unwrap()).map_err(|e| format!("cannot write {file}: {e}"))?;
+        std::fs::write(&file, serde_json::to_string_pretty(&doc).unwrap())
+            .map_err(|e| format!("cannot write {file}: {e}"))?;
         eprintln!("results written to {file}");
     }
-    let failed: Vec<&str> = outcomes.iter().filter(|o| gate.iter().any(|g| *g == o.name) && verdict(o) == "fail").map(|o| o.name.as_str()).collect();
+    let failed: Vec<&str> = outcomes
+        .iter()
+        .filter(|o| gate.iter().any(|g| *g == o.name) && verdict(o) == "fail")
+        .map(|o| o.name.as_str())
+        .collect();
     // a gated scenario that did not run (the load failed) fails too
-    let missing: Vec<&str> = gate.iter().filter(|g| steps_run(&outcomes, g)).map(String::as_str).collect();
+    let missing: Vec<&str> = gate
+        .iter()
+        .filter(|g| steps_run(&outcomes, g))
+        .map(String::as_str)
+        .collect();
     if !failed.is_empty() || !missing.is_empty() {
-        return Err(format!("gated scenarios failed: {}", failed.iter().chain(missing.iter()).copied().collect::<Vec<_>>().join(", ")));
+        return Err(format!(
+            "gated scenarios failed: {}",
+            failed
+                .iter()
+                .chain(missing.iter())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     Ok(())
 }
 
 /// A gated scenario that was asked for but never ran.
 fn steps_run(outcomes: &[Outcome], g: &str) -> bool {
-    !outcomes.iter().any(|o| o.name == g) && outcomes.iter().any(|o| o.name == "load" && o.status != "ok")
+    !outcomes.iter().any(|o| o.name == g)
+        && outcomes
+            .iter()
+            .any(|o| o.name == "load" && o.status != "ok")
 }
 
 /// Run a step in a child process, killed after `limit`.
@@ -415,13 +522,23 @@ fn supervise(mut cmd: Command, name: &str, limit: Duration) -> Outcome {
     let started = Instant::now();
     let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn() {
         Ok(c) => c,
-        Err(e) => return Outcome { name: name.into(), status: "error".into(), last: json!({ "error": e.to_string() }), secs: 0.0 },
+        Err(e) => {
+            return Outcome {
+                name: name.into(),
+                status: "error".into(),
+                last: json!({ "error": e.to_string() }),
+                secs: 0.0,
+            }
+        }
     };
     let last: Arc<Mutex<Option<J>>> = Arc::new(Mutex::new(None));
     let stdout = child.stdout.take().unwrap();
     let keep = last.clone();
     let reader = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
             if let Ok(v) = serde_json::from_str::<J>(&line) {
                 let mut last = keep.lock().unwrap();
                 match (v.get("progress"), last.as_mut()) {
@@ -434,13 +551,23 @@ fn supervise(mut cmd: Command, name: &str, limit: Duration) -> Outcome {
     });
     let status = loop {
         match child.try_wait() {
-            Ok(Some(s)) => break if s.success() { "ok".to_string() } else { "error".to_string() },
+            Ok(Some(s)) => {
+                break if s.success() {
+                    "ok".to_string()
+                } else {
+                    "error".to_string()
+                }
+            }
             Ok(None) if started.elapsed() > limit => {
                 let _ = child.kill();
                 let _ = child.wait();
                 // the changed copy of the project a killed deploy step could not remove
                 let prefix = format!("quadra-bench-{}-", child.id());
-                for e in std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten() {
+                for e in std::fs::read_dir(std::env::temp_dir())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
                     if e.file_name().to_string_lossy().starts_with(&prefix) {
                         let _ = std::fs::remove_dir_all(e.path());
                     }
@@ -456,7 +583,12 @@ fn supervise(mut cmd: Command, name: &str, limit: Duration) -> Outcome {
     if status == "timeout" {
         last["timeout_s"] = json!(limit.as_secs());
     }
-    Outcome { name: name.into(), status, last, secs: started.elapsed().as_secs_f64() }
+    Outcome {
+        name: name.into(),
+        status,
+        last,
+        secs: started.elapsed().as_secs_f64(),
+    }
 }
 
 fn fmt_ms(v: &J) -> String {
@@ -477,7 +609,11 @@ fn summary(v: &J) -> String {
         parts.push(format!("cold {}", fmt_ms(&v["cold_ms"])));
     }
     if !v["p50_ms"].is_null() {
-        parts.push(format!("p50 {} p95 {}", fmt_ms(&v["p50_ms"]), fmt_ms(&v["p95_ms"])));
+        parts.push(format!(
+            "p50 {} p95 {}",
+            fmt_ms(&v["p50_ms"]),
+            fmt_ms(&v["p95_ms"])
+        ));
     }
     if let Some(n) = v["note"].as_str() {
         parts.push(n.to_string());
@@ -486,9 +622,16 @@ fn summary(v: &J) -> String {
 }
 
 fn render(scale: &str, url: &str, outcomes: &[Outcome]) -> String {
-    let db = if url.starts_with("sqlite:") { "SQLite" } else { "PostgreSQL" };
+    let db = if url.starts_with("sqlite:") {
+        "SQLite"
+    } else {
+        "PostgreSQL"
+    };
     let mut s = format!("\n{db}, scale {scale}\n\n");
-    s.push_str(&format!("{:<20} {:>10} {:>10} {:>10} {:>9} {:>9}  {:<5} {:<16}  {}\n", "scenario", "cold", "p50", "p95", "peak MB", "SQL cold", "", "target", "notes"));
+    s.push_str(&format!(
+        "{:<20} {:>10} {:>10} {:>10} {:>9} {:>9}  {:<5} {:<16}  {}\n",
+        "scenario", "cold", "p50", "p95", "peak MB", "SQL cold", "", "target", "notes"
+    ));
     for o in outcomes {
         let v = &o.last;
         let cold = match o.status.as_str() {
@@ -496,19 +639,55 @@ fn render(scale: &str, url: &str, outcomes: &[Outcome]) -> String {
             "ok" | "timeout" => fmt_ms(&v["cold_ms"]),
             _ => "error".into(),
         };
-        let warm = |k: &str| if o.status == "timeout" && v[k].is_null() && !v["cold_ms"].is_null() { format!("> {} s", v["timeout_s"]) } else { fmt_ms(&v[k]) };
+        let warm = |k: &str| {
+            if o.status == "timeout" && v[k].is_null() && !v["cold_ms"].is_null() {
+                format!("> {} s", v["timeout_s"])
+            } else {
+                fmt_ms(&v[k])
+            }
+        };
         let note = if o.status.starts_with("error") {
-            v["error"].as_str().unwrap_or("failed").lines().next().unwrap_or("").to_string()
+            v["error"]
+                .as_str()
+                .unwrap_or("failed")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
         } else if o.status == "timeout" && v["cold_ms"].is_null() {
             let p = &v["progress"];
-            format!("killed after {} records loaded, {} statements", p["records_loaded"], p["statements"])
+            format!(
+                "killed after {} records loaded, {} statements",
+                p["records_loaded"], p["statements"]
+            )
         } else {
-            let db = v["cold_db_ms"].as_f64().map(|d| format!(" [database {d} ms of the cold call]")).unwrap_or_default();
+            let db = v["cold_db_ms"]
+                .as_f64()
+                .map(|d| format!(" [database {d} ms of the cold call]"))
+                .unwrap_or_default();
             format!("{}{db}", v["note"].as_str().unwrap_or(""))
         };
-        let rss = v["rss_mb"].as_f64().or(v["progress"]["rss_mb"].as_f64()).map(|x| format!("{x:.0}")).unwrap_or("—".into());
-        let stmts = v["cold_statements"].as_u64().map(|x| x.to_string()).unwrap_or("—".into());
-        s.push_str(&format!("{:<20} {:>10} {:>10} {:>10} {:>9} {:>9}  {:<5} {:<16}  {}\n", o.name, cold, warm("p50_ms"), warm("p95_ms"), rss, stmts, verdict(o), target_text(target(&o.name)), note));
+        let rss = v["rss_mb"]
+            .as_f64()
+            .or(v["progress"]["rss_mb"].as_f64())
+            .map(|x| format!("{x:.0}"))
+            .unwrap_or("—".into());
+        let stmts = v["cold_statements"]
+            .as_u64()
+            .map(|x| x.to_string())
+            .unwrap_or("—".into());
+        s.push_str(&format!(
+            "{:<20} {:>10} {:>10} {:>10} {:>9} {:>9}  {:<5} {:<16}  {}\n",
+            o.name,
+            cold,
+            warm("p50_ms"),
+            warm("p95_ms"),
+            rss,
+            stmts,
+            verdict(o),
+            target_text(target(&o.name)),
+            note
+        ));
     }
     s
 }
@@ -554,21 +733,36 @@ fn step(name: &str, args: &[String]) -> Result<(), String> {
     let path = path_arg(args);
     let url = flag(args, "--url").ok_or("--url is required")?;
     let scale = flag(args, "--scale").unwrap_or_else(|| "small".into());
-    let reps: usize = flag(args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(5);
+    let reps: usize = flag(args, "--reps")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
     // how far a step got, should it be killed by the timeout
     let started = Instant::now();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
         let (s, r) = counters();
-        println!("{}", json!({ "progress": { "seconds": started.elapsed().as_secs(), "statements": s, "records_loaded": r, "rss_mb": peak_rss_mb().round() } }));
+        println!(
+            "{}",
+            json!({ "progress": { "seconds": started.elapsed().as_secs(), "statements": s, "records_loaded": r, "rss_mb": peak_rss_mb().round() } })
+        );
         let _ = std::io::stdout().flush();
     });
     // the limits a server applies to its requests: the interpreter counts its steps against
     // the deadline as it does in `quadra serve` (the deadline itself is never reached here)
-    let _limits = quadra_runtime::limits::begin(quadra_runtime::limits::Limits { deadline: Some(Instant::now() + Duration::from_secs(86_400)), ..Default::default() });
+    let _limits = quadra_runtime::limits::begin(quadra_runtime::limits::Limits {
+        deadline: Some(Instant::now() + Duration::from_secs(86_400)),
+        ..Default::default()
+    });
     let mut m = Meter::new();
     let r = match name {
-        "load" => load(&path, &url, &scale, seed(args), flag(args, "--commit-size").and_then(|v| v.parse().ok()), &mut m),
+        "load" => load(
+            &path,
+            &url,
+            &scale,
+            seed(args),
+            flag(args, "--commit-size").and_then(|v| v.parse().ok()),
+            &mut m,
+        ),
         n if n.starts_with("deploy_") => deploy(&path, &url, n, &mut m),
         "verify" => verify(&path, &url, &mut m),
         n if n.starts_with("sql_") => sql(&url, n, reps, &mut m),
@@ -588,26 +782,45 @@ fn step(name: &str, args: &[String]) -> Result<(), String> {
 }
 
 fn checked(path: &Path) -> Result<(PathBuf, quadra_analysis::Checked), String> {
-    let root = quadra_sema::find_project_root(path).ok_or_else(|| format!("no quadra.toml in {} or its parents", path.display()))?;
+    let root = quadra_sema::find_project_root(path)
+        .ok_or_else(|| format!("no quadra.toml in {} or its parents", path.display()))?;
     let project = quadra_sema::Project::load(&root).map_err(|e| e.to_string())?;
     let checked = quadra_analysis::check(&project);
-    let Some(model) = &checked.model else { return Err(format!("{}: the project has errors", root.display())) };
+    let Some(model) = &checked.model else {
+        return Err(format!("{}: the project has errors", root.display()));
+    };
     for e in ["Region", "Customer", "Order", "OrderLine", "Shipment"] {
         if model.entity(e).is_none() {
-            return Err(format!("{}: not the stress model (no `{e}`): run the benchmark on examples/stress", root.display()));
+            return Err(format!(
+                "{}: not the stress model (no `{e}`): run the benchmark on examples/stress",
+                root.display()
+            ));
         }
     }
     Ok((root, checked))
 }
 
-fn load(path: &Path, url: &str, scale: &str, seed: u64, per_commit: Option<usize>, m: &mut Meter) -> Result<(), String> {
+fn load(
+    path: &Path,
+    url: &str,
+    scale: &str,
+    seed: u64,
+    per_commit: Option<usize>,
+    m: &mut Meter,
+) -> Result<(), String> {
     let (_, checked) = checked(path)?;
     let model = checked.model.as_ref().unwrap();
     let report = &checked.report;
     let t = Instant::now();
     quadra_store::ops::init(url, model, report, now())?;
     let mut db = quadra_store::Database::open(url, model, report)?;
-    let mut import = quadra_store::bulk::Import::new(&mut db, model, report, now(), &format!("stress {scale} seed {seed}"))?;
+    let mut import = quadra_store::bulk::Import::new(
+        &mut db,
+        model,
+        report,
+        now(),
+        &format!("stress {scale} seed {seed}"),
+    )?;
     if let Some(n) = per_commit {
         import.records_per_commit = n;
     }
@@ -617,25 +830,61 @@ fn load(path: &Path, url: &str, scale: &str, seed: u64, per_commit: Option<usize
     let mut conn = Conn::open(url)?;
     m.cold = Some((total * 1e5).round() / 100.0);
     m.set("rows", json!(g.total()));
-    m.set("entities", json!(g.counts.iter().map(|(e, n)| (e.clone(), json!(n))).collect::<serde_json::Map<_, _>>()));
+    m.set(
+        "entities",
+        json!(g
+            .counts
+            .iter()
+            .map(|(e, n)| (e.clone(), json!(n)))
+            .collect::<serde_json::Map<_, _>>()),
+    );
     m.set("history_rows", json!(r.history));
     m.set("commits", json!(r.commits.len()));
-    m.set("phases_s", json!(r.phases.iter().map(|(p, d)| (p.clone(), json!((d.as_secs_f64() * 100.0).round() / 100.0))).collect::<serde_json::Map<_, _>>()));
+    m.set(
+        "phases_s",
+        json!(r
+            .phases
+            .iter()
+            .map(|(p, d)| (p.clone(), json!((d.as_secs_f64() * 100.0).round() / 100.0)))
+            .collect::<serde_json::Map<_, _>>()),
+    );
     m.set("rows_per_s", json!((g.total() as f64 / total).round()));
     let bytes = db_bytes(url, &mut conn);
-    m.set("db_mb", json!(bytes.map(|b| (b as f64 / 1_048_576.0).round())));
-    m.set("note", json!(format!("{} rows, {:.0} rows/s, {} commits, db {} MB", g.total(), g.total() as f64 / total, r.commits.len(), bytes.map(|b| b / 1_048_576).unwrap_or(0))));
+    m.set(
+        "db_mb",
+        json!(bytes.map(|b| (b as f64 / 1_048_576.0).round())),
+    );
+    m.set(
+        "note",
+        json!(format!(
+            "{} rows, {:.0} rows/s, {} commits, db {} MB",
+            g.total(),
+            g.total() as f64 / total,
+            r.commits.len(),
+            bytes.map(|b| b / 1_048_576).unwrap_or(0)
+        )),
+    );
     Ok(())
 }
 
 /// One value of a query on the database (the targets of the scenarios are picked by SQL on
 /// the projections: not timed).
 fn one(conn: &mut Conn, sql: &str, params: &[Sql]) -> Result<String, String> {
-    conn.query(sql, params)?.into_iter().next().and_then(|r| r.into_iter().next().flatten()).ok_or_else(|| format!("no row for: {sql}"))
+    conn.query(sql, params)?
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+        .ok_or_else(|| format!("no row for: {sql}"))
 }
 
 fn user(conn: &mut Conn, login: &str) -> Result<u64, String> {
-    one(conn, "SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = ?text", &[Sql::Text(login.into())])?.parse().map_err(|_| "bad id".to_string())
+    one(
+        conn,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = ?text",
+        &[Sql::Text(login.into())],
+    )?
+    .parse()
+    .map_err(|_| "bad id".to_string())
 }
 
 fn head(conn: &mut Conn) -> Result<u64, String> {
@@ -650,7 +899,11 @@ fn api(path: &Path, url: &str, name: &str, reps: usize, m: &mut Meter) -> Result
     let logistics = user(&mut conn, "logistics01")?;
     let manager = user(&mut conn, "manager01")?;
     let controller = user(&mut conn, stress::CONTROLLER)?;
-    let r01 = one(&mut conn, "SELECT CAST(\"id\" AS TEXT) FROM \"region\" WHERE \"code\" = 'R01'", &[])?;
+    let r01 = one(
+        &mut conn,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"region\" WHERE \"code\" = 'R01'",
+        &[],
+    )?;
     let mut local = quadra_server::Local::open(&root, url, 256)?;
     let grid = |w: Option<&str>, order: Option<J>| {
         let mut q = json!({ "entity": "Shipment", "limit": 500, "offset": 0 });
@@ -662,21 +915,43 @@ fn api(path: &Path, url: &str, name: &str, reps: usize, m: &mut Meter) -> Result
         }
         q
     };
-    let query = |local: &mut quadra_server::Local, m: &mut Meter, cold: bool, user: u64, q: &J| -> Result<(), String> {
+    let query = |local: &mut quadra_server::Local,
+                 m: &mut Meter,
+                 cold: bool,
+                 user: u64,
+                 q: &J|
+     -> Result<(), String> {
         let (status, body) = local.query(user, q);
         if status != 200 {
             return Err(format!("{status}: {body}"));
         }
         if cold {
             let (hits, misses, len, bytes) = local.cache();
-            m.set("rows", json!(body["rows"].as_array().map_or(0, |r| r.len())));
+            m.set(
+                "rows",
+                json!(body["rows"].as_array().map_or(0, |r| r.len())),
+            );
             m.set("total", body["total"].clone());
             m.set("loaded_records", json!(misses));
-            m.set("note", json!(format!("{} rows of {}, {misses} records loaded ({} cached, {} MB), {hits} cache hits", body["rows"].as_array().map_or(0, |r| r.len()), body["total"], len, bytes >> 20)));
+            m.set(
+                "note",
+                json!(format!(
+                    "{} rows of {}, {misses} records loaded ({} cached, {} MB), {hits} cache hits",
+                    body["rows"].as_array().map_or(0, |r| r.len()),
+                    body["total"],
+                    len,
+                    bytes >> 20
+                )),
+            );
         }
         Ok(())
     };
-    let record = |local: &mut quadra_server::Local, m: &mut Meter, cold: bool, entity: &str, id: u64| -> Result<(), String> {
+    let record = |local: &mut quadra_server::Local,
+                  m: &mut Meter,
+                  cold: bool,
+                  entity: &str,
+                  id: u64|
+     -> Result<(), String> {
         let (status, body) = local.record(admin, entity, id);
         if status != 200 {
             return Err(format!("{status}: {body}"));
@@ -684,14 +959,22 @@ fn api(path: &Path, url: &str, name: &str, reps: usize, m: &mut Meter) -> Result
         if cold {
             let (_, misses, _, _) = local.cache();
             m.set("loaded_records", json!(misses));
-            m.set("note", json!(format!("{entity}#{id}, {misses} records loaded")));
+            m.set(
+                "note",
+                json!(format!("{entity}#{id}, {misses} records loaded")),
+            );
         }
         Ok(())
     };
-    let id = |conn: &mut Conn, sql: &str| -> Result<u64, String> { one(conn, sql, &[])?.parse().map_err(|_| "bad id".to_string()) };
+    let id = |conn: &mut Conn, sql: &str| -> Result<u64, String> {
+        one(conn, sql, &[])?
+            .parse()
+            .map_err(|_| "bad id".to_string())
+    };
     // who reads in the scenarios under row permissions (the new region's manager for move_read)
     let as_user = match name {
-        "grid_sales" | "agg_sales" | "search_sales" | "ref_picker_sales" | "group_sales" | "fts_sales" | "kanban_sales" | "app_open_sales" => Some(stress::SALESPERSON),
+        "grid_sales" | "agg_sales" | "search_sales" | "ref_picker_sales" | "group_sales"
+        | "fts_sales" | "kanban_sales" | "app_open_sales" => Some(stress::SALESPERSON),
         "grid_logistics" => Some("logistics01"),
         "grid_manager" => Some("manager01"),
         "grid_deny" => Some(stress::CONTROLLER),
@@ -701,11 +984,19 @@ fn api(path: &Path, url: &str, name: &str, reps: usize, m: &mut Meter) -> Result
     let r = if name.starts_with("app_") {
         app_step(path, name, reps, m, &mut conn, &mut local, admin, sales)
     } else {
-        api_step(name, reps, m, &mut conn, &mut local, admin, sales, logistics, manager, controller, &r01, &grid, &query, &record, &id)
+        api_step(
+            name, reps, m, &mut conn, &mut local, admin, sales, logistics, manager, controller,
+            &r01, &grid, &query, &record, &id,
+        )
     };
     if let Some(login) = as_user {
         m.set("user", json!(login));
-        let note = m.extra.get("note").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        let note = m
+            .extra
+            .get("note")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
         m.set("note", json!(format!("as {login}: {note}")));
     }
     r
@@ -714,16 +1005,52 @@ fn api(path: &Path, url: &str, name: &str, reps: usize, m: &mut Meter) -> Result
 /// The Sales cockpit of examples/stress (`apps/sales-cockpit.json`), shown as the web client
 /// shows it (`Local::open_app`: the requests of `quadra_server::open_requests`).
 #[allow(clippy::too_many_arguments)]
-fn app_step(path: &Path, name: &str, reps: usize, m: &mut Meter, conn: &mut Conn, local: &mut quadra_server::Local, admin: u64, sales: u64) -> Result<(), String> {
+fn app_step(
+    path: &Path,
+    name: &str,
+    reps: usize,
+    m: &mut Meter,
+    conn: &mut Conn,
+    local: &mut quadra_server::Local,
+    admin: u64,
+    sales: u64,
+) -> Result<(), String> {
     let file = path.join("apps/sales-cockpit.json");
-    let doc: J = serde_json::from_str(&std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?).map_err(|e| format!("{}: {e}", file.display()))?;
+    let doc: J = serde_json::from_str(
+        &std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?,
+    )
+    .map_err(|e| format!("{}: {e}", file.display()))?;
     let cfg = doc["views"][0]["config"].clone();
     let ok = |r: &J| -> Result<(), String> {
-        let errors: Vec<String> = r["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_string)).take(3).collect();
-        if errors.is_empty() { Ok(()) } else { Err(format!("components in error: {}", errors.join("; "))) }
+        let errors: Vec<String> = r["errors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.as_str().map(str::to_string))
+            .take(3)
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("components in error: {}", errors.join("; ")))
+        }
     };
-    let note = |r: &J, extra: &str| format!("{} components, {} requests, {} ms in formulas (the rest: queries, the board){extra}", r["results"].as_object().map_or(0, |o| o.len()), r["requests"], r["ms_engine"]);
-    let regions: Vec<u64> = conn.query("SELECT CAST(\"id\" AS TEXT) FROM \"region\" ORDER BY \"code\"", &[])?.into_iter().filter_map(|r| r[0].as_deref().and_then(|v| v.parse().ok())).collect();
+    let note = |r: &J, extra: &str| {
+        format!(
+            "{} components, {} requests, {} ms in formulas (the rest: queries, the board){extra}",
+            r["results"].as_object().map_or(0, |o| o.len()),
+            r["requests"],
+            r["ms_engine"]
+        )
+    };
+    let regions: Vec<u64> = conn
+        .query(
+            "SELECT CAST(\"id\" AS TEXT) FROM \"region\" ORDER BY \"code\"",
+            &[],
+        )?
+        .into_iter()
+        .filter_map(|r| r[0].as_deref().and_then(|v| v.parse().ok()))
+        .collect();
     match name {
         "app_open" | "app_open_sales" => {
             let user = if name == "app_open" { admin } else { sales };
@@ -750,7 +1077,10 @@ fn app_step(path: &Path, name: &str, reps: usize, m: &mut Meter, conn: &mut Conn
                 let r = local.refresh_app(admin, &cfg, &json!({ "region": [region] }));
                 ok(&r)?;
                 if local.sheet_checks() != checks {
-                    return Err(format!("a filter's value changed and formulas were checked again ({} checks)", local.sheet_checks() - checks));
+                    return Err(format!(
+                        "a filter's value changed and formulas were checked again ({} checks)",
+                        local.sheet_checks() - checks
+                    ));
                 }
                 if cold {
                     m.set("rows", r["requests"].clone());
@@ -765,7 +1095,10 @@ fn app_step(path: &Path, name: &str, reps: usize, m: &mut Meter, conn: &mut Conn
                 &format!("SELECT CAST(o.\"id\" AS TEXT) FROM \"order\" o JOIN \"customer\" c ON c.\"id\" = o.\"customer_id\" JOIN \"region\" r ON r.\"id\" = c.\"region_id\" WHERE o.\"state\" = 'Draft' AND o.\"line_count\" > 0 AND c.\"active\" AND r.\"active\" AND NOT r.\"locked\" ORDER BY o.\"total\", o.\"id\" LIMIT {}", reps + 1),
                 &[],
             )?;
-            let drafts: Vec<u64> = rows.iter().filter_map(|r| r[0].as_deref().and_then(|v| v.parse().ok())).collect();
+            let drafts: Vec<u64> = rows
+                .iter()
+                .filter_map(|r| r[0].as_deref().and_then(|v| v.parse().ok()))
+                .collect();
             if drafts.len() < reps + 1 {
                 return Err("not enough draft orders to confirm".into());
             }
@@ -1328,10 +1661,20 @@ fn api_step(
 
 fn sql(url: &str, name: &str, reps: usize, m: &mut Meter) -> Result<(), String> {
     let mut conn = Conn::open(url)?;
-    let r01 = one(&mut conn, "SELECT CAST(\"id\" AS TEXT) FROM \"region\" WHERE \"code\" = 'R01'", &[])?;
+    let r01 = one(
+        &mut conn,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"region\" WHERE \"code\" = 'R01'",
+        &[],
+    )?;
     let code = one(&mut conn, &format!("SELECT \"code\" FROM \"customer\" WHERE \"region_id\" = {r01} ORDER BY \"id\" LIMIT 1 OFFSET 5"), &[])?;
     // a NUMERIC column is TEXT on SQLite: compare it as a number there
-    let num = |c: &str| if conn.dialect() == Dialect::Sqlite { format!("CAST({c} AS REAL)") } else { c.to_string() };
+    let num = |c: &str| {
+        if conn.dialect() == Dialect::Sqlite {
+            format!("CAST({c} AS REAL)")
+        } else {
+            c.to_string()
+        }
+    };
     let q = match name {
         "sql_count" => "SELECT CAST(COUNT(*) AS TEXT) FROM \"shipment\"".to_string(),
         "sql_page_sorted" => "SELECT CAST(\"id\" AS TEXT), CAST(\"date\" AS TEXT) FROM \"shipment\" ORDER BY \"date\" DESC, \"id\" LIMIT 500".to_string(),
@@ -1357,10 +1700,20 @@ fn sql(url: &str, name: &str, reps: usize, m: &mut Meter) -> Result<(), String> 
 fn verify(path: &Path, url: &str, m: &mut Meter) -> Result<(), String> {
     let (_, checked) = checked(path)?;
     let t = Instant::now();
-    let (problems, records) = quadra_store::ops::verify(url, checked.model.as_ref().unwrap(), &checked.report, now())?;
+    let (problems, records) =
+        quadra_store::ops::verify(url, checked.model.as_ref().unwrap(), &checked.report, now())?;
     m.cold = Some(ms(t));
     if !problems.is_empty() {
-        return Err(format!("verify found {} problems: {}", problems.len(), problems.iter().take(3).cloned().collect::<Vec<_>>().join("; ")));
+        return Err(format!(
+            "verify found {} problems: {}",
+            problems.len(),
+            problems
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
     }
     m.set("records", json!(records));
     m.set("note", json!(format!("{records} records checked, clean")));
@@ -1374,19 +1727,40 @@ fn changed_copy(root: &Path, name: &str) -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     // tests are left out: they use the names a rename changes
-    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())?.flatten() {
+    for entry in std::fs::read_dir(root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let p = entry.path();
         if p.is_file() && matches!(p.extension().and_then(|x| x.to_str()), Some("qd" | "toml")) {
             std::fs::copy(&p, dir.join(entry.file_name())).map_err(|e| e.to_string())?;
         }
     }
-    let order = ["deploy_noop", "deploy_add_field", "deploy_add_default", "deploy_rename", "deploy_add_check", "deploy_add_required", "deploy_add_where", "deploy_add_unique"];
-    let upto = order.iter().position(|n| *n == name).ok_or_else(|| format!("unknown scenario `{name}`"))?;
+    let order = [
+        "deploy_noop",
+        "deploy_add_field",
+        "deploy_add_default",
+        "deploy_rename",
+        "deploy_add_check",
+        "deploy_add_required",
+        "deploy_add_where",
+        "deploy_add_unique",
+    ];
+    let upto = order
+        .iter()
+        .position(|n| *n == name)
+        .ok_or_else(|| format!("unknown scenario `{name}`"))?;
     let sales = dir.join("sales.qd");
     let mut text = std::fs::read_to_string(&sales).map_err(|e| e.to_string())?;
     let insert = |text: &mut String, after: &str, add: &str| -> Result<(), String> {
-        let at = text.find(after).ok_or_else(|| format!("sales.qd: `{after}` not found"))? + after.len();
-        let eol = text[at..].find('\n').map(|i| at + i + 1).unwrap_or(text.len());
+        let at = text
+            .find(after)
+            .ok_or_else(|| format!("sales.qd: `{after}` not found"))?
+            + after.len();
+        let eol = text[at..]
+            .find('\n')
+            .map(|i| at + i + 1)
+            .unwrap_or(text.len());
         text.insert_str(eol, add);
         Ok(())
     };
@@ -1394,15 +1768,27 @@ fn changed_copy(root: &Path, name: &str) -> Result<PathBuf, String> {
         insert(&mut text, "    salesperson: User", "    segment: Text?\n")?;
     }
     if upto >= 2 {
-        insert(&mut text, "    priority: enum(Low, Normal, High) default Normal", "    channel: enum(Web, Phone, Agent) default Web\n")?;
+        insert(
+            &mut text,
+            "    priority: enum(Low, Normal, High) default Normal",
+            "    channel: enum(Web, Phone, Agent) default Web\n",
+        )?;
     }
     if upto >= 3 {
-        text = text.replacen("    code: Code unique\n    name: Text\n    region: Region", "    code: Code unique\n    title: Text\n    region: Region", 1);
+        text = text.replacen(
+            "    code: Code unique\n    name: Text\n    region: Region",
+            "    code: Code unique\n    title: Text\n    region: Region",
+            1,
+        );
         std::fs::create_dir_all(dir.join("migrations")).map_err(|e| e.to_string())?;
         std::fs::write(dir.join("migrations/bench_rename.qd"), "migration bench_rename:\n    reason: \"Customers have a title\"\n    rename Customer.name -> Customer.title\n").map_err(|e| e.to_string())?;
     }
     if upto >= 4 {
-        insert(&mut text, "    discount: Percent where 0%..50% default 0%", "    check qty <= 1000 pcs, \"At most 1000 pieces per line\"\n")?;
+        insert(
+            &mut text,
+            "    discount: Percent where 0%..50% default 0%",
+            "    check qty <= 1000 pcs, \"At most 1000 pieces per line\"\n",
+        )?;
     }
     // the shipments' tracking code: required for the big ones, of a form, unique
     let tracking = match upto {
@@ -1428,14 +1814,51 @@ fn deploy(path: &Path, url: &str, name: &str, m: &mut Meter) -> Result<(), Strin
         let project = quadra_sema::Project::load(&dir).map_err(|e| e.to_string())?;
         let checked = quadra_analysis::check(&project);
         let Some(model) = &checked.model else {
-            let errors: Vec<String> = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
-            return Err(format!("the changed project does not check: {}", errors.join("; ")));
+            let errors: Vec<String> = checked
+                .diagnostics
+                .iter()
+                .filter(|d| d.severity == quadra_sema::Severity::Error)
+                .map(|d| d.message.clone())
+                .collect();
+            return Err(format!(
+                "the changed project does not check: {}",
+                errors.join("; ")
+            ));
         };
         let t = Instant::now();
-        let r = quadra_store::ops::deploy(url, model, &checked.report, &dir, now(), false, &format!("bench {name}"))?;
+        let r = quadra_store::ops::deploy(
+            url,
+            model,
+            &checked.report,
+            &dir,
+            now(),
+            false,
+            &format!("bench {name}"),
+        )?;
         m.cold = Some(ms(t));
-        let how = if r.incremental { format!("{}", if r.steps.is_empty() { "no table change".to_string() } else { r.steps.join("; ") }) } else { format!("tables rebuilt ({})", r.rebuilt_because.clone().unwrap_or_default()) };
-        m.set("note", json!(format!("{how}; {} new default values, {} migrations", r.new_defaults, r.scripts.len())));
+        let how = if r.incremental {
+            format!(
+                "{}",
+                if r.steps.is_empty() {
+                    "no table change".to_string()
+                } else {
+                    r.steps.join("; ")
+                }
+            )
+        } else {
+            format!(
+                "tables rebuilt ({})",
+                r.rebuilt_because.clone().unwrap_or_default()
+            )
+        };
+        m.set(
+            "note",
+            json!(format!(
+                "{how}; {} new default values, {} migrations",
+                r.new_defaults,
+                r.scripts.len()
+            )),
+        );
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&dir);

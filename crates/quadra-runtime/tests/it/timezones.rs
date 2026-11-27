@@ -20,9 +20,23 @@ fn run(dir: &std::path::Path) {
     let p = Project::load(dir).unwrap();
     let results = match quadra_runtime::run_tests(&p, None) {
         Ok(r) => r,
-        Err(d) => panic!("the project has errors: {:?}", d.iter().map(|d| d.message.clone()).collect::<Vec<_>>()),
+        Err(d) => panic!(
+            "the project has errors: {:?}",
+            d.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+        ),
     };
-    let failed: Vec<String> = results.iter().filter(|t| !t.passed).map(|t| format!("{} ({}): {}", t.name, t.location, t.message.clone().unwrap_or_default())).collect();
+    let failed: Vec<String> = results
+        .iter()
+        .filter(|t| !t.passed)
+        .map(|t| {
+            format!(
+                "{} ({}): {}",
+                t.name,
+                t.location,
+                t.message.clone().unwrap_or_default()
+            )
+        })
+        .collect();
     assert!(!results.is_empty());
     assert!(failed.is_empty(), "failed:\n{}", failed.join("\n"));
 }
@@ -100,11 +114,17 @@ test "a literal date-time is a time of the project's clock":
 
 #[test]
 fn the_project_zone_and_explicit_zones() {
-    let dir = project("rome", &[
-        ("quadra.toml", "[project]\nname = \"tz\"\ntimezone = \"Europe/Rome\"\n"),
-        ("main.qd", MODEL),
-        ("tests/time.test.qd", TESTS),
-    ]);
+    let dir = project(
+        "rome",
+        &[
+            (
+                "quadra.toml",
+                "[project]\nname = \"tz\"\ntimezone = \"Europe/Rome\"\n",
+            ),
+            ("main.qd", MODEL),
+            ("tests/time.test.qd", TESTS),
+        ],
+    );
     run(&dir);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -125,16 +145,32 @@ fn without_a_zone_the_project_is_in_utc() {
 
 #[test]
 fn a_zone_that_does_not_exist_is_refused() {
-    let dir = project("bad", &[
-        ("quadra.toml", "[project]\nname = \"bad\"\ntimezone = \"Europe/Atlantis\"\n"),
-        ("main.qd", "entity A:\n    n: Int\n"),
-    ]);
+    let dir = project(
+        "bad",
+        &[
+            (
+                "quadra.toml",
+                "[project]\nname = \"bad\"\ntimezone = \"Europe/Atlantis\"\n",
+            ),
+            ("main.qd", "entity A:\n    n: Int\n"),
+        ],
+    );
     let e = Project::load(&dir).err().expect("refused");
     assert!(e.to_string().contains("Europe/Atlantis"), "{e}");
     std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"bad\"\n").unwrap();
-    std::fs::write(dir.join("main.qd"), "entity A:\n    at: DateTime\n    d = at.in(\"Mars/Base\").date\n").unwrap();
+    std::fs::write(
+        dir.join("main.qd"),
+        "entity A:\n    at: DateTime\n    d = at.in(\"Mars/Base\").date\n",
+    )
+    .unwrap();
     let p = Project::load(&dir).unwrap();
     let c = quadra_analysis::check(&p);
-    assert!(c.diagnostics.iter().any(|d| d.message.contains("Mars/Base")), "{:?}", c.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>());
+    assert!(
+        c.diagnostics
+            .iter()
+            .any(|d| d.message.contains("Mars/Base")),
+        "{:?}",
+        c.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }

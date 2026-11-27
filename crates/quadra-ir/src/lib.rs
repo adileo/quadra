@@ -144,10 +144,16 @@ impl FormatSpec {
             rest = &rest[1..];
         }
         let digits = rest.chars().take_while(char::is_ascii_digit).count();
-        let width = if digits > 0 { rest[..digits].parse().ok()? } else { 0 };
+        let width = if digits > 0 {
+            rest[..digits].parse().ok()?
+        } else {
+            0
+        };
         rest = &rest[digits..];
         let precision = match rest.strip_prefix('.') {
-            Some(p) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => Some(p.parse().ok()?),
+            Some(p) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+                Some(p.parse().ok()?)
+            }
             Some(_) => return None,
             None if rest.is_empty() => None,
             None => return None,
@@ -155,7 +161,12 @@ impl FormatSpec {
         if spec.is_empty() || (zero && align.is_some()) {
             return None;
         }
-        Some(FormatSpec { align, zero, width, precision })
+        Some(FormatSpec {
+            align,
+            zero,
+            width,
+            precision,
+        })
     }
 
     /// Pad a formatted value to the width: numbers right-aligned (zero-padded after the sign
@@ -175,7 +186,11 @@ impl FormatSpec {
         }
         match self.align.unwrap_or(if numeric { '>' } else { '<' }) {
             '<' => format!("{text}{}", " ".repeat(fill)),
-            '^' => format!("{}{text}{}", " ".repeat(fill / 2), " ".repeat(fill - fill / 2)),
+            '^' => format!(
+                "{}{text}{}",
+                " ".repeat(fill / 2),
+                " ".repeat(fill - fill / 2)
+            ),
             _ => format!("{}{text}", " ".repeat(fill)),
         }
     }
@@ -314,7 +329,12 @@ impl Expr {
     /// visited: callers that must see everything treat a block on its own.
     pub fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
         match &self.kind {
-            ExprKind::Lit(_) | ExprKind::Quantity { .. } | ExprKind::Name(_) | ExprKind::SelfRef | ExprKind::Error | ExprKind::Block(_) => {}
+            ExprKind::Lit(_)
+            | ExprKind::Quantity { .. }
+            | ExprKind::Name(_)
+            | ExprKind::SelfRef
+            | ExprKind::Error
+            | ExprKind::Block(_) => {}
             ExprKind::FString(parts) => {
                 for p in parts {
                     if let FPart::Expr(e, _) = p {
@@ -333,12 +353,18 @@ impl Expr {
                 f(base);
                 f(index);
             }
-            ExprKind::Unary { expr, .. } | ExprKind::As { body: expr, .. } | ExprKind::Fail(expr) => f(expr),
+            ExprKind::Unary { expr, .. }
+            | ExprKind::As { body: expr, .. }
+            | ExprKind::Fail(expr) => f(expr),
             ExprKind::Binary { lhs, rhs, .. } => {
                 f(lhs);
                 f(rhs);
             }
-            ExprKind::If { cond, then, otherwise } => {
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 f(cond);
                 f(then);
                 f(otherwise);
@@ -380,7 +406,12 @@ impl Expr {
     pub fn map_children(&self, f: &mut dyn FnMut(&Expr) -> Expr) -> Expr {
         let b = |e: &Expr, f: &mut dyn FnMut(&Expr) -> Expr| Box::new(f(e));
         let kind = match &self.kind {
-            ExprKind::Lit(_) | ExprKind::Quantity { .. } | ExprKind::Name(_) | ExprKind::SelfRef | ExprKind::Error | ExprKind::Block(_) => self.kind.clone(),
+            ExprKind::Lit(_)
+            | ExprKind::Quantity { .. }
+            | ExprKind::Name(_)
+            | ExprKind::SelfRef
+            | ExprKind::Error
+            | ExprKind::Block(_) => self.kind.clone(),
             ExprKind::FString(parts) => ExprKind::FString(
                 parts
                     .iter()
@@ -390,22 +421,90 @@ impl Expr {
                     })
                     .collect(),
             ),
-            ExprKind::Field { base, name, optional } => ExprKind::Field { base: b(base, f), name: name.clone(), optional: *optional },
-            ExprKind::Call { callee, args } => ExprKind::Call { callee: b(callee, f), args: args.iter().map(|a| Arg { name: a.name.clone(), value: f(&a.value), spread: a.spread }).collect() },
-            ExprKind::Index { base, index } => ExprKind::Index { base: b(base, f), index: b(index, f) },
-            ExprKind::Unary { op, expr } => ExprKind::Unary { op: op.clone(), expr: b(expr, f) },
-            ExprKind::As { user, body } => ExprKind::As { user: user.clone(), body: b(body, f) },
+            ExprKind::Field {
+                base,
+                name,
+                optional,
+            } => ExprKind::Field {
+                base: b(base, f),
+                name: name.clone(),
+                optional: *optional,
+            },
+            ExprKind::Call { callee, args } => ExprKind::Call {
+                callee: b(callee, f),
+                args: args
+                    .iter()
+                    .map(|a| Arg {
+                        name: a.name.clone(),
+                        value: f(&a.value),
+                        spread: a.spread,
+                    })
+                    .collect(),
+            },
+            ExprKind::Index { base, index } => ExprKind::Index {
+                base: b(base, f),
+                index: b(index, f),
+            },
+            ExprKind::Unary { op, expr } => ExprKind::Unary {
+                op: op.clone(),
+                expr: b(expr, f),
+            },
+            ExprKind::As { user, body } => ExprKind::As {
+                user: user.clone(),
+                body: b(body, f),
+            },
             ExprKind::Fail(e) => ExprKind::Fail(b(e, f)),
-            ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary { op: op.clone(), lhs: b(lhs, f), rhs: b(rhs, f) },
-            ExprKind::If { cond, then, otherwise } => ExprKind::If { cond: b(cond, f), then: b(then, f), otherwise: b(otherwise, f) },
-            ExprKind::Lambda { params, body } => ExprKind::Lambda { params: params.clone(), body: std::sync::Arc::new(f(body)) },
-            ExprKind::Tuple(items) => ExprKind::Tuple(items.iter().map(|(n, e)| (n.clone(), f(e))).collect()),
-            ExprKind::List(args) => ExprKind::List(args.iter().map(|a| Arg { name: a.name.clone(), value: f(&a.value), spread: a.spread }).collect()),
+            ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+                op: op.clone(),
+                lhs: b(lhs, f),
+                rhs: b(rhs, f),
+            },
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => ExprKind::If {
+                cond: b(cond, f),
+                then: b(then, f),
+                otherwise: b(otherwise, f),
+            },
+            ExprKind::Lambda { params, body } => ExprKind::Lambda {
+                params: params.clone(),
+                body: std::sync::Arc::new(f(body)),
+            },
+            ExprKind::Tuple(items) => {
+                ExprKind::Tuple(items.iter().map(|(n, e)| (n.clone(), f(e))).collect())
+            }
+            ExprKind::List(args) => ExprKind::List(
+                args.iter()
+                    .map(|a| Arg {
+                        name: a.name.clone(),
+                        value: f(&a.value),
+                        spread: a.spread,
+                    })
+                    .collect(),
+            ),
             ExprKind::Set(items) => ExprKind::Set(items.iter().map(|e| f(e)).collect()),
-            ExprKind::When(arms) => ExprKind::When(arms.iter().map(|(c, v)| (c.as_ref().map(|c| f(c)), f(v))).collect()),
-            ExprKind::Match { subject, arms } => ExprKind::Match { subject: b(subject, f), arms: arms.iter().map(|a| Arm { patterns: a.patterns.clone(), body: f(&a.body) }).collect() },
+            ExprKind::When(arms) => ExprKind::When(
+                arms.iter()
+                    .map(|(c, v)| (c.as_ref().map(|c| f(c)), f(v)))
+                    .collect(),
+            ),
+            ExprKind::Match { subject, arms } => ExprKind::Match {
+                subject: b(subject, f),
+                arms: arms
+                    .iter()
+                    .map(|a| Arm {
+                        patterns: a.patterns.clone(),
+                        body: f(&a.body),
+                    })
+                    .collect(),
+            },
         };
-        Expr { kind, span: self.span }
+        Expr {
+            kind,
+            span: self.span,
+        }
     }
 }
 
@@ -818,7 +917,12 @@ impl Model {
     }
 
     pub(crate) fn reindex(&mut self) {
-        self.index = self.entities.iter().enumerate().map(|(i, e)| (e.name.clone(), i)).collect();
+        self.index = self
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name.clone(), i))
+            .collect();
         let mut vi: rustc_hash::FxHashMap<String, (u8, usize, usize, usize)> = Default::default();
         for (i, e) in self.enums.iter().enumerate() {
             for (k, v) in e.variants.iter().enumerate() {
@@ -827,7 +931,13 @@ impl Model {
         }
         for (i, ent) in self.entities.iter().enumerate() {
             for (j, f) in ent.fields.iter().enumerate() {
-                for (k, v) in f.ty.as_ref().and_then(|t| inline_enum(t)).into_iter().flatten().enumerate() {
+                for (k, v) in
+                    f.ty.as_ref()
+                        .and_then(|t| inline_enum(t))
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                {
                     vi.entry(v.name.clone()).or_insert((1, i, j, k));
                 }
             }
@@ -837,7 +947,11 @@ impl Model {
 
     /// All fields of an entity, including those inherited from traits (own fields first).
     pub fn all_fields<'m>(&'m self, entity: &'m Entity) -> Vec<&'m Field> {
-        let mut out: Vec<&Field> = entity.fields.iter().filter(|f| !f.default_override).collect();
+        let mut out: Vec<&Field> = entity
+            .fields
+            .iter()
+            .filter(|f| !f.default_override)
+            .collect();
         let mut stack: Vec<&str> = entity.traits.iter().map(String::as_str).collect();
         let mut seen = std::collections::HashSet::new();
         while let Some(t) = stack.pop() {
@@ -859,7 +973,8 @@ impl Model {
     /// The traits an entity implements, directly or through other traits (nearest first).
     pub fn all_traits<'m>(&'m self, entity: &'m Entity) -> Vec<&'m Entity> {
         let mut out: Vec<&Entity> = Vec::new();
-        let mut queue: std::collections::VecDeque<&str> = entity.traits.iter().map(String::as_str).collect();
+        let mut queue: std::collections::VecDeque<&str> =
+            entity.traits.iter().map(String::as_str).collect();
         while let Some(t) = queue.pop_front() {
             let Some(te) = self.entity(t) else { continue };
             if out.iter().any(|o| o.name == te.name) {
@@ -893,7 +1008,11 @@ impl Model {
     /// A field of an entity or its traits: the first of `all_fields` with that name, found
     /// without building the list (it is called on every read of a field).
     pub fn find_field<'m>(&'m self, entity: &'m Entity, name: &str) -> Option<&'m Field> {
-        if let Some(f) = entity.fields.iter().find(|f| !f.default_override && f.name == name) {
+        if let Some(f) = entity
+            .fields
+            .iter()
+            .find(|f| !f.default_override && f.name == name)
+        {
             return Some(f);
         }
         if entity.traits.is_empty() {
@@ -927,13 +1046,22 @@ impl Model {
                 actions.push(b);
             }
         }
-        let automatic = flow.transitions.iter().any(|t| t.by.is_none() && t.when.is_some());
+        let automatic = flow
+            .transitions
+            .iter()
+            .any(|t| t.by.is_none() && t.when.is_some());
         let how = match (actions.is_empty(), automatic) {
             (false, false) => format!("run one of its actions ({})", actions.join(", ")),
-            (false, true) => format!("run one of its actions ({}), or let its automatic transitions move it", actions.join(", ")),
+            (false, true) => format!(
+                "run one of its actions ({}), or let its automatic transitions move it",
+                actions.join(", ")
+            ),
             (true, _) => "it moves by its automatic transitions".to_string(),
         };
-        Some(format!("`{}.{field}` changes only through its flow: {how}", entity.name))
+        Some(format!(
+            "`{}.{field}` changes only through its flow: {how}",
+            entity.name
+        ))
     }
 
     /// The state a new record starts in, for the field of a flow whose default names a state.
@@ -967,7 +1095,10 @@ impl Model {
             };
             let pe = self.entity(&name)?;
             if pe.kind == EntityKind::Trait {
-                return self.implementors(&name).into_iter().find_map(|i| self.frozen_owner(i));
+                return self
+                    .implementors(&name)
+                    .into_iter()
+                    .find_map(|i| self.frozen_owner(i));
             }
             cur = pe;
         }
@@ -976,14 +1107,22 @@ impl Model {
 
     /// Entities implementing a trait (directly or through other traits).
     pub fn implementors(&self, trait_name: &str) -> Vec<&Entity> {
-        self.entities.iter().filter(|e| e.kind != EntityKind::Trait && self.implements(e, trait_name)).collect()
+        self.entities
+            .iter()
+            .filter(|e| e.kind != EntityKind::Trait && self.implements(e, trait_name))
+            .collect()
     }
 
     pub fn implements(&self, entity: &Entity, trait_name: &str) -> bool {
         if entity.name == trait_name {
             return true;
         }
-        entity.traits.iter().any(|t| t == trait_name || self.entity(t).map_or(false, |te| self.implements(te, trait_name)))
+        entity.traits.iter().any(|t| {
+            t == trait_name
+                || self
+                    .entity(t)
+                    .map_or(false, |te| self.implements(te, trait_name))
+        })
     }
 
     /// Enum (named or inline) that declares a variant, with its definition.
@@ -992,7 +1131,13 @@ impl Model {
         if let Some(&(kind, i, j, k)) = self.variant_index.get(name) {
             let v = match kind {
                 0 => self.enums.get(i).and_then(|e| e.variants.get(k)),
-                _ => self.entities.get(i).and_then(|e| e.fields.get(j)).and_then(|f| f.ty.as_ref()).and_then(|t| inline_enum(t)).and_then(|vs| vs.get(k)),
+                _ => self
+                    .entities
+                    .get(i)
+                    .and_then(|e| e.fields.get(j))
+                    .and_then(|f| f.ty.as_ref())
+                    .and_then(|t| inline_enum(t))
+                    .and_then(|vs| vs.get(k)),
             };
             if let Some(v) = v.filter(|v| v.name == name) {
                 return Some(v);
@@ -1005,7 +1150,11 @@ impl Model {
         }
         for ent in &self.entities {
             for f in &ent.fields {
-                if let Some(v) = f.ty.as_ref().and_then(|t| inline_enum(t)).and_then(|vs| vs.iter().find(|v| v.name == name)) {
+                if let Some(v) =
+                    f.ty.as_ref()
+                        .and_then(|t| inline_enum(t))
+                        .and_then(|vs| vs.iter().find(|v| v.name == name))
+                {
                     return Some(v);
                 }
             }

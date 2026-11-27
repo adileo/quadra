@@ -19,7 +19,10 @@ use std::process::ExitCode;
 const FLAGS: &[&str] = &["--url", "--to", "--entity"];
 
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn positionals(args: &[String]) -> Vec<String> {
@@ -63,7 +66,11 @@ pub fn file_name(name: &str) -> String {
 fn free(dir: &Path, base: &str, taken: &[PathBuf]) -> PathBuf {
     let mut n = 1;
     loop {
-        let name = if n == 1 { format!("{base}.qdi") } else { format!("{base}-{n}.qdi") };
+        let name = if n == 1 {
+            format!("{base}.qdi")
+        } else {
+            format!("{base}-{n}.qdi")
+        };
         let p = dir.join(name);
         if !p.exists() && !taken.contains(&p) {
             return p;
@@ -77,8 +84,13 @@ fn definition(v: &ViewRow, shares: &[store::Share], warnings: &mut Vec<String>) 
     for s in shares {
         match s.target.split_once(':') {
             Some(("role", r)) => sh.push(json!({ "type": "role", "name": r, "edit": s.edit })),
-            None if s.target == "everyone" => sh.push(json!({ "type": "everyone", "edit": s.edit })),
-            _ => warnings.push(format!("`{}`: its share with {} is not written in the file (share it again in the app)", v.name, s.target)),
+            None if s.target == "everyone" => {
+                sh.push(json!({ "type": "everyone", "edit": s.edit }))
+            }
+            _ => warnings.push(format!(
+                "`{}`: its share with {} is not written in the file (share it again in the app)",
+                v.name, s.target
+            )),
         }
     }
     json!({ "kind": v.kind, "entity": v.entity, "type": v.vtype, "name": v.name, "description": v.description, "config": v.config, "shares": sh })
@@ -108,27 +120,41 @@ pub fn apps(args: &[String]) -> ExitCode {
 /// The project's root, from the positional argument (`.` when none).
 fn root_of(path: Option<&String>) -> Result<PathBuf, String> {
     let p = PathBuf::from(path.map(String::as_str).unwrap_or("."));
-    quadra_sema::find_project_root(&p).ok_or_else(|| format!("no quadra.toml found in {} or its parents", p.display()))
+    quadra_sema::find_project_root(&p)
+        .ok_or_else(|| format!("no quadra.toml found in {} or its parents", p.display()))
 }
 
 fn pull(args: &[String]) -> Result<(), String> {
     let all = args.iter().any(|a| a == "--all");
     let pos = positionals(args);
     // `pull <name> [path]` or `pull --all [path]`
-    let (which, path) = if all { (None, pos.first()) } else { (pos.first().cloned(), pos.get(1)) };
+    let (which, path) = if all {
+        (None, pos.first())
+    } else {
+        (pos.first().cloned(), pos.get(1))
+    };
     if which.is_none() && !all {
         return Err("which app or view? `quadra apps pull <name|id>` (or `--all`)".into());
     }
     let root = root_of(path)?;
     let url = super::database_url(&root, args);
-    let to = root.join(flag(args, "--to").unwrap_or_else(|| quadra_sema::INTERFACES_DIR.to_string()));
+    let to =
+        root.join(flag(args, "--to").unwrap_or_else(|| quadra_sema::INTERFACES_DIR.to_string()));
     let mut conn = Conn::open(&url)?;
     let rows = store::views(&mut conn, None, None)?;
-    let folders: std::collections::HashMap<u64, ViewRow> = rows.iter().filter(|v| v.kind == "folder").map(|v| (v.id, v.clone())).collect();
+    let folders: std::collections::HashMap<u64, ViewRow> = rows
+        .iter()
+        .filter(|v| v.kind == "folder")
+        .map(|v| (v.id, v.clone()))
+        .collect();
     let chosen: Vec<ViewRow> = rows
         .iter()
         .filter(|v| v.origin.as_deref() != Some("file") && (v.kind == "app" || v.kind == "view"))
-        .filter(|v| all || which.as_deref().is_some_and(|w| w == v.name || w.parse::<u64>().ok() == Some(v.id)))
+        .filter(|v| {
+            all || which
+                .as_deref()
+                .is_some_and(|w| w == v.name || w.parse::<u64>().ok() == Some(v.id))
+        })
         .cloned()
         .collect();
     if chosen.is_empty() {
@@ -153,9 +179,17 @@ fn pull(args: &[String]) -> Result<(), String> {
         dirs.reverse();
         let dir = dirs.iter().fold(to.clone(), |d, x| d.join(x));
         let path = free(&dir, &file_name(&v.name), &taken);
-        let def = definition(v, shares.get(&v.id).map(Vec::as_slice).unwrap_or(&[]), &mut warnings);
+        let def = definition(
+            v,
+            shares.get(&v.id).map(Vec::as_slice).unwrap_or(&[]),
+            &mut warnings,
+        );
         let (text, w) = quadra_qdi::from_json(&[def])?;
-        warnings.extend(w.into_iter().filter(|w| !w.contains("owner")).map(|w| format!("{}: {w}", v.name)));
+        warnings.extend(
+            w.into_iter()
+                .filter(|w| !w.contains("owner"))
+                .map(|w| format!("{}: {w}", v.name)),
+        );
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         taken.push(path.clone());
@@ -164,17 +198,30 @@ fn pull(args: &[String]) -> Result<(), String> {
     // views: those of an entity together, after the ones already in the file
     let mut by_entity: std::collections::BTreeMap<String, Vec<&ViewRow>> = Default::default();
     for v in chosen.iter().filter(|v| v.kind == "view") {
-        by_entity.entry(v.entity.clone().unwrap_or_default()).or_default().push(v);
+        by_entity
+            .entry(v.entity.clone().unwrap_or_default())
+            .or_default()
+            .push(v);
     }
     for (entity, views) in by_entity {
         let dir = to.join("views");
         let path = dir.join(format!("{}.qdi", file_name(&entity)));
         let mut defs: Vec<J> = match std::fs::read_to_string(&path) {
-            Ok(t) => quadra_qdi::to_json(&t).map_err(|e| format!("{}: {}", path.display(), e.first().map(|d| d.message.clone()).unwrap_or_default()))?,
+            Ok(t) => quadra_qdi::to_json(&t).map_err(|e| {
+                format!(
+                    "{}: {}",
+                    path.display(),
+                    e.first().map(|d| d.message.clone()).unwrap_or_default()
+                )
+            })?,
             Err(_) => Vec::new(),
         };
         for v in &views {
-            let mut def = definition(v, shares.get(&v.id).map(Vec::as_slice).unwrap_or(&[]), &mut warnings);
+            let mut def = definition(
+                v,
+                shares.get(&v.id).map(Vec::as_slice).unwrap_or(&[]),
+                &mut warnings,
+            );
             let mut name = v.name.clone();
             let mut n = 2;
             while defs.iter().any(|d| d["name"] == json!(name)) {
@@ -190,19 +237,41 @@ fn pull(args: &[String]) -> Result<(), String> {
         written.push((path, views.iter().map(|v| v.id).collect()));
     }
     // the data copies are archived: the files' take their place
-    let at = chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let at = chrono::Local::now()
+        .naive_local()
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
     for (path, ids) in &written {
-        let rel = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
         for id in ids {
-            let del = ViewChange { delete: true, ..Default::default() };
-            store::update_view(&mut conn, *id, None, &del, &at, None, &format!("pulled into {rel}"))?.ok();
+            let del = ViewChange {
+                delete: true,
+                ..Default::default()
+            };
+            store::update_view(
+                &mut conn,
+                *id,
+                None,
+                &del,
+                &at,
+                None,
+                &format!("pulled into {rel}"),
+            )?
+            .ok();
         }
         println!("✓ {rel}");
     }
     for w in warnings {
         eprintln!("warning: {w}");
     }
-    println!("{} file(s) written: they are installed when the server starts (or `quadra apps push`)", written.len());
+    println!(
+        "{} file(s) written: they are installed when the server starts (or `quadra apps push`)",
+        written.len()
+    );
     Ok(())
 }
 
@@ -217,37 +286,85 @@ fn push(args: &[String]) -> Result<(), String> {
         .filter(|d| d.severity == quadra_sema::Severity::Error)
         .map(|d| {
             let f = project.file(d.file);
-            let line = f.text[..usize::from(d.range.start()).min(f.text.len())].matches('\n').count() + 1;
-            format!("{}:{line}: {}", f.path.strip_prefix(&root).unwrap_or(&f.path).display(), d.message)
+            let line = f.text[..usize::from(d.range.start()).min(f.text.len())]
+                .matches('\n')
+                .count()
+                + 1;
+            format!(
+                "{}:{line}: {}",
+                f.path.strip_prefix(&root).unwrap_or(&f.path).display(),
+                d.message
+            )
         })
         .collect();
     if !errors.is_empty() {
-        return Err(format!("the project does not check (`quadra check`):\n  {}", errors.join("\n  ")));
+        return Err(format!(
+            "the project does not check (`quadra check`):\n  {}",
+            errors.join("\n  ")
+        ));
     }
     let base = root.join(quadra_sema::INTERFACES_DIR);
     let mut items = Vec::new();
     for f in project.interface_files() {
-        let rel = f.path.strip_prefix(&base).unwrap_or(&f.path).with_extension("").to_string_lossy().replace('\\', "/");
-        let dirs: Vec<String> = rel.split('/').map(str::to_string).collect::<Vec<_>>().split_last().map(|(_, d)| d.to_vec()).unwrap_or_default();
-        for d in quadra_qdi::to_json(&f.text).map_err(|e| format!("{rel}.qdi: {}", e.first().map(|d| d.message.clone()).unwrap_or_default()))? {
+        let rel = f
+            .path
+            .strip_prefix(&base)
+            .unwrap_or(&f.path)
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let dirs: Vec<String> = rel
+            .split('/')
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+            .split_last()
+            .map(|(_, d)| d.to_vec())
+            .unwrap_or_default();
+        for d in quadra_qdi::to_json(&f.text).map_err(|e| {
+            format!(
+                "{rel}.qdi: {}",
+                e.first().map(|d| d.message.clone()).unwrap_or_default()
+            )
+        })? {
             let app = d["kind"] == json!("app");
-            let path = if app { rel.clone() } else { format!("{rel}#{}", d["name"].as_str().unwrap_or("")) };
-            items.push(store::FileItem { path, dirs: if app { dirs.clone() } else { Vec::new() }, def: d });
+            let path = if app {
+                rel.clone()
+            } else {
+                format!("{rel}#{}", d["name"].as_str().unwrap_or(""))
+            };
+            items.push(store::FileItem {
+                path,
+                dirs: if app { dirs.clone() } else { Vec::new() },
+                def: d,
+            });
         }
     }
     let url = super::database_url(&root, args);
     let mut conn = Conn::open(&url)?;
-    let at = chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let at = chrono::Local::now()
+        .naive_local()
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
     let done = store::install_files(&mut conn, &items, &at, None)?;
-    println!("✓ {} interface file(s): {} created, {} changed, {} removed", project.interface_files().count(), done.created, done.changed, done.removed);
+    println!(
+        "✓ {} interface file(s): {} created, {} changed, {} removed",
+        project.interface_files().count(),
+        done.created,
+        done.changed,
+        done.removed
+    );
     Ok(())
 }
 
 fn new(args: &[String]) -> Result<(), String> {
     let pos = positionals(args);
-    let name = pos.first().ok_or("the app's name: `quadra apps new \"Warehouse board\"`")?.clone();
+    let name = pos
+        .first()
+        .ok_or("the app's name: `quadra apps new \"Warehouse board\"`")?
+        .clone();
     let root = root_of(pos.get(1))?;
-    let to = root.join(flag(args, "--to").unwrap_or_else(|| quadra_sema::INTERFACES_DIR.to_string()));
+    let to =
+        root.join(flag(args, "--to").unwrap_or_else(|| quadra_sema::INTERFACES_DIR.to_string()));
     let path = to.join(format!("{}.qdi", file_name(&name)));
     if path.exists() {
         return Err(format!("{} exists already", path.display()));
@@ -256,9 +373,25 @@ fn new(args: &[String]) -> Result<(), String> {
     if let Some(entity) = flag(args, "--entity") {
         let project = quadra_sema::Project::load(&root).map_err(|e| e.to_string())?;
         let checked = quadra_analysis::check(&project);
-        let model = checked.model.as_ref().ok_or("the project has errors: run `quadra check`")?;
-        let e = model.entity(&entity).ok_or(format!("no entity `{entity}`"))?;
-        let fields: Vec<&str> = e.fields.iter().filter(|f| f.formula.is_none() && f.ty.as_ref().is_some_and(|t| !matches!(t, quadra_ir::Ty::List(_) | quadra_ir::Ty::Set(_)))).map(|f| f.name.as_str()).take(6).collect();
+        let model = checked
+            .model
+            .as_ref()
+            .ok_or("the project has errors: run `quadra check`")?;
+        let e = model
+            .entity(&entity)
+            .ok_or(format!("no entity `{entity}`"))?;
+        let fields: Vec<&str> = e
+            .fields
+            .iter()
+            .filter(|f| {
+                f.formula.is_none()
+                    && f.ty.as_ref().is_some_and(|t| {
+                        !matches!(t, quadra_ir::Ty::List(_) | quadra_ir::Ty::Set(_))
+                    })
+            })
+            .map(|f| f.name.as_str())
+            .take(6)
+            .collect();
         let var = file_name(&entity).replace('-', "_");
         text.push_str(&format!(
             "\n        row height 3:\n            kpi count {} width 6:\n                source: {entity}.count()\n\n        row height 10:\n            view {var}s {} width 24:\n                of: {entity}\n                type: grid\n                select: {var}\n                fields: {}\n",
@@ -269,8 +402,16 @@ fn new(args: &[String]) -> Result<(), String> {
     }
     std::fs::create_dir_all(&to).map_err(|e| format!("{}: {e}", to.display()))?;
     // the canonical form, as the client writes it back
-    let text = quadra_qdi::format(&text).map_err(|e| format!("{}", e.first().map(|d| d.message.clone()).unwrap_or_default()))?;
+    let text = quadra_qdi::format(&text).map_err(|e| {
+        format!(
+            "{}",
+            e.first().map(|d| d.message.clone()).unwrap_or_default()
+        )
+    })?;
     std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-    println!("✓ {} (check it: `quadra check`)", path.strip_prefix(&root).unwrap_or(&path).display());
+    println!(
+        "✓ {} (check it: `quadra check`)",
+        path.strip_prefix(&root).unwrap_or(&path).display()
+    );
     Ok(())
 }

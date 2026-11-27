@@ -31,7 +31,10 @@ metric orders_in(period: DateRange) -> Int:
 ";
 
 fn clock() -> chrono::NaiveDateTime {
-    chrono::NaiveDate::from_ymd_opt(2026, 11, 20).unwrap().and_hms_opt(10, 0, 0).unwrap()
+    chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+        .unwrap()
+        .and_hms_opt(10, 0, 0)
+        .unwrap()
 }
 
 fn project_copy(tag: &str) -> PathBuf {
@@ -58,7 +61,10 @@ fn fresh(target: &str, tag: &str) -> String {
         format!("sqlite:{}", p.display())
     } else {
         let schema = format!("qcompl_{}_{tag}", std::process::id());
-        Conn::open(target).unwrap().batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")).unwrap();
+        Conn::open(target)
+            .unwrap()
+            .batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+            .unwrap();
         format!("{target}#schema={schema}")
     }
 }
@@ -69,7 +75,8 @@ fn cleanup(target: &str, url: &str, root: &Path) {
             let _ = std::fs::remove_file(format!("{path}{s}"));
         }
     } else if let Some((_, schema)) = url.split_once("#schema=") {
-        let _ = Conn::open(target).and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
+        let _ = Conn::open(target)
+            .and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
     }
     let _ = std::fs::remove_dir_all(root);
 }
@@ -79,10 +86,23 @@ fn world(target: &str, tag: &str) -> (PathBuf, String) {
     let url = fresh(target, tag);
     let dir = std::env::temp_dir().join(format!("quadra-compl-{}-{tag}-gen", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let st = std::process::Command::new(env!("CARGO_BIN_EXE_quadra")).args(["bench", "gen", "--scale", "tiny", "--out"]).arg(&dir).output().unwrap();
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_quadra"))
+        .args(["bench", "gen", "--scale", "tiny", "--out"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
     let checked = quadra_analysis::check(&quadra_sema::Project::load(&root).unwrap());
-    let errors: Vec<String> = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
+    let errors: Vec<String> = checked
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == quadra_sema::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
     assert!(errors.is_empty(), "{errors:?}");
     let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
     quadra_store::ops::init(&url, m, r, clock()).unwrap();
@@ -92,7 +112,15 @@ fn world(target: &str, tag: &str) -> (PathBuf, String) {
 }
 
 fn pick(url: &str, sql: &str) -> u64 {
-    Conn::open(url).unwrap().query(sql, &[]).unwrap().into_iter().next().and_then(|r| r.into_iter().next().flatten()).and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("no row: {sql}"))
+    Conn::open(url)
+        .unwrap()
+        .query(sql, &[])
+        .unwrap()
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("no row: {sql}"))
 }
 
 /// The app's filters, as the client sends them to `/v1/eval`.
@@ -124,11 +152,21 @@ fn ask(local: &mut Local, user: u64, marked: &str, kind: &str) -> J {
 }
 
 fn labels(r: &J) -> Vec<String> {
-    r["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    r["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn item<'a>(r: &'a J, label: &str) -> &'a J {
-    r["items"].as_array().unwrap().iter().find(|i| i["label"] == json!(label)).unwrap_or_else(|| panic!("no `{label}` in {:?}", labels(r)))
+    r["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == json!(label))
+        .unwrap_or_else(|| panic!("no `{label}` in {:?}", labels(r)))
 }
 
 fn has(r: &J, label: &str) -> bool {
@@ -138,7 +176,12 @@ fn has(r: &J, label: &str) -> bool {
 fn complete_on(target: &str) {
     let tag = if target == "sqlite" { "s" } else { "p" };
     let (root, url) = world(target, tag);
-    let user = |login: &str| pick(&url, &format!("SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = '{login}'"));
+    let user = |login: &str| {
+        pick(
+            &url,
+            &format!("SELECT CAST(\"id\" AS TEXT) FROM \"user\" WHERE \"login\" = '{login}'"),
+        )
+    };
     let (admin, s1, l1) = (user("admin"), user("sales0001"), user("logistics01"));
     let mut t = Local::open(&root, &url, 64).unwrap();
     let f = "formula";
@@ -169,7 +212,12 @@ fn complete_on(target: &str) {
     assert_eq!(r["receiver"], json!("[Customer]"), "{r}");
     assert!(has(&r, "where") && has(&r, "sum") && has(&r, "group_by"));
     assert_eq!(item(&r, "revenue")["detail"], json!("[Money<EUR>]"));
-    let r = ask(&mut t, admin, "=Region.first().customers.where(c => c.active).first().orders.|", f);
+    let r = ask(
+        &mut t,
+        admin,
+        "=Region.first().customers.where(c => c.active).first().orders.|",
+        f,
+    );
     assert_eq!(r["receiver"], json!("[Order]"), "{r}");
     // methods with their signature and what they give
     let r = ask(&mut t, admin, "=Order.|", f);
@@ -177,7 +225,10 @@ fn complete_on(target: &str) {
     assert_eq!(w["detail"], json!(".where(x => cond)"));
     assert!(w["doc"].as_str().unwrap().contains("satisfy"), "{w}");
     assert_eq!(w["insert"], json!("where("));
-    assert!(!has(&r, "total"), "an entity's records: methods, not fields");
+    assert!(
+        !has(&r, "total"),
+        "an entity's records: methods, not fields"
+    );
     // values: a text's methods, a date's parts
     let r = ask(&mut t, admin, "=Order.first().number.|", f);
     assert!(has(&r, "upper") && has(&r, "starts_with"), "{r}");
@@ -192,7 +243,10 @@ fn complete_on(target: &str) {
     assert_eq!(item(&r, "@amount_min")["detail"], json!("Money<EUR>?"));
     assert!(!has(&r, "@period__on"));
     assert_eq!(r["from"], json!(1), "`@` is part of what is replaced");
-    assert_eq!(item(&r, "@region")["doc"], json!("**Region**: the app's multi filter on Order.customer.region"));
+    assert_eq!(
+        item(&r, "@region")["doc"],
+        json!("**Region**: the app's multi filter on Order.customer.region")
+    );
     let r = ask(&mut t, admin, "=@region.|", f);
     assert_eq!(r["receiver"], json!("[Region]"));
     assert!(has(&r, "count") && has(&r, "code"));
@@ -202,22 +256,41 @@ fn complete_on(target: &str) {
     assert_eq!(labels(&r)[0], "@period");
 
     // ---- lambda parameters ----
-    let r = ask(&mut t, admin, "=Order.count(o => o.total > 100.00 EUR and |", f);
+    let r = ask(
+        &mut t,
+        admin,
+        "=Order.count(o => o.total > 100.00 EUR and |",
+        f,
+    );
     assert_eq!(item(&r, "o")["kind"], json!("variable"));
     assert_eq!(item(&r, "o")["detail"], json!("Order"));
     let r = ask(&mut t, admin, "=Order.sum(o => o.lines.sum(l => l.|", f);
     assert_eq!(r["receiver"], json!("OrderLine"), "{r}");
     assert!(has(&r, "amount") && has(&r, "product"));
-    let r = ask(&mut t, admin, "=Order.group_by(o => o.customer.region, o => o.date.month).map(g => g.|", f);
+    let r = ask(
+        &mut t,
+        admin,
+        "=Order.group_by(o => o.customer.region, o => o.date.month).map(g => g.|",
+        f,
+    );
     assert_eq!(item(&r, "key")["detail"], json!("Region"), "{r}");
     assert_eq!(item(&r, "key2")["detail"], json!("YearMonth"));
     assert_eq!(item(&r, "items")["detail"], json!("[Order]"));
-    let r = ask(&mut t, admin, "=Order.group_by(o => o.state).map(g => g.items.|", f);
+    let r = ask(
+        &mut t,
+        admin,
+        "=Order.group_by(o => o.state).map(g => g.items.|",
+        f,
+    );
     assert!(has(&r, "sum") && has(&r, "total"), "{r}");
 
     // ---- values of enums: those a comparison expects first ----
     let r = ask(&mut t, admin, "=Order.count(o => o.state is |", f);
-    assert_eq!(labels(&r)[..4], ["Draft", "Confirmed", "Shipped", "Cancelled"], "{r}");
+    assert_eq!(
+        labels(&r)[..4],
+        ["Draft", "Confirmed", "Shipped", "Cancelled"],
+        "{r}"
+    );
     let r = ask(&mut t, admin, "=Order.count(o => o.priority == H|", f);
     assert_eq!(labels(&r)[0], "High");
     let r = ask(&mut t, admin, "=Order.count(o => o.state in {Draft, |", f);
@@ -230,12 +303,26 @@ fn complete_on(target: &str) {
     // ---- functions and metrics, with their signature and doc ----
     let r = ask(&mut t, admin, "=lev|", f);
     let l = item(&r, "level_of");
-    assert_eq!((l["kind"].as_str(), l["detail"].as_str(), l["insert"].as_str()), (Some("function"), Some("level_of(c: Customer) -> Level"), Some("level_of(")));
+    assert_eq!(
+        (
+            l["kind"].as_str(),
+            l["detail"].as_str(),
+            l["insert"].as_str()
+        ),
+        (
+            Some("function"),
+            Some("level_of(c: Customer) -> Level"),
+            Some("level_of(")
+        )
+    );
     assert!(l["doc"].as_str().unwrap().contains("by revenue"), "{l}");
     let r = ask(&mut t, admin, "=orders|", f);
     let m = item(&r, "orders_in");
     assert_eq!(m["kind"], json!("metric"));
-    assert!(m["doc"].as_str().unwrap().contains("dated in the period"), "{m}");
+    assert!(
+        m["doc"].as_str().unwrap().contains("dated in the period"),
+        "{m}"
+    );
 
     // ---- sheets, and the cells they hold ----
     let r = ask(&mut t, admin, "=Sh|", f);
@@ -260,26 +347,53 @@ fn complete_on(target: &str) {
     let r = ask(&mut t, admin, "=Order.sum(|", f);
     assert_eq!(r["signature"]["label"], json!("sum(x => v)"), "{r}");
     assert_eq!(r["signature"]["active"], json!(0));
-    let r = ask(&mut t, admin, "=Order.where(o => o.date in DateRange(2026-01-01, |", f);
+    let r = ask(
+        &mut t,
+        admin,
+        "=Order.where(o => o.date in DateRange(2026-01-01, |",
+        f,
+    );
     assert_eq!(r["signature"]["label"], json!("DateRange(from, to)"), "{r}");
     assert_eq!(r["signature"]["params"], json!(["from", "to"]));
     assert_eq!(r["signature"]["active"], json!(1));
     let r = ask(&mut t, admin, "=orders_in(|", f);
-    assert_eq!(r["signature"]["label"], json!("orders_in(period: DateRange) -> Int"), "{r}");
+    assert_eq!(
+        r["signature"]["label"],
+        json!("orders_in(period: DateRange) -> Int"),
+        "{r}"
+    );
     let r = ask(&mut t, admin, "=Order.first().number.starts_with(|", f);
     assert_eq!(r["signature"]["label"], json!("starts_with(text)"), "{r}");
-    let r = ask(&mut t, admin, "=Order.where(o => (o.total > 0.00 EUR or |", f);
-    assert_eq!(r["signature"]["label"], json!("where(x => cond)"), "a `(` grouping is not a call: {r}");
+    let r = ask(
+        &mut t,
+        admin,
+        "=Order.where(o => (o.total > 0.00 EUR or |",
+        f,
+    );
+    assert_eq!(
+        r["signature"]["label"],
+        json!("where(x => cond)"),
+        "a `(` grouping is not a call: {r}"
+    );
     let r = ask(&mut t, admin, "=Order.group_by(o => o.state, |", f);
     assert_eq!(r["signature"]["active"], json!(1));
-    assert_eq!(r["signature"]["label"], json!("group_by(x => key, x => key2)"), "{r}");
+    assert_eq!(
+        r["signature"]["label"],
+        json!("group_by(x => key, x => key2)"),
+        "{r}"
+    );
 
     // ---- expressions and texts ----
     let r = ask(&mut t, admin, "Order.co|", "expr");
     assert_eq!(labels(&r)[0], "count");
     let r = ask(&mut t, admin, "Orders: {= Order.co| } and more", "template");
     assert_eq!(labels(&r)[0], "count");
-    let r = ask(&mut t, admin, "Orders: {= Order.count() } and Ord|", "template");
+    let r = ask(
+        &mut t,
+        admin,
+        "Orders: {= Order.count() } and Ord|",
+        "template",
+    );
     assert!(labels(&r).is_empty(), "outside `{{= … }}`: {r}");
     let r = ask(&mut t, admin, "Ord|", f);
     assert!(labels(&r).is_empty(), "a value, not a formula");
@@ -288,22 +402,38 @@ fn complete_on(target: &str) {
 
     // ---- what the user may not read is not offered ----
     let r = ask(&mut t, l1, "=Or|", f);
-    assert!(!has(&r, "Order") && !has(&r, "OrderLine"), "{:?}", labels(&r));
+    assert!(
+        !has(&r, "Order") && !has(&r, "OrderLine"),
+        "{:?}",
+        labels(&r)
+    );
     let r = ask(&mut t, l1, "=Re|", f);
     assert!(has(&r, "Region"));
     let r = ask(&mut t, l1, "=Order.|", f);
     assert!(labels(&r).is_empty(), "{r}");
     let r = ask(&mut t, l1, "=Region.first().customers.|", f);
-    assert!(has(&r, "count") && !has(&r, "credit_limit") && !has(&r, "name"), "methods, no field of customers: {r}");
+    assert!(
+        has(&r, "count") && !has(&r, "credit_limit") && !has(&r, "name"),
+        "methods, no field of customers: {r}"
+    );
     let r = ask(&mut t, s1, "=Customer.first().|", f);
-    assert!(has(&r, "name") && !has(&r, "credit_limit"), "a hidden field: {r}");
+    assert!(
+        has(&r, "name") && !has(&r, "credit_limit"),
+        "a hidden field: {r}"
+    );
     let r = ask(&mut t, admin, "=Customer.first().|", f);
     assert!(has(&r, "credit_limit"));
 
     // ---- bad requests ----
     let (st, _) = t.views(admin, "POST", "/v1/complete", &[], &json!({ "pos": 1 }));
     assert_eq!(st, 400);
-    let (st, _) = t.views(admin, "POST", "/v1/complete", &[], &json!({ "text": "=1", "kind": "nope" }));
+    let (st, _) = t.views(
+        admin,
+        "POST",
+        "/v1/complete",
+        &[],
+        &json!({ "text": "=1", "kind": "nope" }),
+    );
     assert_eq!(st, 400);
     // unknown parameters: completed without them
     let (st, b) = t.views(admin, "POST", "/v1/complete", &[], &json!({ "text": "=Order.", "params": [{ "name": "x", "entity": "Nope", "widget": "select" }] }));
@@ -311,7 +441,14 @@ fn complete_on(target: &str) {
     assert!(b["warning"].is_string() && has(&b, "where"));
 
     // ---- fast: no query of the data, nothing checked again ----
-    let cases = ["=Order.where(o => o.customer.region.|", "=Order.group_by(o => o.state).map(g => g.items.sum(o => o.|", "=@region.|", "=C1.|", "=Or|", "=Order.count(o => o.state is |"];
+    let cases = [
+        "=Order.where(o => o.customer.region.|",
+        "=Order.group_by(o => o.state).map(g => g.items.sum(o => o.|",
+        "=@region.|",
+        "=C1.|",
+        "=Or|",
+        "=Order.count(o => o.state is |",
+    ];
     let mut worst = 0.0f64;
     for _ in 0..5 {
         for c in cases {

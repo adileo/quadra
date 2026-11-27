@@ -32,7 +32,11 @@ impl Drop for Timed {
         DB_MICROS.fetch_add(us, Ordering::Relaxed);
         if let (Some(sql), Some(limit)) = (&self.1, slow_limit()) {
             if us >= limit {
-                eprintln!("slow statement: {:.1} ms: {}", us as f64 / 1000.0, sql.chars().take(300).collect::<String>());
+                eprintln!(
+                    "slow statement: {:.1} ms: {}",
+                    us as f64 / 1000.0,
+                    sql.chars().take(300).collect::<String>()
+                );
             }
         }
     }
@@ -41,11 +45,19 @@ impl Drop for Timed {
 /// `QUADRA_SLOW_SQL=<ms>`: statements that take longer are printed to stderr (diagnostics).
 fn slow_limit() -> Option<u64> {
     static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| std::env::var("QUADRA_SLOW_SQL").ok().and_then(|v| v.parse::<f64>().ok()).map(|ms| (ms * 1000.0) as u64))
+    *LIMIT.get_or_init(|| {
+        std::env::var("QUADRA_SLOW_SQL")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|ms| (ms * 1000.0) as u64)
+    })
 }
 
 fn timed(sql: &str) -> Timed {
-    Timed(std::time::Instant::now(), slow_limit().map(|_| sql.to_string()))
+    Timed(
+        std::time::Instant::now(),
+        slow_limit().map(|_| sql.to_string()),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +111,11 @@ fn lite(e: rusqlite::Error) -> String {
         }
         if f.code == rusqlite::ErrorCode::DiskFull {
             if let Some(max) = MAX_BYTES.with(|m| m.get()) {
-                let size = if max >= 1 << 20 { format!("{} MB", max >> 20) } else { format!("{} kB", max >> 10) };
+                let size = if max >= 1 << 20 {
+                    format!("{} MB", max >> 20)
+                } else {
+                    format!("{} kB", max >> 10)
+                };
                 let m = format!("too large: the database reached its size limit of {size} (nothing of this request was written)");
                 limits::hit(m.clone());
                 return m;
@@ -145,25 +161,48 @@ pub enum Conn {
     Postgres(postgres::Client),
 }
 
-const KINDS: &[&str] = &["bigint", "text", "numeric", "boolean", "date", "timestamp", "jsonb"];
+const KINDS: &[&str] = &[
+    "bigint",
+    "text",
+    "numeric",
+    "boolean",
+    "date",
+    "timestamp",
+    "jsonb",
+];
 
 impl Conn {
     /// `sqlite:path/to.db`, `sqlite::memory:`, `postgres://user@host:port/db`
     pub fn open(url: &str) -> Result<Conn, String> {
         if let Some(path) = url.strip_prefix("sqlite:") {
-            let c = if path == ":memory:" { rusqlite::Connection::open_in_memory() } else { rusqlite::Connection::open(path) }.map_err(|e| e.to_string())?;
+            let c = if path == ":memory:" {
+                rusqlite::Connection::open_in_memory()
+            } else {
+                rusqlite::Connection::open(path)
+            }
+            .map_err(|e| e.to_string())?;
             // another connection's checkpoint or write holds the file a moment: wait for it
             // rather than fail at once ("database is locked")
-            c.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;").map_err(|e| e.to_string())?;
+            c.execute_batch(
+                "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
+            )
+            .map_err(|e| e.to_string())?;
             // the file mapped in memory: every connection (every engine of a project) reads the
             // same pages from the system's cache instead of copying them into its own
             if path != ":memory:" {
-                c.execute_batch("PRAGMA mmap_size = 1073741824").map_err(|e| e.to_string())?;
+                c.execute_batch("PRAGMA mmap_size = 1073741824")
+                    .map_err(|e| e.to_string())?;
             }
             if let Some(max) = MAX_BYTES.with(|m| m.get()) {
-                let page: u64 = c.query_row("PRAGMA page_size", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+                let page: u64 = c
+                    .query_row("PRAGMA page_size", [], |r| r.get(0))
+                    .map_err(|e| e.to_string())?;
                 // a database already larger keeps its size: SQLite never lowers the count below it
-                c.execute_batch(&format!("PRAGMA max_page_count = {}", (max / page.max(1)).max(1))).map_err(|e| e.to_string())?;
+                c.execute_batch(&format!(
+                    "PRAGMA max_page_count = {}",
+                    (max / page.max(1)).max(1)
+                ))
+                .map_err(|e| e.to_string())?;
             }
             c.set_prepared_statement_cache_capacity(256);
             sqlite_functions(&c).map_err(|e| e.to_string())?;
@@ -177,16 +216,23 @@ impl Conn {
                 None => (url, None),
             };
             let mut c = postgres::Client::connect(base, postgres::NoTls).map_err(pg)?;
-            c.batch_execute("SET client_min_messages = warning").map_err(pg)?;
+            c.batch_execute("SET client_min_messages = warning")
+                .map_err(pg)?;
             if let Some(t) = STATEMENT_TIMEOUT.with(|t| t.get()) {
-                c.batch_execute(&format!("SET statement_timeout = {}", t.as_millis().max(1))).map_err(pg)?;
+                c.batch_execute(&format!("SET statement_timeout = {}", t.as_millis().max(1)))
+                    .map_err(pg)?;
             }
             if let Some(s) = schema {
-                c.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{s}\"; SET search_path TO \"{s}\"")).map_err(pg)?;
+                c.batch_execute(&format!(
+                    "CREATE SCHEMA IF NOT EXISTS \"{s}\"; SET search_path TO \"{s}\""
+                ))
+                .map_err(pg)?;
             }
             Ok(Conn::Postgres(c))
         } else {
-            Err(format!("unsupported database url `{url}` (use sqlite:… or postgres://…)"))
+            Err(format!(
+                "unsupported database url `{url}` (use sqlite:… or postgres://…)"
+            ))
         }
     }
 
@@ -204,7 +250,11 @@ impl Conn {
         while let Some(i) = rest.find('?') {
             out.push_str(&rest[..i]);
             rest = &rest[i + 1..];
-            let kind = KINDS.iter().find(|k| rest.starts_with(**k)).copied().unwrap_or("text");
+            let kind = KINDS
+                .iter()
+                .find(|k| rest.starts_with(**k))
+                .copied()
+                .unwrap_or("text");
             if rest.starts_with(kind) {
                 rest = &rest[kind.len()..];
             }
@@ -227,8 +277,12 @@ impl Conn {
         STATEMENTS.fetch_add(1, Ordering::Relaxed);
         let _t = timed(sql);
         match self {
-            Conn::Sqlite(c) => c.execute_batch(sql).map_err(|e| format!("{}\n{sql}", lite(e))),
-            Conn::Postgres(c) => c.batch_execute(sql).map_err(|e| format!("{}\n{sql}", pg(e))),
+            Conn::Sqlite(c) => c
+                .execute_batch(sql)
+                .map_err(|e| format!("{}\n{sql}", lite(e))),
+            Conn::Postgres(c) => c
+                .batch_execute(sql)
+                .map_err(|e| format!("{}\n{sql}", pg(e))),
         }
     }
 
@@ -249,14 +303,26 @@ impl Conn {
             Conn::Sqlite(c) => {
                 let ps: Vec<rusqlite::types::Value> = params.iter().map(sqlite_value).collect();
                 let mut stmt = c.prepare_cached(&sql).map_err(|e| format!("{e}\n{sql}"))?;
-                stmt.execute(rusqlite::params_from_iter(ps)).map(|n| n as u64).map_err(|e| format!("{}\n{sql}", lite(e)))
+                stmt.execute(rusqlite::params_from_iter(ps))
+                    .map(|n| n as u64)
+                    .map_err(|e| format!("{}\n{sql}", lite(e)))
             }
             Conn::Postgres(c) => {
                 // parameters are text (`$n::text::<type>`): typed, the statement takes one round
                 // trip instead of three (prepare, execute, close)
                 let texts: Vec<Option<String>> = params.iter().map(Sql::as_text).collect();
-                let typed: Vec<(&(dyn postgres::types::ToSql + Sync), postgres::types::Type)> = texts.iter().map(|t| (t as &(dyn postgres::types::ToSql + Sync), postgres::types::Type::TEXT)).collect();
-                c.execute_typed(sql.as_str(), &typed).map_err(|e| format!("{}\n{sql}", pg(e)))
+                let typed: Vec<(&(dyn postgres::types::ToSql + Sync), postgres::types::Type)> =
+                    texts
+                        .iter()
+                        .map(|t| {
+                            (
+                                t as &(dyn postgres::types::ToSql + Sync),
+                                postgres::types::Type::TEXT,
+                            )
+                        })
+                        .collect();
+                c.execute_typed(sql.as_str(), &typed)
+                    .map_err(|e| format!("{}\n{sql}", pg(e)))
             }
         }
     }
@@ -270,7 +336,11 @@ impl Conn {
         r
     }
 
-    fn query_counted(&mut self, sql: &str, params: &[Sql]) -> Result<Vec<Vec<Option<String>>>, String> {
+    fn query_counted(
+        &mut self,
+        sql: &str,
+        params: &[Sql],
+    ) -> Result<Vec<Vec<Option<String>>>, String> {
         STATEMENTS.fetch_add(1, Ordering::Relaxed);
         let _t = timed(sql);
         let sql = self.rewrite(sql);
@@ -307,17 +377,34 @@ impl Conn {
             }
             Conn::Postgres(c) => {
                 let texts: Vec<Option<String>> = params.iter().map(Sql::as_text).collect();
-                let typed: Vec<(&(dyn postgres::types::ToSql + Sync), postgres::types::Type)> = texts.iter().map(|t| (t as &(dyn postgres::types::ToSql + Sync), postgres::types::Type::TEXT)).collect();
-                let text = |r: &postgres::Row| (0..r.len()).map(|i| r.get::<_, Option<String>>(i)).collect::<Vec<_>>();
+                let typed: Vec<(&(dyn postgres::types::ToSql + Sync), postgres::types::Type)> =
+                    texts
+                        .iter()
+                        .map(|t| {
+                            (
+                                t as &(dyn postgres::types::ToSql + Sync),
+                                postgres::types::Type::TEXT,
+                            )
+                        })
+                        .collect();
+                let text = |r: &postgres::Row| {
+                    (0..r.len())
+                        .map(|i| r.get::<_, Option<String>>(i))
+                        .collect::<Vec<_>>()
+                };
                 match limits::current().max_rows {
                     None => {
-                        let rows = c.query_typed(sql.as_str(), &typed).map_err(|e| format!("{}\n{sql}", pg(e)))?;
+                        let rows = c
+                            .query_typed(sql.as_str(), &typed)
+                            .map_err(|e| format!("{}\n{sql}", pg(e)))?;
                         Ok(rows.iter().map(text).collect())
                     }
                     Some(max) => {
                         // streamed: the rows past the cap are never kept
                         use postgres::fallible_iterator::FallibleIterator;
-                        let mut it = c.query_typed_raw(sql.as_str(), typed).map_err(|e| format!("{}\n{sql}", pg(e)))?;
+                        let mut it = c
+                            .query_typed_raw(sql.as_str(), typed)
+                            .map_err(|e| format!("{}\n{sql}", pg(e)))?;
                         let mut out = Vec::new();
                         while let Some(r) = it.next().map_err(|e| format!("{}\n{sql}", pg(e)))? {
                             out.push(text(&r));
@@ -335,7 +422,12 @@ impl Conn {
     /// Many rows into one table, streamed: a prepared statement inside the caller's
     /// transaction on SQLite, `COPY … FROM STDIN` on PostgreSQL. Each row has one value per
     /// column, as `exec` would send it. Returns the number of rows.
-    pub fn bulk_insert(&mut self, table: &str, cols: &[&str], rows: &mut dyn Iterator<Item = Vec<Sql>>) -> Result<u64, String> {
+    pub fn bulk_insert(
+        &mut self,
+        table: &str,
+        cols: &[&str],
+        rows: &mut dyn Iterator<Item = Vec<Sql>>,
+    ) -> Result<u64, String> {
         let names: Vec<String> = cols.iter().map(|c| format!("\"{c}\"")).collect();
         let mut n = 0u64;
         match self {
@@ -343,22 +435,35 @@ impl Conn {
                 // several rows per statement (fewer steps of the virtual machine), the rest one by one
                 let one = format!("({})", vec!["?"; cols.len()].join(", "));
                 let per = (32_000 / cols.len().max(1)).clamp(1, 64);
-                let sql = format!("INSERT INTO \"{table}\" ({}) VALUES {}", names.join(", "), vec![one.as_str(); per].join(", "));
-                let single = format!("INSERT INTO \"{table}\" ({}) VALUES {one}", names.join(", "));
+                let sql = format!(
+                    "INSERT INTO \"{table}\" ({}) VALUES {}",
+                    names.join(", "),
+                    vec![one.as_str(); per].join(", ")
+                );
+                let single = format!(
+                    "INSERT INTO \"{table}\" ({}) VALUES {one}",
+                    names.join(", ")
+                );
                 let mut stmt = c.prepare_cached(&sql).map_err(|e| format!("{e}\n{sql}"))?;
                 let mut buf: Vec<Vec<Sql>> = Vec::with_capacity(per);
                 for row in rows {
                     buf.push(row);
                     if buf.len() == per {
-                        stmt.execute(rusqlite::params_from_iter(buf.iter().flat_map(|r| r.iter().map(SqlRef)))).map_err(|e| format!("{table}: {e}"))?;
+                        stmt.execute(rusqlite::params_from_iter(
+                            buf.iter().flat_map(|r| r.iter().map(SqlRef)),
+                        ))
+                        .map_err(|e| format!("{table}: {e}"))?;
                         n += per as u64;
                         buf.clear();
                     }
                 }
                 if !buf.is_empty() {
-                    let mut stmt = c.prepare_cached(&single).map_err(|e| format!("{e}\n{single}"))?;
+                    let mut stmt = c
+                        .prepare_cached(&single)
+                        .map_err(|e| format!("{e}\n{single}"))?;
                     for row in &buf {
-                        stmt.execute(rusqlite::params_from_iter(row.iter().map(SqlRef))).map_err(|e| format!("{table}: {e}"))?;
+                        stmt.execute(rusqlite::params_from_iter(row.iter().map(SqlRef)))
+                            .map_err(|e| format!("{table}: {e}"))?;
                         n += 1;
                     }
                 }
@@ -366,7 +471,9 @@ impl Conn {
             Conn::Postgres(c) => {
                 use std::io::Write;
                 let sql = format!("COPY \"{table}\" ({}) FROM STDIN", names.join(", "));
-                let mut w = c.copy_in(sql.as_str()).map_err(|e| format!("{}\n{sql}", pg(e)))?;
+                let mut w = c
+                    .copy_in(sql.as_str())
+                    .map_err(|e| format!("{}\n{sql}", pg(e)))?;
                 let mut buf = String::with_capacity(1 << 17);
                 for row in rows {
                     for (i, v) in row.iter().enumerate() {
@@ -386,11 +493,13 @@ impl Conn {
                     buf.push('\n');
                     n += 1;
                     if buf.len() >= 1 << 16 {
-                        w.write_all(buf.as_bytes()).map_err(|e| format!("{table}: {e}"))?;
+                        w.write_all(buf.as_bytes())
+                            .map_err(|e| format!("{table}: {e}"))?;
                         buf.clear();
                     }
                 }
-                w.write_all(buf.as_bytes()).map_err(|e| format!("{table}: {e}"))?;
+                w.write_all(buf.as_bytes())
+                    .map_err(|e| format!("{table}: {e}"))?;
                 w.finish().map_err(|e| format!("{table}: {}", pg(e)))?;
             }
         }
@@ -400,19 +509,27 @@ impl Conn {
     /// PostgreSQL: `COPY` of rows `fill` writes as COPY text (tab-separated, escaped with
     /// `copy_escape`, one per line) into the buffer it is given, until it returns false: what
     /// a writer that knows its rows sends without building them as values first.
-    pub fn copy_text(&mut self, table: &str, cols: &[&str], fill: &mut dyn FnMut(&mut String) -> Result<bool, String>) -> Result<(), String> {
+    pub fn copy_text(
+        &mut self,
+        table: &str,
+        cols: &[&str],
+        fill: &mut dyn FnMut(&mut String) -> Result<bool, String>,
+    ) -> Result<(), String> {
         let Conn::Postgres(c) = self else {
             return Err("COPY needs PostgreSQL".into());
         };
         use std::io::Write;
         let names: Vec<String> = cols.iter().map(|c| format!("\"{c}\"")).collect();
         let sql = format!("COPY \"{table}\" ({}) FROM STDIN", names.join(", "));
-        let mut w = c.copy_in(sql.as_str()).map_err(|e| format!("{}\n{sql}", pg(e)))?;
+        let mut w = c
+            .copy_in(sql.as_str())
+            .map_err(|e| format!("{}\n{sql}", pg(e)))?;
         let mut buf = String::with_capacity(1 << 17);
         loop {
             let more = fill(&mut buf)?;
             if buf.len() >= 1 << 16 || !more {
-                w.write_all(buf.as_bytes()).map_err(|e| format!("{table}: {e}"))?;
+                w.write_all(buf.as_bytes())
+                    .map_err(|e| format!("{table}: {e}"))?;
                 buf.clear();
             }
             if !more {
@@ -445,16 +562,25 @@ impl Conn {
 fn sqlite_functions(c: &rusqlite::Connection) -> rusqlite::Result<()> {
     use rust_decimal::Decimal;
     use std::str::FromStr;
-    c.create_collation("quadra_dec", |a: &str, b: &str| match (Decimal::from_str(a), Decimal::from_str(b)) {
-        (Ok(x), Ok(y)) => x.cmp(&y),
-        _ => a.cmp(b),
+    c.create_collation("quadra_dec", |a: &str, b: &str| {
+        match (Decimal::from_str(a), Decimal::from_str(b)) {
+            (Ok(x), Ok(y)) => x.cmp(&y),
+            _ => a.cmp(b),
+        }
     })?;
     struct Sum;
     impl rusqlite::functions::Aggregate<Option<Decimal>, Option<String>> for Sum {
-        fn init(&self, _: &mut rusqlite::functions::Context<'_>) -> rusqlite::Result<Option<Decimal>> {
+        fn init(
+            &self,
+            _: &mut rusqlite::functions::Context<'_>,
+        ) -> rusqlite::Result<Option<Decimal>> {
             Ok(None)
         }
-        fn step(&self, ctx: &mut rusqlite::functions::Context<'_>, acc: &mut Option<Decimal>) -> rusqlite::Result<()> {
+        fn step(
+            &self,
+            ctx: &mut rusqlite::functions::Context<'_>,
+            acc: &mut Option<Decimal>,
+        ) -> rusqlite::Result<()> {
             let v: Option<String> = match ctx.get_raw(0) {
                 rusqlite::types::ValueRef::Null => None,
                 rusqlite::types::ValueRef::Integer(i) => Some(i.to_string()),
@@ -467,19 +593,37 @@ fn sqlite_functions(c: &rusqlite::Connection) -> rusqlite::Result<()> {
             }
             Ok(())
         }
-        fn finalize(&self, _: &mut rusqlite::functions::Context<'_>, acc: Option<Option<Decimal>>) -> rusqlite::Result<Option<String>> {
+        fn finalize(
+            &self,
+            _: &mut rusqlite::functions::Context<'_>,
+            acc: Option<Option<Decimal>>,
+        ) -> rusqlite::Result<Option<String>> {
             Ok(acc.flatten().map(|d| d.to_string()))
         }
     }
-    c.create_aggregate_function("quadra_dsum", 1, rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, Sum)?;
+    c.create_aggregate_function(
+        "quadra_dsum",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        Sum,
+    )?;
     // the words of a text as the full-text search indexes them (`query::words`), separated by
     // spaces: what the FTS5 tables of the search are given
-    c.create_scalar_function("quadra_words", 1, rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
-        Ok(match ctx.get_raw(0) {
-            rusqlite::types::ValueRef::Text(t) => Some(quadra_runtime::query::words(&String::from_utf8_lossy(t)).join(" ")),
-            _ => None::<String>,
-        })
-    })?;
+    c.create_scalar_function(
+        "quadra_words",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            Ok(match ctx.get_raw(0) {
+                rusqlite::types::ValueRef::Text(t) => {
+                    Some(quadra_runtime::query::words(&String::from_utf8_lossy(t)).join(" "))
+                }
+                _ => None::<String>,
+            })
+        },
+    )?;
     Ok(())
 }
 
@@ -543,7 +687,11 @@ pub struct Pooled {
 impl Pooled {
     /// A connection of its own: closed when dropped.
     pub fn own(conn: Conn) -> Pooled {
-        Pooled { conn: Some(conn), home: None, read: false }
+        Pooled {
+            conn: Some(conn),
+            home: None,
+            read: false,
+        }
     }
 
     /// The connection, moved out (to a thread of its own): `put_conn` gives it back.
@@ -562,7 +710,11 @@ impl Pooled {
             Some(c) => c,
             None => Conn::open(url)?,
         };
-        Ok(Pooled { conn: Some(conn), home: Some(pool.clone()), read: false })
+        Ok(Pooled {
+            conn: Some(conn),
+            home: Some(pool.clone()),
+            read: false,
+        })
     }
 
     /// Every statement from now on sees the database as of one moment: commits made meanwhile
@@ -648,7 +800,9 @@ enum SideBatch {
 fn side_batch(sql: &str) -> SideBatch {
     SIDE.with(|s| {
         let mut s = s.borrow_mut();
-        let Some(side) = s.as_mut() else { return SideBatch::Run(sql.to_string()) };
+        let Some(side) = s.as_mut() else {
+            return SideBatch::Run(sql.to_string());
+        };
         let mut rest = Vec::new();
         for part in sql.split(';').map(str::trim).filter(|p| !p.is_empty()) {
             let up = part.to_ascii_uppercase();
@@ -659,7 +813,11 @@ fn side_batch(sql: &str) -> SideBatch {
                 side.rolled_back = true;
                 continue;
             }
-            if !up.starts_with("LOCK ") && !up.starts_with("SAVEPOINT") && !up.starts_with("RELEASE") && !up.starts_with("SELECT") {
+            if !up.starts_with("LOCK ")
+                && !up.starts_with("SAVEPOINT")
+                && !up.starts_with("RELEASE")
+                && !up.starts_with("SELECT")
+            {
                 side.statements.push((part.to_string(), Vec::new()));
             }
             rest.push(part);

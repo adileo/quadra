@@ -96,7 +96,9 @@ fn config_path() -> std::result::Result<PathBuf, String> {
     if let Ok(p) = std::env::var("QUADRA_CLOUD_CONFIG") {
         return Ok(PathBuf::from(p));
     }
-    config_dir().map(|d| d.join("cloud.json")).ok_or_else(|| "no home directory".into())
+    config_dir()
+        .map(|d| d.join("cloud.json"))
+        .ok_or_else(|| "no home directory".into())
 }
 
 fn saved() -> Option<Value> {
@@ -120,7 +122,8 @@ fn save(v: &Value) -> std::result::Result<PathBuf, String> {
             .mode(0o600)
             .open(&tmp)
             .map_err(|e| format!("{}: {e}", tmp.display()))?;
-        f.write_all(text.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        f.write_all(text.as_bytes())
+            .map_err(|e| format!("{}: {e}", tmp.display()))?;
     }
     #[cfg(not(unix))]
     std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
@@ -146,13 +149,22 @@ pub struct Refused {
 
 /// One call to the API. Ok(JSON) on success; Err(Ok(refusal)) for an answer of the API;
 /// Err(Err(failure)) when it could not be reached, or after an upgrade.
-pub fn call(method: &str, path: &str, token: Option<&str>, body: Option<&Value>) -> Result<std::result::Result<Value, Refused>> {
-    let (status, v) = http::json(method, &format!("{}{path}", api_base()), token, body).map_err(Failure::Message)?;
+pub fn call(
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&Value>,
+) -> Result<std::result::Result<Value, Refused>> {
+    let (status, v) = http::json(method, &format!("{}{path}", api_base()), token, body)
+        .map_err(Failure::Message)?;
     if (200..300).contains(&status) {
         return Ok(Ok(v));
     }
     let code = v["code"].as_str().unwrap_or("error").to_string();
-    let message = v["error"].as_str().map(str::to_owned).unwrap_or_else(|| format!("HTTP {status}"));
+    let message = v["error"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("HTTP {status}"));
     if status == 426 || code == "cli_too_old" {
         return Err(too_old(&message, v["min_version"].as_str()));
     }
@@ -161,11 +173,16 @@ pub fn call(method: &str, path: &str, token: Option<&str>, body: Option<&Value>)
 
 /// The forced upgrade: in a terminal, offer it and run the same command with the new binary.
 fn too_old(message: &str, min: Option<&str>) -> Failure {
-    let need = min.map(|m| format!(" (version {m} or newer is needed)")).unwrap_or_default();
+    let need = min
+        .map(|m| format!(" (version {m} or newer is needed)"))
+        .unwrap_or_default();
     eprintln!("{message}{need}");
     let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     if !interactive {
-        return Failure::Message(format!("quadra {} is too old for Quadra Cloud: run `quadra upgrade`", upgrade::VERSION));
+        return Failure::Message(format!(
+            "quadra {} is too old for Quadra Cloud: run `quadra upgrade`",
+            upgrade::VERSION
+        ));
     }
     eprint!("Upgrade quadra now? [Y/n] ");
     let _ = std::io::stderr().flush();
@@ -185,7 +202,9 @@ fn too_old(message: &str, min: Option<&str>) -> Failure {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match std::process::Command::new(exe).args(args).status() {
         Ok(s) => Failure::Exit(ExitCode::from(s.code().unwrap_or(1).clamp(0, 255) as u8)),
-        Err(e) => Failure::Message(format!("upgraded, but the command could not run again: {e}")),
+        Err(e) => Failure::Message(format!(
+            "upgraded, but the command could not run again: {e}"
+        )),
     }
 }
 
@@ -208,7 +227,9 @@ fn open_browser(url: &str) -> bool {
     let r = if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).status()
     } else if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/C", "start", "", url]).status()
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()
     } else {
         if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return false;
@@ -220,8 +241,13 @@ fn open_browser(url: &str) -> bool {
 
 fn login(no_browser: bool) -> Result<()> {
     let api = api_base();
-    let start = call("POST", "/v1/device/code", None, Some(&json!({ "client_name": format!("quadra CLI on {}", hostname()) })))?
-        .map_err(|r| r.message)?;
+    let start = call(
+        "POST",
+        "/v1/device/code",
+        None,
+        Some(&json!({ "client_name": format!("quadra CLI on {}", hostname()) })),
+    )?
+    .map_err(|r| r.message)?;
     let device = start["device_code"].as_str().ok_or("no device code")?;
     let user = start["user_code"].as_str().ok_or("no user code")?;
     let uri = start["verification_uri"].as_str().unwrap_or("");
@@ -236,10 +262,17 @@ fn login(no_browser: bool) -> Result<()> {
     eprintln!("Waiting for the approval… (Ctrl-C to stop)");
     loop {
         if Instant::now() >= until {
-            return Err("the code expired before it was approved: run `quadra cloud login` again".into());
+            return Err(
+                "the code expired before it was approved: run `quadra cloud login` again".into(),
+            );
         }
         std::thread::sleep(Duration::from_secs(interval));
-        match call("POST", "/v1/device/token", None, Some(&json!({ "device_code": device }))) {
+        match call(
+            "POST",
+            "/v1/device/token",
+            None,
+            Some(&json!({ "device_code": device })),
+        ) {
             Ok(Ok(v)) => {
                 let token = v["access_token"].as_str().ok_or("no token in the answer")?;
                 let email = v["email"].as_str().unwrap_or("");
@@ -266,13 +299,21 @@ pub fn saved_token() -> Option<String> {
 }
 
 /// The sources of a deploy, uploaded: like [`call`], with a .tar.gz body.
-pub fn upload(path: &str, token: &str, body: Vec<u8>) -> Result<std::result::Result<Value, Refused>> {
-    let (status, v) = http::upload(&format!("{}{path}", api_base()), token, body).map_err(Failure::Message)?;
+pub fn upload(
+    path: &str,
+    token: &str,
+    body: Vec<u8>,
+) -> Result<std::result::Result<Value, Refused>> {
+    let (status, v) =
+        http::upload(&format!("{}{path}", api_base()), token, body).map_err(Failure::Message)?;
     if (200..300).contains(&status) {
         return Ok(Ok(v));
     }
     let code = v["code"].as_str().unwrap_or("error").to_string();
-    let message = v["error"].as_str().map(str::to_owned).unwrap_or_else(|| format!("HTTP {status}"));
+    let message = v["error"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("HTTP {status}"));
     if status == 426 || code == "cli_too_old" {
         return Err(too_old(&message, v["min_version"].as_str()));
     }

@@ -50,7 +50,9 @@ pub fn current() -> Limits {
 /// The previous limits come back when the guard is dropped.
 pub fn begin(limits: Limits) -> Guard {
     HIT.with(|h| *h.borrow_mut() = None);
-    Guard { previous: LIMITS.with(|l| l.replace(limits)) }
+    Guard {
+        previous: LIMITS.with(|l| l.replace(limits)),
+    }
 }
 
 pub struct Guard {
@@ -67,9 +69,19 @@ impl Drop for Guard {
 /// a large commit) is not a request reading too much.
 pub fn without_row_cap<T>(f: impl FnOnce() -> T) -> T {
     let before = current();
-    LIMITS.with(|l| l.set(Limits { max_rows: None, ..before }));
+    LIMITS.with(|l| {
+        l.set(Limits {
+            max_rows: None,
+            ..before
+        })
+    });
     let out = f();
-    LIMITS.with(|l| l.set(Limits { max_rows: before.max_rows, ..current() }));
+    LIMITS.with(|l| {
+        l.set(Limits {
+            max_rows: before.max_rows,
+            ..current()
+        })
+    });
     out
 }
 
@@ -106,7 +118,11 @@ pub fn count_written(rows: u64) {
 /// Runs `f` without counting what it uses: the engine's own bookkeeping (its caches catching
 /// up), which depends on what ran before rather than on the request.
 pub fn uncounted<T>(f: impl FnOnce() -> T) -> T {
-    let before = (STEPS.with(Cell::get), ROWS_READ.with(Cell::get), ROWS_WRITTEN.with(Cell::get));
+    let before = (
+        STEPS.with(Cell::get),
+        ROWS_READ.with(Cell::get),
+        ROWS_WRITTEN.with(Cell::get),
+    );
     let out = f();
     STEPS.with(|c| c.set(before.0));
     ROWS_READ.with(|c| c.set(before.1));
@@ -116,7 +132,11 @@ pub fn uncounted<T>(f: impl FnOnce() -> T) -> T {
 
 /// The usage of this thread so far, and the counters back to zero.
 pub fn take_usage() -> Usage {
-    Usage { steps: STEPS.with(|c| c.replace(0)), rows_read: ROWS_READ.with(|c| c.replace(0)), rows_written: ROWS_WRITTEN.with(|c| c.replace(0)) }
+    Usage {
+        steps: STEPS.with(|c| c.replace(0)),
+        rows_read: ROWS_READ.with(|c| c.replace(0)),
+        rows_written: ROWS_WRITTEN.with(|c| c.replace(0)),
+    }
 }
 
 /// The job's deadline has passed.
@@ -157,8 +177,22 @@ mod tests {
         })
         .join()
         .unwrap();
-        assert_eq!(other, Usage { steps: 1, rows_read: 0, rows_written: 0 });
-        assert_eq!(take_usage(), Usage { steps: 2, rows_read: 5, rows_written: 2 });
+        assert_eq!(
+            other,
+            Usage {
+                steps: 1,
+                rows_read: 0,
+                rows_written: 0
+            }
+        );
+        assert_eq!(
+            take_usage(),
+            Usage {
+                steps: 2,
+                rows_read: 5,
+                rows_written: 2
+            }
+        );
         assert_eq!(take_usage(), Usage::default());
     }
 
@@ -166,7 +200,10 @@ mod tests {
     fn limits_are_per_job_and_restored() {
         assert_eq!(current(), Limits::default());
         {
-            let _g = begin(Limits { max_rows: Some(10), ..Default::default() });
+            let _g = begin(Limits {
+                max_rows: Some(10),
+                ..Default::default()
+            });
             assert_eq!(current().max_rows, Some(10));
             without_row_cap(|| assert_eq!(current().max_rows, None));
             assert_eq!(current().max_rows, Some(10));
@@ -177,7 +214,10 @@ mod tests {
             hit("left over");
         }
         assert_eq!(current(), Limits::default());
-        let _g = begin(Limits { deadline: Some(Instant::now() - Duration::from_millis(1)), ..Default::default() });
+        let _g = begin(Limits {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..Default::default()
+        });
         assert!(expired());
         assert_eq!(take_hit(), None, "a new job starts with no limit hit");
     }

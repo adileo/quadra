@@ -12,7 +12,12 @@ fn check(source: String) -> Vec<String> {
     let root = Path::new("/depth");
     let project = Project::from_sources(root, vec![(root.join("main.qd"), source)]);
     let checked = quadra_analysis::check(&project);
-    checked.diagnostics.into_iter().filter(|d| d.severity == Severity::Error).map(|d| d.message).collect()
+    checked
+        .diagnostics
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.message)
+        .collect()
 }
 
 fn function(body: &str) -> String {
@@ -65,14 +70,21 @@ fn nested_lists_are_an_error() {
 #[test]
 fn nested_types_are_an_error() {
     let n = 100_000;
-    let errors = check(format!("fn deep(x: {}Int{}) -> Int:\n    1\n", "[".repeat(n), "]".repeat(n)));
+    let errors = check(format!(
+        "fn deep(x: {}Int{}) -> Int:\n    1\n",
+        "[".repeat(n),
+        "]".repeat(n)
+    ));
     assert!(too_deep(&errors), "{errors:?}");
 }
 
 #[test]
 fn a_long_chain_of_optionals_is_an_error() {
     // spaced, so that the lexer reads single `?` and not `??`
-    let errors = check(format!("fn deep(x: Int{}) -> Int:\n    1\n", " ?".repeat(100_000)));
+    let errors = check(format!(
+        "fn deep(x: Int{}) -> Int:\n    1\n",
+        " ?".repeat(100_000)
+    ));
     assert!(too_deep(&errors), "{errors:?}");
 }
 
@@ -91,12 +103,26 @@ fn nested_blocks_are_an_error() {
 #[test]
 fn the_line_after_a_too_deep_one_is_parsed_again() {
     let n = 100_000;
-    let source = format!("fn deep() -> Int:\n    let x = {}1{}\n    return y\n", "(".repeat(n), ")".repeat(n));
+    let source = format!(
+        "fn deep() -> Int:\n    let x = {}1{}\n    return y\n",
+        "(".repeat(n),
+        ")".repeat(n)
+    );
     let errors = check(source);
     assert!(too_deep(&errors), "{errors:?}");
     // one report for the deep line, not one per level
-    assert_eq!(errors.iter().filter(|e| e.contains("nested too deeply")).count(), 1, "{errors:?}");
-    assert!(errors.iter().any(|e| e.contains('y')), "the next line is still checked: {errors:?}");
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|e| e.contains("nested too deeply"))
+            .count(),
+        1,
+        "{errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains('y')),
+        "the next line is still checked: {errors:?}"
+    );
 }
 
 #[test]
@@ -106,8 +132,10 @@ fn the_deepest_tree_allowed_is_checked() {
     // (the test fails by aborting the process if a later pass overflows its stack)
     let inner = format!("{}1{}", "(".repeat(60), ")".repeat(60));
     for chain in [100, 190, 250] {
-        check(function(&format!("{inner} + {}", vec!["1"; chain].join(" + "))));
+        check(function(&format!(
+            "{inner} + {}",
+            vec!["1"; chain].join(" + ")
+        )));
         check(function(&format!("[{inner}]{}", ".first()".repeat(chain))));
     }
 }
-

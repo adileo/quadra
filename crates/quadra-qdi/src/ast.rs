@@ -26,7 +26,10 @@ pub struct Name {
 
 impl Name {
     pub fn new(text: impl Into<String>) -> Name {
-        Name { text: text.into(), span: Span::default() }
+        Name {
+            text: text.into(),
+            span: Span::default(),
+        }
     }
 }
 
@@ -45,7 +48,10 @@ pub struct Expr {
 
 impl Expr {
     pub fn new(text: impl Into<String>) -> Expr {
-        Expr { text: text.into(), ..Expr::default() }
+        Expr {
+            text: text.into(),
+            ..Expr::default()
+        }
     }
 }
 
@@ -183,23 +189,54 @@ pub struct Component {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Line {
     /// `key: value` (`names`: the names written in the value, with their places)
-    Opt { key: Name, value: Value, span: Span, names: Vec<Name> },
+    Opt {
+        key: Name,
+        value: Value,
+        span: Span,
+        names: Vec<Name>,
+    },
     /// `apply Order: region -> customer.region, state -> none`
-    Apply { entity: Name, binds: Vec<(Name, Option<Name>)>, span: Span },
+    Apply {
+        entity: Name,
+        binds: Vec<(Name, Option<Name>)>,
+        span: Span,
+    },
     /// `apply auto: false`
     ApplyAuto(bool, Span),
     /// `compute margin: total - cost` (a computed column of a view)
-    Compute { name: Name, expr: Expr, span: Span },
+    Compute {
+        name: Name,
+        expr: Expr,
+        span: Span,
+    },
     /// `color "#fee2e2": total > 1000.00 EUR` (rows where it holds get the color)
-    Color { color: String, expr: Expr, span: Span },
+    Color {
+        color: String,
+        expr: Expr,
+        span: Span,
+    },
     /// `default customer: @customer` (a form's starting value)
-    Default { field: Name, source: Source, span: Span },
+    Default {
+        field: Name,
+        source: Source,
+        span: Span,
+    },
     /// `section "Delivery": address, date` (a form's section)
-    Section { title: Option<String>, fields: Vec<String>, span: Span, names: Vec<Name> },
+    Section {
+        title: Option<String>,
+        fields: Vec<String>,
+        span: Span,
+        names: Vec<Name>,
+    },
     /// `field qty "Quantity": Qty<pcs> where > 0 default 1 pcs` (a custom form)
     Field(FormField),
     /// `submit "Move":` and the statements it runs (a custom form)
-    Submit { label: Option<String>, code: String, span: Span, code_span: Span },
+    Submit {
+        label: Option<String>,
+        code: String,
+        span: Span,
+        code_span: Span,
+    },
     /// `tab s1 "Pivot" free 200 x 10:` (a spreadsheet's sheet)
     Tab(Tab),
     /// a bare text: a Markdown box's text
@@ -292,7 +329,10 @@ pub enum After {
     Keep,
     Open,
     /// publish the record the submit gives as `@name`
-    Select { entity: String, name: String },
+    Select {
+        entity: String,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -323,7 +363,12 @@ pub struct Tab {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TabLine {
     /// `A1 bold: "Region"`, `A2: = Order.count()`
-    Cell { addr: String, style: Vec<StyleItem>, value: Option<CellValue>, span: Span },
+    Cell {
+        addr: String,
+        style: Vec<StyleItem>,
+        value: Option<CellValue>,
+        span: Span,
+    },
     /// `width A 160, B 90` (px by column)
     Widths(Vec<(String, J)>, Span),
     /// `height 1 30` (px by row)
@@ -331,7 +376,11 @@ pub enum TabLine {
     /// `merge A1:D1, B3:C4`
     Merge(Vec<String>, Span),
     /// `freeze rows 1 cols 2`
-    Freeze { rows: Option<i64>, cols: Option<i64>, span: Span },
+    Freeze {
+        rows: Option<i64>,
+        cols: Option<i64>,
+        span: Span,
+    },
     Raw(Raw),
 }
 
@@ -353,7 +402,12 @@ pub enum StyleItem {
     /// `align center` (ha), `valign top` (va)
     Align(String, String),
     /// `fmt number dec 2 thousands date "d mmm yyyy"`
-    Format { kind: String, dec: Option<i64>, thousands: bool, date: Option<String> },
+    Format {
+        kind: String,
+        dec: Option<i64>,
+        thousands: bool,
+        date: Option<String>,
+    },
     /// `border {t: thin, c: "#000"}`
     Border(J),
     /// `style {…}`: the keys without syntax

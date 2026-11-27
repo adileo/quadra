@@ -9,7 +9,9 @@ use quadra_store::{materialized_formulas, Conn, Database, DbBackend, Sink};
 use std::path::{Path, PathBuf};
 
 fn example(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(name)
 }
 
 /// Runs an example's tests on `target`; returns the final hash of every test's database.
@@ -20,10 +22,26 @@ fn run_on(name: &str, target: &str) -> Vec<(usize, String)> {
 fn run_with(name: &str, mut backend: DbBackend) -> Vec<(usize, String)> {
     let target = backend.target.clone();
     let project = Project::load(&example(name)).unwrap();
-    let results = quadra_runtime::run_tests_with(&project, None, Some(&mut backend)).unwrap_or_else(|d| panic!("{name} does not check: {d:#?}"));
-    let failed: Vec<String> = results.iter().filter(|r| !r.passed).map(|r| format!("{} ({}): {}", r.name, r.location, r.message.clone().unwrap_or_default())).collect();
+    let results = quadra_runtime::run_tests_with(&project, None, Some(&mut backend))
+        .unwrap_or_else(|d| panic!("{name} does not check: {d:#?}"));
+    let failed: Vec<String> = results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| {
+            format!(
+                "{} ({}): {}",
+                r.name,
+                r.location,
+                r.message.clone().unwrap_or_default()
+            )
+        })
+        .collect();
     assert!(!results.is_empty(), "{name}: no tests found");
-    assert!(failed.is_empty(), "{name} on {target}:\n{}", failed.join("\n"));
+    assert!(
+        failed.is_empty(),
+        "{name} on {target}:\n{}",
+        failed.join("\n")
+    );
     backend.hashes
 }
 
@@ -57,7 +75,10 @@ fn postgres_gives_the_same_hash_chain_as_sqlite() {
     for name in ["minimal", "extended"] {
         let lite = run_on(name, "sqlite");
         let post = run_on(name, &pg);
-        assert_eq!(lite, post, "{name}: SQLite and PostgreSQL wrote different histories");
+        assert_eq!(
+            lite, post,
+            "{name}: SQLite and PostgreSQL wrote different histories"
+        );
     }
 }
 
@@ -74,7 +95,8 @@ seed:
 fn seeded_database(file: &Path) -> (Project, String) {
     let root = example("minimal");
     let main = std::fs::read_to_string(root.join("main.qd")).unwrap();
-    let project = Project::from_sources(&root, vec![(root.join("main.qd"), format!("{main}{SEED}"))]);
+    let project =
+        Project::from_sources(&root, vec![(root.join("main.qd"), format!("{main}{SEED}"))]);
     let url = format!("sqlite:{}", file.display());
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", file.display()));
@@ -126,10 +148,16 @@ fn verify_detects_an_altered_table() {
     assert_eq!(verify(&project, &url), Vec::<String>::new());
 
     let mut c = Conn::open(&url).unwrap();
-    c.batch("UPDATE customer SET credit_limit = '999999'").unwrap();
+    c.batch("UPDATE customer SET credit_limit = '999999'")
+        .unwrap();
     drop(c);
     let problems = verify(&project, &url);
-    assert!(problems.iter().any(|p| p.contains("customer.credit_limit") && p.contains("999999")), "{problems:?}");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("customer.credit_limit") && p.contains("999999")),
+        "{problems:?}"
+    );
     // the history is intact: only the projection is wrong
     assert!(!problems.iter().any(|p| p.contains("hash")), "{problems:?}");
 }
@@ -141,10 +169,18 @@ fn verify_detects_an_altered_history() {
     init(&project, &url);
 
     let mut c = Conn::open(&url).unwrap();
-    c.batch("UPDATE _quadra_history SET value = replace(value, '1.5', '0.5') WHERE field = 'price'").unwrap();
+    c.batch(
+        "UPDATE _quadra_history SET value = replace(value, '1.5', '0.5') WHERE field = 'price'",
+    )
+    .unwrap();
     drop(c);
     let problems = verify(&project, &url);
-    assert!(problems.iter().any(|p| p.contains("does not match its hash")), "{problems:?}");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("does not match its hash")),
+        "{problems:?}"
+    );
 }
 
 #[test]
@@ -157,7 +193,10 @@ fn verify_detects_a_removed_commit() {
     c.batch("DELETE FROM _quadra_commits").unwrap();
     drop(c);
     let problems = verify(&project, &url);
-    assert!(problems.iter().any(|p| p.contains("have no commit row")), "{problems:?}");
+    assert!(
+        problems.iter().any(|p| p.contains("have no commit row")),
+        "{problems:?}"
+    );
 }
 
 #[test]
@@ -181,15 +220,24 @@ fn reload_reproduces_the_engine_state() {
 // ---- migrations and changes ------------------------------------------------------------
 
 fn shop(version: &str) -> (Project, quadra_analysis::Checked, PathBuf) {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shop").join(version);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/shop")
+        .join(version);
     let project = Project::load(&root).unwrap();
     let checked = quadra_analysis::check(&project);
-    assert!(checked.model.is_some(), "{version} does not check: {:#?}", checked.diagnostics);
+    assert!(
+        checked.model.is_some(),
+        "{version} does not check: {:#?}",
+        checked.diagnostics
+    );
     (project, checked, root)
 }
 
 fn clock() -> chrono::NaiveDateTime {
-    chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap().and_hms_opt(10, 0, 0).unwrap()
+    chrono::NaiveDate::from_ymd_opt(2026, 12, 1)
+        .unwrap()
+        .and_hms_opt(10, 0, 0)
+        .unwrap()
 }
 
 /// v1 → migration → change → revert, verified at every step.
@@ -201,26 +249,53 @@ fn migrate_and_change(url: &str) {
     let (_, c2, root) = shop("v2");
     let (m, r) = (c2.model.as_ref().unwrap(), &c2.report);
     // dry run: the report, and nothing written
-    let report = ops::migrate(url, m, r, &root, clock(), true).unwrap().expect("something to migrate");
+    let report = ops::migrate(url, m, r, &root, clock(), true)
+        .unwrap()
+        .expect("something to migrate");
     let lines = report.scripts[0].1.join("\n");
-    assert!(lines.contains("rename Product.product_kind → Product.type: 3 values"), "{lines}");
-    assert!(lines.contains("backfill Product.hs_code: 3 values, 1 provisional"), "{lines}");
+    assert!(
+        lines.contains("rename Product.product_kind → Product.type: 3 values"),
+        "{lines}"
+    );
+    assert!(
+        lines.contains("backfill Product.hs_code: 3 values, 1 provisional"),
+        "{lines}"
+    );
     let mut db = Database::open(url, m, r).unwrap();
     assert!(!db.status().unwrap().schema_current);
     drop(db);
 
-    ops::migrate(url, m, r, &root, clock(), false).unwrap().unwrap();
-    assert!(ops::migrate(url, m, r, &root, clock(), false).unwrap().is_none(), "a second migrate has nothing to do");
-    assert_eq!(ops::verify(url, m, r, clock()).unwrap().0, Vec::<String>::new());
+    ops::migrate(url, m, r, &root, clock(), false)
+        .unwrap()
+        .unwrap();
+    assert!(
+        ops::migrate(url, m, r, &root, clock(), false)
+            .unwrap()
+            .is_none(),
+        "a second migrate has nothing to do"
+    );
+    assert_eq!(
+        ops::verify(url, m, r, clock()).unwrap().0,
+        Vec::<String>::new()
+    );
 
     let mut db = Database::open(url, m, r).unwrap();
     let mut interp = ops::loaded(&mut db, m, clock()).unwrap();
     let products = interp.ids("Product", None);
     let a = products[0];
-    assert_eq!(interp.store.read(a, "type", None).unwrap().to_string(), "Storable");
-    assert_eq!(interp.store.read(a, "hs_code", None).unwrap().to_string(), "73181500");
+    assert_eq!(
+        interp.store.read(a, "type", None).unwrap().to_string(),
+        "Storable"
+    );
+    assert_eq!(
+        interp.store.read(a, "hs_code", None).unwrap().to_string(),
+        "73181500"
+    );
     // the history written before the rename is read under the new name
-    assert_eq!(interp.store.read(a, "type", Some(1)).unwrap().to_string(), "merce");
+    assert_eq!(
+        interp.store.read(a, "type", Some(1)).unwrap().to_string(),
+        "merce"
+    );
     let prov = interp.provisional_values();
     assert_eq!(prov.len(), 1);
     assert_eq!(prov[0].2, "hs_code");
@@ -240,20 +315,43 @@ fn migrate_and_change(url: &str) {
     assert!(done.tx.is_some());
     let err = ops::run_change(url, m, r, "raise_prices", Some("lucia"), clock(), true).unwrap_err();
     assert!(err.contains("already applied"), "{err}");
-    assert_eq!(ops::verify(url, m, r, clock()).unwrap().0, Vec::<String>::new());
+    assert_eq!(
+        ops::verify(url, m, r, clock()).unwrap().0,
+        Vec::<String>::new()
+    );
 
     let mut db = Database::open(url, m, r).unwrap();
     let mut interp = ops::loaded(&mut db, m, clock()).unwrap();
-    assert_eq!(interp.store.read(a, "list_price", None).unwrap().to_string(), "1.10 EUR");
+    assert_eq!(
+        interp
+            .store
+            .read(a, "list_price", None)
+            .unwrap()
+            .to_string(),
+        "1.10 EUR"
+    );
     drop(interp);
     drop(db);
 
-    assert_eq!(ops::revert_change(url, m, r, "raise_prices", Some("lucia"), clock()).unwrap(), 3);
+    assert_eq!(
+        ops::revert_change(url, m, r, "raise_prices", Some("lucia"), clock()).unwrap(),
+        3
+    );
     assert!(ops::revert_change(url, m, r, "raise_prices", Some("lucia"), clock()).is_err());
-    assert_eq!(ops::verify(url, m, r, clock()).unwrap().0, Vec::<String>::new());
+    assert_eq!(
+        ops::verify(url, m, r, clock()).unwrap().0,
+        Vec::<String>::new()
+    );
     let mut db = Database::open(url, m, r).unwrap();
     let mut interp = ops::loaded(&mut db, m, clock()).unwrap();
-    assert_eq!(interp.store.read(a, "list_price", None).unwrap().to_string(), "1.00 EUR");
+    assert_eq!(
+        interp
+            .store
+            .read(a, "list_price", None)
+            .unwrap()
+            .to_string(),
+        "1.00 EUR"
+    );
     let changes = ops::list_changes(url, m, r, clock()).unwrap();
     assert!(changes[0].applied_tx.is_some() && changes[0].reverted_tx.is_some());
 }
@@ -271,9 +369,11 @@ fn migration_and_change_on_postgres() {
         return;
     };
     let schema = format!("shop_{}", std::process::id());
-    let _ = Conn::open(&pg).and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
+    let _ = Conn::open(&pg)
+        .and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
     migrate_and_change(&format!("{pg}#schema={schema}"));
-    let _ = Conn::open(&pg).and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
+    let _ = Conn::open(&pg)
+        .and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
 }
 
 #[test]
@@ -290,7 +390,15 @@ fn a_value_the_migration_cannot_convert_stops_it() {
     let c1b = quadra_analysis::check(&p);
     ops::init(&url, c1b.model.as_ref().unwrap(), &c1b.report, clock()).unwrap();
     let (_, c2, root) = shop("v2");
-    let err = ops::migrate(&url, c2.model.as_ref().unwrap(), &c2.report, &root, clock(), true).unwrap_err();
+    let err = ops::migrate(
+        &url,
+        c2.model.as_ref().unwrap(),
+        &c2.report,
+        &root,
+        clock(),
+        true,
+    )
+    .unwrap_err();
     assert!(err.contains("Unknown product kind: omaggio"), "{err}");
     // nothing was written
     let mut db = Database::open(&url, c2.model.as_ref().unwrap(), &c2.report).unwrap();
@@ -300,13 +408,22 @@ fn a_value_the_migration_cannot_convert_stops_it() {
 // ---- concurrency ---------------------------------------------------------------------------
 
 /// An engine over the database, loading on demand at the current head.
-fn engine<'m>(url: &str, model: &'m quadra_ir::Model, report: &'m quadra_types::Report) -> Interp<'m> {
+fn engine<'m>(
+    url: &str,
+    model: &'m quadra_ir::Model,
+    report: &'m quadra_types::Report,
+) -> Interp<'m> {
     engine_with(url, model, report, None)
 }
 
 type SharedCache = std::rc::Rc<std::cell::RefCell<quadra_store::Cache>>;
 
-fn engine_with<'m>(url: &str, model: &'m quadra_ir::Model, report: &'m quadra_types::Report, cache: Option<SharedCache>) -> Interp<'m> {
+fn engine_with<'m>(
+    url: &str,
+    model: &'m quadra_ir::Model,
+    report: &'m quadra_types::Report,
+    cache: Option<SharedCache>,
+) -> Interp<'m> {
     let db = Database::open(url, model, report).unwrap();
     let schema = db.schema.clone();
     let src = quadra_store::DbSource::open(url, schema, cache).unwrap();
@@ -320,7 +437,10 @@ fn engine_with<'m>(url: &str, model: &'m quadra_ir::Model, report: &'m quadra_ty
 
 fn first(i: &mut Interp, ent: &str) -> quadra_runtime::V {
     let id = i.ids(ent, None)[0];
-    quadra_runtime::V::Ref { ent: ent.into(), id }
+    quadra_runtime::V::Ref {
+        ent: ent.into(),
+        id,
+    }
 }
 
 fn amount(v: quadra_runtime::V) -> String {
@@ -331,7 +451,11 @@ fn amount(v: quadra_runtime::V) -> String {
 }
 
 fn eur(s: &str) -> quadra_runtime::V {
-    quadra_runtime::V::Price { amt: s.parse().unwrap(), cur: "EUR".into(), per: "pcs".into() }
+    quadra_runtime::V::Price {
+        amt: s.parse().unwrap(),
+        cur: "EUR".into(),
+        per: "pcs".into(),
+    }
 }
 
 #[test]
@@ -347,17 +471,31 @@ fn a_commit_is_refused_when_others_changed_what_it_read() {
     let mut b = engine(&url, m, r);
     let pa = first(&mut a, "Product");
     let pb = first(&mut b, "Product");
-    a.transaction(|i| i.set(&pa, "price", eur("2.00"), None)).unwrap();
-    let err = b.transaction(|i| i.set(&pb, "price", eur("3.00"), None)).unwrap_err();
-    let quadra_runtime::Flow::Conflict(c) = err else { panic!("expected a conflict, got {err:?}") };
+    a.transaction(|i| i.set(&pa, "price", eur("2.00"), None))
+        .unwrap();
+    let err = b
+        .transaction(|i| i.set(&pb, "price", eur("3.00"), None))
+        .unwrap_err();
+    let quadra_runtime::Flow::Conflict(c) = err else {
+        panic!("expected a conflict, got {err:?}")
+    };
     assert_eq!(c.len(), 1);
-    assert!(c[0].what.iter().any(|w| w.starts_with("Product#") && w.ends_with(".price")), "{c:?}");
+    assert!(
+        c[0].what
+            .iter()
+            .any(|w| w.starts_with("Product#") && w.ends_with(".price")),
+        "{c:?}"
+    );
 
     // after seeing the change, a fresh engine can commit
     let mut b = engine(&url, m, r);
     let pb = first(&mut b, "Product");
-    b.transaction(|i| i.set(&pb, "price", eur("3.00"), None)).unwrap();
-    assert_eq!(quadra_store::ops::verify(&url, m, r, clock()).unwrap().0, Vec::<String>::new());
+    b.transaction(|i| i.set(&pb, "price", eur("3.00"), None))
+        .unwrap();
+    assert_eq!(
+        quadra_store::ops::verify(&url, m, r, clock()).unwrap().0,
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -372,11 +510,30 @@ fn independent_commits_both_succeed() {
     let mut b = engine(&url, m, r);
     let customer = first(&mut a, "Customer");
     let product = first(&mut b, "Product");
-    a.transaction(|i| i.set(&customer, "name", quadra_runtime::V::Text("Anna B.".into()), None)).unwrap();
+    a.transaction(|i| {
+        i.set(
+            &customer,
+            "name",
+            quadra_runtime::V::Text("Anna B.".into()),
+            None,
+        )
+    })
+    .unwrap();
     // b started before a committed, but read nothing a changed: it gets the next number
-    b.transaction(|i| i.set(&product, "name", quadra_runtime::V::Text("Blue pen".into()), None)).unwrap();
+    b.transaction(|i| {
+        i.set(
+            &product,
+            "name",
+            quadra_runtime::V::Text("Blue pen".into()),
+            None,
+        )
+    })
+    .unwrap();
     assert_eq!(b.store.tx, a.store.tx + 1);
-    assert_eq!(quadra_store::ops::verify(&url, m, r, clock()).unwrap().0, Vec::<String>::new());
+    assert_eq!(
+        quadra_store::ops::verify(&url, m, r, clock()).unwrap().0,
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -387,22 +544,55 @@ fn concurrent_movements_of_the_same_stock_are_serialized() {
     let checked = quadra_analysis::check(&project);
     let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
 
-    let qty = |n: i64| quadra_runtime::V::Qty { v: n.into(), unit: "pcs".into() };
+    let qty = |n: i64| quadra_runtime::V::Qty {
+        v: n.into(),
+        unit: "pcs".into(),
+    };
     let mut a = engine(&url, m, r);
     let mut b = engine(&url, m, r);
     let pa = first(&mut a, "Product");
     let pb = first(&mut b, "Product");
-    a.transaction(|i| i.create("Restock", vec![("product".into(), pa.clone()), ("qty".into(), qty(5))]).map(|_| ())).unwrap();
+    a.transaction(|i| {
+        i.create(
+            "Restock",
+            vec![("product".into(), pa.clone()), ("qty".into(), qty(5))],
+        )
+        .map(|_| ())
+    })
+    .unwrap();
     // b's stock check read the rows of the same product: refused, with what changed
-    let err = b.transaction(|i| i.create("Restock", vec![("product".into(), pb.clone()), ("qty".into(), qty(3))]).map(|_| ())).unwrap_err();
-    let quadra_runtime::Flow::Conflict(c) = err else { panic!("expected a conflict, got {err:?}") };
-    assert!(c[0].what.iter().any(|w| w.starts_with("Stock rows")), "{c:?}");
+    let err = b
+        .transaction(|i| {
+            i.create(
+                "Restock",
+                vec![("product".into(), pb.clone()), ("qty".into(), qty(3))],
+            )
+            .map(|_| ())
+        })
+        .unwrap_err();
+    let quadra_runtime::Flow::Conflict(c) = err else {
+        panic!("expected a conflict, got {err:?}")
+    };
+    assert!(
+        c[0].what.iter().any(|w| w.starts_with("Stock rows")),
+        "{c:?}"
+    );
     let mut b = engine(&url, m, r);
     let pb = first(&mut b, "Product");
-    b.transaction(|i| i.create("Restock", vec![("product".into(), pb.clone()), ("qty".into(), qty(3))]).map(|_| ())).unwrap();
+    b.transaction(|i| {
+        i.create(
+            "Restock",
+            vec![("product".into(), pb.clone()), ("qty".into(), qty(3))],
+        )
+        .map(|_| ())
+    })
+    .unwrap();
     let stock = b.get(&pb, "stock", None, None).unwrap();
     assert_eq!(stock.to_string(), "18 pcs"); // 10 + 5 + 3
-    assert_eq!(quadra_store::ops::verify(&url, m, r, clock()).unwrap().0, Vec::<String>::new());
+    assert_eq!(
+        quadra_store::ops::verify(&url, m, r, clock()).unwrap().0,
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -412,7 +602,10 @@ fn the_cache_is_reused_and_never_stale() {
     init(&project, &url);
     let checked = quadra_analysis::check(&project);
     let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
-    let cache: SharedCache = std::rc::Rc::new(std::cell::RefCell::new(quadra_store::Cache::new(1 << 20, std::time::Duration::from_secs(60))));
+    let cache: SharedCache = std::rc::Rc::new(std::cell::RefCell::new(quadra_store::Cache::new(
+        1 << 20,
+        std::time::Duration::from_secs(60),
+    )));
 
     let mut a = engine_with(&url, m, r, Some(cache.clone()));
     let p = first(&mut a, "Product");
@@ -421,21 +614,37 @@ fn the_cache_is_reused_and_never_stale() {
     let mut b = engine_with(&url, m, r, Some(cache.clone()));
     let pb = first(&mut b, "Product");
     assert_eq!(amount(b.get(&pb, "price", None, None).unwrap()), "1.5");
-    assert!(cache.borrow().hits > 0, "the second engine reads from the cache");
+    assert!(
+        cache.borrow().hits > 0,
+        "the second engine reads from the cache"
+    );
     assert_eq!(cache.borrow().misses, misses);
 
     // a commit elsewhere: the next engine sees the new value, not the cached one
     let mut w = engine(&url, m, r);
     let pw = first(&mut w, "Product");
-    w.transaction(|i| i.set(&pw, "price", eur("2.00"), None)).unwrap();
+    w.transaction(|i| i.set(&pw, "price", eur("2.00"), None))
+        .unwrap();
     let mut c = engine_with(&url, m, r, Some(cache.clone()));
     let pc = first(&mut c, "Product");
     assert_eq!(amount(c.get(&pc, "price", None, None).unwrap()), "2");
 
     // prewarm: recent records up to the budget
-    let fresh = std::rc::Rc::new(std::cell::RefCell::new(quadra_store::Cache::new(1 << 20, std::time::Duration::from_secs(60))));
+    let fresh = std::rc::Rc::new(std::cell::RefCell::new(quadra_store::Cache::new(
+        1 << 20,
+        std::time::Duration::from_secs(60),
+    )));
     let mut conn = Conn::open(&url).unwrap();
-    let n = fresh.borrow_mut().prewarm(&mut conn, chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap()).unwrap();
+    let n = fresh
+        .borrow_mut()
+        .prewarm(
+            &mut conn,
+            chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        )
+        .unwrap();
     assert!(n > 20 && fresh.borrow().len() == n, "{n}");
 }
 
@@ -445,11 +654,23 @@ fn run_source_on_sqlite(src: &str) {
     let root = Path::new("/regression");
     let project = Project::from_sources(root, vec![(root.join("main.qd"), src.to_string())]);
     let mut backend = DbBackend::new("sqlite");
-    let results = quadra_runtime::run_tests_with(&project, None, Some(&mut backend)).unwrap_or_else(|d| {
-        let msgs: Vec<String> = d.iter().map(|d| d.message.clone()).collect();
-        panic!("does not check:\n{}", msgs.join("\n"))
-    });
-    let failed: Vec<String> = results.iter().filter(|r| !r.passed).map(|r| format!("{} ({}): {}", r.name, r.location, r.message.clone().unwrap_or_default())).collect();
+    let results = quadra_runtime::run_tests_with(&project, None, Some(&mut backend))
+        .unwrap_or_else(|d| {
+            let msgs: Vec<String> = d.iter().map(|d| d.message.clone()).collect();
+            panic!("does not check:\n{}", msgs.join("\n"))
+        });
+    let failed: Vec<String> = results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| {
+            format!(
+                "{} ({}): {}",
+                r.name,
+                r.location,
+                r.message.clone().unwrap_or_default()
+            )
+        })
+        .collect();
     assert!(!results.is_empty(), "no tests found");
     assert!(failed.is_empty(), "\n{}", failed.join("\n"));
 }
@@ -604,10 +825,22 @@ entity Doc:
     let url = format!("sqlite:{}", file.display());
     quadra_store::ops::init(&url, model, report, clock()).unwrap();
     let mut i = engine(&url, model, report);
-    let doc = i.transaction(|i| i.create("Doc", vec![("n".into(), quadra_runtime::V::Int(7))])).unwrap();
-    let action = |name: &str| model.entity("Doc").unwrap().actions.iter().find(|a| a.name == name);
-    i.transaction(|i| i.run_action(&doc, "Doc", "send", action("send"), vec![], vec![])).unwrap();
-    assert!(i.transaction(|i| i.run_action(&doc, "Doc", "broken", action("broken"), vec![], vec![])).is_err());
+    let doc = i
+        .transaction(|i| i.create("Doc", vec![("n".into(), quadra_runtime::V::Int(7))]))
+        .unwrap();
+    let action = |name: &str| {
+        model
+            .entity("Doc")
+            .unwrap()
+            .actions
+            .iter()
+            .find(|a| a.name == name)
+    };
+    i.transaction(|i| i.run_action(&doc, "Doc", "send", action("send"), vec![], vec![]))
+        .unwrap();
+    assert!(i
+        .transaction(|i| i.run_action(&doc, "Doc", "broken", action("broken"), vec![], vec![]))
+        .is_err());
     let pending = quadra_store::ops::outbox(&url, model, report, true).unwrap();
     assert_eq!(pending.len(), 1, "{pending:?}");
     let e = &pending[0];
@@ -616,9 +849,12 @@ entity Doc:
     assert_eq!(e.fields["n"], serde_json::json!(7));
     assert_eq!(e.fields["doc"]["ent"], serde_json::json!("Doc"));
     assert!(e.delivered_at.is_none());
-    let marked = quadra_store::ops::outbox_delivered(&url, model, report, &[e.id, 999], clock()).unwrap();
+    let marked =
+        quadra_store::ops::outbox_delivered(&url, model, report, &[e.id, 999], clock()).unwrap();
     assert_eq!(marked, 1);
-    assert!(quadra_store::ops::outbox(&url, model, report, true).unwrap().is_empty());
+    assert!(quadra_store::ops::outbox(&url, model, report, true)
+        .unwrap()
+        .is_empty());
     let all = quadra_store::ops::outbox(&url, model, report, false).unwrap();
     assert_eq!(all.len(), 1);
     assert!(all[0].delivered_at.is_some());
@@ -936,10 +1172,22 @@ fn an_idle_sweep_writes_no_commit() {
     init(&project, &url);
     let checked = quadra_analysis::check(&project);
     let model = checked.model.as_ref().unwrap();
-    let commits = |url: &str| Database::open(url, model, &checked.report).unwrap().status().unwrap().commits;
+    let commits = |url: &str| {
+        Database::open(url, model, &checked.report)
+            .unwrap()
+            .status()
+            .unwrap()
+            .commits
+    };
     let before = commits(&url);
-    assert_eq!(quadra_store::ops::sweep(&url, model, &checked.report, clock()).unwrap(), None);
-    assert_eq!(quadra_store::ops::sweep(&url, model, &checked.report, clock()).unwrap(), None);
+    assert_eq!(
+        quadra_store::ops::sweep(&url, model, &checked.report, clock()).unwrap(),
+        None
+    );
+    assert_eq!(
+        quadra_store::ops::sweep(&url, model, &checked.report, clock()).unwrap(),
+        None
+    );
     assert_eq!(commits(&url), before, "an idle sweep wrote a commit");
     assert!(verify(&project, &url).is_empty());
 }
@@ -961,12 +1209,35 @@ fn a_new_rule_broken_by_the_data_names_the_record() {
     let url = format!("sqlite:{}", dir.join("data.db").display());
     let v1 = model("");
     ops::init(&url, v1.model.as_ref().unwrap(), &v1.report, clock()).unwrap();
-    ops::fixture(&url, v1.model.as_ref().unwrap(), &v1.report, "demo", clock()).unwrap();
+    ops::fixture(
+        &url,
+        v1.model.as_ref().unwrap(),
+        &v1.report,
+        "demo",
+        clock(),
+    )
+    .unwrap();
     // `hours > 0` holds (a duration compares with 0); the date is in the future
     let v2 = model("    check hours > 0, \"Hours must be greater than 0\"\n    check date <= today(), \"Date must be today or in the past\"\n");
-    let e = ops::deploy(&url, v2.model.as_ref().unwrap(), &v2.report, &dir, clock(), true, "test").unwrap_err();
+    let e = ops::deploy(
+        &url,
+        v2.model.as_ref().unwrap(),
+        &v2.report,
+        &dir,
+        clock(),
+        true,
+        "test",
+    )
+    .unwrap_err();
     // the rule's line, the record with the value that breaks it, and what can be done
-    for part in ["main.qd:5\n", "check date <= today(), \"Date must be today or in the past\"", "1 TimeLog breaks it:", "TimeLog#", "date = 2026-12-24", "add a migration that fixes them"] {
+    for part in [
+        "main.qd:5\n",
+        "check date <= today(), \"Date must be today or in the past\"",
+        "1 TimeLog breaks it:",
+        "TimeLog#",
+        "date = 2026-12-24",
+        "add a migration that fixes them",
+    ] {
         assert!(e.contains(part), "missing {part:?} in:\n{e}");
     }
     assert!(!e.contains("Hours must be greater than 0"), "{e}");
@@ -994,11 +1265,21 @@ fn a_reminder_fires_at_the_first_sweep_after_its_time() {
     let t = |s: i64| clock() + chrono::Duration::seconds(s);
     quadra_store::ops::init(&url, model, &checked.report, t(0)).unwrap();
     quadra_store::ops::fixture(&url, model, &checked.report, "demo", t(0)).unwrap();
-    let fired = || Conn::open(&url).unwrap().query("SELECT count(*) FROM \"fired\"", &[]).unwrap()[0][0].clone().unwrap_or_default();
+    let fired = || {
+        Conn::open(&url)
+            .unwrap()
+            .query("SELECT count(*) FROM \"fired\"", &[])
+            .unwrap()[0][0]
+            .clone()
+            .unwrap_or_default()
+    };
     let sweep = |s: i64| quadra_store::ops::sweep(&url, model, &checked.report, t(s)).unwrap();
     assert_eq!(sweep(30), None, "not due yet");
     assert_eq!(fired(), "0");
-    assert!(sweep(90).is_some(), "due since 10:01: the sweep at 10:01:30 fires it");
+    assert!(
+        sweep(90).is_some(),
+        "due since 10:01: the sweep at 10:01:30 fires it"
+    );
     assert_eq!(fired(), "1");
     assert_eq!(sweep(150), None, "fired once");
     assert_eq!(fired(), "1");
@@ -1017,15 +1298,27 @@ fn a_reminder_fires_at_the_first_sweep_after_its_time() {
 fn load_from_reads_only_a_file_of_the_project() {
     use quadra_store::ops;
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shop/v2");
-    for (what, from, link) in [("absolute", "/etc/hosts", false), ("parent", "../customs.csv", false), ("link", "link.csv", true)] {
-        let root = std::env::temp_dir().join(format!("quadra-loadfrom-{}-{what}", std::process::id()));
+    for (what, from, link) in [
+        ("absolute", "/etc/hosts", false),
+        ("parent", "../customs.csv", false),
+        ("link", "link.csv", true),
+    ] {
+        let root =
+            std::env::temp_dir().join(format!("quadra-loadfrom-{}-{what}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("migrations")).unwrap();
         for f in ["customs.csv", "main.qd", "quadra.toml"] {
             std::fs::copy(src.join(f), root.join(f)).unwrap();
         }
         let m = std::fs::read_to_string(src.join("migrations/2026-12-01_customs.qd")).unwrap();
-        std::fs::write(root.join("migrations/2026-12-01_customs.qd"), m.replace("load from \"customs.csv\"", &format!("load from \"{from}\""))).unwrap();
+        std::fs::write(
+            root.join("migrations/2026-12-01_customs.qd"),
+            m.replace(
+                "load from \"customs.csv\"",
+                &format!("load from \"{from}\""),
+            ),
+        )
+        .unwrap();
         if link {
             std::os::unix::fs::symlink("/etc/hosts", root.join("link.csv")).unwrap();
         }
@@ -1034,8 +1327,21 @@ fn load_from_reads_only_a_file_of_the_project() {
         ops::init(&url, c1.model.as_ref().unwrap(), &c1.report, clock()).unwrap();
         let project = Project::load(&root).unwrap();
         let c2 = quadra_analysis::check(&project);
-        let err = ops::migrate(&url, c2.model.as_ref().unwrap(), &c2.report, &root, clock(), false).unwrap_err();
-        assert!(err.contains("a file of the project") || err.contains("is a link") || err.contains("outside the project"), "{what}: {err}");
+        let err = ops::migrate(
+            &url,
+            c2.model.as_ref().unwrap(),
+            &c2.report,
+            &root,
+            clock(),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a file of the project")
+                || err.contains("is a link")
+                || err.contains("outside the project"),
+            "{what}: {err}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

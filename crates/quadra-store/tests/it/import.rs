@@ -73,20 +73,27 @@ fn project() -> Project {
 }
 
 fn clock() -> chrono::NaiveDateTime {
-    chrono::NaiveDate::from_ymd_opt(2026, 3, 9).unwrap().and_hms_opt(10, 0, 0).unwrap()
+    chrono::NaiveDate::from_ymd_opt(2026, 3, 9)
+        .unwrap()
+        .and_hms_opt(10, 0, 0)
+        .unwrap()
 }
 
 /// A fresh database: a SQLite file or a PostgreSQL schema.
 fn fresh(target: &str, name: &str) -> String {
     if target == "sqlite" {
-        let p = std::env::temp_dir().join(format!("quadra-import-{}-{name}.db", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("quadra-import-{}-{name}.db", std::process::id()));
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", p.display()));
         }
         format!("sqlite:{}", p.display())
     } else {
         let schema = format!("qi_{}_{name}", std::process::id());
-        Conn::open(target).unwrap().batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")).unwrap();
+        Conn::open(target)
+            .unwrap()
+            .batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+            .unwrap();
         format!("{target}#schema={schema}")
     }
 }
@@ -98,7 +105,8 @@ fn cleanup(target: &str, url: &str) {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
     } else if let Some((_, schema)) = url.split_once("#schema=") {
-        let _ = Conn::open(target).and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
+        let _ = Conn::open(target)
+            .and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
     }
 }
 
@@ -121,13 +129,44 @@ fn tables(url: &str, checked: &quadra_analysis::Checked) -> Vec<(String, Vec<Str
     let mut conn = Conn::open(url).unwrap();
     let mut out = Vec::new();
     for t in &db.schema.tables {
-        let cols: Vec<String> = t.columns.iter().filter(|c| c.references.is_none() && !c.name.ends_with("_id") && c.name != "id" && !c.name.starts_with("_created")).map(|c| c.name.clone()).collect();
+        let cols: Vec<String> = t
+            .columns
+            .iter()
+            .filter(|c| {
+                c.references.is_none()
+                    && !c.name.ends_with("_id")
+                    && c.name != "id"
+                    && !c.name.starts_with("_created")
+            })
+            .map(|c| c.name.clone())
+            .collect();
         if cols.is_empty() {
             continue;
         }
-        let shown: Vec<String> = cols.iter().map(|c| if c == "_frozen_tx" { "CASE WHEN \"_frozen_tx\" IS NULL THEN 'live' ELSE 'frozen' END".to_string() } else { format!("CAST(\"{c}\" AS TEXT)") }).collect();
-        let mut rows: Vec<String> =
-            conn.query(&format!("SELECT {} FROM \"{}\"", shown.join(", "), t.name), &[]).unwrap().into_iter().map(|r| r.iter().map(|v| normalize(v.as_deref())).collect::<Vec<_>>().join(" | ")).collect();
+        let shown: Vec<String> = cols
+            .iter()
+            .map(|c| {
+                if c == "_frozen_tx" {
+                    "CASE WHEN \"_frozen_tx\" IS NULL THEN 'live' ELSE 'frozen' END".to_string()
+                } else {
+                    format!("CAST(\"{c}\" AS TEXT)")
+                }
+            })
+            .collect();
+        let mut rows: Vec<String> = conn
+            .query(
+                &format!("SELECT {} FROM \"{}\"", shown.join(", "), t.name),
+                &[],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                r.iter()
+                    .map(|v| normalize(v.as_deref()))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .collect();
         rows.sort();
         out.push((t.name.clone(), rows));
     }
@@ -178,19 +217,45 @@ fn normalize(v: Option<&str>) -> String {
 }
 
 fn verify(url: &str, checked: &quadra_analysis::Checked) -> Vec<String> {
-    ops::verify(url, checked.model.as_ref().unwrap(), &checked.report, clock()).unwrap().0
+    ops::verify(
+        url,
+        checked.model.as_ref().unwrap(),
+        &checked.report,
+        clock(),
+    )
+    .unwrap()
+    .0
 }
 
 /// The full-text search index against the text of the rows.
 fn search_index(url: &str, checked: &quadra_analysis::Checked) -> Vec<String> {
     let mut db = Database::open(url, checked.model.as_ref().unwrap(), &checked.report).unwrap();
     let schema = db.schema.clone();
-    quadra_store::sqlq::search_index_problems(&mut db.conn, &schema, checked.model.as_ref().unwrap()).unwrap()
+    quadra_store::sqlq::search_index_problems(
+        &mut db.conn,
+        &schema,
+        checked.model.as_ref().unwrap(),
+    )
+    .unwrap()
 }
 
-fn import(url: &str, checked: &quadra_analysis::Checked, files: &[(&str, &str)], name: &str, per_commit: Option<usize>) -> Result<bulk::ImportReport, String> {
+fn import(
+    url: &str,
+    checked: &quadra_analysis::Checked,
+    files: &[(&str, &str)],
+    name: &str,
+    per_commit: Option<usize>,
+) -> Result<bulk::ImportReport, String> {
     let dir = write_files(name, files);
-    let r = bulk::import_dir(url, checked.model.as_ref().unwrap(), &checked.report, &dir, clock(), per_commit, &mut |_| {});
+    let r = bulk::import_dir(
+        url,
+        checked.model.as_ref().unwrap(),
+        &checked.report,
+        &dir,
+        clock(),
+        per_commit,
+        &mut |_| {},
+    );
     let _ = std::fs::remove_dir_all(&dir);
     r
 }
@@ -198,7 +263,12 @@ fn import(url: &str, checked: &quadra_analysis::Checked, files: &[(&str, &str)],
 fn same_as_the_engine(target: &str) {
     let project = project();
     let checked = quadra_analysis::check(&project);
-    let errors: Vec<_> = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
+    let errors: Vec<_> = checked
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == quadra_sema::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
     assert!(errors.is_empty(), "{errors:?}");
     let model = checked.model.as_ref().unwrap();
 
@@ -211,7 +281,18 @@ fn same_as_the_engine(target: &str) {
     let bulk = fresh(target, "bulk");
     ops::init(&bulk, model, &checked.report, clock()).unwrap();
     // (a directory of its own: the SQLite and PostgreSQL tests run at the same time)
-    let r = import(&bulk, &checked, &files(), if target == "sqlite" { "same-lite" } else { "same-pg" }, Some(7)).unwrap();
+    let r = import(
+        &bulk,
+        &checked,
+        &files(),
+        if target == "sqlite" {
+            "same-lite"
+        } else {
+            "same-pg"
+        },
+        Some(7),
+    )
+    .unwrap();
     assert_eq!(r.records, 28);
     assert_eq!(r.commits.len(), 4);
     assert_eq!(verify(&bulk, &checked), Vec::<String>::new());
@@ -225,13 +306,25 @@ fn same_as_the_engine(target: &str) {
     }
     // the records' rows: frozen as `frozen when` says, warnings of the soft rules
     let (ra, rb) = (records(&engine), records(&bulk));
-    assert!(rb.iter().any(|r| r.contains("A high-priority order")), "{rb:#?}");
-    assert!(rb.iter().any(|r| r.starts_with("Order | frozen")), "{rb:#?}");
-    assert_eq!(ra, rb, "_quadra_records: the engine and the import disagree");
+    assert!(
+        rb.iter().any(|r| r.contains("A high-priority order")),
+        "{rb:#?}"
+    );
+    assert!(
+        rb.iter().any(|r| r.starts_with("Order | frozen")),
+        "{rb:#?}"
+    );
+    assert_eq!(
+        ra, rb,
+        "_quadra_records: the engine and the import disagree"
+    );
     // the foreign keys the import dropped are back
     if target != "sqlite" {
         let fks = foreign_keys(&bulk);
-        assert!(fks.iter().any(|k| k.starts_with("order_line: ")), "{fks:#?}");
+        assert!(
+            fks.iter().any(|k| k.starts_with("order_line: ")),
+            "{fks:#?}"
+        );
         assert_eq!(foreign_keys(&engine), fks);
     }
     // rollups of rollups, from the materialized columns
@@ -249,7 +342,18 @@ fn same_as_the_engine(target: &str) {
     interp
         .transaction(|i| {
             let line = i.ids("OrderLine", None)[0];
-            i.set(&quadra_runtime::V::Ref { ent: "OrderLine".into(), id: line }, "qty", quadra_runtime::V::Qty { v: 11.into(), unit: "pcs".into() }, None)
+            i.set(
+                &quadra_runtime::V::Ref {
+                    ent: "OrderLine".into(),
+                    id: line,
+                },
+                "qty",
+                quadra_runtime::V::Qty {
+                    v: 11.into(),
+                    unit: "pcs".into(),
+                },
+                None,
+            )
         })
         .unwrap();
     assert_eq!(verify(&bulk, &checked), Vec::<String>::new());
@@ -273,7 +377,10 @@ fn the_import_writes_what_the_engine_writes_on_postgres() {
 }
 
 fn with(file: &str, text: &'static str) -> Vec<(&'static str, &'static str)> {
-    files().into_iter().map(|(e, t)| if e == file { (e, text) } else { (e, t) }).collect()
+    files()
+        .into_iter()
+        .map(|(e, t)| if e == file { (e, text) } else { (e, t) })
+        .collect()
 }
 
 /// Data that breaks the model is refused, with a message that says where; nothing is
@@ -301,10 +408,16 @@ fn data_that_breaks_the_model_is_refused() {
     for (i, (files, expected)) in cases.into_iter().enumerate() {
         match import(&url, &checked, &files, &format!("bad{i}"), None) {
             Ok(_) => panic!("case {i}: imported, expected an error containing {expected:?}"),
-            Err(e) => assert!(e.contains(expected), "case {i}: {e:?} does not contain {expected:?}"),
+            Err(e) => assert!(
+                e.contains(expected),
+                "case {i}: {e:?} does not contain {expected:?}"
+            ),
         }
     }
-    let status = Database::open(&url, model, &checked.report).unwrap().status().unwrap();
+    let status = Database::open(&url, model, &checked.report)
+        .unwrap()
+        .status()
+        .unwrap();
     assert_eq!(status.commits, 1, "only the seeds are committed");
     cleanup("sqlite", &url);
 }

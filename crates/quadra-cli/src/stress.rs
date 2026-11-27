@@ -60,10 +60,31 @@ impl Rng {
     }
 }
 
-const FIRST: &[&str] = &["Rossi", "Bianchi", "Verdi", "Ferrari", "Esposito", "Romano", "Colombo", "Ricci", "Marino", "Greco", "Bruno", "Gallo", "Conti", "De Luca", "Mancini", "Costa", "Giordano", "Rizzo", "Lombardi", "Moretti", "Acme", "Globex", "Initech", "Umbrella", "Stark", "Wayne", "Hooli", "Vandelay", "Soylent", "Tyrell"];
-const KIND: &[&str] = &["Spa", "Srl", "& Figli", "Group", "Trading", "Logistics", "Industries", "Retail", "Foods", "Tech"];
-const WORDS: &[&str] = &["Hammer", "Saw", "Drill", "Wrench", "Screw", "Bolt", "Nut", "Washer", "Pliers", "Chisel", "File", "Clamp", "Level", "Tape", "Glue", "Brush", "Roller", "Ladder", "Bucket", "Gloves"];
-const SIZES: &[&str] = &["Mini", "Small", "Medium", "Large", "XL", "Pro", "Basic", "Plus"];
+const FIRST: &[&str] = &[
+    "Rossi", "Bianchi", "Verdi", "Ferrari", "Esposito", "Romano", "Colombo", "Ricci", "Marino",
+    "Greco", "Bruno", "Gallo", "Conti", "De Luca", "Mancini", "Costa", "Giordano", "Rizzo",
+    "Lombardi", "Moretti", "Acme", "Globex", "Initech", "Umbrella", "Stark", "Wayne", "Hooli",
+    "Vandelay", "Soylent", "Tyrell",
+];
+const KIND: &[&str] = &[
+    "Spa",
+    "Srl",
+    "& Figli",
+    "Group",
+    "Trading",
+    "Logistics",
+    "Industries",
+    "Retail",
+    "Foods",
+    "Tech",
+];
+const WORDS: &[&str] = &[
+    "Hammer", "Saw", "Drill", "Wrench", "Screw", "Bolt", "Nut", "Washer", "Pliers", "Chisel",
+    "File", "Clamp", "Level", "Tape", "Glue", "Brush", "Roller", "Ladder", "Bucket", "Gloves",
+];
+const SIZES: &[&str] = &[
+    "Mini", "Small", "Medium", "Large", "XL", "Pro", "Basic", "Plus",
+];
 pub const STATES: &[&str] = &["Draft", "Confirmed", "Shipped", "Cancelled"];
 const PRIORITIES: &[&str] = &["Low", "Normal", "High"];
 const CARRIERS: &[&str] = &["Road", "Rail", "Air"];
@@ -75,7 +96,8 @@ fn money(cents: u64) -> String {
 
 fn date(day: u32) -> String {
     // day 0 = 2024-01-01
-    let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day as i64);
+    let d =
+        chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day as i64);
     d.to_string()
 }
 
@@ -124,7 +146,10 @@ pub const CONTROLLER: &str = "controller";
 
 /// Generate every entity of the stress model into `out`.
 pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated, String> {
-    let &(_, regions, ncat, nprod, ntags, ncust) = SCALES.iter().find(|s| s.0 == scale).ok_or_else(|| format!("unknown scale `{scale}` ({})", scale_names()))?;
+    let &(_, regions, ncat, nprod, ntags, ncust) = SCALES
+        .iter()
+        .find(|s| s.0 == scale)
+        .ok_or_else(|| format!("unknown scale `{scale}` ({})", scale_names()))?;
     let mut rng = Rng::new(seed);
     let mut g = Generated::default();
     let count = |name: &str, n: usize, g: &mut Generated| g.counts.push((name.to_string(), n));
@@ -138,34 +163,80 @@ pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated,
     out.row(&["controller", CONTROLLER, "Controller", "Controller"])?;
     for r in 0..regions {
         let login = format!("manager{:02}", r + 1);
-        out.row(&[&format!("m{r}"), &login, &format!("Manager {}", r + 1), "RegionalManager"])?;
+        out.row(&[
+            &format!("m{r}"),
+            &login,
+            &format!("Manager {}", r + 1),
+            "RegionalManager",
+        ])?;
     }
     for l in 0..nlog {
         let login = format!("logistics{:02}", l + 1);
-        out.row(&[&format!("l{l}"), &login, &format!("Logistics {}", l + 1), "Logistics"])?;
+        out.row(&[
+            &format!("l{l}"),
+            &login,
+            &format!("Logistics {}", l + 1),
+            "Logistics",
+        ])?;
     }
     for s in 0..nsales {
         let login = format!("sales{:04}", s + 1);
-        out.row(&[&format!("s{s}"), &login, &format!("Salesperson {}", s + 1), "Salesperson"])?;
+        out.row(&[
+            &format!("s{s}"),
+            &login,
+            &format!("Salesperson {}", s + 1),
+            "Salesperson",
+        ])?;
     }
     count("User", 3 + regions + nlog + nsales, &mut g);
     // salespeople by region (round robin): the customers of a salesperson are in one region
     let sales_of = |r: usize| -> Vec<usize> { (0..nsales).filter(|s| s % regions == r).collect() };
 
     // ---- regions: the last one is locked ----
-    out.entity("Region", &["id", "code", "name", "manager", "logistics", "team", "active", "locked", "target"])?;
+    out.entity(
+        "Region",
+        &[
+            "id",
+            "code",
+            "name",
+            "manager",
+            "logistics",
+            "team",
+            "active",
+            "locked",
+            "target",
+        ],
+    )?;
     for r in 0..regions {
         let team: Vec<String> = (0..3).map(|_| format!("s{}", rng.below(nsales))).collect();
-        let locked = if r + 1 == regions && regions > 1 { "true" } else { "false" };
+        let locked = if r + 1 == regions && regions > 1 {
+            "true"
+        } else {
+            "false"
+        };
         let target = money(rng.range(1_000, 50_000) as u64 * 100_000);
-        out.row(&[&r.to_string(), &format!("R{:02}", r + 1), &format!("Region {}", r + 1), &format!("m{r}"), &format!("l{}", r / 4), &team.join(";"), "true", locked, &format!("{target} EUR")])?;
+        out.row(&[
+            &r.to_string(),
+            &format!("R{:02}", r + 1),
+            &format!("Region {}", r + 1),
+            &format!("m{r}"),
+            &format!("l{}", r / 4),
+            &team.join(";"),
+            "true",
+            locked,
+            &format!("{target} EUR"),
+        ])?;
     }
     count("Region", regions, &mut g);
 
     // ---- categories: a tree; a few leaves are not sold any more ----
     let mut parent: Vec<Option<usize>> = Vec::with_capacity(ncat);
     for c in 0..ncat {
-        parent.push(if c < (ncat / 10).max(1) { None } else { Some(rng.below(c)) });
+        parent.push(if c < (ncat / 10).max(1) {
+            None
+        } else {
+            Some(rng.below(c))
+        });
     }
     let mut has_children = vec![false; ncat];
     for p in parent.iter().flatten() {
@@ -176,21 +247,35 @@ pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated,
     for c in 0..ncat {
         let name = format!("{} {}", WORDS[c % WORDS.len()], c + 1);
         let p = parent[c].map(|p| p.to_string()).unwrap_or_default();
-        out.row(&[&c.to_string(), &format!("C{:04}", c + 1), &name, &p, if cat_active[c] { "true" } else { "false" }])?;
+        out.row(&[
+            &c.to_string(),
+            &format!("C{:04}", c + 1),
+            &name,
+            &p,
+            if cat_active[c] { "true" } else { "false" },
+        ])?;
     }
     count("Category", ncat, &mut g);
 
     // ---- products ----
     let mut price = Vec::with_capacity(nprod);
     let mut sellable = Vec::with_capacity(nprod);
-    out.entity("Product", &["id", "sku", "name", "category", "price", "cost", "active"])?;
+    out.entity(
+        "Product",
+        &["id", "sku", "name", "category", "price", "cost", "active"],
+    )?;
     for p in 0..nprod {
         let cat = rng.below(ncat);
         let cents = rng.range(100, 20_000) as u32;
         let active = !rng.pct(2);
         price.push(cents);
         sellable.push(active && cat_active[cat]);
-        let name = format!("{} {} {}", WORDS[rng.below(WORDS.len())], SIZES[rng.below(SIZES.len())], p + 1);
+        let name = format!(
+            "{} {} {}",
+            WORDS[rng.below(WORDS.len())],
+            SIZES[rng.below(SIZES.len())],
+            p + 1
+        );
         out.row(&[
             &p.to_string(),
             &format!("P{:06}", p + 1),
@@ -202,12 +287,18 @@ pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated,
         ])?;
     }
     count("Product", nprod, &mut g);
-    let sold: Vec<u32> = (0..nprod as u32).filter(|p| sellable[*p as usize]).collect();
+    let sold: Vec<u32> = (0..nprod as u32)
+        .filter(|p| sellable[*p as usize])
+        .collect();
 
     // ---- tags ----
     out.entity("Tag", &["id", "name", "color"])?;
     for t in 0..ntags {
-        out.row(&[&t.to_string(), &format!("TAG{:03}", t + 1), COLORS[rng.below(COLORS.len())]])?;
+        out.row(&[
+            &t.to_string(),
+            &format!("TAG{:03}", t + 1),
+            COLORS[rng.below(COLORS.len())],
+        ])?;
     }
     count("Tag", ntags, &mut g);
 
@@ -239,16 +330,29 @@ pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated,
             let nl = rng.range(1, 6) as u8;
             let first_line = lines.len() as u32;
             for _ in 0..nl {
-                let product = if state == 0 { sold[rng.below(sold.len())] } else { rng.below(nprod) as u32 };
+                let product = if state == 0 {
+                    sold[rng.below(sold.len())]
+                } else {
+                    rng.below(nprod) as u32
+                };
                 let qty = rng.range(1, 20) as u8;
                 let negotiated = rng.pct(30).then(|| price[product as usize] * 95 / 100);
-                let discount = if rng.pct(80) { 0 } else { [5, 10, 15, 20][rng.below(4)] };
+                let discount = if rng.pct(80) {
+                    0
+                } else {
+                    [5, 10, 15, 20][rng.below(4)]
+                };
                 let unit = negotiated.unwrap_or(price[product as usize]) as u64;
                 if state == 1 {
                     open_bound[c] += unit * qty as u64;
                 }
                 let line = lines.len() as u32;
-                lines.push(LineInfo { product, qty, price: negotiated, discount });
+                lines.push(LineInfo {
+                    product,
+                    qty,
+                    price: negotiated,
+                    discount,
+                });
                 // shipped orders: every line shipped, in one or two shipments; confirmed
                 // orders: some lines partly shipped
                 let to_ship = match state {
@@ -257,26 +361,62 @@ pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated,
                     _ => 0,
                 };
                 if to_ship > 0 {
-                    let split = if to_ship > 1 && rng.pct(40) { rng.range(1, to_ship as usize - 1) as u8 } else { to_ship };
+                    let split = if to_ship > 1 && rng.pct(40) {
+                        rng.range(1, to_ship as usize - 1) as u8
+                    } else {
+                        to_ship
+                    };
                     for part in [split, to_ship - split] {
                         if part > 0 {
-                            ships.push(ShipInfo { line, qty: part, day: day + rng.range(1, 20) as u32, carrier: rng.below(3) as u8, tracking: rng.pct(70) });
+                            ships.push(ShipInfo {
+                                line,
+                                qty: part,
+                                day: day + rng.range(1, 20) as u32,
+                                carrier: rng.below(3) as u8,
+                                tracking: rng.pct(70),
+                            });
                         }
                     }
                 }
             }
-            orders.push(OrderInfo { customer: c as u32, day, state, priority: rng.below(3) as u8, first_line, lines: nl });
+            orders.push(OrderInfo {
+                customer: c as u32,
+                day,
+                state,
+                priority: rng.below(3) as u8,
+                first_line,
+                lines: nl,
+            });
         }
     }
 
     // ---- customers ----
-    out.entity("Customer", &["id", "code", "name", "region", "salesperson", "tags", "credit_limit", "active"])?;
+    out.entity(
+        "Customer",
+        &[
+            "id",
+            "code",
+            "name",
+            "region",
+            "salesperson",
+            "tags",
+            "credit_limit",
+            "active",
+        ],
+    )?;
     for c in 0..ncust {
         let r = cust_region[c];
         let reps = sales_of(r);
         let rep = reps.get(rng.below(reps.len())).copied().unwrap_or(0);
-        let tags: Vec<String> = (0..rng.range(0, 3)).map(|_| rng.below(ntags).to_string()).collect();
-        let name = format!("{} {} {}", FIRST[rng.below(FIRST.len())], KIND[rng.below(KIND.len())], c + 1);
+        let tags: Vec<String> = (0..rng.range(0, 3))
+            .map(|_| rng.below(ntags).to_string())
+            .collect();
+        let name = format!(
+            "{} {} {}",
+            FIRST[rng.below(FIRST.len())],
+            KIND[rng.below(KIND.len())],
+            c + 1
+        );
         let limit = (open_bound[c] + 100_000).max(5_000_000) / 100_000 * 100_000 + 100_000;
         out.row(&[
             &c.to_string(),
@@ -291,13 +431,26 @@ pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated,
     }
     count("Customer", ncust, &mut g);
 
-    out.entity("Order", &["id", "number", "customer", "date", "state", "priority"])?;
+    out.entity(
+        "Order",
+        &["id", "number", "customer", "date", "state", "priority"],
+    )?;
     for (i, o) in orders.iter().enumerate() {
-        out.row(&[&i.to_string(), &format!("O{:08}", i + 1), &o.customer.to_string(), &date(o.day), STATES[o.state as usize], PRIORITIES[o.priority as usize]])?;
+        out.row(&[
+            &i.to_string(),
+            &format!("O{:08}", i + 1),
+            &o.customer.to_string(),
+            &date(o.day),
+            STATES[o.state as usize],
+            PRIORITIES[o.priority as usize],
+        ])?;
     }
     count("Order", orders.len(), &mut g);
 
-    out.entity("OrderLine", &["id", "order", "product", "qty", "price", "discount"])?;
+    out.entity(
+        "OrderLine",
+        &["id", "order", "product", "qty", "price", "discount"],
+    )?;
     let mut buf = String::new();
     for (i, o) in orders.iter().enumerate() {
         for k in 0..o.lines as u32 {
@@ -306,16 +459,41 @@ pub fn generate(scale: &str, seed: u64, out: &mut dyn Sink) -> Result<Generated,
             if let Some(p) = l.price {
                 let _ = write!(buf, "{} EUR/pcs", money(p as u64));
             }
-            let discount = if l.discount == 0 { String::new() } else { format!("{}%", l.discount) };
-            out.row(&[&(o.first_line + k).to_string(), &i.to_string(), &l.product.to_string(), &format!("{} pcs", l.qty), &buf, &discount])?;
+            let discount = if l.discount == 0 {
+                String::new()
+            } else {
+                format!("{}%", l.discount)
+            };
+            out.row(&[
+                &(o.first_line + k).to_string(),
+                &i.to_string(),
+                &l.product.to_string(),
+                &format!("{} pcs", l.qty),
+                &buf,
+                &discount,
+            ])?;
         }
     }
     count("OrderLine", lines.len(), &mut g);
 
-    out.entity("Shipment", &["id", "line", "qty", "date", "carrier", "tracking"])?;
+    out.entity(
+        "Shipment",
+        &["id", "line", "qty", "date", "carrier", "tracking"],
+    )?;
     for (i, s) in ships.iter().enumerate() {
-        let tracking = if s.tracking { format!("TR{:09}", i + 1) } else { String::new() };
-        out.row(&[&i.to_string(), &s.line.to_string(), &format!("{} pcs", s.qty), &date(s.day), CARRIERS[s.carrier as usize], &tracking])?;
+        let tracking = if s.tracking {
+            format!("TR{:09}", i + 1)
+        } else {
+            String::new()
+        };
+        out.row(&[
+            &i.to_string(),
+            &s.line.to_string(),
+            &format!("{} pcs", s.qty),
+            &date(s.day),
+            CARRIERS[s.carrier as usize],
+            &tracking,
+        ])?;
     }
     count("Shipment", ships.len(), &mut g);
     Ok(g)
@@ -330,8 +508,13 @@ pub struct CsvDir {
 
 impl CsvDir {
     pub fn new(dir: &std::path::Path) -> Result<CsvDir, String> {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        Ok(CsvDir { dir: dir.to_path_buf(), file: None, line: String::new() })
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        Ok(CsvDir {
+            dir: dir.to_path_buf(),
+            file: None,
+            line: String::new(),
+        })
     }
 
     fn write(&mut self, cells: &[&str]) -> Result<(), String> {
@@ -344,7 +527,11 @@ impl CsvDir {
             self.line.push_str(&quadra_store::bulk::csv_cell(c));
         }
         self.line.push('\n');
-        self.file.as_mut().ok_or("no entity begun")?.write_all(self.line.as_bytes()).map_err(|e| e.to_string())
+        self.file
+            .as_mut()
+            .ok_or("no entity begun")?
+            .write_all(self.line.as_bytes())
+            .map_err(|e| e.to_string())
     }
 
     pub fn finish(&mut self) -> Result<(), String> {
@@ -360,7 +547,8 @@ impl Sink for CsvDir {
     fn entity(&mut self, name: &str, header: &[&str]) -> Result<(), String> {
         self.finish()?;
         let path = self.dir.join(format!("{name}.csv"));
-        let f = std::fs::File::create(&path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        let f = std::fs::File::create(&path)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         self.file = Some(std::io::BufWriter::with_capacity(1 << 20, f));
         self.write(header)
     }
@@ -380,7 +568,12 @@ pub struct ToImport<'a, 'm> {
 
 impl<'a, 'm> ToImport<'a, 'm> {
     pub fn new(import: &'a mut quadra_store::bulk::Import<'m>) -> Self {
-        ToImport { import, handle: None, entity: String::new(), line: 0 }
+        ToImport {
+            import,
+            handle: None,
+            entity: String::new(),
+            line: 0,
+        }
     }
 }
 
@@ -388,14 +581,18 @@ impl Sink for ToImport<'_, '_> {
     fn entity(&mut self, name: &str, header: &[&str]) -> Result<(), String> {
         let header: Vec<String> = header.iter().map(|h| h.to_string()).collect();
         self.entity = name.to_string();
-        self.handle = Some(self.import.entity(name, &header, &format!("generated {name}"))?);
+        self.handle = Some(
+            self.import
+                .entity(name, &header, &format!("generated {name}"))?,
+        );
         self.line = 1;
         Ok(())
     }
 
     fn row(&mut self, cells: &[&str]) -> Result<(), String> {
         self.line += 1;
-        self.import.row(self.handle.ok_or("no entity begun")?, cells, self.line)
+        self.import
+            .row(self.handle.ok_or("no entity begun")?, cells, self.line)
     }
 }
 
@@ -434,6 +631,19 @@ mod tests {
         assert_eq!(a, run(7));
         assert_ne!(a.1, run(8).1);
         let names: Vec<&str> = a.0.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["User", "Region", "Category", "Product", "Tag", "Customer", "Order", "OrderLine", "Shipment"]);
+        assert_eq!(
+            names,
+            [
+                "User",
+                "Region",
+                "Category",
+                "Product",
+                "Tag",
+                "Customer",
+                "Order",
+                "OrderLine",
+                "Shipment"
+            ]
+        );
     }
 }

@@ -10,18 +10,32 @@ fn run(src: &str) {
 
 fn project(files: &[(&str, &str)]) -> Project {
     let root = Path::new("/regression");
-    Project::from_sources(root, files.iter().map(|(name, src)| (root.join(name), src.to_string())).collect())
+    Project::from_sources(
+        root,
+        files
+            .iter()
+            .map(|(name, src)| (root.join(name), src.to_string()))
+            .collect(),
+    )
 }
 
 /// The compile errors of a project (none: it checks).
 fn errors(files: &[(&str, &str)]) -> Vec<String> {
     let checked = quadra_analysis::check(&project(files));
-    checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect()
+    checked
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == quadra_sema::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect()
 }
 
 fn assert_error(files: &[(&str, &str)], expected: &str) {
     let errors = errors(files);
-    assert!(errors.iter().any(|e| e.contains(expected)), "expected an error containing {expected:?}, got {errors:#?}");
+    assert!(
+        errors.iter().any(|e| e.contains(expected)),
+        "expected an error containing {expected:?}, got {errors:#?}"
+    );
 }
 
 fn run_files(files: &[(&str, &str)]) {
@@ -30,7 +44,18 @@ fn run_files(files: &[(&str, &str)]) {
         let msgs: Vec<String> = d.iter().map(|d| d.message.clone()).collect();
         panic!("does not check:\n{}", msgs.join("\n"))
     });
-    let failed: Vec<String> = results.iter().filter(|r| !r.passed).map(|r| format!("{} ({}): {}", r.name, r.location, r.message.clone().unwrap_or_default())).collect();
+    let failed: Vec<String> = results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| {
+            format!(
+                "{} ({}): {}",
+                r.name,
+                r.location,
+                r.message.clone().unwrap_or_default()
+            )
+        })
+        .collect();
     assert!(!results.is_empty(), "no tests found");
     assert!(failed.is_empty(), "\n{}", failed.join("\n"));
 }
@@ -323,15 +348,45 @@ entity Item:
     frozen when state is Done
 "#;
     assert_error(&[("base.qd", base), ("more.qd", "from base import Item\n\nextend Item:\n    flow state:\n        Done -> Draft by reopen\n")], "`Item.state` already has a flow");
-    assert_error(&[("base.qd", base), ("more.qd", "from base import Item\n\nextend Item:\n    frozen when code == \"X\"\n")], "`Item` already has `frozen when`");
-    assert_error(&[("base.qd", base), ("more.qd", "from base import Item\n\nextend Item:\n    load from \"items.csv\"\n")], "`load from` cannot be used in an `extend`");
-    assert_error(&[("main.qd", "entity Item:\n    code: Code\n    load from \"items.csv\"\n")], "`load from` is only for a `temporary entity`");
+    assert_error(
+        &[
+            ("base.qd", base),
+            (
+                "more.qd",
+                "from base import Item\n\nextend Item:\n    frozen when code == \"X\"\n",
+            ),
+        ],
+        "`Item` already has `frozen when`",
+    );
+    assert_error(
+        &[
+            ("base.qd", base),
+            (
+                "more.qd",
+                "from base import Item\n\nextend Item:\n    load from \"items.csv\"\n",
+            ),
+        ],
+        "`load from` cannot be used in an `extend`",
+    );
+    assert_error(
+        &[(
+            "main.qd",
+            "entity Item:\n    code: Code\n    load from \"items.csv\"\n",
+        )],
+        "`load from` is only for a `temporary entity`",
+    );
 }
 
 /// An entity of the standard library is extended, not redeclared.
 #[test]
 fn std_entities_cannot_be_redeclared() {
-    assert_error(&[("main.qd", "entity Company:\n    name: Text\n    vat: Text\n")], "use `extend Company:`");
+    assert_error(
+        &[(
+            "main.qd",
+            "entity Company:\n    name: Text\n    vat: Text\n",
+        )],
+        "use `extend Company:`",
+    );
     assert!(errors(&[("main.qd", "extend Company:\n    vat: Text?\n")]).is_empty());
 }
 
@@ -407,7 +462,13 @@ test "created and changes":
 
 #[test]
 fn deleted_reactions_are_refused() {
-    assert_error(&[("main.qd", "entity Item:\n    code: Code\n\non Item deleted as i:\n    fail \"no\"\n")], "records are not deleted in Quadra");
+    assert_error(
+        &[(
+            "main.qd",
+            "entity Item:\n    code: Code\n\non Item deleted as i:\n    fail \"no\"\n",
+        )],
+        "records are not deleted in Quadra",
+    );
 }
 
 /// A `becomes` reaction whose effects change what its condition reads must be declared
@@ -425,14 +486,18 @@ entity Line:
     rule: Rule parent
     qty: Int
 "#;
-    let without = format!("{model}\non Rule becomes to_order > 0 as r:\n    Line(rule=r, qty=r.to_order)\n");
+    let without =
+        format!("{model}\non Rule becomes to_order > 0 as r:\n    Line(rule=r, qty=r.to_order)\n");
     assert_error(&[("main.qd", &without)], "declare it `converges`");
     let with =
         format!("{model}\non Rule becomes to_order > 0 as r converges:\n    Line(rule=r, qty=r.to_order)\n\ntest \"reorder\":\n    let r = Rule(min=5)\n    expect r.lines.count() == 1\n    expect r.to_order == 0\n");
     run(&with);
     let enters =
         "entity Doc:\n    state: enum(Draft, Done) default Draft\n    flow state:\n        Draft -> Done by finish\n    action finish:\n        require true\n\non Doc enters Done as d converges:\n    require true\n";
-    assert_error(&[("main.qd", enters)], "`converges` applies only to `becomes` reactions");
+    assert_error(
+        &[("main.qd", enters)],
+        "`converges` applies only to `becomes` reactions",
+    );
 }
 
 /// Permissions: `deny` inside a role applies to its users, a top-level `allow` grants to
@@ -484,7 +549,12 @@ test "rules":
     let hidden = quadra_runtime::run_session(&p, "rules", |_, _, interp, _| {
         let mut out = Vec::new();
         for login in ["ann", "sam", "bob"] {
-            let id = interp.ids("User", None).into_iter().find(|id| interp.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login));
+            let id = interp.ids("User", None).into_iter().find(|id| {
+                interp
+                    .store
+                    .read(*id, "login", None)
+                    .map_or(false, |v| v.to_string() == login)
+            });
             interp.user = id;
             out.push((login, interp.hidden("Doc", "cost")));
         }
@@ -492,7 +562,10 @@ test "rules":
     })
     .unwrap_or_else(|_| panic!("does not check"));
     assert_eq!(hidden.0, None, "the test fails");
-    assert_eq!(hidden.1, vec![("ann", true), ("sam", false), ("bob", false)]);
+    assert_eq!(
+        hidden.1,
+        vec![("ann", true), ("sam", false), ("bob", false)]
+    );
     let refused = |rule: &str, expected: &str| {
         let src = format!("entity Doc:\n    title: Text\n\nrole Clerk:\n    {rule}\n");
         assert_error(&[("main.qd", &src)], expected);
@@ -500,7 +573,13 @@ test "rules":
     refused("delete Doc", "records are not deleted in Quadra");
     refused("read, derived Doc", "`derived` is not a permission");
     refused("hide, read Doc.title", "`hide` cannot be combined");
-    assert_error(&[("main.qd", "entity Doc:\n    title: Text\n\nallow hide Doc.title\n")], "inside a `role`");
+    assert_error(
+        &[(
+            "main.qd",
+            "entity Doc:\n    title: Text\n\nallow hide Doc.title\n",
+        )],
+        "inside a `role`",
+    );
 }
 
 // ---- frozen documents and flows (items 15–18) ---------------------------------------------
@@ -519,33 +598,105 @@ entity Order:
 #[test]
 fn a_flow_field_is_not_assigned() {
     let msg = "`Order.state` changes only through its flow: run one of its actions (confirm, ship)";
-    assert_error(&[("main.qd", &format!("{FLOW_ORDER}    action force:\n        state = Shipped\n"))], msg);
-    assert_error(&[("main.qd", &format!("{FLOW_ORDER}    action force:\n        self.state = Shipped\n"))], msg);
-    assert_error(&[("main.qd", &format!("{FLOW_ORDER}\ntest \"t\":\n    let o = Order()\n    o.state = Shipped\n"))], msg);
-    assert_error(&[("main.qd", &format!("{FLOW_ORDER}\non Order enters Confirmed as o:\n    o.state = Shipped\n"))], msg);
-    assert_error(&[("main.qd", &format!("{FLOW_ORDER}\nfixture f:\n    let o = Order()\n    o.state = Shipped\n"))], msg);
+    assert_error(
+        &[(
+            "main.qd",
+            &format!("{FLOW_ORDER}    action force:\n        state = Shipped\n"),
+        )],
+        msg,
+    );
+    assert_error(
+        &[(
+            "main.qd",
+            &format!("{FLOW_ORDER}    action force:\n        self.state = Shipped\n"),
+        )],
+        msg,
+    );
+    assert_error(
+        &[(
+            "main.qd",
+            &format!("{FLOW_ORDER}\ntest \"t\":\n    let o = Order()\n    o.state = Shipped\n"),
+        )],
+        msg,
+    );
+    assert_error(
+        &[(
+            "main.qd",
+            &format!("{FLOW_ORDER}\non Order enters Confirmed as o:\n    o.state = Shipped\n"),
+        )],
+        msg,
+    );
+    assert_error(
+        &[(
+            "main.qd",
+            &format!("{FLOW_ORDER}\nfixture f:\n    let o = Order()\n    o.state = Shipped\n"),
+        )],
+        msg,
+    );
     // a new record starts in the initial state
-    assert_error(&[("main.qd", &format!("{FLOW_ORDER}\ntest \"t\":\n    let o = Order(state=Shipped)\n"))], "a new Order starts in Draft");
-    assert!(errors(&[("main.qd", &format!("{FLOW_ORDER}\ntest \"t\":\n    let o = Order(state=Draft)\n    o.n = 1\n"))]).is_empty());
+    assert_error(
+        &[(
+            "main.qd",
+            &format!("{FLOW_ORDER}\ntest \"t\":\n    let o = Order(state=Shipped)\n"),
+        )],
+        "a new Order starts in Draft",
+    );
+    assert!(errors(&[(
+        "main.qd",
+        &format!("{FLOW_ORDER}\ntest \"t\":\n    let o = Order(state=Draft)\n    o.n = 1\n")
+    )])
+    .is_empty());
     // only automatic transitions
     let auto = "entity Task:\n    n: Int default 0\n    state: enum(Open, Big) default Open\n    flow state:\n        Open -> Big when n > 10\n    action force:\n        state = Big\n";
-    assert_error(&[("main.qd", auto)], "`Task.state` changes only through its flow: it moves by its automatic transitions");
+    assert_error(
+        &[("main.qd", auto)],
+        "`Task.state` changes only through its flow: it moves by its automatic transitions",
+    );
 
     // at run time (the API's `update`, any other path): refused with the actions that move it
     let src = format!("{FLOW_ORDER}\nchange fix_state:\n    reason: \"wrongly confirmed\"\n    for o in Order.all():\n        o.state = Draft\n\ntest \"t\":\n    let o = Order()\n    o.confirm()\n");
     let p = project(&[("main.qd", &src)]);
     let (outcome, ()) = quadra_runtime::run_session(&p, "t", |m, _, interp, vars| {
         let o = vars["o"].clone();
-        let shipped = quadra_runtime::V::Variant { name: "Shipped".into(), fields: Default::default() };
-        let err = interp.transaction(|i| i.set(&o, "state", shipped.clone(), None)).unwrap_err();
+        let shipped = quadra_runtime::V::Variant {
+            name: "Shipped".into(),
+            fields: Default::default(),
+        };
+        let err = interp
+            .transaction(|i| i.set(&o, "state", shipped.clone(), None))
+            .unwrap_err();
         assert!(format!("{err:?}").contains(msg), "{err:?}");
-        let err = interp.transaction(|i| i.create("Order", vec![("state".into(), shipped.clone())])).unwrap_err();
-        assert!(format!("{err:?}").contains("a new Order starts in Draft"), "{err:?}");
-        assert_eq!(interp.get(&o, "state", None, None).ok().map(|v| v.to_string()), Some("Confirmed".into()));
+        let err = interp
+            .transaction(|i| i.create("Order", vec![("state".into(), shipped.clone())]))
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("a new Order starts in Draft"),
+            "{err:?}"
+        );
+        assert_eq!(
+            interp
+                .get(&o, "state", None, None)
+                .ok()
+                .map(|v| v.to_string()),
+            Some("Confirmed".into())
+        );
         // a change (a data fix, with a reason and an approval) may set it
-        let change = m.changes.iter().find(|c| c.name == "fix_state").unwrap().clone();
-        interp.transaction(|i| i.run_change(&change)).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(interp.get(&o, "state", None, None).ok().map(|v| v.to_string()), Some("Draft".into()));
+        let change = m
+            .changes
+            .iter()
+            .find(|c| c.name == "fix_state")
+            .unwrap()
+            .clone();
+        interp
+            .transaction(|i| i.run_change(&change))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            interp
+                .get(&o, "state", None, None)
+                .ok()
+                .map(|v| v.to_string()),
+            Some("Draft".into())
+        );
     })
     .unwrap_or_else(|d| panic!("does not check: {d:#?}"));
     assert_eq!(outcome, None);
@@ -797,12 +948,30 @@ test "payload variants":
 "#);
     let item = "entity Item:\n    code: Code\n    rule: enum(Fixed(amount: Money<EUR>), Free) default Free\n\n";
     for (body, expected) in [
-        ("fn f(i: Item) -> Item:\n    return i.as_of(2026-01-01)\n", "`as_of` is not available"),
-        ("fn f(i: Item) -> Text:\n    return i.explain()\n", "`explain` is not available"),
-        ("fn f(i: Item) -> Int:\n    return i.history.count()\n", "`history` is not available"),
-        ("fn f(i: Item):\n    i.rule = Fixed(amount=1.00 EUR, extra=1)\n", "`Fixed` has no field `extra`"),
-        ("fn f(i: Item):\n    i.rule = Free(1)\n", "`Free` has no fields"),
-        ("fn f(i: Item):\n    i.rule = Fixed()\n", "`Fixed` needs `amount`"),
+        (
+            "fn f(i: Item) -> Item:\n    return i.as_of(2026-01-01)\n",
+            "`as_of` is not available",
+        ),
+        (
+            "fn f(i: Item) -> Text:\n    return i.explain()\n",
+            "`explain` is not available",
+        ),
+        (
+            "fn f(i: Item) -> Int:\n    return i.history.count()\n",
+            "`history` is not available",
+        ),
+        (
+            "fn f(i: Item):\n    i.rule = Fixed(amount=1.00 EUR, extra=1)\n",
+            "`Fixed` has no field `extra`",
+        ),
+        (
+            "fn f(i: Item):\n    i.rule = Free(1)\n",
+            "`Free` has no fields",
+        ),
+        (
+            "fn f(i: Item):\n    i.rule = Fixed()\n",
+            "`Fixed` needs `amount`",
+        ),
     ] {
         assert_error(&[("main.qd", &format!("{item}{body}"))], expected);
     }
@@ -841,9 +1010,18 @@ test "f-strings":
 "#);
     for (src, expected) in [
         ("const A = f\"{1:xyz}\"\n", "invalid format `xyz`"),
-        ("fn f(t: Text) -> Text:\n    return f\"{t:.2}\"\n", "`.2` applies to numbers"),
-        ("fn f(t: Text) -> Text:\n    return f\"{t:05}\"\n", "`0` padding applies to numbers"),
-        ("fn f(m: Money<EUR>) -> Text:\n    return f\"{m:010}\"\n", "`0` padding applies to numbers"),
+        (
+            "fn f(t: Text) -> Text:\n    return f\"{t:.2}\"\n",
+            "`.2` applies to numbers",
+        ),
+        (
+            "fn f(t: Text) -> Text:\n    return f\"{t:05}\"\n",
+            "`0` padding applies to numbers",
+        ),
+        (
+            "fn f(m: Money<EUR>) -> Text:\n    return f\"{m:010}\"\n",
+            "`0` padding applies to numbers",
+        ),
         ("const A = f\"{1 +}\"\n", "invalid expression in f-string"),
     ] {
         assert_error(&[("main.qd", src)], expected);
@@ -1039,7 +1217,13 @@ test "zero":
     expect_error "At most 12 hours":
         TimeLog(hours=13 hours)
 "#);
-    assert_error(&[("main.qd", "entity TimeLog:\n    hours: Duration\n    check hours > 5, \"five\"\n")], "cannot compare Duration and Int: write the unit, as in `5 hours`, `30 minutes`, `2 days`");
+    assert_error(
+        &[(
+            "main.qd",
+            "entity TimeLog:\n    hours: Duration\n    check hours > 5, \"five\"\n",
+        )],
+        "cannot compare Duration and Int: write the unit, as in `5 hours`, `30 minutes`, `2 days`",
+    );
 }
 
 #[test]
@@ -1082,20 +1266,35 @@ test "group_by with one and two keys, aggregates, first(n)":
 #[test]
 fn group_by_checks_its_keys() {
     assert_error(&[("main.qd", "entity A:\n    n: Int\n\ntest \"x\":\n    let g = A.group_by(a => a.n, a => a.n, a => a.n)\n")], "group_by takes one or two keys");
-    assert_error(&[("main.qd", "entity A:\n    t: Text\n\ntest \"x\":\n    let g = A.all().avg(a => a.t)\n")], "cannot average");
-    assert_error(&[("main.qd", "test \"x\":\n    let g = [1, 2].first(\"a\")\n")], "takes a whole number");
+    assert_error(
+        &[(
+            "main.qd",
+            "entity A:\n    t: Text\n\ntest \"x\":\n    let g = A.all().avg(a => a.t)\n",
+        )],
+        "cannot average",
+    );
+    assert_error(
+        &[("main.qd", "test \"x\":\n    let g = [1, 2].first(\"a\")\n")],
+        "takes a whole number",
+    );
 }
 
 /// A range of billions is refused before it is made: one expression cannot take the machine's
 /// memory.
 #[test]
 fn a_huge_range_is_refused_not_allocated() {
-    let project = project(&[("main.qd", "test \"huge\":\n    let n = (1..9000000000000).count()\n    expect n > 0\n")]);
+    let project = project(&[(
+        "main.qd",
+        "test \"huge\":\n    let n = (1..9000000000000).count()\n    expect n > 0\n",
+    )]);
     let started = std::time::Instant::now();
     let results = quadra_runtime::run_tests(&project, None).unwrap();
     assert!(!results[0].passed);
     let m = results[0].message.clone().unwrap_or_default();
-    assert!(m.contains("elements") || m.contains("list") || m.contains("long"), "{m}");
+    assert!(
+        m.contains("elements") || m.contains("list") || m.contains("long"),
+        "{m}"
+    );
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
 
@@ -1105,5 +1304,13 @@ fn an_integer_overflow_is_an_error() {
     let project = project(&[("main.qd", "test \"overflow\":\n    let big = 9223372036854775807\n    let n = big + 1\n    expect n > 0\n")]);
     let results = quadra_runtime::run_tests(&project, None).unwrap();
     assert!(!results[0].passed);
-    assert!(results[0].message.clone().unwrap_or_default().contains("too large"), "{:?}", results[0].message);
+    assert!(
+        results[0]
+            .message
+            .clone()
+            .unwrap_or_default()
+            .contains("too large"),
+        "{:?}",
+        results[0].message
+    );
 }

@@ -50,13 +50,21 @@ pub fn analyze_model(model: &Model) -> Report {
         }
     }
     c.diags.sort_by_key(|d| (d.file, d.range.start()));
-    c.diags.dedup_by(|a, b| a.file == b.file && a.range == b.range && a.message == b.message);
+    c.diags
+        .dedup_by(|a, b| a.file == b.file && a.range == b.range && a.message == b.message);
     for v in c.reads.values_mut() {
         v.dedup_by(|a, b| a.0 == b.0);
     }
     c.accesses.sort_by_key(|(s, _)| (s.file, s.range.start()));
     c.accesses.dedup();
-    Report { diagnostics: c.diags, reads: c.reads, writes: c.writes, field_types, sum_types: c.sum_types, accesses: c.accesses }
+    Report {
+        diagnostics: c.diags,
+        reads: c.reads,
+        writes: c.writes,
+        field_types,
+        sum_types: c.sum_types,
+        accesses: c.accesses,
+    }
 }
 
 #[derive(Clone)]
@@ -97,7 +105,15 @@ struct Checker<'m> {
     accesses: Vec<(Span, Node)>,
 }
 
-const TEXT_TYPES: &[&str] = &["Text", "Code", "Email", "Phone", "VatNumber", "Barcode", "File"];
+const TEXT_TYPES: &[&str] = &[
+    "Text",
+    "Code",
+    "Email",
+    "Phone",
+    "VatNumber",
+    "Barcode",
+    "File",
+];
 
 fn path_str(p: &[String]) -> String {
     p.join(".")
@@ -137,19 +153,32 @@ impl<'m> Checker<'m> {
     fn record_access(&mut self, base: &T, name: &str, span: Span) {
         let T::Ent(en) = base else { return };
         let Some(e) = self.m.entity(en) else { return };
-        let known = self.m.find_field(e, name).is_some() || e.actions.iter().any(|a| a.name == name) || e.methods.iter().any(|f| f.name == name) || self.is_flow_action(e, name);
+        let known = self.m.find_field(e, name).is_some()
+            || e.actions.iter().any(|a| a.name == name)
+            || e.methods.iter().any(|f| f.name == name)
+            || self.is_flow_action(e, name);
         let end = span.range.end();
         let len = quadra_syntax::TextSize::from(name.len() as u32);
         if known && end >= span.range.start() + len {
             let range = quadra_syntax::TextRange::new(end - len, end);
-            self.accesses.push((Span { file: span.file, range }, (en.clone(), name.to_string())));
+            self.accesses.push((
+                Span {
+                    file: span.file,
+                    range,
+                },
+                (en.clone(), name.to_string()),
+            ));
         }
     }
 
     fn record_read(&mut self, entity: &str, field: &str, span: Span) {
         if let Some(cur) = self.current.clone() {
             let node = (entity.to_string(), field.to_string());
-            if self.reads.get(&cur).map_or(true, |v| !v.iter().any(|(n, _)| *n == node)) {
+            if self
+                .reads
+                .get(&cur)
+                .map_or(true, |v| !v.iter().any(|(n, _)| *n == node))
+            {
                 self.reads.entry(cur).or_default().push((node, span));
             }
         }
@@ -157,11 +186,19 @@ impl<'m> Checker<'m> {
 
     fn record_write(&mut self, entity: &str, field: &str, span: Span) {
         let ctx = self.context.clone();
-        self.writes.entry((entity.to_string(), field.to_string())).or_default().push((ctx, span));
+        self.writes
+            .entry((entity.to_string(), field.to_string()))
+            .or_default()
+            .push((ctx, span));
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.diags.push(Diagnostic { file: span.file, range: span.range, severity: Severity::Error, message: message.into() });
+        self.diags.push(Diagnostic {
+            file: span.file,
+            range: span.range,
+            severity: Severity::Error,
+            message: message.into(),
+        });
     }
 
     // ---- seeds: units and currencies ------------------------------------------------------
@@ -275,12 +312,18 @@ impl<'m> Checker<'m> {
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|fx| {
-                let ready = fx.extends.as_ref().map_or(true, |p| done.contains(p) || !m.fixtures.iter().any(|f| &f.name == p));
+                let ready = fx.extends.as_ref().map_or(true, |p| {
+                    done.contains(p) || !m.fixtures.iter().any(|f| &f.name == p)
+                });
                 if !ready {
                     return true;
                 }
                 self.context = format!("fixture {}", fx.name);
-                let mut scope = fx.extends.as_ref().and_then(|p| self.fixture_scopes.get(p).cloned()).unwrap_or_default();
+                let mut scope = fx
+                    .extends
+                    .as_ref()
+                    .and_then(|p| self.fixture_scopes.get(p).cloned())
+                    .unwrap_or_default();
                 self.scopes.push(std::mem::take(&mut scope));
                 self.stmts(&fx.body);
                 let s = self.scopes.pop().unwrap();
@@ -301,7 +344,10 @@ impl<'m> Checker<'m> {
         for metric in &m.metrics {
             self.push();
             for p in &metric.params {
-                let t = p.ty.as_ref().map(|t| self.decl_ty(t, &[p.name.clone()])).unwrap_or(T::Unknown);
+                let t =
+                    p.ty.as_ref()
+                        .map(|t| self.decl_ty(t, &[p.name.clone()]))
+                        .unwrap_or(T::Unknown);
                 self.bind(&p.name, self.param_unit_root(&p.name, t));
             }
             for (_, e) in &metric.meta {
@@ -335,11 +381,20 @@ impl<'m> Checker<'m> {
 
     fn check_rule(&mut self, rule: &Rule) {
         let Some(cond) = &rule.condition else { return };
-        let target = rule.targets.first().and_then(|t| t.first()).cloned().unwrap_or_default();
+        let target = rule
+            .targets
+            .first()
+            .and_then(|t| t.first())
+            .cloned()
+            .unwrap_or_default();
         self.push();
         if let ExprKind::Lambda { params, body } = &cond.kind {
             if let Some(p) = params.first() {
-                let t = if self.m.entity(&target).is_some() { T::Ent(target) } else { T::Unknown };
+                let t = if self.m.entity(&target).is_some() {
+                    T::Ent(target)
+                } else {
+                    T::Unknown
+                };
                 self.bind(p, t);
             }
             self.infer(body);
@@ -406,14 +461,40 @@ impl<'m> Checker<'m> {
                 self.error(c.span, "a ledger row cannot carry a warning (rows are never edited): use `check` to refuse the row");
             }
             if !c.per.is_empty() {
-                let key: Vec<(Option<String>, T)> = c.per.iter().map(|k| (Some(k.clone()), e.field(k).and_then(|f| f.ty.as_ref()).map(|t| self.decl_ty(t, &["self".into()])).unwrap_or(T::Unknown))).collect();
+                let key: Vec<(Option<String>, T)> = c
+                    .per
+                    .iter()
+                    .map(|k| {
+                        (
+                            Some(k.clone()),
+                            e.field(k)
+                                .and_then(|f| f.ty.as_ref())
+                                .map(|t| self.decl_ty(t, &["self".into()]))
+                                .unwrap_or(T::Unknown),
+                        )
+                    })
+                    .collect();
                 self.group_key = Some(T::Tuple(key));
                 self.push();
                 if let ExprKind::Lambda { params, body } = &c.cond.kind {
                     if let Some(p) = params.first() {
                         // rows of a group share its key columns
-                        let facts = c.per.iter().map(|k| Fact { rel: vec![k.clone()], target: vec![p.clone(), "key".into(), k.clone()] }).collect();
-                        self.bind(p, T::Coll { elem: Box::new(T::Ent(e.name.clone())), set: false, facts });
+                        let facts = c
+                            .per
+                            .iter()
+                            .map(|k| Fact {
+                                rel: vec![k.clone()],
+                                target: vec![p.clone(), "key".into(), k.clone()],
+                            })
+                            .collect();
+                        self.bind(
+                            p,
+                            T::Coll {
+                                elem: Box::new(T::Ent(e.name.clone())),
+                                set: false,
+                                facts,
+                            },
+                        );
                     }
                     self.infer(body);
                 } else {
@@ -441,7 +522,11 @@ impl<'m> Checker<'m> {
         let m = self.m;
         let has = |n: &str| m.find_field(e, n).is_some();
         if let Some(fr) = &e.frozen {
-            for n in fr.except.iter().chain(fr.live.iter().filter(|n| !e.live_decls.iter().any(|(d, _)| d == *n))) {
+            for n in fr.except.iter().chain(
+                fr.live
+                    .iter()
+                    .filter(|n| !e.live_decls.iter().any(|(d, _)| d == *n)),
+            ) {
                 if !has(n) {
                     self.error(fr.span, format!("`{n}` is not a field of {}", e.name));
                 }
@@ -468,7 +553,14 @@ impl<'m> Checker<'m> {
         }
         for flow in &e.flows {
             for t in &flow.transitions {
-                self.context = format!("flow {} → {}{}", t.from.join(" | "), t.to, t.by.as_ref().map(|b| format!(" by {b}")).unwrap_or_default());
+                self.context = format!(
+                    "flow {} → {}{}",
+                    t.from.join(" | "),
+                    t.to,
+                    t.by.as_ref()
+                        .map(|b| format!(" by {b}"))
+                        .unwrap_or_default()
+                );
                 self.record_write(&e.name, &flow.field, t.span);
             }
         }
@@ -515,7 +607,10 @@ impl<'m> Checker<'m> {
             if let Some(d) = &p.default {
                 self.infer(d);
             }
-            let t = p.ty.as_ref().map(|t| self.decl_ty(t, &["self".into()])).unwrap_or(T::Unknown);
+            let t =
+                p.ty.as_ref()
+                    .map(|t| self.decl_ty(t, &["self".into()]))
+                    .unwrap_or(T::Unknown);
             let t = self.param_unit_root(&p.name, t);
             self.bind(&p.name, t);
         }
@@ -524,7 +619,13 @@ impl<'m> Checker<'m> {
     /// An unparameterized `Money` parameter has its own currency: `Money<amount.currency>`.
     fn param_unit_root(&self, name: &str, t: T) -> T {
         match t {
-            T::Money { cur: Unit::Unknown, exact } => T::Money { cur: Unit::Path(vec![name.into(), "currency".into()]), exact },
+            T::Money {
+                cur: Unit::Unknown,
+                exact,
+            } => T::Money {
+                cur: Unit::Path(vec![name.into(), "currency".into()]),
+                exact,
+            },
             other => other,
         }
     }
@@ -564,14 +665,24 @@ impl<'m> Checker<'m> {
     /// per-company member.
     fn decl_ty(&mut self, ty: &Ty, root: &[String]) -> T {
         match ty {
-            Ty::Path { segments, args, span } => {
+            Ty::Path {
+                segments,
+                args,
+                span,
+            } => {
                 if segments.len() != 1 {
                     return T::Unknown;
                 }
                 let name = segments[0].as_str();
-                let unit = |c: &mut Self, i: usize| args.get(i).map(|a| c.unit_of_ty(a, root)).unwrap_or(Unit::Unknown);
+                let unit = |c: &mut Self, i: usize| {
+                    args.get(i)
+                        .map(|a| c.unit_of_ty(a, root))
+                        .unwrap_or(Unit::Unknown)
+                };
                 match name {
-                    n if TEXT_TYPES.contains(&n) => T::Text(TEXT_TYPES.iter().find(|t| **t == n).unwrap()),
+                    n if TEXT_TYPES.contains(&n) => {
+                        T::Text(TEXT_TYPES.iter().find(|t| **t == n).unwrap())
+                    }
                     "Int" => T::Num(Num::Int),
                     "Decimal" => T::Num(Num::Decimal),
                     "Percent" => T::Num(Num::Percent),
@@ -581,13 +692,29 @@ impl<'m> Checker<'m> {
                     "Duration" => T::Duration,
                     "DateRange" => T::DateRange,
                     "Role" => T::Role,
-                    "Money" => T::Money { cur: unit(self, 0), exact: false },
-                    "Price" => T::Price { cur: unit(self, 0), per: unit(self, 1), exact: false },
-                    "Qty" => T::Qty { unit: unit(self, 0), exact: false },
-                    "Exact" => args.first().map(|a| self.decl_ty(a, root).with_exact(true)).unwrap_or(T::Unknown),
+                    "Money" => T::Money {
+                        cur: unit(self, 0),
+                        exact: false,
+                    },
+                    "Price" => T::Price {
+                        cur: unit(self, 0),
+                        per: unit(self, 1),
+                        exact: false,
+                    },
+                    "Qty" => T::Qty {
+                        unit: unit(self, 0),
+                        exact: false,
+                    },
+                    "Exact" => args
+                        .first()
+                        .map(|a| self.decl_ty(a, root).with_exact(true))
+                        .unwrap_or(T::Unknown),
                     n if self.m.entity(n).is_some() => T::Ent(n.to_string()),
                     n => match self.m.enum_def(n) {
-                        Some(e) => T::Enum { name: n.to_string(), variants: e.variants.iter().map(|v| v.name.clone()).collect() },
+                        Some(e) => T::Enum {
+                            name: n.to_string(),
+                            variants: e.variants.iter().map(|v| v.name.clone()).collect(),
+                        },
                         None => {
                             let _ = span;
                             T::Unknown
@@ -597,9 +724,26 @@ impl<'m> Checker<'m> {
             }
             Ty::Optional(i) => T::opt(self.decl_ty(i, root)),
             Ty::List(i) => T::list(self.decl_ty(i, root)),
-            Ty::Set(i) => T::Coll { elem: Box::new(self.decl_ty(i, root)), set: true, facts: Vec::new() },
-            Ty::Tuple(fs) => T::Tuple(fs.iter().map(|(n, t)| (Some(n.clone()), self.decl_ty(t, root))).collect()),
-            Ty::Enum(vs) => T::Enum { name: format!("enum({})", vs.iter().map(|v| v.name.as_str()).collect::<Vec<_>>().join(", ")), variants: vs.iter().map(|v| v.name.clone()).collect() },
+            Ty::Set(i) => T::Coll {
+                elem: Box::new(self.decl_ty(i, root)),
+                set: true,
+                facts: Vec::new(),
+            },
+            Ty::Tuple(fs) => T::Tuple(
+                fs.iter()
+                    .map(|(n, t)| (Some(n.clone()), self.decl_ty(t, root)))
+                    .collect(),
+            ),
+            Ty::Enum(vs) => T::Enum {
+                name: format!(
+                    "enum({})",
+                    vs.iter()
+                        .map(|v| v.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                variants: vs.iter().map(|v| v.name.clone()).collect(),
+            },
             Ty::Union(_) | Ty::Error => T::Unknown,
         }
     }
@@ -610,7 +754,9 @@ impl<'m> Checker<'m> {
         };
         let first = segments[0].as_str();
         if segments.len() == 1 {
-            let is_field = self.entity.map_or(false, |e| self.m.find_field(e, first).is_some());
+            let is_field = self
+                .entity
+                .map_or(false, |e| self.m.find_field(e, first).is_some());
             let is_local = self.local(first).is_some();
             if !is_field && !is_local && first != "company" {
                 if !self.units.contains_key(first) && !self.currencies.contains(first) {
@@ -639,22 +785,53 @@ impl<'m> Checker<'m> {
         let target_inner = target.unopt();
         let value_inner = value.unopt();
         match (target_inner, value_inner) {
-            (T::Money { cur: a, exact: false }, T::Money { cur: b, exact }) => {
+            (
+                T::Money {
+                    cur: a,
+                    exact: false,
+                },
+                T::Money { cur: b, exact },
+            ) => {
                 if *exact {
-                    self.error(span, format!("{value} must be rounded with .round() before it is stored as {target}"));
+                    self.error(
+                        span,
+                        format!(
+                            "{value} must be rounded with .round() before it is stored as {target}"
+                        ),
+                    );
                 }
                 if let (Unit::Const(x), Unit::Const(y)) = (a, b) {
                     if x != y {
-                        self.error(span, format!("cannot store {value} in a {what} of type {target}"));
+                        self.error(
+                            span,
+                            format!("cannot store {value} in a {what} of type {target}"),
+                        );
                     }
                 }
             }
             (T::Price { exact: false, .. }, T::Price { exact: true, .. }) => {
-                self.error(span, format!("{value} must be rounded with .round() before it is stored as {target}"));
+                self.error(
+                    span,
+                    format!(
+                        "{value} must be rounded with .round() before it is stored as {target}"
+                    ),
+                );
             }
-            (T::Qty { unit: Unit::Const(a), .. }, T::Qty { unit: Unit::Const(b), .. }) => {
+            (
+                T::Qty {
+                    unit: Unit::Const(a),
+                    ..
+                },
+                T::Qty {
+                    unit: Unit::Const(b),
+                    ..
+                },
+            ) => {
                 if self.units.get(a) != self.units.get(b) {
-                    self.error(span, format!("cannot store {value} in a {what} of type {target}"));
+                    self.error(
+                        span,
+                        format!("cannot store {value} in a {what} of type {target}"),
+                    );
                 }
             }
             (T::Ent(a), T::Ent(b)) => {
@@ -671,7 +848,10 @@ impl<'m> Checker<'m> {
             (t, v) => {
                 if let (Some(a), Some(b)) = (kind_of(t), kind_of(v)) {
                     if a != b {
-                        self.error(span, format!("cannot store {value} in a {what} of type {target}"));
+                        self.error(
+                            span,
+                            format!("cannot store {value} in a {what} of type {target}"),
+                        );
                     }
                 }
             }
@@ -692,8 +872,16 @@ impl<'m> Checker<'m> {
         for s in stmts {
             self.stmt(s);
             // `if x == none: return …` → x is not none afterwards
-            if let StmtKind::If { cond, then, otherwise: None, binding: None } = &s.kind {
-                if then.last().map_or(false, |l| matches!(l.kind, StmtKind::Return(_) | StmtKind::Fail(_))) {
+            if let StmtKind::If {
+                cond,
+                then,
+                otherwise: None,
+                binding: None,
+            } = &s.kind
+            {
+                if then.last().map_or(false, |l| {
+                    matches!(l.kind, StmtKind::Return(_) | StmtKind::Fail(_))
+                }) {
                     let f = self.facts_false(cond);
                     self.narrowed.extend(f);
                 }
@@ -720,7 +908,12 @@ impl<'m> Checker<'m> {
                 // keep the variable as the root of its own units: `let x = …` then `x.total`
                 self.bind(name, t);
             }
-            StmtKind::If { binding, cond, then, otherwise } => {
+            StmtKind::If {
+                binding,
+                cond,
+                then,
+                otherwise,
+            } => {
                 let ct = self.infer(cond);
                 let facts = self.facts_true(cond);
                 self.push();
@@ -753,7 +946,9 @@ impl<'m> Checker<'m> {
                 } else {
                     for (i, n) in names.iter().enumerate() {
                         let t = match &elem {
-                            T::Tuple(items) => items.get(i).map(|(_, t)| t.clone()).unwrap_or(T::Unknown),
+                            T::Tuple(items) => {
+                                items.get(i).map(|(_, t)| t.clone()).unwrap_or(T::Unknown)
+                            }
                             _ => T::Unknown,
                         };
                         self.bind(n, t);
@@ -802,14 +997,22 @@ impl<'m> Checker<'m> {
                     if let T::Ent(en) = bt.unopt() {
                         let en2 = en.clone();
                         self.record_write(&en2, name, target.span);
-                        if let Some(f) = self.m.entity(en).and_then(|e| self.m.find_field(e, name)) {
+                        if let Some(f) = self.m.entity(en).and_then(|e| self.m.find_field(e, name))
+                        {
                             if f.kind == FieldKind::Formula {
-                                self.error(target.span, format!("`{name}` is a formula: it cannot be assigned"));
+                                self.error(
+                                    target.span,
+                                    format!("`{name}` is a formula: it cannot be assigned"),
+                                );
                             }
                         }
                         // the field of a flow moves by its transitions (migrations and changes,
                         // where data fixes may set it, are not checked statement by statement)
-                        if let Some(msg) = self.m.entity(en).and_then(|e| self.m.flow_assignment_error(e, name)) {
+                        if let Some(msg) = self
+                            .m
+                            .entity(en)
+                            .and_then(|e| self.m.flow_assignment_error(e, name))
+                        {
                             self.error(target.span, msg);
                         }
                     }
@@ -821,10 +1024,16 @@ impl<'m> Checker<'m> {
                         }
                         if let Some(f) = self.entity.and_then(|e| self.m.find_field(e, name)) {
                             if f.kind == FieldKind::Formula {
-                                self.error(target.span, format!("`{name}` is a formula: it cannot be assigned"));
+                                self.error(
+                                    target.span,
+                                    format!("`{name}` is a formula: it cannot be assigned"),
+                                );
                             }
                         }
-                        if let Some(msg) = self.entity.and_then(|e| self.m.flow_assignment_error(e, name)) {
+                        if let Some(msg) = self
+                            .entity
+                            .and_then(|e| self.m.flow_assignment_error(e, name))
+                        {
                             self.error(target.span, msg);
                         }
                     }
@@ -839,7 +1048,13 @@ impl<'m> Checker<'m> {
             StmtKind::Block { body, .. } => self.block(body),
             StmtKind::Fn(f) => {
                 if let Some(s) = self.scopes.last_mut() {
-                    s.insert(f.name.clone(), Local { ty: T::Unknown, func: Some(f.clone()) });
+                    s.insert(
+                        f.name.clone(),
+                        Local {
+                            ty: T::Unknown,
+                            func: Some(f.clone()),
+                        },
+                    );
                 }
                 let saved = self.fn_ret.take();
                 self.check_fn(f);
@@ -854,13 +1069,28 @@ impl<'m> Checker<'m> {
     /// Paths known to be non-none when `cond` is true.
     fn facts_true(&self, cond: &Expr) -> Vec<String> {
         match &cond.kind {
-            ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+            ExprKind::Binary {
+                op: BinOp::And,
+                lhs,
+                rhs,
+            } => {
                 let mut v = self.facts_true(lhs);
                 v.extend(self.facts_true(rhs));
                 v
             }
-            ExprKind::Binary { op: BinOp::Ne, lhs, rhs } if is_none(rhs) => self.path(lhs).map(|p| vec![path_str(&p)]).unwrap_or_default(),
-            ExprKind::Binary { op: BinOp::Is | BinOp::Eq, lhs, rhs } if !is_none(rhs) => {
+            ExprKind::Binary {
+                op: BinOp::Ne,
+                lhs,
+                rhs,
+            } if is_none(rhs) => self
+                .path(lhs)
+                .map(|p| vec![path_str(&p)])
+                .unwrap_or_default(),
+            ExprKind::Binary {
+                op: BinOp::Is | BinOp::Eq,
+                lhs,
+                rhs,
+            } if !is_none(rhs) => {
                 // `x?.kind is Kit` → x is not none
                 let mut out = Vec::new();
                 let mut cur = lhs.as_ref();
@@ -881,13 +1111,27 @@ impl<'m> Checker<'m> {
     /// Paths known to be non-none when `cond` is false.
     fn facts_false(&self, cond: &Expr) -> Vec<String> {
         match &cond.kind {
-            ExprKind::Binary { op: BinOp::Or, lhs, rhs } => {
+            ExprKind::Binary {
+                op: BinOp::Or,
+                lhs,
+                rhs,
+            } => {
                 let mut v = self.facts_false(lhs);
                 v.extend(self.facts_false(rhs));
                 v
             }
-            ExprKind::Binary { op: BinOp::Eq, lhs, rhs } if is_none(rhs) => self.path(lhs).map(|p| vec![path_str(&p)]).unwrap_or_default(),
-            ExprKind::Unary { op: UnOp::Not, expr } => self.facts_true(expr),
+            ExprKind::Binary {
+                op: BinOp::Eq,
+                lhs,
+                rhs,
+            } if is_none(rhs) => self
+                .path(lhs)
+                .map(|p| vec![path_str(&p)])
+                .unwrap_or_default(),
+            ExprKind::Unary {
+                op: UnOp::Not,
+                expr,
+            } => self.facts_true(expr),
             _ => Vec::new(),
         }
     }
@@ -901,7 +1145,10 @@ impl<'m> Checker<'m> {
             ExprKind::Name(n) => {
                 if self.local(n).is_some() || n == "current" || n == "company" && self.company_ctx {
                     Some(vec![n.clone()])
-                } else if self.entity.map_or(false, |en| self.m.find_field(en, n).is_some()) {
+                } else if self
+                    .entity
+                    .map_or(false, |en| self.m.find_field(en, n).is_some())
+                {
                     Some(vec!["self".to_string(), n.clone()])
                 } else {
                     None
@@ -965,18 +1212,30 @@ impl<'m> Checker<'m> {
     fn entity_equalities(&self, e: &Entity) -> Vec<(Vec<String>, Vec<String>)> {
         let mut out = Vec::new();
         for f in self.m.all_fields(e) {
-            let Some(Where::Expr(Expr { kind: ExprKind::Lambda { params, body }, .. })) = &f.where_ else {
+            let Some(Where::Expr(Expr {
+                kind: ExprKind::Lambda { params, body },
+                ..
+            })) = &f.where_
+            else {
                 continue;
             };
             let Some(v) = params.first() else { continue };
             let mut stack = vec![body.as_ref()];
             while let Some(x) = stack.pop() {
                 match &x.kind {
-                    ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+                    ExprKind::Binary {
+                        op: BinOp::And,
+                        lhs,
+                        rhs,
+                    } => {
                         stack.push(lhs);
                         stack.push(rhs);
                     }
-                    ExprKind::Binary { op: BinOp::Eq, lhs, rhs } => {
+                    ExprKind::Binary {
+                        op: BinOp::Eq,
+                        lhs,
+                        rhs,
+                    } => {
                         for (a, b) in [(lhs, rhs), (rhs, lhs)] {
                             if let (Some(rel), None) = (rel_path(a, v), rel_path(b, v)) {
                                 if let Some(other) = entity_rel_path(b, e, self.m) {
@@ -1033,15 +1292,29 @@ impl<'m> Checker<'m> {
             }
             ExprKind::Quantity { unit, per, .. } => self.quantity(unit, per.as_deref(), e.span),
             ExprKind::Name(n) => self.name(n, e.span),
-            ExprKind::SelfRef => self.entity.map(|en| T::Ent(en.name.clone())).unwrap_or(T::Unknown),
-            ExprKind::Field { base, name, optional } => self.field_access(base, name, *optional, e.span),
+            ExprKind::SelfRef => self
+                .entity
+                .map(|en| T::Ent(en.name.clone()))
+                .unwrap_or(T::Unknown),
+            ExprKind::Field {
+                base,
+                name,
+                optional,
+            } => self.field_access(base, name, *optional, e.span),
             ExprKind::Call { callee, args } => self.call(callee, args, e.span),
             ExprKind::Index { base, index } => {
                 // per-company member at a given company: `product.cost[company]`
-                if let ExprKind::Field { base: recv, name, .. } = &base.kind {
+                if let ExprKind::Field {
+                    base: recv, name, ..
+                } = &base.kind
+                {
                     let rt = self.type_only(recv);
                     if let T::Ent(en) = rt.unopt() {
-                        if let Some(f) = self.m.entity(en).and_then(|ent| self.m.find_field(ent, name)) {
+                        if let Some(f) = self
+                            .m
+                            .entity(en)
+                            .and_then(|ent| self.m.find_field(ent, name))
+                        {
                             if f.per_company {
                                 self.infer(index);
                                 let rp = self.path(recv);
@@ -1067,7 +1340,11 @@ impl<'m> Checker<'m> {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, e.span),
-            ExprKind::If { cond, then, otherwise } => {
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 self.infer(cond);
                 let n = self.narrowed.len();
                 let ft = self.facts_true(cond);
@@ -1087,9 +1364,17 @@ impl<'m> Checker<'m> {
                 }
                 let r = self.infer(body);
                 self.pop();
-                T::Fn { params: params.len(), ret: Box::new(r) }
+                T::Fn {
+                    params: params.len(),
+                    ret: Box::new(r),
+                }
             }
-            ExprKind::Tuple(items) => T::Tuple(items.iter().map(|(n, x)| (n.clone(), self.infer(x))).collect()),
+            ExprKind::Tuple(items) => T::Tuple(
+                items
+                    .iter()
+                    .map(|(n, x)| (n.clone(), self.infer(x)))
+                    .collect(),
+            ),
             ExprKind::List(items) => {
                 let mut elem = T::Unknown;
                 for a in items {
@@ -1116,7 +1401,11 @@ impl<'m> Checker<'m> {
                         _ => elem,
                     };
                 }
-                T::Coll { elem: Box::new(elem), set: true, facts: Vec::new() }
+                T::Coll {
+                    elem: Box::new(elem),
+                    set: true,
+                    facts: Vec::new(),
+                }
             }
             ExprKind::When(arms) => {
                 let mut out = T::Unknown;
@@ -1169,12 +1458,22 @@ impl<'m> Checker<'m> {
             if !self.units.contains_key(p) {
                 self.error(span, format!("unknown unit `{p}`"));
             }
-            return T::Price { cur: Unit::Const(unit.into()), per: Unit::Const(p.into()), exact: false };
+            return T::Price {
+                cur: Unit::Const(unit.into()),
+                per: Unit::Const(p.into()),
+                exact: false,
+            };
         }
         if self.currencies.contains(unit) {
-            T::Money { cur: Unit::Const(unit.into()), exact: false }
+            T::Money {
+                cur: Unit::Const(unit.into()),
+                exact: false,
+            }
         } else {
-            T::Qty { unit: Unit::Const(unit.into()), exact: false }
+            T::Qty {
+                unit: Unit::Const(unit.into()),
+                exact: false,
+            }
         }
     }
 
@@ -1192,7 +1491,11 @@ impl<'m> Checker<'m> {
         if let Some(en) = self.entity {
             if self.m.find_field(en, n).is_some() {
                 let ename = en.name.clone();
-                let company = if self.company_ctx { Some(vec!["company".to_string()]) } else { None };
+                let company = if self.company_ctx {
+                    Some(vec!["company".to_string()])
+                } else {
+                    None
+                };
                 return self.member_type(&ename, n, Some(vec!["self".into()]), company, span);
             }
             if en.actions.iter().any(|a| a.name == n) || en.methods.iter().any(|f| f.name == n) {
@@ -1217,7 +1520,11 @@ impl<'m> Checker<'m> {
             return T::Variant(n.to_string());
         }
         if let Some(c) = self.m.constant(n) {
-            return c.ty.as_ref().map(|t| self.decl_ty(t, &["self".into()])).unwrap_or(T::Unknown);
+            return c
+                .ty
+                .as_ref()
+                .map(|t| self.decl_ty(t, &["self".into()]))
+                .unwrap_or(T::Unknown);
         }
         if self.m.function(n).is_some() || self.m.event(n).is_some() || BUILTIN_FNS.contains(&n) {
             return T::Unknown;
@@ -1231,7 +1538,18 @@ impl<'m> Checker<'m> {
         if self.m.role(n).is_some() {
             return T::Role;
         }
-        if ["Text", "Code", "Int", "Decimal", "Money", "Qty", "Price", "DateRange"].contains(&n) {
+        if [
+            "Text",
+            "Code",
+            "Int",
+            "Decimal",
+            "Money",
+            "Qty",
+            "Price",
+            "DateRange",
+        ]
+        .contains(&n)
+        {
             return T::Unknown;
         }
         self.error(span, format!("unknown name `{n}`"));
@@ -1239,7 +1557,14 @@ impl<'m> Checker<'m> {
     }
 
     /// Type of `receiver.field` for an entity field, rebased on the receiver's path.
-    fn member_type(&mut self, entity: &str, field: &str, receiver: Option<Vec<String>>, company: Option<Vec<String>>, span: Span) -> T {
+    fn member_type(
+        &mut self,
+        entity: &str,
+        field: &str,
+        receiver: Option<Vec<String>>,
+        company: Option<Vec<String>>,
+        span: Span,
+    ) -> T {
         self.record_read(entity, field, span);
         if self.m.entity(entity).map_or(false, |e| e.is_ledger) {
             self.record_read(entity, "*", span);
@@ -1272,8 +1597,15 @@ impl<'m> Checker<'m> {
         if let T::Coll { elem, set, .. } = &t {
             if let (T::Ent(child), Some(rp)) = (elem.as_ref(), &receiver) {
                 if let Some(back) = self.back_ref(e, f, child) {
-                    let facts = vec![Fact { rel: vec![back], target: rp.clone() }];
-                    t = T::Coll { elem: elem.clone(), set: *set, facts };
+                    let facts = vec![Fact {
+                        rel: vec![back],
+                        target: rp.clone(),
+                    }];
+                    t = T::Coll {
+                        elem: elem.clone(),
+                        set: *set,
+                        facts,
+                    };
                 }
             }
         }
@@ -1294,7 +1626,10 @@ impl<'m> Checker<'m> {
                     Ty::Optional(i) => i.as_ref(),
                     other => other,
                 }) {
-                    Some(Ty::Path { segments, .. }) => segments.len() == 1 && (segments[0] == owner.name || owner.traits.contains(&segments[0])),
+                    Some(Ty::Path { segments, .. }) => {
+                        segments.len() == 1
+                            && (segments[0] == owner.name || owner.traits.contains(&segments[0]))
+                    }
                     _ => false,
                 }
             })
@@ -1310,7 +1645,14 @@ impl<'m> Checker<'m> {
         if !self.in_progress.insert(key.clone()) {
             return T::Unknown;
         }
-        let saved = (self.entity, std::mem::replace(&mut self.scopes, vec![HashMap::new()]), std::mem::take(&mut self.facts), std::mem::take(&mut self.narrowed), self.company_ctx, self.in_formula);
+        let saved = (
+            self.entity,
+            std::mem::replace(&mut self.scopes, vec![HashMap::new()]),
+            std::mem::take(&mut self.facts),
+            std::mem::take(&mut self.narrowed),
+            self.company_ctx,
+            self.in_formula,
+        );
         self.entity = Some(e);
         self.company_ctx = f.per_company;
         self.in_formula = true;
@@ -1338,8 +1680,20 @@ impl<'m> Checker<'m> {
                     let root = p[0].as_str();
                     let (prefix, rest): (Option<Vec<String>>, &[String]) = match root {
                         "self" => (receiver.map(|r| r.to_vec()), &p[1..]),
-                        "company" => (Some(company.map(|c| c.to_vec()).unwrap_or_else(|| vec!["current".into(), "company".into()])), &p[1..]),
-                        "owner" => (receiver.filter(|r| r.len() > 1).map(|r| r[..r.len() - 1].to_vec()), &p[1..]),
+                        "company" => (
+                            Some(
+                                company
+                                    .map(|c| c.to_vec())
+                                    .unwrap_or_else(|| vec!["current".into(), "company".into()]),
+                            ),
+                            &p[1..],
+                        ),
+                        "owner" => (
+                            receiver
+                                .filter(|r| r.len() > 1)
+                                .map(|r| r[..r.len() - 1].to_vec()),
+                            &p[1..],
+                        ),
                         "current" => (Some(vec![]), &p[..]),
                         _ => (Some(vec![]), &p[..]),
                     };
@@ -1359,15 +1713,25 @@ impl<'m> Checker<'m> {
 
     fn field_access(&mut self, base: &Expr, name: &str, optional: bool, span: Span) -> T {
         let bt = self.infer(base);
-        let bpath = self.path(base).or_else(|| Some(vec![format!("#{}", u32::from(base.span.range.start()))]));
+        let bpath = self
+            .path(base)
+            .or_else(|| Some(vec![format!("#{}", u32::from(base.span.range.start()))]));
         let (inner, was_opt) = match &bt {
             T::Opt(i) => ((**i).clone(), true),
             other => (other.clone(), false),
         };
         if was_opt && !optional && self.in_fstring == 0 {
-            let narrowed = bpath.as_ref().map_or(false, |p| self.narrowed.contains(&path_str(p)));
+            let narrowed = bpath
+                .as_ref()
+                .map_or(false, |p| self.narrowed.contains(&path_str(p)));
             if !narrowed {
-                self.error(span, format!("`{}` is optional: use `?.` (or check it is not none first)", print::expr(base)));
+                self.error(
+                    span,
+                    format!(
+                        "`{}` is optional: use `?.` (or check it is not none first)",
+                        print::expr(base)
+                    ),
+                );
             }
         }
         self.record_access(&inner, name, span);
@@ -1388,7 +1752,11 @@ impl<'m> Checker<'m> {
                         return self.member_type(&en, name, bpath, None, span);
                     }
                     if e.is_ledger && (name == "source" || name == "date") {
-                        return if name == "date" { T::DateTime } else { T::Unknown };
+                        return if name == "date" {
+                            T::DateTime
+                        } else {
+                            T::Unknown
+                        };
                     }
                     match name {
                         "id" => return T::text(),
@@ -1402,7 +1770,10 @@ impl<'m> Checker<'m> {
                         }
                         _ => {}
                     }
-                    if e.actions.iter().any(|a| a.name == name) || e.methods.iter().any(|f| f.name == name) || self.is_flow_action(e, name) {
+                    if e.actions.iter().any(|a| a.name == name)
+                        || e.methods.iter().any(|f| f.name == name)
+                        || self.is_flow_action(e, name)
+                    {
                         return T::Unknown;
                     }
                     // implementors may add members to a trait value
@@ -1414,7 +1785,11 @@ impl<'m> Checker<'m> {
                 }
                 T::Unknown
             }
-            T::Money { .. } | T::Price { .. } | T::Qty { .. } | T::Num(_) | T::Zero if name == "raw" => T::Num(Num::Decimal),
+            T::Money { .. } | T::Price { .. } | T::Qty { .. } | T::Num(_) | T::Zero
+                if name == "raw" =>
+            {
+                T::Num(Num::Decimal)
+            }
             T::Money { cur, .. } if name == "currency" => match cur {
                 Unit::Path(p) => {
                     let _ = p;
@@ -1432,7 +1807,10 @@ impl<'m> Checker<'m> {
                 "user" => T::Ent("User".into()),
                 "company" => T::Ent("Company".into()),
                 _ => {
-                    self.error(span, format!("`current` has no `{name}` (use current.user or current.company)"));
+                    self.error(
+                        span,
+                        format!("`current` has no `{name}` (use current.user or current.company)"),
+                    );
                     T::Unknown
                 }
             },
@@ -1451,7 +1829,9 @@ impl<'m> Checker<'m> {
     }
 
     fn is_flow_action(&self, e: &Entity, name: &str) -> bool {
-        e.flows.iter().any(|f| f.transitions.iter().any(|t| t.by.as_deref() == Some(name)))
+        e.flows
+            .iter()
+            .any(|f| f.transitions.iter().any(|t| t.by.as_deref() == Some(name)))
     }
 
     // ---- operators --------------------------------------------------------------------
@@ -1517,13 +1897,19 @@ impl<'m> Checker<'m> {
                         if !self.same_unit(a, b, true) {
                             self.error(span, format!("cannot {verb} {l} and {r}"));
                         }
-                        T::Money { cur: a.clone(), exact: *ea || *eb }
+                        T::Money {
+                            cur: a.clone(),
+                            exact: *ea || *eb,
+                        }
                     }
                     (T::Qty { unit: a, exact: ea }, T::Qty { unit: b, exact: eb }) => {
                         if !self.same_unit(a, b, false) {
                             self.error(span, format!("cannot {verb} {l} and {r}"));
                         }
-                        T::Qty { unit: a.clone(), exact: *ea || *eb }
+                        T::Qty {
+                            unit: a.clone(),
+                            exact: *ea || *eb,
+                        }
                     }
                     (T::Price { cur: a, .. }, T::Price { cur: b, .. }) => {
                         if !self.same_unit(a, b, true) {
@@ -1532,7 +1918,9 @@ impl<'m> Checker<'m> {
                         l.clone()
                     }
                     // durations: with durations, and with 0 (`hours > 0`); a bare number has no unit
-                    (T::Duration, T::Duration) | (T::Duration, T::Zero) | (T::Zero, T::Duration) => T::Duration,
+                    (T::Duration, T::Duration)
+                    | (T::Duration, T::Zero)
+                    | (T::Zero, T::Duration) => T::Duration,
                     (T::Duration, T::Num(_)) | (T::Num(_), T::Duration) => {
                         self.error(span, format!("cannot {verb} {l} and {r}: write the unit, as in `5 hours`, `30 minutes`, `2 days`"));
                         T::Unknown
@@ -1553,7 +1941,11 @@ impl<'m> Checker<'m> {
                     (T::Coll { .. }, _) => l.clone(),
                     (T::Text(_), T::Text(_)) => T::text(),
                     // different kinds of measure, or a measure and a plain number
-                    (T::Money { .. } | T::Qty { .. } | T::Price { .. }, T::Money { .. } | T::Qty { .. } | T::Price { .. } | T::Num(_)) | (T::Num(_), T::Money { .. } | T::Qty { .. } | T::Price { .. }) => {
+                    (
+                        T::Money { .. } | T::Qty { .. } | T::Price { .. },
+                        T::Money { .. } | T::Qty { .. } | T::Price { .. } | T::Num(_),
+                    )
+                    | (T::Num(_), T::Money { .. } | T::Qty { .. } | T::Price { .. }) => {
                         self.error(span, format!("cannot {verb} {l} and {r}"));
                         T::Unknown
                     }
@@ -1566,35 +1958,94 @@ impl<'m> Checker<'m> {
                 }
             }
             Mul => match (&l, &r) {
-                (T::Qty { unit, .. }, T::Price { cur, per, .. }) | (T::Price { cur, per, .. }, T::Qty { unit, .. }) => {
+                (T::Qty { unit, .. }, T::Price { cur, per, .. })
+                | (T::Price { cur, per, .. }, T::Qty { unit, .. }) => {
                     if !self.same_unit(unit, per, false) {
-                        let (a, b) = if matches!(l, T::Qty { .. }) { (&l, &r) } else { (&r, &l) };
+                        let (a, b) = if matches!(l, T::Qty { .. }) {
+                            (&l, &r)
+                        } else {
+                            (&r, &l)
+                        };
                         self.error(span, format!("cannot multiply {a} by {b}"));
                     }
-                    T::Money { cur: cur.clone(), exact: true }
+                    T::Money {
+                        cur: cur.clone(),
+                        exact: true,
+                    }
                 }
                 // a product by an integer needs no rounding: it keeps the operand's exactness
-                (T::Money { cur, exact }, T::Num(Num::Int)) | (T::Num(Num::Int), T::Money { cur, exact }) => T::Money { cur: cur.clone(), exact: *exact },
-                (T::Money { cur, .. }, n) | (n, T::Money { cur, .. }) if n.is_numeric() => T::Money { cur: cur.clone(), exact: true },
-                (T::Price { cur, per, exact }, T::Num(Num::Int)) | (T::Num(Num::Int), T::Price { cur, per, exact }) => T::Price { cur: cur.clone(), per: per.clone(), exact: *exact },
-                (T::Price { cur, per, .. }, n) | (n, T::Price { cur, per, .. }) if n.is_numeric() => T::Price { cur: cur.clone(), per: per.clone(), exact: true },
-                (T::Qty { unit, exact }, T::Num(Num::Int)) | (T::Num(Num::Int), T::Qty { unit, exact }) => T::Qty { unit: unit.clone(), exact: *exact },
-                (T::Qty { unit, .. }, n) | (n, T::Qty { unit, .. }) if n.is_numeric() => T::Qty { unit: unit.clone(), exact: true },
-                (T::Num(a), T::Num(b)) => T::Num(if *a == Num::Int && *b == Num::Int { Num::Int } else { Num::Decimal }),
+                (T::Money { cur, exact }, T::Num(Num::Int))
+                | (T::Num(Num::Int), T::Money { cur, exact }) => T::Money {
+                    cur: cur.clone(),
+                    exact: *exact,
+                },
+                (T::Money { cur, .. }, n) | (n, T::Money { cur, .. }) if n.is_numeric() => {
+                    T::Money {
+                        cur: cur.clone(),
+                        exact: true,
+                    }
+                }
+                (T::Price { cur, per, exact }, T::Num(Num::Int))
+                | (T::Num(Num::Int), T::Price { cur, per, exact }) => T::Price {
+                    cur: cur.clone(),
+                    per: per.clone(),
+                    exact: *exact,
+                },
+                (T::Price { cur, per, .. }, n) | (n, T::Price { cur, per, .. })
+                    if n.is_numeric() =>
+                {
+                    T::Price {
+                        cur: cur.clone(),
+                        per: per.clone(),
+                        exact: true,
+                    }
+                }
+                (T::Qty { unit, exact }, T::Num(Num::Int))
+                | (T::Num(Num::Int), T::Qty { unit, exact }) => T::Qty {
+                    unit: unit.clone(),
+                    exact: *exact,
+                },
+                (T::Qty { unit, .. }, n) | (n, T::Qty { unit, .. }) if n.is_numeric() => T::Qty {
+                    unit: unit.clone(),
+                    exact: true,
+                },
+                (T::Num(a), T::Num(b)) => T::Num(if *a == Num::Int && *b == Num::Int {
+                    Num::Int
+                } else {
+                    Num::Decimal
+                }),
                 (T::Num(n), T::Zero) | (T::Zero, T::Num(n)) => T::Num(n.clone()),
                 (T::Duration, n) if n.is_numeric() => T::Duration,
-                (T::Money { .. }, T::Money { .. }) | (T::Money { .. }, T::Qty { .. }) | (T::Qty { .. }, T::Money { .. }) => {
+                (T::Money { .. }, T::Money { .. })
+                | (T::Money { .. }, T::Qty { .. })
+                | (T::Qty { .. }, T::Money { .. }) => {
                     self.error(span, format!("cannot multiply {l} by {r}"));
                     T::Unknown
                 }
                 _ => T::Unknown,
             },
             Div => match (&l, &r) {
-                (T::Money { .. }, T::Money { .. }) | (T::Qty { .. }, T::Qty { .. }) | (T::Price { .. }, T::Price { .. }) => T::Num(Num::Decimal),
-                (T::Money { cur, .. }, T::Qty { unit, .. }) => T::Price { cur: cur.clone(), per: unit.clone(), exact: true },
-                (T::Money { cur, .. }, n) if n.is_numeric() => T::Money { cur: cur.clone(), exact: true },
-                (T::Price { cur, per, .. }, n) if n.is_numeric() => T::Price { cur: cur.clone(), per: per.clone(), exact: true },
-                (T::Qty { unit, .. }, n) if n.is_numeric() => T::Qty { unit: unit.clone(), exact: true },
+                (T::Money { .. }, T::Money { .. })
+                | (T::Qty { .. }, T::Qty { .. })
+                | (T::Price { .. }, T::Price { .. }) => T::Num(Num::Decimal),
+                (T::Money { cur, .. }, T::Qty { unit, .. }) => T::Price {
+                    cur: cur.clone(),
+                    per: unit.clone(),
+                    exact: true,
+                },
+                (T::Money { cur, .. }, n) if n.is_numeric() => T::Money {
+                    cur: cur.clone(),
+                    exact: true,
+                },
+                (T::Price { cur, per, .. }, n) if n.is_numeric() => T::Price {
+                    cur: cur.clone(),
+                    per: per.clone(),
+                    exact: true,
+                },
+                (T::Qty { unit, .. }, n) if n.is_numeric() => T::Qty {
+                    unit: unit.clone(),
+                    exact: true,
+                },
                 (T::Num(_), T::Num(_)) | (T::Zero, _) => T::Num(Num::Decimal),
                 _ => T::Unknown,
             },
@@ -1644,7 +2095,10 @@ impl<'m> Checker<'m> {
                 missing.push("none".into());
             }
             if !missing.is_empty() {
-                self.error(span, format!("non-exhaustive match: missing {}", missing.join(", ")));
+                self.error(
+                    span,
+                    format!("non-exhaustive match: missing {}", missing.join(", ")),
+                );
             }
         }
         out
@@ -1667,7 +2121,10 @@ impl<'m> Checker<'m> {
             let fields = v.fields.clone();
             for (i, a) in args.iter().enumerate() {
                 if let Pattern::Name(b) = a {
-                    let t = fields.get(i).map(|(_, t)| self.decl_ty(t, &["self".into()])).unwrap_or(T::Unknown);
+                    let t = fields
+                        .get(i)
+                        .map(|(_, t)| self.decl_ty(t, &["self".into()]))
+                        .unwrap_or(T::Unknown);
                     self.bind(b, t);
                 }
             }
@@ -1677,23 +2134,38 @@ impl<'m> Checker<'m> {
     // ---- calls ------------------------------------------------------------------------
 
     fn kwarg<'a>(args: &'a [Arg], name: &str) -> Option<&'a Expr> {
-        args.iter().find(|a| a.name.as_deref() == Some(name)).map(|a| &a.value)
+        args.iter()
+            .find(|a| a.name.as_deref() == Some(name))
+            .map(|a| &a.value)
     }
 
     fn call(&mut self, callee: &Expr, args: &[Arg], span: Span) -> T {
         match &callee.kind {
             ExprKind::Name(n) => self.call_name(n, args, span),
-            ExprKind::Field { base, name, optional } => {
+            ExprKind::Field {
+                base,
+                name,
+                optional,
+            } => {
                 let bt = self.infer(base);
                 let bpath = self.path(base);
                 if matches!(bt, T::Opt(_)) && !optional && self.in_fstring == 0 {
-                    let narrowed = bpath.as_ref().map_or(false, |p| self.narrowed.contains(&path_str(p)));
+                    let narrowed = bpath
+                        .as_ref()
+                        .map_or(false, |p| self.narrowed.contains(&path_str(p)));
                     if !narrowed {
-                        self.error(span, format!("`{}` is optional: use `?.` (or check it is not none first)", print::expr(base)));
+                        self.error(
+                            span,
+                            format!(
+                                "`{}` is optional: use `?.` (or check it is not none first)",
+                                print::expr(base)
+                            ),
+                        );
                     }
                 }
                 let inner = bt.unopt().clone();
-                let bpath = bpath.or_else(|| Some(vec![format!("#{}", u32::from(base.span.range.start()))]));
+                let bpath = bpath
+                    .or_else(|| Some(vec![format!("#{}", u32::from(base.span.range.start()))]));
                 self.record_access(&inner, name, callee.span);
                 let t = self.method(&inner, bpath, name, args, span);
                 if *optional && matches!(bt, T::Opt(_)) {
@@ -1740,7 +2212,10 @@ impl<'m> Checker<'m> {
             "datetime" => {
                 // datetime(date, "09:00", tz?): the instant of a wall-clock time in a zone
                 let date = args.first().map(|a| self.infer(&a.value));
-                if !matches!(date.as_ref().map(|t| t.unopt()), Some(T::Date) | Some(T::Unknown)) {
+                if !matches!(
+                    date.as_ref().map(|t| t.unopt()),
+                    Some(T::Date) | Some(T::Unknown)
+                ) {
                     self.error(span, "datetime() takes a date, a time of day and optionally a time zone: `datetime(due, \"09:00\")`");
                 }
                 match args.get(1) {
@@ -1750,12 +2225,20 @@ impl<'m> Checker<'m> {
                             self.error(a.value.span, "the time of day is text: `\"09:00\"`");
                         }
                         if let ExprKind::Lit(Lit::Str(s)) = &a.value.kind {
-                            if chrono::NaiveTime::parse_from_str(s, "%H:%M").is_err() && chrono::NaiveTime::parse_from_str(s, "%H:%M:%S").is_err() {
-                                self.error(a.value.span, format!("`{s}` is not a time of day (`09:00`, `17:30:15`)"));
+                            if chrono::NaiveTime::parse_from_str(s, "%H:%M").is_err()
+                                && chrono::NaiveTime::parse_from_str(s, "%H:%M:%S").is_err()
+                            {
+                                self.error(
+                                    a.value.span,
+                                    format!("`{s}` is not a time of day (`09:00`, `17:30:15`)"),
+                                );
                             }
                         }
                     }
-                    None => self.error(span, "datetime() needs the time of day: `datetime(due, \"09:00\")`"),
+                    None => self.error(
+                        span,
+                        "datetime() needs the time of day: `datetime(due, \"09:00\")`",
+                    ),
                 }
                 if let Some(a) = args.get(2) {
                     self.zone_arg(&a.value);
@@ -1764,13 +2247,25 @@ impl<'m> Checker<'m> {
             }
             "convert" => {
                 let ts = self.args(args);
-                if self.in_formula && Self::kwarg(args, "on").is_none() && Self::kwarg(args, "rate").is_none() {
+                if self.in_formula
+                    && Self::kwarg(args, "on").is_none()
+                    && Self::kwarg(args, "rate").is_none()
+                {
                     self.error(span, "convert() in a formula needs `on=` or `rate=`: the exchange rate of today is not deterministic");
                 }
-                let to = Self::kwarg(args, "to").map(|e| self.unit_expr(e)).unwrap_or(Unit::Unknown);
+                let to = Self::kwarg(args, "to")
+                    .map(|e| self.unit_expr(e))
+                    .unwrap_or(Unit::Unknown);
                 return match ts.first().map(|t| t.unopt().clone()) {
-                    Some(T::Money { .. }) => T::Money { cur: to, exact: true },
-                    Some(T::Price { per, .. }) => T::Price { cur: to, per, exact: true },
+                    Some(T::Money { .. }) => T::Money {
+                        cur: to,
+                        exact: true,
+                    },
+                    Some(T::Price { per, .. }) => T::Price {
+                        cur: to,
+                        per,
+                        exact: true,
+                    },
                     _ => T::Unknown,
                 };
             }
@@ -1802,17 +2297,29 @@ impl<'m> Checker<'m> {
             }
             "Qty" => {
                 self.args(args);
-                let u = args.get(1).map(|a| self.unit_expr(&a.value)).unwrap_or(Unit::Unknown);
-                return T::Qty { unit: u, exact: false };
+                let u = args
+                    .get(1)
+                    .map(|a| self.unit_expr(&a.value))
+                    .unwrap_or(Unit::Unknown);
+                return T::Qty {
+                    unit: u,
+                    exact: false,
+                };
             }
             "Price" => {
                 let ts = self.args(args);
-                let per = Self::kwarg(args, "per").map(|e| self.unit_expr(e)).unwrap_or(Unit::Unknown);
+                let per = Self::kwarg(args, "per")
+                    .map(|e| self.unit_expr(e))
+                    .unwrap_or(Unit::Unknown);
                 let cur = match ts.first().map(|t| t.unopt().clone()) {
                     Some(T::Money { cur, .. }) => cur,
                     _ => Unit::Unknown,
                 };
-                return T::Price { cur, per, exact: false };
+                return T::Price {
+                    cur,
+                    per,
+                    exact: false,
+                };
             }
             "DateRange" => {
                 self.args(args);
@@ -1825,7 +2332,14 @@ impl<'m> Checker<'m> {
         }
         if let Some(metric) = self.m.metrics.iter().find(|x| x.name == n && !x.control) {
             self.record_read("metric", n, span);
-            let f = FnDef { name: n.to_string(), params: metric.params.clone(), ret: metric.ret.clone(), body: None, builtin: false, span: metric.span };
+            let f = FnDef {
+                name: n.to_string(),
+                params: metric.params.clone(),
+                ret: metric.ret.clone(),
+                body: None,
+                builtin: false,
+                span: metric.span,
+            };
             return self.call_fn(&f, args);
         }
         if let Some(ev) = self.m.event(n) {
@@ -1844,13 +2358,20 @@ impl<'m> Checker<'m> {
             return self.construct(e, args, span);
         }
         if let Some(v) = self.m.variant(n) {
-            return self.variant_ctor(n, &v.fields.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(), args, span);
+            return self.variant_ctor(
+                n,
+                &v.fields.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(),
+                args,
+                span,
+            );
         }
         if let Some(en) = self.entity {
             if let Some(a) = en.actions.iter().find(|a| a.name == n) {
                 let ret = a.ret.clone();
                 self.args(args);
-                return ret.map(|t| self.decl_ty(&t, &["self".into()])).unwrap_or(T::Unknown);
+                return ret
+                    .map(|t| self.decl_ty(&t, &["self".into()]))
+                    .unwrap_or(T::Unknown);
             }
             if let Some(f) = en.methods.iter().find(|f| f.name == n) {
                 return self.call_fn(f, args);
@@ -1876,15 +2397,23 @@ impl<'m> Checker<'m> {
         // substitute parameter roots with the arguments
         let mut subst: HashMap<String, (Option<Vec<String>>, T)> = HashMap::new();
         for (i, p) in f.params.iter().enumerate() {
-            let arg = args.iter().find(|a| a.name.as_deref() == Some(&p.name)).or_else(|| args.get(i).filter(|a| a.name.is_none()));
+            let arg = args
+                .iter()
+                .find(|a| a.name.as_deref() == Some(&p.name))
+                .or_else(|| args.get(i).filter(|a| a.name.is_none()));
             if let Some(a) = arg {
-                let at = ts.get(args.iter().position(|x| std::ptr::eq(x, a)).unwrap()).cloned().unwrap_or(T::Unknown);
+                let at = ts
+                    .get(args.iter().position(|x| std::ptr::eq(x, a)).unwrap())
+                    .cloned()
+                    .unwrap_or(T::Unknown);
                 subst.insert(p.name.clone(), (self.path(&a.value), at));
             }
         }
         map_units(local, &|u| match u {
             Unit::Path(p) => match subst.get(&p[0]) {
-                Some((_, T::Money { cur, .. })) if p.len() == 2 && p[1] == "currency" => cur.clone(),
+                Some((_, T::Money { cur, .. })) if p.len() == 2 && p[1] == "currency" => {
+                    cur.clone()
+                }
                 Some((Some(ap), _)) => {
                     let mut out = ap.clone();
                     out.extend(p[1..].iter().cloned());
@@ -1899,7 +2428,9 @@ impl<'m> Checker<'m> {
 
     fn unit_expr(&mut self, e: &Expr) -> Unit {
         match &e.kind {
-            ExprKind::Name(n) if self.currencies.contains(n) || self.units.contains_key(n) => Unit::Const(n.clone()),
+            ExprKind::Name(n) if self.currencies.contains(n) || self.units.contains_key(n) => {
+                Unit::Const(n.clone())
+            }
             _ => self.path(e).map(Unit::Path).unwrap_or(Unit::Unknown),
         }
     }
@@ -1911,7 +2442,13 @@ impl<'m> Checker<'m> {
             }
             let vt = self.infer(&a.value);
             let Some(name) = &a.name else {
-                self.error(a.value.span, format!("`{}(…)` takes named arguments: `{}(field=value)`", e.name, e.name));
+                self.error(
+                    a.value.span,
+                    format!(
+                        "`{}(…)` takes named arguments: `{}(field=value)`",
+                        e.name, e.name
+                    ),
+                );
                 continue;
             };
             match self.m.find_field(e, name) {
@@ -1919,7 +2456,10 @@ impl<'m> Checker<'m> {
                     self.error(a.value.span, format!("`{}` has no field `{name}`", e.name));
                 }
                 Some(f) if f.kind == FieldKind::Formula => {
-                    self.error(a.value.span, format!("`{name}` is a formula: it cannot be set"));
+                    self.error(
+                        a.value.span,
+                        format!("`{name}` is a formula: it cannot be set"),
+                    );
                 }
                 Some(_) if matches!(&a.value.kind, ExprKind::Name(n) if self.m.initial_state(e, name).map_or(false, |i| &i != n) && e.flows.iter().any(|fl| fl.field == *name && fl.transitions.iter().any(|t| t.to == *n || t.from.contains(n)))) =>
                 {
@@ -1929,7 +2469,8 @@ impl<'m> Checker<'m> {
                 Some(f) => {
                     if let Some(ty) = &f.ty {
                         let saved_entity = self.entity;
-                        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+                        let saved_scopes =
+                            std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
                         self.entity = Some(e);
                         let d = self.decl_ty_field(ty, f.per_company);
                         self.entity = saved_entity;
@@ -1954,7 +2495,13 @@ impl<'m> Checker<'m> {
             self.error(span, format!("the format `.{p}` applies to numbers, amounts, prices and quantities, not to {t}"));
         }
         if spec.zero && !plain {
-            self.error(span, format!("`0` padding applies to numbers, not to {t}: use a width (`{{x:{}}}`)", spec.width));
+            self.error(
+                span,
+                format!(
+                    "`0` padding applies to numbers, not to {t}: use a width (`{{x:{}}}`)",
+                    spec.width
+                ),
+            );
         }
     }
 
@@ -1963,12 +2510,18 @@ impl<'m> Checker<'m> {
     fn variant_ctor(&mut self, n: &str, fields: &[String], args: &[Arg], span: Span) -> T {
         self.args(args);
         if fields.is_empty() {
-            self.error(span, format!("`{n}` has no fields: write `{n}` without parentheses"));
+            self.error(
+                span,
+                format!("`{n}` has no fields: write `{n}` without parentheses"),
+            );
             return T::Variant(n.to_string());
         }
         let positional = args.iter().filter(|a| a.name.is_none()).count();
         if positional > fields.len() {
-            self.error(span, format!("`{n}` has {} field(s): {}", fields.len(), fields.join(", ")));
+            self.error(
+                span,
+                format!("`{n}` has {} field(s): {}", fields.len(), fields.join(", ")),
+            );
         }
         for a in args {
             if let Some(name) = &a.name {
@@ -1996,15 +2549,28 @@ impl<'m> Checker<'m> {
         for a in args {
             match &a.name {
                 Some(n) if l.field(n).is_some() || n == "date" => {}
-                Some(n) => self.error(a.value.span, format!("ledger `{ledger}` has no column `{n}`")),
-                None => self.error(span, "add() takes named columns: add(product=…, qty=…)".to_string()),
+                Some(n) => self.error(
+                    a.value.span,
+                    format!("ledger `{ledger}` has no column `{n}`"),
+                ),
+                None => self.error(
+                    span,
+                    "add() takes named columns: add(product=…, qty=…)".to_string(),
+                ),
             }
         }
     }
 
     // ---- methods ----------------------------------------------------------------------
 
-    fn lambda(&mut self, args: &[Arg], idx: usize, name: Option<&str>, params: &[T], facts: &[Fact]) -> T {
+    fn lambda(
+        &mut self,
+        args: &[Arg],
+        idx: usize,
+        name: Option<&str>,
+        params: &[T],
+        facts: &[Fact],
+    ) -> T {
         let arg = match name {
             Some(n) => args.iter().find(|a| a.name.as_deref() == Some(n)),
             None => args.iter().filter(|a| a.name.is_none()).nth(idx),
@@ -2032,7 +2598,15 @@ impl<'m> Checker<'m> {
 
     /// Facts `x.rel == target` from the conjuncts of a `where` lambda.
     fn where_facts(&self, args: &[Arg]) -> Vec<Fact> {
-        let Some(Arg { value: Expr { kind: ExprKind::Lambda { params, body }, .. }, .. }) = args.first() else {
+        let Some(Arg {
+            value:
+                Expr {
+                    kind: ExprKind::Lambda { params, body },
+                    ..
+                },
+            ..
+        }) = args.first()
+        else {
             return Vec::new();
         };
         let Some(p) = params.first() else {
@@ -2042,11 +2616,19 @@ impl<'m> Checker<'m> {
         let mut stack = vec![body.as_ref()];
         while let Some(e) = stack.pop() {
             match &e.kind {
-                ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+                ExprKind::Binary {
+                    op: BinOp::And,
+                    lhs,
+                    rhs,
+                } => {
                     stack.push(lhs);
                     stack.push(rhs);
                 }
-                ExprKind::Binary { op: BinOp::Eq, lhs, rhs } => {
+                ExprKind::Binary {
+                    op: BinOp::Eq,
+                    lhs,
+                    rhs,
+                } => {
                     for (a, b) in [(lhs, rhs), (rhs, lhs)] {
                         if let Some(rel) = rel_path(a, p) {
                             if rel_path(b, p).is_none() {
@@ -2076,7 +2658,14 @@ impl<'m> Checker<'m> {
         }
     }
 
-    fn method(&mut self, base: &T, bpath: Option<Vec<String>>, name: &str, args: &[Arg], span: Span) -> T {
+    fn method(
+        &mut self,
+        base: &T,
+        bpath: Option<Vec<String>>,
+        name: &str,
+        args: &[Arg],
+        span: Span,
+    ) -> T {
         // collection-like receivers
         let coll = match base {
             T::Coll { elem, set, facts } => Some(((**elem).clone(), *set, facts.clone())),
@@ -2129,12 +2718,23 @@ impl<'m> Checker<'m> {
                             T::Coll { elem, .. } => (**elem).clone(),
                             other => other.clone(),
                         };
-                        return T::Coll { elem: Box::new(inner), set: true, facts: Vec::new() };
+                        return T::Coll {
+                            elem: Box::new(inner),
+                            set: true,
+                            facts: Vec::new(),
+                        };
                     }
                     "as_of" | "explain" => {
                         self.args(args);
-                        let how = if name == "as_of" { "read the history through the API (`GET /v1/records/{entity}/{id}/history`)" } else { "use `why(record)`" };
-                        self.error(span, format!("`{name}` is not available in expressions: {how}"));
+                        let how = if name == "as_of" {
+                            "read the history through the API (`GET /v1/records/{entity}/{id}/history`)"
+                        } else {
+                            "use `why(record)`"
+                        };
+                        self.error(
+                            span,
+                            format!("`{name}` is not available in expressions: {how}"),
+                        );
                         return T::Unknown;
                     }
                     _ => {}
@@ -2149,20 +2749,37 @@ impl<'m> Checker<'m> {
             T::Money { cur, exact } => {
                 self.args(args);
                 match name {
-                    "round" => T::Money { cur: cur.clone(), exact: false },
-                    "abs" => T::Money { cur: cur.clone(), exact: *exact },
+                    "round" => T::Money {
+                        cur: cur.clone(),
+                        exact: false,
+                    },
+                    "abs" => T::Money {
+                        cur: cur.clone(),
+                        exact: *exact,
+                    },
                     _ => self.unknown_method(base, name, span),
                 }
             }
             T::Price { cur, per, exact } => match name {
                 "round" => {
                     self.args(args);
-                    T::Price { cur: cur.clone(), per: per.clone(), exact: false }
+                    T::Price {
+                        cur: cur.clone(),
+                        per: per.clone(),
+                        exact: false,
+                    }
                 }
                 "to" => {
                     self.args(args);
-                    let u = args.first().map(|a| self.unit_expr(&a.value)).unwrap_or(Unit::Unknown);
-                    T::Price { cur: cur.clone(), per: u, exact: *exact }
+                    let u = args
+                        .first()
+                        .map(|a| self.unit_expr(&a.value))
+                        .unwrap_or(Unit::Unknown);
+                    T::Price {
+                        cur: cur.clone(),
+                        per: u,
+                        exact: *exact,
+                    }
                 }
                 "abs" => base.clone(),
                 _ => self.unknown_method(base, name, span),
@@ -2170,17 +2787,29 @@ impl<'m> Checker<'m> {
             T::Qty { unit, exact } => match name {
                 "to" => {
                     self.args(args);
-                    let u = args.first().map(|a| self.unit_expr(&a.value)).unwrap_or(Unit::Unknown);
+                    let u = args
+                        .first()
+                        .map(|a| self.unit_expr(&a.value))
+                        .unwrap_or(Unit::Unknown);
                     if let (Unit::Const(a), Unit::Const(b)) = (unit, &u) {
                         if self.units.get(a) != self.units.get(b) {
-                            self.error(span, format!("cannot convert {base} to {b}: different kinds of unit"));
+                            self.error(
+                                span,
+                                format!("cannot convert {base} to {b}: different kinds of unit"),
+                            );
                         }
                     }
-                    T::Qty { unit: u, exact: *exact }
+                    T::Qty {
+                        unit: u,
+                        exact: *exact,
+                    }
                 }
                 "round" | "round_up" => {
                     self.args(args);
-                    T::Qty { unit: unit.clone(), exact: false }
+                    T::Qty {
+                        unit: unit.clone(),
+                        exact: false,
+                    }
                 }
                 "abs" => base.clone(),
                 _ => self.unknown_method(base, name, span),
@@ -2188,7 +2817,13 @@ impl<'m> Checker<'m> {
             T::Duration => {
                 self.args(args);
                 match name {
-                    "to" => T::Qty { unit: args.first().map(|a| self.unit_expr(&a.value)).unwrap_or(Unit::Unknown), exact: false },
+                    "to" => T::Qty {
+                        unit: args
+                            .first()
+                            .map(|a| self.unit_expr(&a.value))
+                            .unwrap_or(Unit::Unknown),
+                        exact: false,
+                    },
                     _ => T::Duration,
                 }
             }
@@ -2243,8 +2878,21 @@ impl<'m> Checker<'m> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn coll_method(&mut self, elem: T, set: bool, facts: Vec<Fact>, is_table: bool, name: &str, args: &[Arg], span: Span) -> T {
-        let same = |facts: Vec<Fact>| T::Coll { elem: Box::new(elem.clone()), set, facts };
+    fn coll_method(
+        &mut self,
+        elem: T,
+        set: bool,
+        facts: Vec<Fact>,
+        is_table: bool,
+        name: &str,
+        args: &[Arg],
+        span: Span,
+    ) -> T {
+        let same = |facts: Vec<Fact>| T::Coll {
+            elem: Box::new(elem.clone()),
+            set,
+            facts,
+        };
         match name {
             "where" => {
                 self.lambda(args, 0, None, &[elem.clone()], &facts);
@@ -2279,7 +2927,11 @@ impl<'m> Checker<'m> {
                     if !matches!(n.unopt(), T::Num(Num::Int) | T::Unknown | T::Zero) {
                         self.error(span, format!("{name}(n) takes a whole number, not {n}"));
                     }
-                    return T::Coll { elem: Box::new(elem), set: false, facts };
+                    return T::Coll {
+                        elem: Box::new(elem),
+                        set: false,
+                        facts,
+                    };
                 }
                 if !args.is_empty() {
                     self.lambda(args, 0, None, &[elem.clone()], &facts);
@@ -2301,12 +2953,20 @@ impl<'m> Checker<'m> {
                 T::list(elem)
             }
             "max" | "min" => {
-                let r = if args.is_empty() { elem.clone() } else { self.lambda(args, 0, None, &[elem.clone()], &facts) };
+                let r = if args.is_empty() {
+                    elem.clone()
+                } else {
+                    self.lambda(args, 0, None, &[elem.clone()], &facts)
+                };
                 T::opt(r.unopt().clone())
             }
             "avg" => {
                 // the mean of the values that are not none; none for no value
-                let r = if args.is_empty() { elem.clone() } else { self.lambda(args, 0, None, &[elem.clone()], &facts) };
+                let r = if args.is_empty() {
+                    elem.clone()
+                } else {
+                    self.lambda(args, 0, None, &[elem.clone()], &facts)
+                };
                 let param = match args.first().map(|a| &a.value.kind) {
                     Some(ExprKind::Lambda { params, .. }) => params.first().cloned(),
                     _ => None,
@@ -2321,9 +2981,19 @@ impl<'m> Checker<'m> {
                 }
                 match r.unopt() {
                     T::Num(Num::Int) | T::Zero => T::opt(T::Num(Num::Decimal)),
-                    T::Money { cur, .. } => T::opt(T::Money { cur: cur.clone(), exact: false }),
-                    T::Qty { unit, .. } => T::opt(T::Qty { unit: unit.clone(), exact: false }),
-                    T::Price { cur, per, .. } => T::opt(T::Price { cur: cur.clone(), per: per.clone(), exact: false }),
+                    T::Money { cur, .. } => T::opt(T::Money {
+                        cur: cur.clone(),
+                        exact: false,
+                    }),
+                    T::Qty { unit, .. } => T::opt(T::Qty {
+                        unit: unit.clone(),
+                        exact: false,
+                    }),
+                    T::Price { cur, per, .. } => T::opt(T::Price {
+                        cur: cur.clone(),
+                        per: per.clone(),
+                        exact: false,
+                    }),
                     T::Num(n) => T::opt(T::Num(n.clone())),
                     T::Duration => T::opt(T::Duration),
                     T::Unknown => T::Unknown,
@@ -2348,7 +3018,11 @@ impl<'m> Checker<'m> {
                 T::list(inner)
             }
             "sum" => {
-                let r = if args.is_empty() { elem.clone() } else { self.lambda(args, 0, None, &[elem.clone()], &facts) };
+                let r = if args.is_empty() {
+                    elem.clone()
+                } else {
+                    self.lambda(args, 0, None, &[elem.clone()], &facts)
+                };
                 // the result's unit must not depend on the element
                 let param = match args.first().map(|a| &a.value.kind) {
                     Some(ExprKind::Lambda { params, .. }) => params.first().cloned(),
@@ -2381,7 +3055,11 @@ impl<'m> Checker<'m> {
                     self.error(span, "group_by takes one or two keys: group_by(x => key) or group_by(x => key, x => key2)");
                 }
                 let k = self.lambda(args, 0, None, &[elem.clone()], &facts);
-                let items = T::Coll { elem: Box::new(elem.clone()), set: false, facts: facts.clone() };
+                let items = T::Coll {
+                    elem: Box::new(elem.clone()),
+                    set: false,
+                    facts: facts.clone(),
+                };
                 let mut fields = vec![(Some("key".into()), k)];
                 if positional == 2 {
                     let k2 = self.lambda(args, 1, None, &[elem.clone()], &facts);
@@ -2391,10 +3069,16 @@ impl<'m> Checker<'m> {
                 T::list(T::Tuple(fields))
             }
             "allocate" => {
-                let total = args.first().map(|a| self.infer(&a.value)).unwrap_or(T::Unknown);
+                let total = args
+                    .first()
+                    .map(|a| self.infer(&a.value))
+                    .unwrap_or(T::Unknown);
                 self.lambda(args, 0, Some("by"), &[elem.clone()], &facts);
                 let share = total.unopt().clone().with_exact(false);
-                T::list(T::Tuple(vec![(Some("item".into()), elem.clone()), (Some("share".into()), share)]))
+                T::list(T::Tuple(vec![
+                    (Some("item".into()), elem.clone()),
+                    (Some("share".into()), share),
+                ]))
             }
             _ => {
                 self.args(args);
@@ -2405,7 +3089,23 @@ impl<'m> Checker<'m> {
     }
 }
 
-const BUILTIN_FNS: &[&str] = &["convert", "today", "now", "datetime", "why", "login", "affected", "count_distinct", "add", "provisional", "sum", "Qty", "Price", "DateRange", "some"];
+const BUILTIN_FNS: &[&str] = &[
+    "convert",
+    "today",
+    "now",
+    "datetime",
+    "why",
+    "login",
+    "affected",
+    "count_distinct",
+    "add",
+    "provisional",
+    "sum",
+    "Qty",
+    "Price",
+    "DateRange",
+    "some",
+];
 
 fn is_none(e: &Expr) -> bool {
     matches!(e.kind, ExprKind::Lit(Lit::None))
@@ -2449,20 +3149,38 @@ fn call_parts(e: &Expr) -> Option<(&str, &[Arg])> {
 }
 
 fn str_arg(args: &[Arg], name: &str) -> Option<String> {
-    args.iter().find(|a| a.name.as_deref() == Some(name)).and_then(|a| match &a.value.kind {
-        ExprKind::Lit(Lit::Str(s)) => Some(s.clone()),
-        _ => None,
-    })
+    args.iter()
+        .find(|a| a.name.as_deref() == Some(name))
+        .and_then(|a| match &a.value.kind {
+            ExprKind::Lit(Lit::Str(s)) => Some(s.clone()),
+            _ => None,
+        })
 }
 
 fn map_units(t: T, f: &dyn Fn(Unit) -> Unit) -> T {
     match t {
         T::Money { cur, exact } => T::Money { cur: f(cur), exact },
-        T::Price { cur, per, exact } => T::Price { cur: f(cur), per: f(per), exact },
-        T::Qty { unit, exact } => T::Qty { unit: f(unit), exact },
+        T::Price { cur, per, exact } => T::Price {
+            cur: f(cur),
+            per: f(per),
+            exact,
+        },
+        T::Qty { unit, exact } => T::Qty {
+            unit: f(unit),
+            exact,
+        },
         T::Opt(i) => T::Opt(Box::new(map_units(*i, f))),
-        T::Coll { elem, set, facts } => T::Coll { elem: Box::new(map_units(*elem, f)), set, facts },
-        T::Tuple(items) => T::Tuple(items.into_iter().map(|(n, t)| (n, map_units(t, f))).collect()),
+        T::Coll { elem, set, facts } => T::Coll {
+            elem: Box::new(map_units(*elem, f)),
+            set,
+            facts,
+        },
+        T::Tuple(items) => T::Tuple(
+            items
+                .into_iter()
+                .map(|(n, t)| (n, map_units(t, f)))
+                .collect(),
+        ),
         other => other,
     }
 }
@@ -2478,8 +3196,22 @@ fn unify(a: T, b: T) -> T {
         (T::Variant(_), b @ T::Enum { .. }) => b,
         (T::Opt(a), b) => T::opt(unify(*a, b)),
         (a, T::Opt(b)) => T::opt(unify(a, *b)),
-        (T::Money { cur, exact: e1 }, T::Money { exact: e2, .. }) => T::Money { cur, exact: e1 || e2 },
-        (T::Price { cur, per, exact: e1 }, T::Price { exact: e2, .. }) => T::Price { cur, per, exact: e1 || e2 },
+        (T::Money { cur, exact: e1 }, T::Money { exact: e2, .. }) => T::Money {
+            cur,
+            exact: e1 || e2,
+        },
+        (
+            T::Price {
+                cur,
+                per,
+                exact: e1,
+            },
+            T::Price { exact: e2, .. },
+        ) => T::Price {
+            cur,
+            per,
+            exact: e1 || e2,
+        },
         (a, _) => a,
     }
 }

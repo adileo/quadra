@@ -23,7 +23,15 @@ pub enum Binder {
 }
 
 /// Members every record has besides its declared fields.
-pub const IMPLICIT: &[&str] = &["id", "created_at", "created_by", "updated_at", "updated_by", "version", "warnings"];
+pub const IMPLICIT: &[&str] = &[
+    "id",
+    "created_at",
+    "created_by",
+    "updated_at",
+    "updated_by",
+    "version",
+    "warnings",
+];
 
 /// Values of the subexpressions that do not depend on the row, by the expression's address
 /// (the expressions are borrowed for the whole query).
@@ -60,20 +68,33 @@ fn row_name(model: &Model, entity: &str, binder: &Binder, bound: &[String], n: &
         Binder::This => {
             IMPLICIT.contains(&n)
                 || model.entity(entity).map_or(false, |e| {
-                    model.find_field(e, n).is_some() || e.actions.iter().any(|a| a.name == n) || e.methods.iter().any(|m| m.name == n) || e.flows.iter().any(|f| f.transitions.iter().any(|t| t.by.as_deref() == Some(n)))
+                    model.find_field(e, n).is_some()
+                        || e.actions.iter().any(|a| a.name == n)
+                        || e.methods.iter().any(|m| m.name == n)
+                        || e.flows
+                            .iter()
+                            .any(|f| f.transitions.iter().any(|t| t.by.as_deref() == Some(n)))
                 })
         }
     }
 }
 
 /// Does `e` depend on the row (its binder, or a lambda parameter declared inside it)?
-pub fn mentions_row(model: &Model, entity: &str, binder: &Binder, bound: &mut Vec<String>, e: &Expr) -> bool {
+pub fn mentions_row(
+    model: &Model,
+    entity: &str,
+    binder: &Binder,
+    bound: &mut Vec<String>,
+    e: &Expr,
+) -> bool {
     let m = |x: &Expr, bound: &mut Vec<String>| mentions_row(model, entity, binder, bound, x);
     match &e.kind {
         ExprKind::Lit(_) | ExprKind::Quantity { .. } | ExprKind::Error => false,
         ExprKind::Name(n) => row_name(model, entity, binder, bound, n),
         ExprKind::SelfRef => *binder == Binder::This,
-        ExprKind::FString(parts) => parts.iter().any(|p| matches!(p, FPart::Expr(x, _) if m(x, bound))),
+        ExprKind::FString(parts) => parts
+            .iter()
+            .any(|p| matches!(p, FPart::Expr(x, _) if m(x, bound))),
         ExprKind::Field { base, .. } => m(base, bound),
         ExprKind::Call { callee, args } => {
             // a method of the row called by its bare name
@@ -87,7 +108,11 @@ pub fn mentions_row(model: &Model, entity: &str, binder: &Binder, bound: &mut Ve
         ExprKind::Index { base, index } => m(base, bound) || m(index, bound),
         ExprKind::Unary { expr, .. } => m(expr, bound),
         ExprKind::Binary { lhs, rhs, .. } => m(lhs, bound) || m(rhs, bound),
-        ExprKind::If { cond, then, otherwise } => m(cond, bound) || m(then, bound) || m(otherwise, bound),
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => m(cond, bound) || m(then, bound) || m(otherwise, bound),
         ExprKind::Lambda { params, body } => {
             let n = bound.len();
             bound.extend(params.iter().cloned());
@@ -98,8 +123,12 @@ pub fn mentions_row(model: &Model, entity: &str, binder: &Binder, bound: &mut Ve
         ExprKind::Tuple(items) => items.iter().any(|(_, x)| m(x, bound)),
         ExprKind::List(args) => args.iter().any(|a| m(&a.value, bound)),
         ExprKind::Set(items) => items.iter().any(|x| m(x, bound)),
-        ExprKind::When(arms) => arms.iter().any(|(c, v)| c.as_ref().map_or(false, |c| m(c, bound)) || m(v, bound)),
-        ExprKind::Match { subject, arms } => m(subject, bound) || arms.iter().any(|a| m(&a.body, bound)),
+        ExprKind::When(arms) => arms
+            .iter()
+            .any(|(c, v)| c.as_ref().map_or(false, |c| m(c, bound)) || m(v, bound)),
+        ExprKind::Match { subject, arms } => {
+            m(subject, bound) || arms.iter().any(|a| m(&a.body, bound))
+        }
         // statements may declare and assign anything: never computed apart
         ExprKind::Block(_) => true,
         ExprKind::As { body, .. } => m(body, bound),
@@ -110,14 +139,31 @@ pub fn mentions_row(model: &Model, entity: &str, binder: &Binder, bound: &mut Ve
 /// The largest subexpressions of `e` that do not depend on the row (nor on a lambda parameter
 /// declared inside `e`): the interpreter computes them once, the source binds them as
 /// parameters. Lambdas and blocks are never computed apart.
-pub fn free_exprs<'e>(model: &Model, entity: &str, binder: &Binder, e: &'e Expr, out: &mut Vec<&'e Expr>) {
-    fn walk<'e>(model: &Model, entity: &str, binder: &Binder, bound: &mut Vec<String>, e: &'e Expr, out: &mut Vec<&'e Expr>) {
-        let free = !matches!(e.kind, ExprKind::Lambda { .. } | ExprKind::Block(_) | ExprKind::Fail(_) | ExprKind::Error) && !mentions_row(model, entity, binder, bound, e);
+pub fn free_exprs<'e>(
+    model: &Model,
+    entity: &str,
+    binder: &Binder,
+    e: &'e Expr,
+    out: &mut Vec<&'e Expr>,
+) {
+    fn walk<'e>(
+        model: &Model,
+        entity: &str,
+        binder: &Binder,
+        bound: &mut Vec<String>,
+        e: &'e Expr,
+        out: &mut Vec<&'e Expr>,
+    ) {
+        let free = !matches!(
+            e.kind,
+            ExprKind::Lambda { .. } | ExprKind::Block(_) | ExprKind::Fail(_) | ExprKind::Error
+        ) && !mentions_row(model, entity, binder, bound, e);
         if free {
             out.push(e);
             return;
         }
-        let mut w = |x: &'e Expr, bound: &mut Vec<String>| walk(model, entity, binder, bound, x, out);
+        let mut w =
+            |x: &'e Expr, bound: &mut Vec<String>| walk(model, entity, binder, bound, x, out);
         match &e.kind {
             ExprKind::FString(parts) => {
                 for p in parts {
@@ -145,7 +191,11 @@ pub fn free_exprs<'e>(model: &Model, entity: &str, binder: &Binder, e: &'e Expr,
                 w(lhs, bound);
                 w(rhs, bound);
             }
-            ExprKind::If { cond, then, otherwise } => {
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 w(cond, bound);
                 w(then, bound);
                 w(otherwise, bound);
@@ -180,7 +230,11 @@ pub fn free_exprs<'e>(model: &Model, entity: &str, binder: &Binder, e: &'e Expr,
 /// The conjuncts of a condition: `a and (b and c)` → a, b, c.
 pub fn conjuncts(e: &Expr) -> Vec<&Expr> {
     match &e.kind {
-        ExprKind::Binary { op: quadra_ir::BinOp::And, lhs, rhs } => {
+        ExprKind::Binary {
+            op: quadra_ir::BinOp::And,
+            lhs,
+            rhs,
+        } => {
             let mut v = conjuncts(lhs);
             v.extend(conjuncts(rhs));
             v
@@ -203,7 +257,11 @@ pub struct Cond<'a> {
 pub enum Key<'a> {
     /// a value of the language (`sort_by`, `last_by`, `min`, `max`): compared as the language
     /// compares (no none, one currency or unit)
-    Lang { binder: &'a Binder, expr: &'a Expr, desc: bool },
+    Lang {
+        binder: &'a Binder,
+        expr: &'a Expr,
+        desc: bool,
+    },
     /// a field path of the grid (`customer.name`), ordered as the grid shows it: numbers by
     /// value, text by its ASCII-lowercase form, none last (first when descending)
     Grid { path: Vec<String>, desc: bool },
@@ -280,7 +338,9 @@ impl Bucket {
         use chrono::Datelike;
         match self {
             Bucket::Day => d.format("%Y-%m-%d").to_string(),
-            Bucket::Week => (d - chrono::Duration::days(d.weekday().num_days_from_monday() as i64)).format("%Y-%m-%d").to_string(),
+            Bucket::Week => (d - chrono::Duration::days(d.weekday().num_days_from_monday() as i64))
+                .format("%Y-%m-%d")
+                .to_string(),
             Bucket::Month => d.format("%Y-%m").to_string(),
             Bucket::Quarter => format!("{}-Q{}", d.format("%Y"), (d.month() + 2) / 3),
             Bucket::Year => d.format("%Y").to_string(),
@@ -354,7 +414,10 @@ pub enum GroupOrder {
     /// by an aggregate (`by`; None: the row count), then by another one ascending (`then`: the
     /// first row of each group, `MIN(id)`): the order of the language's stable `sort_by` over
     /// groups in the order of their first row (`Entity.group_by(…).sort_by(…).first(n)`)
-    Ranked { by: Option<usize>, then: usize },
+    Ranked {
+        by: Option<usize>,
+        then: usize,
+    },
 }
 
 /// Full-text search: every word is the beginning of a word of one of `fields` (stored text
@@ -381,12 +444,25 @@ pub fn searchable(model: &Model, ent: &str) -> Vec<String> {
     let Some(e) = model.entity(ent) else {
         return Vec::new();
     };
-    model.all_fields(e).iter().filter(|f| f.formula.is_none() && !f.per_company && !f.name.starts_with("__") && text_type(f.ty.as_ref())).map(|f| f.name.clone()).collect()
+    model
+        .all_fields(e)
+        .iter()
+        .filter(|f| {
+            f.formula.is_none()
+                && !f.per_company
+                && !f.name.starts_with("__")
+                && text_type(f.ty.as_ref())
+        })
+        .map(|f| f.name.clone())
+        .collect()
 }
 
 /// The words of a text, as the search indexes them: runs of letters and digits, in lower case.
 pub fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect()
 }
 
 /// The words of a search (at most 10, each at most 64 characters).
@@ -405,7 +481,9 @@ pub fn search_words(text: &str) -> Vec<String> {
 /// Whether every word starts a word of one of the texts.
 pub fn text_matches(search: &[String], texts: &[String]) -> bool {
     let have: Vec<String> = texts.iter().flat_map(|t| words(t)).collect();
-    search.iter().all(|w| have.iter().any(|h| h.starts_with(w.as_str())))
+    search
+        .iter()
+        .all(|w| have.iter().any(|h| h.starts_with(w.as_str())))
 }
 
 /// The key of a value of a group, as text (None: no value): a record by its id, text and
@@ -429,7 +507,11 @@ pub fn group_value(v: &V, bucket: Option<Bucket>) -> Result<Option<String>, Stri
 pub enum What<'a> {
     /// rows in order (with the values of their keys), at most `limit` of them; `only_checked`:
     /// just the rows the interpreter must decide
-    Rows { after: Option<After>, limit: usize, only_checked: bool },
+    Rows {
+        after: Option<After>,
+        limit: usize,
+        only_checked: bool,
+    },
     /// how many rows (counting at most `cap` + 1 of them), and how many the interpreter must decide
     Count { cap: Option<u64> },
     /// aggregates of the rows (the source answers only when no row needs the interpreter)
@@ -437,7 +519,15 @@ pub enum What<'a> {
     /// the rows grouped by 1–2 keys: per group its key values, row count and aggregates, a page
     /// of groups in `order` (then the keys); `within`: per key, the values the groups may have
     /// (the cells of a pivot); the number of groups and the rows the interpreter must decide
-    Groups { keys: Vec<GroupKey>, aggs: Vec<Agg<'a>>, order: GroupOrder, desc: bool, offset: usize, limit: usize, within: Vec<Option<Vec<Option<String>>>> },
+    Groups {
+        keys: Vec<GroupKey>,
+        aggs: Vec<Agg<'a>>,
+        order: GroupOrder,
+        desc: bool,
+        offset: usize,
+        limit: usize,
+        within: Vec<Option<Vec<Option<String>>>>,
+    },
 }
 
 /// The condition of a row rule (`where o => …`): its parameter and body.
@@ -468,7 +558,13 @@ pub struct Perm<'a> {
 impl<'a> Perm<'a> {
     /// Every rule condition of the permission, with the entity whose rows it is about.
     pub fn conds(&self) -> Vec<(&str, RuleCond<'a>)> {
-        let mut out: Vec<(&str, RuleCond<'a>)> = self.deny.iter().chain(self.allow.iter()).flatten().map(|c| (self.entity.as_str(), *c)).collect();
+        let mut out: Vec<(&str, RuleCond<'a>)> = self
+            .deny
+            .iter()
+            .chain(self.allow.iter())
+            .flatten()
+            .map(|c| (self.entity.as_str(), *c))
+            .collect();
         if let Some((_, p)) = &self.parent {
             out.extend(p.conds());
         }

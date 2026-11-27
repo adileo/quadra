@@ -21,13 +21,22 @@ fn examples_parse_without_errors() {
     qd_files(&root, &mut files);
     qd_files(&root.join("../std"), &mut files);
     files.sort();
-    assert!(files.len() >= 15, "examples not found in {}", root.display());
+    assert!(
+        files.len() >= 15,
+        "examples not found in {}",
+        root.display()
+    );
 
     let mut failures = String::new();
     for file in &files {
         let src = std::fs::read_to_string(file).unwrap();
         let parse = quadra_syntax::parse(&src);
-        assert_eq!(parse.syntax().to_string(), src, "tree is not lossless for {}", file.display());
+        assert_eq!(
+            parse.syntax().to_string(),
+            src,
+            "tree is not lossless for {}",
+            file.display()
+        );
         for e in &parse.errors {
             let line = src[..usize::from(e.range.start())].matches('\n').count() + 1;
             failures.push_str(&format!("{}:{}: {}\n", file.display(), line, e.message));
@@ -41,7 +50,10 @@ fn reports_useful_errors() {
     let cases = [
         ("entity A\n    x: Int\n", "expected `:`"),
         ("entity A:\n\tx: Int\n", "tabs are not allowed"),
-        ("entity A:\n    x: Int\n  y: Int\n", "indentation does not match"),
+        (
+            "entity A:\n    x: Int\n  y: Int\n",
+            "indentation does not match",
+        ),
         ("entity A:\n    x: \n", "expected a type"),
         ("frobnicate\n", "expected a declaration"),
         ("fn f():\n    let x = \n", "expected an expression"),
@@ -64,7 +76,10 @@ fn ops_of(src: &str) -> Vec<String> {
     let parse = quadra_syntax::parse(src);
     assert!(parse.errors.is_empty(), "{src:?}: {:?}", parse.errors);
     let mut ops = Vec::new();
-    let mut node = parse.syntax().descendants().find(|n| n.kind() == SyntaxKind::BIN_EXPR);
+    let mut node = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::BIN_EXPR);
     while let Some(n) = node {
         let op = n
             .children_with_tokens()
@@ -74,7 +89,10 @@ fn ops_of(src: &str) -> Vec<String> {
             .unwrap_or_default();
         ops.push(op);
         // descend into the left operand when it is a binary expression
-        node = n.children().next().filter(|c| c.kind() == SyntaxKind::BIN_EXPR);
+        node = n
+            .children()
+            .next()
+            .filter(|c| c.kind() == SyntaxKind::BIN_EXPR);
     }
     ops
 }
@@ -105,7 +123,10 @@ fn statement_keyword_before_parenthesis() {
         let parse = quadra_syntax::parse(src);
         assert!(parse.errors.is_empty(), "{src:?}: {:?}", parse.errors);
         let tree = parse.debug_tree();
-        let stmt = tree.lines().find(|l| l.contains("_STMT@")).unwrap_or_default();
+        let stmt = tree
+            .lines()
+            .find(|l| l.contains("_STMT@"))
+            .unwrap_or_default();
         assert!(stmt.contains("KEYWORD_STMT@"), "{src:?}:\n{tree}");
     }
 }

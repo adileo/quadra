@@ -32,8 +32,16 @@ impl<'m> Interp<'m> {
     /// user and the field not hidden from them.
     pub(super) fn viewer_read(&mut self, ent: &str, id: Id, name: &str) -> R<()> {
         let actual = self.ent_of(id);
-        let ent = if actual.is_empty() { ent.to_string() } else { actual.to_string() };
-        if self.m.entity(&ent).map_or(true, |e| e.kind != EntityKind::Entity) {
+        let ent = if actual.is_empty() {
+            ent.to_string()
+        } else {
+            actual.to_string()
+        };
+        if self
+            .m
+            .entity(&ent)
+            .map_or(true, |e| e.kind != EntityKind::Entity)
+        {
             return Ok(());
         }
         if self.field(&ent, name).is_some() && self.hidden(&ent, name) {
@@ -46,7 +54,15 @@ impl<'m> Interp<'m> {
         let ok = match self.viewer_seen.get(&id) {
             Some(b) => *b,
             None => {
-                let b = self.can("read", &ent, None, Some(&V::Ref { ent: Rc::from(ent.as_str()), id }));
+                let b = self.can(
+                    "read",
+                    &ent,
+                    None,
+                    Some(&V::Ref {
+                        ent: Rc::from(ent.as_str()),
+                        id,
+                    }),
+                );
                 self.viewer_seen.insert(id, b);
                 b
             }
@@ -135,7 +151,11 @@ impl<'m> Interp<'m> {
     /// The entity of the record an expression is, when it is a path from a lambda parameter.
     fn viewer_entity(&self, e: &Expr, scope: &[(String, String)]) -> Option<String> {
         match &e.kind {
-            ExprKind::Name(n) => scope.iter().rev().find(|(p, _)| p == n).map(|(_, e)| e.clone()),
+            ExprKind::Name(n) => scope
+                .iter()
+                .rev()
+                .find(|(p, _)| p == n)
+                .map(|(_, e)| e.clone()),
             ExprKind::Field { base, name, .. } => {
                 let owner = self.viewer_entity(base, scope)?;
                 let f = self.field(&owner, name)?;
@@ -148,7 +168,11 @@ impl<'m> Interp<'m> {
     /// The entity of the records of a collection field reached from a lambda parameter.
     fn viewer_collection(&self, e: &Expr, scope: &[(String, String)]) -> Option<String> {
         match &e.kind {
-            ExprKind::Name(n) if self.m.entity(n).is_some() && !scope.iter().any(|(p, _)| p == n) => Some(n.clone()),
+            ExprKind::Name(n)
+                if self.m.entity(n).is_some() && !scope.iter().any(|(p, _)| p == n) =>
+            {
+                Some(n.clone())
+            }
             ExprKind::Field { base, name, .. } => {
                 let owner = self.viewer_entity(base, scope)?;
                 let f = self.field(&owner, name)?;

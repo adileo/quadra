@@ -35,23 +35,41 @@ fn ref_ids(v: &V) -> Vec<Id> {
 
 impl<'m> Interp<'m> {
     /// Dependencies of a rule, computed once.
-    pub(super) fn deps(&mut self, key: &str, root: &str, exprs: &[&Expr], stmts: &[&[Stmt]]) -> Rc<Deps> {
+    pub(super) fn deps(
+        &mut self,
+        key: &str,
+        root: &str,
+        exprs: &[&Expr],
+        stmts: &[&[Stmt]],
+    ) -> Rc<Deps> {
         if let Some(d) = self.statics.deps.borrow().get(key) {
             return d.clone();
         }
         let d = Rc::new(analyze(self.m, root, exprs, stmts));
-        self.statics.deps.borrow_mut().insert(key.to_string(), d.clone());
+        self.statics
+            .deps
+            .borrow_mut()
+            .insert(key.to_string(), d.clone());
         d
     }
 
     pub(super) fn is_a(&self, ent: &str, target: &str) -> bool {
-        ent == target || self.m.entity(ent).map_or(false, |e| self.m.implements(e, target))
+        ent == target
+            || self
+                .m
+                .entity(ent)
+                .map_or(false, |e| self.m.implements(e, target))
     }
 
     /// Concrete entities behind a name (a trait's implementors, or itself).
     fn concrete(&self, ent: &str) -> Vec<String> {
         match self.m.entity(ent) {
-            Some(e) if e.kind == EntityKind::Trait => self.m.implementors(ent).iter().map(|e| e.name.clone()).collect(),
+            Some(e) if e.kind == EntityKind::Trait => self
+                .m
+                .implementors(ent)
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
             _ => vec![ent.to_string()],
         }
     }
@@ -63,15 +81,26 @@ impl<'m> Interp<'m> {
             let Some(r) = self.store.records.get(&id) else {
                 continue;
             };
-            let fields = r.history.iter().filter(|(t, _, _)| *t == tx).map(|(_, f, _)| base_name(f).to_string()).collect();
-            out.push(Written { id, ent: r.ent.to_string(), fields, created: r.created_tx == tx });
+            let fields = r
+                .history
+                .iter()
+                .filter(|(t, _, _)| *t == tx)
+                .map(|(_, f, _)| base_name(f).to_string())
+                .collect();
+            out.push(Written {
+                id,
+                ent: r.ent.to_string(),
+                fields,
+                created: r.created_tx == tx,
+            });
         }
         out
     }
 
     /// Records of `ent` a rule must be evaluated on now. Every record in memory.
     pub(super) fn candidates(&mut self, ent: &str, deps: &Deps) -> Vec<Id> {
-        self.candidates_with(ent, deps, true).unwrap_or_else(|| self.ids(ent, None))
+        self.candidates_with(ent, deps, true)
+            .unwrap_or_else(|| self.ids(ent, None))
     }
 
     /// Like `candidates`, for a deploy going through the records batch by batch: a record
@@ -88,12 +117,23 @@ impl<'m> Interp<'m> {
         }
         let written = self.written();
         let tx = self.store.tx;
-        let rows: Vec<(String, HashMap<String, V>)> = self.store.rows.iter().filter(|r| r.tx == tx).map(|r| (r.ledger.to_string(), r.cols.clone())).collect();
+        let rows: Vec<(String, HashMap<String, V>)> = self
+            .store
+            .rows
+            .iter()
+            .filter(|r| r.tx == tx)
+            .map(|r| (r.ledger.to_string(), r.cols.clone()))
+            .collect();
         if written.is_empty() && rows.is_empty() {
             return Some(Vec::new());
         }
         // (a recursion over a tree is followed by the incremental formulas only: `rollup.rs`)
-        let global_hit = deps.opaque || !deps.recursive.is_empty() || written.iter().any(|w| deps.globals.iter().any(|g| self.is_a(&w.ent, g))) || rows.iter().any(|(l, _)| deps.globals.contains(l));
+        let global_hit = deps.opaque
+            || !deps.recursive.is_empty()
+            || written
+                .iter()
+                .any(|w| deps.globals.iter().any(|g| self.is_a(&w.ent, g)))
+            || rows.iter().any(|(l, _)| deps.globals.contains(l));
         if global_hit {
             return None;
         }
@@ -154,7 +194,16 @@ impl<'m> Interp<'m> {
                 break;
             }
         }
-        nodes.into_iter().filter_map(|n| if let Node::Rec(id) = n { Some(id) } else { None }).collect()
+        nodes
+            .into_iter()
+            .filter_map(|n| {
+                if let Node::Rec(id) = n {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// From records at the end of `step` to the records at its start.
@@ -165,12 +214,19 @@ impl<'m> Interp<'m> {
                 for n in nodes {
                     let Node::Rec(b) = n else { continue };
                     for a in self.concrete(ent) {
-                        let target = V::Ref { ent: Rc::from(""), id: b };
+                        let target = V::Ref {
+                            ent: Rc::from(""),
+                            id: b,
+                        };
                         match self.store.find(&a, field, &target) {
                             Some(ids) => out.extend(ids),
                             None => {
                                 for id in self.ids(&a, None) {
-                                    if self.store.read(id, field, None).map_or(false, |v| ref_ids(&v).contains(&b)) {
+                                    if self
+                                        .store
+                                        .read(id, field, None)
+                                        .map_or(false, |v| ref_ids(&v).contains(&b))
+                                    {
                                         out.insert(id);
                                     }
                                 }
@@ -189,7 +245,12 @@ impl<'m> Interp<'m> {
                             }
                             // the value before this transaction (a record moved to another parent)
                             if let Some(r) = self.store.records.get(&c) {
-                                if let Some((_, _, v)) = r.history.iter().rev().find(|(t, f, _)| *t < tx && f == back) {
+                                if let Some((_, _, v)) = r
+                                    .history
+                                    .iter()
+                                    .rev()
+                                    .find(|(t, f, _)| *t < tx && f == back)
+                                {
                                     out.extend(ref_ids(v));
                                 }
                             }
@@ -216,7 +277,12 @@ impl<'m> Interp<'m> {
     pub(super) fn post_deps(&mut self, e: &'m Entity, pi: usize) -> Rc<Deps> {
         let p = &e.posts[pi];
         let exprs: Vec<&Expr> = p.when.iter().collect();
-        self.deps(&format!("post:{}:{pi}", e.name), &e.name, &exprs, &[&p.body])
+        self.deps(
+            &format!("post:{}:{pi}", e.name),
+            &e.name,
+            &exprs,
+            &[&p.body],
+        )
     }
 
     pub fn record_checks_deps(&mut self, e: &'m Entity) -> Rc<Deps> {

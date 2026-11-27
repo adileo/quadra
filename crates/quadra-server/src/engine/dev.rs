@@ -16,11 +16,21 @@ const READABLE: &[&str] = &["qd", "csv", "md", "toml", "lock", "expected"];
 const MAX_FILE: usize = 1 << 20;
 
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git").arg("-C").arg(root).args(args).env("GIT_TERMINAL_PROMPT", "0").output().map_err(|e| format!("git: {e}"))?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
-        Err(format!("git {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim()))
+        Err(format!(
+            "git {}: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 }
 
@@ -31,10 +41,17 @@ fn safe_path(root: &Path, rel: &str, kinds: &[&str]) -> Result<PathBuf, (u16, St
         || rel.len() > 300
         || p.is_absolute()
         || p.components().any(|c| !matches!(c, Component::Normal(_)))
-        || p.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-        || !p.extension().and_then(|e| e.to_str()).map_or(false, |e| kinds.contains(&e));
+        || p.components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        || !p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map_or(false, |e| kinds.contains(&e));
     if bad {
-        return Err((400, format!("`{rel}`: not a project file that can be edited here")));
+        return Err((
+            400,
+            format!("`{rel}`: not a project file that can be edited here"),
+        ));
     }
     Ok(root.join(p))
 }
@@ -74,7 +91,12 @@ pub(super) fn import_edit(text: &str, module: &str, name: &str) -> Option<(usize
 /// A folder inside the project: relative, no `..`, no hidden folders.
 fn safe_dir(root: &Path, rel: &str) -> Result<PathBuf, (u16, String)> {
     let p = Path::new(rel.trim_end_matches('/'));
-    let bad = rel.is_empty() || rel.len() > 300 || p.is_absolute() || p.components().any(|c| !matches!(c, Component::Normal(_))) || p.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+    let bad = rel.is_empty()
+        || rel.len() > 300
+        || p.is_absolute()
+        || p.components().any(|c| !matches!(c, Component::Normal(_)))
+        || p.components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
     if bad {
         return Err((400, format!("`{rel}`: not a folder of the project")));
     }
@@ -87,7 +109,8 @@ fn collect_dirs(root: &Path, dir: &Path, out: &mut Vec<String>) {
     };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name == "node_modules" || name == "target" || !e.path().is_dir() {
+        if name.starts_with('.') || name == "node_modules" || name == "target" || !e.path().is_dir()
+        {
             continue;
         }
         if let Ok(rel) = e.path().strip_prefix(root) {
@@ -115,7 +138,11 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) {
         let path = e.path();
         if path.is_dir() {
             collect(root, &path, out);
-        } else if path.extension().and_then(|x| x.to_str()).map_or(false, |x| READABLE.contains(&x)) {
+        } else if path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map_or(false, |x| READABLE.contains(&x))
+        {
             if let Ok(rel) = path.strip_prefix(root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
@@ -132,13 +159,18 @@ impl Engine {
         let checked = self.checked.clone();
         let login = self.login_of(checked.model.as_ref().unwrap(), who.user_id);
         if !self.editors.iter().any(|e| e == &login || e == "*") {
-            return Err((403, "editing the code is not allowed for this user (see `quadra serve --editors`)".into()));
+            return Err((
+                403,
+                "editing the code is not allowed for this user (see `quadra serve --editors`)"
+                    .into(),
+            ));
         }
         Ok(login)
     }
 
     fn is_repo(&self) -> bool {
-        git(&self.root, &["rev-parse", "--is-inside-work-tree"]).map_or(false, |o| o.trim() == "true")
+        git(&self.root, &["rev-parse", "--is-inside-work-tree"])
+            .map_or(false, |o| o.trim() == "true")
     }
 
     /// `path → status` of changed files (git porcelain codes: M, A, D, ??).
@@ -148,7 +180,10 @@ impl Engine {
             return out;
         };
         let prefix = prefix.trim().to_string();
-        if let Ok(s) = git(&self.root, &["status", "--porcelain", "--untracked-files=all", "--", "."]) {
+        if let Ok(s) = git(
+            &self.root,
+            &["status", "--porcelain", "--untracked-files=all", "--", "."],
+        ) {
             for line in s.lines() {
                 if line.len() < 4 {
                     continue;
@@ -170,26 +205,47 @@ impl Engine {
         let list: Vec<J> = files
             .iter()
             .map(|f| {
-                let editable = Path::new(f).extension().and_then(|e| e.to_str()).map_or(false, |e| EDITABLE.contains(&e));
+                let editable = Path::new(f)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map_or(false, |e| EDITABLE.contains(&e));
                 json!({ "path": f, "status": changes.get(f), "editable": editable })
             })
             .collect();
-        let deleted: Vec<&String> = changes.iter().filter(|(_, c)| c.contains('D')).map(|(p, _)| p).collect();
+        let deleted: Vec<&String> = changes
+            .iter()
+            .filter(|(_, c)| c.contains('D'))
+            .map(|(p, _)| p)
+            .collect();
         let mut dirs = Vec::new();
         collect_dirs(&self.root, &self.root, &mut dirs);
         dirs.sort();
-        Ok(reply(200, json!({ "files": list, "dirs": dirs, "deleted": deleted, "repository": self.is_repo() })))
+        Ok(reply(
+            200,
+            json!({ "files": list, "dirs": dirs, "deleted": deleted, "repository": self.is_repo() }),
+        ))
     }
 
     pub(super) fn dev_read(&mut self, who: &Principal, path: &str) -> Result<Reply, Fail> {
         self.editor_login(who)?;
         let p = safe_path(&self.root, path, READABLE)?;
         let text = std::fs::read_to_string(&p).map_err(|e| (404, format!("{path}: {e}")))?;
-        let editable = Path::new(path).extension().and_then(|e| e.to_str()).map_or(false, |e| EDITABLE.contains(&e));
-        Ok(reply(200, json!({ "path": path, "text": text, "editable": editable })))
+        let editable = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map_or(false, |e| EDITABLE.contains(&e));
+        Ok(reply(
+            200,
+            json!({ "path": path, "text": text, "editable": editable }),
+        ))
     }
 
-    pub(super) fn dev_save(&mut self, who: &Principal, path: &str, text: &str) -> Result<Reply, Fail> {
+    pub(super) fn dev_save(
+        &mut self,
+        who: &Principal,
+        path: &str,
+        text: &str,
+    ) -> Result<Reply, Fail> {
         self.editor_login(who)?;
         let p = safe_path(&self.root, path, EDITABLE)?;
         if text.len() > MAX_FILE {
@@ -200,7 +256,10 @@ impl Engine {
         }
         std::fs::write(&p, text).map_err(|e| (500, e.to_string()))?;
         self.dev_generation += 1;
-        Ok(reply(200, json!({ "path": path, "status": self.changes().get(path) })))
+        Ok(reply(
+            200,
+            json!({ "path": path, "status": self.changes().get(path) }),
+        ))
     }
 
     pub(super) fn dev_delete(&mut self, who: &Principal, path: &str) -> Result<Reply, Fail> {
@@ -211,7 +270,12 @@ impl Engine {
         Ok(reply(200, json!({ "path": path })))
     }
 
-    pub(super) fn dev_rename(&mut self, who: &Principal, from: &str, to: &str) -> Result<Reply, Fail> {
+    pub(super) fn dev_rename(
+        &mut self,
+        who: &Principal,
+        from: &str,
+        to: &str,
+    ) -> Result<Reply, Fail> {
         self.editor_login(who)?;
         let src = self.root.join(from.trim_end_matches('/'));
         let dst = if src.is_dir() {
@@ -250,17 +314,32 @@ impl Engine {
         let mut files = Vec::new();
         let mut todo = vec![p.clone()];
         while let Some(dir) = todo.pop() {
-            for e in std::fs::read_dir(&dir).map_err(|e| (500, e.to_string()))?.flatten() {
+            for e in std::fs::read_dir(&dir)
+                .map_err(|e| (500, e.to_string()))?
+                .flatten()
+            {
                 let kind = e.file_type().map_err(|e| (500, e.to_string()))?;
-                let rel = e.path().strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                let rel = e
+                    .path()
+                    .strip_prefix(&self.root)
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
                 let name = e.file_name().to_string_lossy().to_string();
-                let editable = Path::new(&name).extension().and_then(|x| x.to_str()).map_or(false, |x| EDITABLE.contains(&x));
+                let editable = Path::new(&name)
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map_or(false, |x| EDITABLE.contains(&x));
                 if kind.is_dir() && !name.starts_with('.') {
                     todo.push(e.path());
-                } else if kind.is_file() && (editable && !name.starts_with('.') || name == ".gitkeep") {
+                } else if kind.is_file()
+                    && (editable && !name.starts_with('.') || name == ".gitkeep")
+                {
                     files.push(rel);
                 } else {
-                    return Err((409, format!("`{path}` contains `{rel}`, which cannot be deleted from here")));
+                    return Err((
+                        409,
+                        format!("`{path}` contains `{rel}`, which cannot be deleted from here"),
+                    ));
                 }
             }
         }
@@ -337,35 +416,61 @@ impl Engine {
                 let list: Vec<J> = results.iter().map(|r| json!({ "name": r.name, "location": r.location, "passed": r.passed, "message": r.message })).collect();
                 Ok(reply(200, json!({ "results": list })))
             }
-            Err(diags) => Ok(reply(200, json!({ "error": format!("{} error(s): fix them first", diags.iter().filter(|d| d.severity == quadra_sema::Severity::Error).count()) }))),
+            Err(diags) => Ok(reply(
+                200,
+                json!({ "error": format!("{} error(s): fix them first", diags.iter().filter(|d| d.severity == quadra_sema::Severity::Error).count()) }),
+            )),
         }
     }
 
     pub(super) fn dev_status(&mut self, who: &Principal) -> Result<Reply, Fail> {
         self.editor_login(who)?;
         let repo = self.is_repo();
-        let branch = git(&self.root, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string()).ok();
-        let log = git(&self.root, &["log", "-n", "15", "--format=%H%x1f%an%x1f%aI%x1f%s", "--", "."]).unwrap_or_default();
+        let branch = git(&self.root, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .map(|s| s.trim().to_string())
+            .ok();
+        let log = git(
+            &self.root,
+            &[
+                "log",
+                "-n",
+                "15",
+                "--format=%H%x1f%an%x1f%aI%x1f%s",
+                "--",
+                ".",
+            ],
+        )
+        .unwrap_or_default();
         let commits: Vec<J> = log
             .lines()
             .filter_map(|l| {
                 let p: Vec<&str> = l.split('\u{1f}').collect();
-                (p.len() == 4).then(|| json!({ "sha": p[0], "author": p[1], "at": p[2], "message": p[3] }))
+                (p.len() == 4)
+                    .then(|| json!({ "sha": p[0], "author": p[1], "at": p[2], "message": p[3] }))
             })
             .collect();
         let checked = self.checked.clone();
-        let mut db = Database::open(&self.url, checked.model.as_ref().unwrap(), &checked.report).map_err(|e| (500, e))?;
+        let mut db = Database::open(&self.url, checked.model.as_ref().unwrap(), &checked.report)
+            .map_err(|e| (500, e))?;
         let deployed = db.meta("code_commit").map_err(|e| (500, e))?;
         let changes = self.changes();
-        Ok(reply(200, json!({ "repository": repo, "branch": branch, "commits": commits, "deployed": deployed, "changes": changes })))
+        Ok(reply(
+            200,
+            json!({ "repository": repo, "branch": branch, "commits": commits, "deployed": deployed, "changes": changes }),
+        ))
     }
 
     pub(super) fn dev_diff(&mut self, who: &Principal) -> Result<Reply, Fail> {
         self.editor_login(who)?;
         // new files take part in the diff without being staged
         let _ = git(&self.root, &["add", "--intent-to-add", "--", "."]);
-        let base = if git(&self.root, &["rev-parse", "--verify", "HEAD"]).is_ok() { "HEAD" } else { "4b825dc642cb6eb9a060e54bf8d69288fbee4904" };
-        let diff = git(&self.root, &["diff", "--no-color", base, "--", "."]).map_err(|e| (500, e))?;
+        let base = if git(&self.root, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+            "HEAD"
+        } else {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        };
+        let diff =
+            git(&self.root, &["diff", "--no-color", base, "--", "."]).map_err(|e| (500, e))?;
         Ok(reply(200, json!({ "diff": diff })))
     }
 
@@ -373,7 +478,10 @@ impl Engine {
     pub(super) fn dev_commit(&mut self, who: &Principal, message: &str) -> Result<Reply, Fail> {
         let login = self.editor_login(who)?;
         if !self.is_repo() {
-            return Err((409, "the project is not a git repository: run `git init` in it".into()));
+            return Err((
+                409,
+                "the project is not a git repository: run `git init` in it".into(),
+            ));
         }
         let message = message.trim();
         if message.is_empty() || message.len() > 2000 {
@@ -386,28 +494,54 @@ impl Engine {
         let fail = |steps: Vec<J>, step: &str, detail: String, extra: J| -> Result<Reply, Fail> {
             let mut steps = steps;
             steps.push(json!({ "step": step, "ok": false, "detail": detail }));
-            Ok(reply(422, json!({ "error": format!("{step}: {detail}"), "steps": steps, "diagnostics": extra })))
+            Ok(reply(
+                422,
+                json!({ "error": format!("{step}: {detail}"), "steps": steps, "diagnostics": extra }),
+            ))
         };
         // 1. the new model
         let project = Project::load(&self.root).map_err(|e| (500, e.to_string()))?;
         let checked = quadra_analysis::check(&project);
-        let errors = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).count();
+        let errors = checked
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == quadra_sema::Severity::Error)
+            .count();
         if errors > 0 || checked.model.is_none() {
             let diags = self.diagnostics(&project, &checked);
-            return fail(steps, "check", format!("{errors} error(s)"), J::Array(diags));
+            return fail(
+                steps,
+                "check",
+                format!("{errors} error(s)"),
+                J::Array(diags),
+            );
         }
         steps.push(json!({ "step": "check", "ok": true, "detail": "no errors" }));
         // 2. tests
         let results = quadra_runtime::run_tests(&project, None).unwrap_or_default();
-        let failed: Vec<String> = results.iter().filter(|r| !r.passed).map(|r| format!("{} ({})", r.name, r.message.clone().unwrap_or_default())).collect();
+        let failed: Vec<String> = results
+            .iter()
+            .filter(|r| !r.passed)
+            .map(|r| format!("{} ({})", r.name, r.message.clone().unwrap_or_default()))
+            .collect();
         if !failed.is_empty() {
             return fail(steps, "tests", failed.join("; "), J::Null);
         }
-        steps.push(json!({ "step": "tests", "ok": true, "detail": format!("{} passed", results.len()) }));
+        steps.push(
+            json!({ "step": "tests", "ok": true, "detail": format!("{} passed", results.len()) }),
+        );
         // 3. dry run on the real data
         let model = checked.model.as_ref().unwrap();
         let label = format!("deploy: {message} ({login})");
-        match quadra_store::ops::deploy(&self.url, model, &checked.report, &self.root, now(), true, &label) {
+        match quadra_store::ops::deploy(
+            &self.url,
+            model,
+            &checked.report,
+            &self.root,
+            now(),
+            true,
+            &label,
+        ) {
             Ok(r) => {
                 let mut d = Vec::new();
                 if r.schema_changed {
@@ -433,16 +567,41 @@ impl Engine {
         let author = format!("{login} <{login}@quadra>");
         let name = format!("user.name={login}");
         let email = format!("user.email={login}@quadra");
-        if let Err(e) = git(&self.root, &["-c", &name, "-c", &email, "commit", "-q", "--author", &author, "-m", message]) {
+        if let Err(e) = git(
+            &self.root,
+            &[
+                "-c", &name, "-c", &email, "commit", "-q", "--author", &author, "-m", message,
+            ],
+        ) {
             return fail(steps, "commit", e, J::Null);
         }
-        let sha = git(&self.root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string()).unwrap_or_default();
+        let sha = git(&self.root, &["rev-parse", "HEAD"])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
         steps.push(json!({ "step": "commit", "ok": true, "detail": sha }));
         // 5. apply
         let label = format!("deploy {}: {message} ({login})", &sha[..sha.len().min(10)]);
-        if let Err(e) = quadra_store::ops::deploy(&self.url, model, &checked.report, &self.root, now(), false, &label).inspect(|_| self.sequencer_reload()) {
-            let _ = git(&self.root, &["-c", &name, "-c", &email, "revert", "--no-edit", "HEAD"]);
-            return fail(steps, "apply", format!("{e} — the commit was reverted"), J::Null);
+        if let Err(e) = quadra_store::ops::deploy(
+            &self.url,
+            model,
+            &checked.report,
+            &self.root,
+            now(),
+            false,
+            &label,
+        )
+        .inspect(|_| self.sequencer_reload())
+        {
+            let _ = git(
+                &self.root,
+                &["-c", &name, "-c", &email, "revert", "--no-edit", "HEAD"],
+            );
+            return fail(
+                steps,
+                "apply",
+                format!("{e} — the commit was reverted"),
+                J::Null,
+            );
         }
         if let Ok(mut db) = Database::open(&self.url, model, &checked.report) {
             let _ = db.set_meta("code_commit", &sha);
@@ -450,7 +609,10 @@ impl Engine {
         steps.push(json!({ "step": "apply", "ok": true, "detail": "database and server on the new version" }));
         // 6. the server serves the new model
         self.reload(project, checked).map_err(|e| (500, e))?;
-        Ok(reply(200, json!({ "sha": sha, "steps": steps, "deployed": true })))
+        Ok(reply(
+            200,
+            json!({ "sha": sha, "steps": steps, "deployed": true }),
+        ))
     }
 
     /// Serve a new version of the model.
@@ -461,9 +623,14 @@ impl Engine {
     pub(super) fn dev_reload(&mut self) -> Option<J> {
         let project = match Project::load(&self.root) {
             Ok(p) => p,
-            Err(e) => return Some(self.set_problems(json!({ "kind": "io", "message": e.to_string() }))),
+            Err(e) => {
+                return Some(self.set_problems(json!({ "kind": "io", "message": e.to_string() })))
+            }
         };
-        let files: Vec<(PathBuf, String)> = project.user_files().map(|f| (f.path.clone(), f.text.clone())).collect();
+        let files: Vec<(PathBuf, String)> = project
+            .user_files()
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
         let interfaces = super::interface_texts(&project);
         let interfaces_changed = self.seen_interfaces.as_ref() != Some(&interfaces);
         if files == self.seen && !interfaces_changed {
@@ -485,7 +652,12 @@ impl Engine {
                 let f = project.file(d.file);
                 let at = usize::from(d.range.start()).min(f.text.len());
                 let line = f.text[..at].matches('\n').count() + 1;
-                let rel = f.path.strip_prefix(&self.root).unwrap_or(&f.path).to_string_lossy().replace('\\', "/");
+                let rel = f
+                    .path
+                    .strip_prefix(&self.root)
+                    .unwrap_or(&f.path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 json!({ "path": rel, "line": line, "message": d.message })
             })
             .collect();
@@ -493,7 +665,17 @@ impl Engine {
             return Some(self.set_problems(json!({ "kind": "code", "errors": errors })));
         }
         let model = checked.model.as_ref().unwrap();
-        if let Err(e) = quadra_store::ops::deploy(&self.url, model, &checked.report, &self.root, now(), false, "dev: the files changed").inspect(|_| self.sequencer_reload()) {
+        if let Err(e) = quadra_store::ops::deploy(
+            &self.url,
+            model,
+            &checked.report,
+            &self.root,
+            now(),
+            false,
+            "dev: the files changed",
+        )
+        .inspect(|_| self.sequencer_reload())
+        {
             return Some(self.set_problems(json!({ "kind": "data", "message": e })));
         }
         if let Err(e) = self.reload(project, checked) {
@@ -505,16 +687,29 @@ impl Engine {
     }
 
     fn set_problems(&mut self, p: J) -> J {
-        let indent = |s: &str| s.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n");
+        let indent = |s: &str| {
+            s.lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         match p["kind"].as_str() {
             Some("code") => {
                 let errors = p["errors"].as_array().cloned().unwrap_or_default();
                 eprintln!("quadra dev: the code has {} error(s), the last version that compiled keeps running:", errors.len());
                 for e in errors.iter().take(10) {
-                    eprintln!("  {}:{}  {}", e["path"].as_str().unwrap_or(""), e["line"], e["message"].as_str().unwrap_or(""));
+                    eprintln!(
+                        "  {}:{}  {}",
+                        e["path"].as_str().unwrap_or(""),
+                        e["line"],
+                        e["message"].as_str().unwrap_or("")
+                    );
                 }
             }
-            _ => eprintln!("quadra dev: not applied, the last version keeps running:\n{}\n", indent(p["message"].as_str().unwrap_or(""))),
+            _ => eprintln!(
+                "quadra dev: not applied, the last version keeps running:\n{}\n",
+                indent(p["message"].as_str().unwrap_or(""))
+            ),
         }
         self.problems = Some(p.clone());
         json!({ "type": "problems", "problems": p })
@@ -527,15 +722,33 @@ impl Engine {
         self.renames = None;
         self.units = None;
         self.pool.borrow_mut().clear();
-        self.files = project.user_files().map(|f| (f.path.clone(), f.text.clone())).collect();
-        self.modules = project.files().map(|f| (f.id, if f.kind == quadra_sema::FileKind::Std { "std".to_string() } else { f.module.clone() })).collect();
+        self.files = project
+            .user_files()
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
+        self.modules = project
+            .files()
+            .map(|f| {
+                (
+                    f.id,
+                    if f.kind == quadra_sema::FileKind::Std {
+                        "std".to_string()
+                    } else {
+                        f.module.clone()
+                    },
+                )
+            })
+            .collect();
         self.checked = Rc::new(checked);
         self.overlays.clear();
         self.overlay_order.clear();
         self.dev_generation += 1;
         self.ide_cache = None;
         let max = self.cache.borrow().max_bytes;
-        self.cache = Rc::new(RefCell::new(Cache::new(max, std::time::Duration::from_secs(600))));
+        self.cache = Rc::new(RefCell::new(Cache::new(
+            max,
+            std::time::Duration::from_secs(600),
+        )));
         // saved views follow the new model: renames applied, what no longer fits marked
         self.revalidate_views();
         self.install_interfaces(&project)?;

@@ -33,15 +33,16 @@ pub(crate) fn source_file(p: &mut Parser) {
 /// `fn` and `extend` can appear inside tests and reactions.)
 pub(crate) fn at_item(p: &Parser) -> bool {
     match p.current() {
-        FROM_KW | ENTITY_KW | RECORD_KW | TRAIT_KW | EXTEND_KW | ENUM_KW | LEDGER_KW | FN_KW | CONST_KW => true,
+        FROM_KW | ENTITY_KW | RECORD_KW | TRAIT_KW | EXTEND_KW | ENUM_KW | LEDGER_KW | FN_KW
+        | CONST_KW => true,
         IDENT => {
             let t = p.nth_text(0);
             let n1 = p.nth(1);
             match t {
                 "temporary" => n1 == ENTITY_KW,
                 "builtin" => n1 == FN_KW,
-                "patch" | "view" | "report" | "role" | "metric" | "control" | "migration" | "change"
-                | "fixture" => n1 == IDENT,
+                "patch" | "view" | "report" | "role" | "metric" | "control" | "migration"
+                | "change" | "fixture" => n1 == IDENT,
                 "test" => n1 == STRING,
                 "event" => n1 == IDENT && p.nth(2) == L_PAREN,
                 "seed" => n1 == COLON,
@@ -541,7 +542,9 @@ fn role(p: &mut Parser) {
     m.complete(p, ROLE);
 }
 
-const VERBS: &[&str] = &["read", "create", "edit", "run", "all", "hide", "show", "derived", "delete"];
+const VERBS: &[&str] = &[
+    "read", "create", "edit", "run", "all", "hide", "show", "derived", "delete",
+];
 
 fn rule(p: &mut Parser) {
     let m = p.start();

@@ -19,7 +19,17 @@ impl Unit {
         match self {
             Unit::Const(c) => c.clone(),
             Unit::Path(p) => {
-                let p: Vec<&str> = p.iter().map(|s| if s.starts_with('#') { "(…)" } else { s.as_str() }).filter(|s| *s != "self").collect();
+                let p: Vec<&str> = p
+                    .iter()
+                    .map(|s| {
+                        if s.starts_with('#') {
+                            "(…)"
+                        } else {
+                            s.as_str()
+                        }
+                    })
+                    .filter(|s| *s != "self")
+                    .collect();
                 if p.is_empty() {
                     "self".into()
                 } else {
@@ -114,7 +124,11 @@ impl T {
     }
 
     pub fn list(elem: T) -> T {
-        T::Coll { elem: Box::new(elem), set: false, facts: Vec::new() }
+        T::Coll {
+            elem: Box::new(elem),
+            set: false,
+            facts: Vec::new(),
+        }
     }
 
     pub fn opt(t: T) -> T {
@@ -136,7 +150,12 @@ impl T {
     }
 
     pub fn is_exact(&self) -> bool {
-        matches!(self, T::Money { exact: true, .. } | T::Price { exact: true, .. } | T::Qty { exact: true, .. })
+        matches!(
+            self,
+            T::Money { exact: true, .. }
+                | T::Price { exact: true, .. }
+                | T::Qty { exact: true, .. }
+        )
     }
 
     pub fn with_exact(self, exact: bool) -> T {
@@ -172,7 +191,11 @@ impl fmt::Display for T {
             T::Money { cur, exact: e } => {
                 write!(f, "{}", exact(format!("Money<{}>", cur.show()), *e))
             }
-            T::Price { cur, per, exact: e } => write!(f, "{}", exact(format!("Price<{}, {}>", cur.show(), per.show()), *e)),
+            T::Price { cur, per, exact: e } => write!(
+                f,
+                "{}",
+                exact(format!("Price<{}, {}>", cur.show(), per.show()), *e)
+            ),
             T::Qty { unit, exact: e } => {
                 write!(f, "{}", exact(format!("Qty<{}>", unit.show()), *e))
             }
@@ -182,7 +205,9 @@ impl fmt::Display for T {
             T::Variant(v) => write!(f, "{v}"),
             T::Role => write!(f, "Role"),
             T::Opt(i) => write!(f, "{i}?"),
-            T::Coll { elem, set: true, .. } => write!(f, "{{{elem}}}"),
+            T::Coll {
+                elem, set: true, ..
+            } => write!(f, "{{{elem}}}"),
             T::Coll { elem, .. } => write!(f, "[{elem}]"),
             T::Tuple(items) => {
                 let s: Vec<String> = items

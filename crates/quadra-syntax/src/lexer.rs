@@ -16,7 +16,10 @@ pub struct Token {
 
 impl Token {
     fn new(kind: SyntaxKind, start: usize, end: usize) -> Token {
-        Token { kind, range: TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32)) }
+        Token {
+            kind,
+            range: TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32)),
+        }
     }
     pub fn text<'a>(&self, src: &'a str) -> &'a str {
         &src[self.range]
@@ -156,7 +159,10 @@ fn exactly_digits(bytes: &[u8], at: usize, n: usize) -> bool {
 fn lex_number(bytes: &[u8], i: &mut usize) -> SyntaxKind {
     let start = *i;
     // Dates: 2026-11-21, date-times: 2026-11-21 09:00, year-month: 2026-11
-    if exactly_digits(bytes, start, 4) && bytes.get(start + 4) == Some(&b'-') && exactly_digits(bytes, start + 5, 2) {
+    if exactly_digits(bytes, start, 4)
+        && bytes.get(start + 4) == Some(&b'-')
+        && exactly_digits(bytes, start + 5, 2)
+    {
         if bytes.get(start + 7) == Some(&b'-') && exactly_digits(bytes, start + 8, 2) {
             *i = start + 10;
             let sep = bytes.get(*i).copied();
@@ -238,8 +244,10 @@ fn punct(b: &[u8]) -> (SyntaxKind, usize) {
 // ---------------------------------------------------------------------------------------
 
 fn is_binary_op(kind: SyntaxKind, text: &str) -> bool {
-    matches!(kind, PLUS | MINUS | STAR | SLASH | QUESTION2 | EQ2 | NEQ | LT | GT | LE | GE | AND_KW | OR_KW)
-        || (kind == IDENT && text == "implies")
+    matches!(
+        kind,
+        PLUS | MINUS | STAR | SLASH | QUESTION2 | EQ2 | NEQ | LT | GT | LE | GE | AND_KW | OR_KW
+    ) || (kind == IDENT && text == "implies")
 }
 
 /// The previous line ends with a token that cannot end an expression.
@@ -259,13 +267,19 @@ fn layout(src: &str, raw: Vec<Token>, errors: &mut Vec<SyntaxError>) -> Vec<Toke
     let mut indent_tab: Option<TextRange> = None;
 
     let next_sig = |from: usize| -> Option<Token> {
-        raw[from..].iter().copied().find(|t| !matches!(t.kind, WHITESPACE | COMMENT | NEWLINE))
+        raw[from..]
+            .iter()
+            .copied()
+            .find(|t| !matches!(t.kind, WHITESPACE | COMMENT | NEWLINE))
     };
 
     for (ri, tok) in raw.iter().copied().enumerate() {
         match tok.kind {
             NEWLINE => {
-                out.push(Token { kind: WHITESPACE, ..tok });
+                out.push(Token {
+                    kind: WHITESPACE,
+                    ..tok
+                });
                 if pending_nl.is_none() && depth == 0 && last_sig.is_some() {
                     pending_nl = Some(out.len() - 1);
                 }
@@ -289,7 +303,10 @@ fn layout(src: &str, raw: Vec<Token>, errors: &mut Vec<SyntaxError>) -> Vec<Toke
                     match last_sig {
                         None => {
                             if indent_col > 0 {
-                                errors.push(SyntaxError::new("unexpected indentation".into(), tok.range));
+                                errors.push(SyntaxError::new(
+                                    "unexpected indentation".into(),
+                                    tok.range,
+                                ));
                             }
                         }
                         Some(ls) => {
@@ -305,7 +322,8 @@ fn layout(src: &str, raw: Vec<Token>, errors: &mut Vec<SyntaxError>) -> Vec<Toke
                                 ),
                                 k => is_binary_op(k, text),
                             };
-                            let continuation = continues_after(prev.kind, prev.text(src)) || starts_cont;
+                            let continuation =
+                                continues_after(prev.kind, prev.text(src)) || starts_cont;
                             if continuation {
                                 // the line break stays trivia
                             } else {
@@ -322,11 +340,17 @@ fn layout(src: &str, raw: Vec<Token>, errors: &mut Vec<SyntaxError>) -> Vec<Toke
                                 let top = *stack.last().unwrap();
                                 if indent_col > top {
                                     stack.push(indent_col);
-                                    out.push(Token { kind: INDENT, range: TextRange::empty(at) });
+                                    out.push(Token {
+                                        kind: INDENT,
+                                        range: TextRange::empty(at),
+                                    });
                                 } else if indent_col < top {
                                     while indent_col < *stack.last().unwrap() {
                                         stack.pop();
-                                        out.push(Token { kind: DEDENT, range: TextRange::empty(at) });
+                                        out.push(Token {
+                                            kind: DEDENT,
+                                            range: TextRange::empty(at),
+                                        });
                                     }
                                     if indent_col != *stack.last().unwrap() {
                                         errors.push(SyntaxError::new(
@@ -356,10 +380,16 @@ fn layout(src: &str, raw: Vec<Token>, errors: &mut Vec<SyntaxError>) -> Vec<Toke
     if last_sig.is_some() {
         match pending_nl {
             Some(nl) => out[nl].kind = NEWLINE,
-            None => out.push(Token { kind: NEWLINE, range: TextRange::empty(end) }),
+            None => out.push(Token {
+                kind: NEWLINE,
+                range: TextRange::empty(end),
+            }),
         }
         for _ in 1..stack.len() {
-            out.push(Token { kind: DEDENT, range: TextRange::empty(end) });
+            out.push(Token {
+                kind: DEDENT,
+                range: TextRange::empty(end),
+            });
         }
     }
     out
@@ -372,7 +402,10 @@ mod tests {
     fn kinds(src: &str) -> Vec<SyntaxKind> {
         let (toks, errs) = tokenize(src);
         assert!(errs.is_empty(), "{errs:?}");
-        toks.into_iter().map(|t| t.kind).filter(|k| !k.is_trivia()).collect()
+        toks.into_iter()
+            .map(|t| t.kind)
+            .filter(|k| !k.is_trivia())
+            .collect()
     }
 
     #[test]
@@ -381,21 +414,23 @@ mod tests {
         assert_eq!(
             k,
             vec![
-                ENTITY_KW, IDENT, COLON, NEWLINE, INDENT, IDENT, COLON, IDENT, NEWLINE, IDENT, COLON, IDENT,
-                NEWLINE, DEDENT, FN_KW, IDENT, L_PAREN, R_PAREN, COLON, NEWLINE, INDENT, RETURN_KW, NUMBER,
-                NEWLINE, DEDENT
+                ENTITY_KW, IDENT, COLON, NEWLINE, INDENT, IDENT, COLON, IDENT, NEWLINE, IDENT,
+                COLON, IDENT, NEWLINE, DEDENT, FN_KW, IDENT, L_PAREN, R_PAREN, COLON, NEWLINE,
+                INDENT, RETURN_KW, NUMBER, NEWLINE, DEDENT
             ]
         );
     }
 
     #[test]
     fn continuation_and_literals() {
-        let k = kinds("x := a\n    .where(b)\n    + 2 kg\ny = 9.90 EUR/pcs\nz = 2026-11-21 09:00\n");
+        let k =
+            kinds("x := a\n    .where(b)\n    + 2 kg\ny = 9.90 EUR/pcs\nz = 2026-11-21 09:00\n");
         assert_eq!(
             k,
             vec![
-                IDENT, COLON_EQ, IDENT, DOT, WHERE_KW, L_PAREN, IDENT, R_PAREN, PLUS, NUMBER, IDENT, NEWLINE,
-                IDENT, EQ, NUMBER, IDENT, SLASH, IDENT, NEWLINE, IDENT, EQ, DATETIME, NEWLINE
+                IDENT, COLON_EQ, IDENT, DOT, WHERE_KW, L_PAREN, IDENT, R_PAREN, PLUS, NUMBER,
+                IDENT, NEWLINE, IDENT, EQ, NUMBER, IDENT, SLASH, IDENT, NEWLINE, IDENT, EQ,
+                DATETIME, NEWLINE
             ]
         );
     }
@@ -406,8 +441,8 @@ mod tests {
         assert_eq!(
             k,
             vec![
-                IDENT, COLON_EQ, WHEN_KW, COLON, NEWLINE, INDENT, IDENT, FAT_ARROW, NUMBER, NEWLINE, ELSE_KW,
-                FAT_ARROW, NUMBER, NEWLINE, DEDENT
+                IDENT, COLON_EQ, WHEN_KW, COLON, NEWLINE, INDENT, IDENT, FAT_ARROW, NUMBER,
+                NEWLINE, ELSE_KW, FAT_ARROW, NUMBER, NEWLINE, DEDENT
             ]
         );
     }

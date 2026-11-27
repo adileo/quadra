@@ -4,14 +4,20 @@
 use quadra_sema::Severity;
 
 fn hints_of(src: &str) -> Vec<(usize, String)> {
-    let dir = std::env::temp_dir().join(format!("quadra-hints-{}-{}", std::process::id(), src.len()));
+    let dir =
+        std::env::temp_dir().join(format!("quadra-hints-{}-{}", std::process::id(), src.len()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"hints\"\n").unwrap();
     std::fs::write(dir.join("main.qd"), src).unwrap();
     let project = quadra_sema::Project::load(&dir).unwrap();
     let checked = quadra_analysis::check(&project);
-    let errors: Vec<String> = checked.diagnostics.iter().filter(|d| d.severity == Severity::Error).map(|d| d.message.clone()).collect();
+    let errors: Vec<String> = checked
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
     assert!(errors.is_empty(), "{errors:?}");
     let out = quadra_store::hints::hints(&checked)
         .into_iter()
@@ -19,7 +25,10 @@ fn hints_of(src: &str) -> Vec<(usize, String)> {
         .map(|d| {
             assert_eq!(d.severity, Severity::Hint);
             let text = &project.file(d.file).text;
-            (text[..usize::from(d.range.start())].matches('\n').count() + 1, d.message)
+            (
+                text[..usize::from(d.range.start())].matches('\n').count() + 1,
+                d.message,
+            )
         })
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
@@ -27,7 +36,10 @@ fn hints_of(src: &str) -> Vec<(usize, String)> {
 }
 
 fn on(h: &[(usize, String)], line: usize) -> Vec<String> {
-    h.iter().filter(|(l, _)| *l == line).map(|(_, m)| m.clone()).collect()
+    h.iter()
+        .filter(|(l, _)| *l == line)
+        .map(|(_, m)| m.clone())
+        .collect()
 }
 
 const SRC: &str = r#"
@@ -76,22 +88,60 @@ fn hints_say_how_queries_rules_and_formulas_run() {
     let all: Vec<String> = h.iter().map(|(l, m)| format!("{l}: {m}")).collect();
     let joined = all.join("\n");
     // a reference compared with a value: an index
-    assert!(on(&h, 25).iter().any(|m| m.contains("`Customer.where(…).count()` runs in SQL using an index (reference `Customer.region`)")), "{joined}");
+    assert!(
+        on(&h, 25).iter().any(|m| m.contains(
+            "`Customer.where(…).count()` runs in SQL using an index (reference `Customer.region`)"
+        )),
+        "{joined}"
+    );
     // a field without an index: every row read
-    assert!(on(&h, 26).iter().any(|m| m.contains("`Order.count(…)` runs in SQL but reads every row of `order`")), "{joined}");
-    assert!(on(&h, 27).iter().any(|m| m.contains("`Customer.where(…).first()` runs in SQL")), "{joined}");
+    assert!(
+        on(&h, 26)
+            .iter()
+            .any(|m| m.contains("`Order.count(…)` runs in SQL but reads every row of `order`")),
+        "{joined}"
+    );
+    assert!(
+        on(&h, 27)
+            .iter()
+            .any(|m| m.contains("`Customer.where(…).first()` runs in SQL")),
+        "{joined}"
+    );
     // a path through two references; then `.map` in the interpreter
     assert!(on(&h, 28).iter().any(|m| m.contains("runs in SQL") && m.contains("`.map` then runs in the interpreter")), "{joined}");
     // a user function: the interpreter
-    assert!(on(&h, 29).iter().any(|m| m.contains("runs in the interpreter over every Order record") && m.contains("does not translate")), "{joined}");
+    assert!(
+        on(&h, 29).iter().any(
+            |m| m.contains("runs in the interpreter over every Order record")
+                && m.contains("does not translate")
+        ),
+        "{joined}"
+    );
     // the loop's query
-    assert!(on(&h, 30).iter().any(|m| m.contains("`Order.where(…)` runs in SQL")), "{joined}");
+    assert!(
+        on(&h, 30)
+            .iter()
+            .any(|m| m.contains("`Order.where(…)` runs in SQL")),
+        "{joined}"
+    );
     // one hint per query: the chain `Customer.where(…).count()` is described once
     assert_eq!(on(&h, 25).len(), 1, "{joined}");
     // a rule reading a formula: the interpreter, row by row
-    assert!(on(&h, 38).iter().any(|m| m.contains("applied by the interpreter, row by row") && m.contains("`Customer.open` is a formula")), "{joined}");
+    assert!(
+        on(&h, 38)
+            .iter()
+            .any(|m| m.contains("applied by the interpreter, row by row")
+                && m.contains("`Customer.open` is a formula")),
+        "{joined}"
+    );
     // a formula reading a whole entity: computed when read
-    assert!(on(&h, 15).iter().any(|m| m.contains("`Customer.lucky` is computed when read") && m.contains("it reads every Order")), "{joined}");
+    assert!(
+        on(&h, 15)
+            .iter()
+            .any(|m| m.contains("`Customer.lucky` is computed when read")
+                && m.contains("it reads every Order")),
+        "{joined}"
+    );
     // an incremental formula has no hint
     assert!(on(&h, 14).is_empty(), "{joined}");
 }

@@ -11,8 +11,11 @@ use crate::SyntaxError;
 use rowan::{GreenNode, GreenNodeBuilder, TextRange};
 
 pub(crate) fn parse(src: &str, tokens: &[Token]) -> (GreenNode, Vec<SyntaxError>) {
-    let sig: Vec<(SyntaxKind, TextRange)> =
-        tokens.iter().filter(|t| !t.kind.is_trivia()).map(|t| (t.kind, t.range)).collect();
+    let sig: Vec<(SyntaxKind, TextRange)> = tokens
+        .iter()
+        .filter(|t| !t.kind.is_trivia())
+        .map(|t| (t.kind, t.range))
+        .collect();
     let mut p = Parser::new(src, sig);
     grammar::source_file(&mut p);
     let (events, errors) = p.finish();
@@ -21,9 +24,14 @@ pub(crate) fn parse(src: &str, tokens: &[Token]) -> (GreenNode, Vec<SyntaxError>
 
 #[derive(Debug)]
 enum Event {
-    Start { kind: SyntaxKind, forward_parent: Option<u32> },
+    Start {
+        kind: SyntaxKind,
+        forward_parent: Option<u32>,
+    },
     Finish,
-    Token { kind: SyntaxKind },
+    Token {
+        kind: SyntaxKind,
+    },
     Error,
     Tombstone,
 }
@@ -124,7 +132,9 @@ impl<'s> Parser<'s> {
         let f = self.fuel.get();
         assert!(f > 0, "parser is stuck");
         self.fuel.set(f - 1);
-        self.tokens.get(self.pos + n).map_or(SyntaxKind::__LAST, |t| t.0)
+        self.tokens
+            .get(self.pos + n)
+            .map_or(SyntaxKind::__LAST, |t| t.0)
     }
 
     pub(crate) fn current(&self) -> SyntaxKind {
@@ -223,7 +233,10 @@ impl<'s> Parser<'s> {
         let pos = self.events.len() as u32;
         self.events.push(Event::Tombstone);
         self.heights.push(0);
-        Marker { pos, completed: false }
+        Marker {
+            pos,
+            completed: false,
+        }
     }
 
     /// A node of `height` completed: the node being built around it is at least one taller.
@@ -242,11 +255,17 @@ pub(crate) struct Marker {
 impl Marker {
     pub(crate) fn complete(mut self, p: &mut Parser, kind: SyntaxKind) -> CompletedMarker {
         self.completed = true;
-        p.events[self.pos as usize] = Event::Start { kind, forward_parent: None };
+        p.events[self.pos as usize] = Event::Start {
+            kind,
+            forward_parent: None,
+        };
         p.events.push(Event::Finish);
         let height = p.heights.pop().unwrap_or(0) + 1;
         p.completed(height);
-        CompletedMarker { pos: self.pos, height }
+        CompletedMarker {
+            pos: self.pos,
+            height,
+        }
     }
 
     pub(crate) fn abandon(mut self, p: &mut Parser) {
@@ -317,13 +336,20 @@ fn build_tree(
     };
 
     // Map from significant token index to its range, for error positions.
-    let sig_ranges: Vec<TextRange> = tokens.iter().filter(|t| !t.kind.is_trivia()).map(|t| t.range).collect();
+    let sig_ranges: Vec<TextRange> = tokens
+        .iter()
+        .filter(|t| !t.kind.is_trivia())
+        .map(|t| t.range)
+        .collect();
 
     let mut depth = 0usize;
     let mut forward_parents = Vec::new();
     for i in 0..events.len() {
         match std::mem::replace(&mut events[i], Event::Tombstone) {
-            Event::Start { kind, forward_parent } => {
+            Event::Start {
+                kind,
+                forward_parent,
+            } => {
                 forward_parents.clear();
                 forward_parents.push(kind);
                 let mut idx = i;
@@ -331,7 +357,10 @@ fn build_tree(
                 while let Some(off) = fp {
                     idx += off as usize;
                     fp = match std::mem::replace(&mut events[idx], Event::Tombstone) {
-                        Event::Start { kind, forward_parent } => {
+                        Event::Start {
+                            kind,
+                            forward_parent,
+                        } => {
                             forward_parents.push(kind);
                             forward_parent
                         }

@@ -54,12 +54,32 @@ const SYSTEM_DDL: &[&str] = &[
 /// of an entity (scans), those written or created after a transaction (the cache, conflicts),
 /// the rows of a ledger.
 pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
-    ("qx__quadra_history_record_id_seq", "_quadra_history", &["record_id", "seq"]),
+    (
+        "qx__quadra_history_record_id_seq",
+        "_quadra_history",
+        &["record_id", "seq"],
+    ),
     ("qx__quadra_history_tx", "_quadra_history", &["tx"]),
-    ("qx__quadra_records_entity_id", "_quadra_records", &["entity", "id"]),
-    ("qx__quadra_records_last_tx", "_quadra_records", &["last_tx"]),
-    ("qx__quadra_records_created_tx", "_quadra_records", &["created_tx"]),
-    ("qx__quadra_ledger_rows_ledger_tx", "_quadra_ledger_rows", &["ledger", "tx"]),
+    (
+        "qx__quadra_records_entity_id",
+        "_quadra_records",
+        &["entity", "id"],
+    ),
+    (
+        "qx__quadra_records_last_tx",
+        "_quadra_records",
+        &["last_tx"],
+    ),
+    (
+        "qx__quadra_records_created_tx",
+        "_quadra_records",
+        &["created_tx"],
+    ),
+    (
+        "qx__quadra_ledger_rows_ledger_tx",
+        "_quadra_ledger_rows",
+        &["ledger", "tx"],
+    ),
 ];
 
 /// The version of the system tables and their indexes: a database opened with an older one
@@ -82,11 +102,31 @@ const SYSTEM_VERSION: &str = "10";
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
 fn system_ddl(d: Dialect) -> Vec<String> {
-    SYSTEM_DDL.iter().map(|s| if d == Dialect::Sqlite { s.replacen("BIGINT PRIMARY KEY", "INTEGER PRIMARY KEY", 1) } else { s.to_string() }).collect()
+    SYSTEM_DDL
+        .iter()
+        .map(|s| {
+            if d == Dialect::Sqlite {
+                s.replacen("BIGINT PRIMARY KEY", "INTEGER PRIMARY KEY", 1)
+            } else {
+                s.to_string()
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn system_indexes_sql() -> Vec<String> {
-    SYSTEM_INDEXES.iter().map(|(n, t, cols)| format!("CREATE INDEX IF NOT EXISTS \"{n}\" ON \"{t}\" ({})", cols.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", "))).collect()
+    SYSTEM_INDEXES
+        .iter()
+        .map(|(n, t, cols)| {
+            format!(
+                "CREATE INDEX IF NOT EXISTS \"{n}\" ON \"{t}\" ({})",
+                cols.iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect()
 }
 
 /// An event of the outbox (`emit`), as written with the commit that emitted it.
@@ -150,7 +190,10 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) fn drop_search_triggers(conn: &mut Conn, table: &str) -> Result<(), String> {
     let fts = crate::schema::fts_table(table);
     for k in ["ai", "ad", "au"] {
-        conn.batch(&format!("DROP TRIGGER IF EXISTS {}", q(&format!("{fts}_{k}"))))?;
+        conn.batch(&format!(
+            "DROP TRIGGER IF EXISTS {}",
+            q(&format!("{fts}_{k}"))
+        ))?;
     }
     Ok(())
 }
@@ -184,7 +227,17 @@ impl Database {
                 _ => None,
             })
             .collect();
-        Database { conn, schema, entity_tables, seq: 0, prev_hash: "0".repeat(64), deferred: None, recording: None, delta_ops: Vec::new(), url: None }
+        Database {
+            conn,
+            schema,
+            entity_tables,
+            seq: 0,
+            prev_hash: "0".repeat(64),
+            deferred: None,
+            recording: None,
+            delta_ops: Vec::new(),
+            url: None,
+        }
     }
 
     /// Databases created by an older version get the system tables and indexes added since.
@@ -193,34 +246,91 @@ impl Database {
     /// A column is looked for qualified by its table (`t."col"`): SQLite reads an unknown
     /// `"col"` alone as a string, and the column would never be added.
     fn upgrade(&mut self) -> Result<(), String> {
-        match self.conn.query("SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'system'", &[]) {
+        match self.conn.query(
+            "SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'system'",
+            &[],
+        ) {
             Err(_) => return Ok(()), // not initialized
-            Ok(r) if r.first().and_then(|r| r[0].as_deref()) == Some(SYSTEM_VERSION) => return Ok(()),
+            Ok(r) if r.first().and_then(|r| r[0].as_deref()) == Some(SYSTEM_VERSION) => {
+                return Ok(())
+            }
             Ok(_) => {}
         }
-        if self.conn.query("SELECT t.\"last_tx\" FROM \"_quadra_records\" t WHERE 1 = 0", &[]).is_err() {
-            self.conn.batch("ALTER TABLE \"_quadra_records\" ADD COLUMN \"last_tx\" BIGINT NOT NULL DEFAULT 0")?;
+        if self
+            .conn
+            .query(
+                "SELECT t.\"last_tx\" FROM \"_quadra_records\" t WHERE 1 = 0",
+                &[],
+            )
+            .is_err()
+        {
+            self.conn.batch(
+                "ALTER TABLE \"_quadra_records\" ADD COLUMN \"last_tx\" BIGINT NOT NULL DEFAULT 0",
+            )?;
         }
-        if self.conn.query("SELECT t.\"version_tx\" FROM \"_quadra_records\" t WHERE 1 = 0", &[]).is_err() {
+        if self
+            .conn
+            .query(
+                "SELECT t.\"version_tx\" FROM \"_quadra_records\" t WHERE 1 = 0",
+                &[],
+            )
+            .is_err()
+        {
             // 0: the rows written before are read from the history (their decimals were written
             // without their scale); each record's next write sets it
             self.conn.batch("ALTER TABLE \"_quadra_records\" ADD COLUMN \"version_tx\" BIGINT NOT NULL DEFAULT 0")?;
         }
-        if self.conn.query("SELECT t.\"kinds\" FROM \"_quadra_records\" t WHERE 1 = 0", &[]).is_err() {
-            self.conn.batch("ALTER TABLE \"_quadra_records\" ADD COLUMN \"kinds\" TEXT")?;
+        if self
+            .conn
+            .query(
+                "SELECT t.\"kinds\" FROM \"_quadra_records\" t WHERE 1 = 0",
+                &[],
+            )
+            .is_err()
+        {
+            self.conn
+                .batch("ALTER TABLE \"_quadra_records\" ADD COLUMN \"kinds\" TEXT")?;
         }
         // the user's own state of a saved view (an app: the default values of its filters)
-        if self.conn.table_exists("_quadra_view_prefs")? && self.conn.query("SELECT t.\"state\" FROM \"_quadra_view_prefs\" t WHERE 1 = 0", &[]).is_err() {
-            self.conn.batch("ALTER TABLE \"_quadra_view_prefs\" ADD COLUMN \"state\" TEXT")?;
+        if self.conn.table_exists("_quadra_view_prefs")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"state\" FROM \"_quadra_view_prefs\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            self.conn
+                .batch("ALTER TABLE \"_quadra_view_prefs\" ADD COLUMN \"state\" TEXT")?;
         }
         // the folder an app or a folder is in (none: at the top)
-        if self.conn.table_exists("_quadra_views")? && self.conn.query("SELECT t.\"parent_id\" FROM \"_quadra_views\" t WHERE 1 = 0", &[]).is_err() {
-            self.conn.batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"parent_id\" BIGINT")?;
+        if self.conn.table_exists("_quadra_views")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"parent_id\" FROM \"_quadra_views\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            self.conn
+                .batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"parent_id\" BIGINT")?;
         }
         // where an app, a view or a folder comes from: an interface file (`file`), by its path
-        if self.conn.table_exists("_quadra_views")? && self.conn.query("SELECT t.\"origin\" FROM \"_quadra_views\" t WHERE 1 = 0", &[]).is_err() {
-            self.conn.batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"origin\" TEXT")?;
-            self.conn.batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"path\" TEXT")?;
+        if self.conn.table_exists("_quadra_views")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"origin\" FROM \"_quadra_views\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            self.conn
+                .batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"origin\" TEXT")?;
+            self.conn
+                .batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"path\" TEXT")?;
         }
         for s in system_ddl(self.dialect()) {
             let name = s.split('"').nth(1).unwrap_or("").to_string();
@@ -239,8 +349,14 @@ impl Database {
     }
 
     pub fn meta(&mut self, key: &str) -> Result<Option<String>, String> {
-        let rows = self.conn.query("SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = ?text", &[Sql::Text(key.into())])?;
-        Ok(rows.into_iter().next().and_then(|r| r.into_iter().next().flatten()))
+        let rows = self.conn.query(
+            "SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = ?text",
+            &[Sql::Text(key.into())],
+        )?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next().flatten()))
     }
 
     pub fn set_meta(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -251,17 +367,42 @@ impl Database {
     pub fn status(&mut self) -> Result<Status, String> {
         let fingerprint = self.schema.fingerprint();
         if !self.conn.table_exists("_quadra_meta")? {
-            return Ok(Status { initialized: false, schema_current: false, stored_fingerprint: None, fingerprint, commits: 0, last_hash: None });
+            return Ok(Status {
+                initialized: false,
+                schema_current: false,
+                stored_fingerprint: None,
+                fingerprint,
+                commits: 0,
+                last_hash: None,
+            });
         }
         let stored = self.meta("schema_fingerprint")?;
-        let rows = self.conn.query("SELECT CAST(COUNT(*) AS TEXT), CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\"", &[])?;
+        let rows = self.conn.query(
+            "SELECT CAST(COUNT(*) AS TEXT), CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\"",
+            &[],
+        )?;
         let commits = num(&rows[0][0]);
         let last = rows[0][1].clone();
         let last_hash = match last {
-            Some(tx) => self.conn.query("SELECT CAST(\"hash\" AS TEXT) FROM \"_quadra_commits\" WHERE \"tx\" = ?bigint", &[Sql::Int(tx.parse().unwrap_or(0))])?.into_iter().next().and_then(|r| r[0].clone()),
+            Some(tx) => self
+                .conn
+                .query(
+                    "SELECT CAST(\"hash\" AS TEXT) FROM \"_quadra_commits\" WHERE \"tx\" = ?bigint",
+                    &[Sql::Int(tx.parse().unwrap_or(0))],
+                )?
+                .into_iter()
+                .next()
+                .and_then(|r| r[0].clone()),
             None => None,
         };
-        Ok(Status { initialized: true, schema_current: stored.as_deref() == Some(fingerprint.as_str()), stored_fingerprint: stored, fingerprint, commits, last_hash })
+        Ok(Status {
+            initialized: true,
+            schema_current: stored.as_deref() == Some(fingerprint.as_str()),
+            stored_fingerprint: stored,
+            fingerprint,
+            commits,
+            last_hash,
+        })
     }
 
     /// Create system tables and projections in an empty database.
@@ -299,16 +440,32 @@ impl Database {
         if self.status()?.commits > 0 {
             return Err("the database has commits: it is not removed".into());
         }
-        let cascade = if self.dialect() == Dialect::Postgres { " CASCADE" } else { "" };
+        let cascade = if self.dialect() == Dialect::Postgres {
+            " CASCADE"
+        } else {
+            ""
+        };
         self.conn.batch("BEGIN")?;
         let r = (|| -> Result<(), String> {
-            let mut names: Vec<String> = self.schema.tables.iter().rev().map(|t| t.name.clone()).collect();
-            names.extend(SYSTEM_DDL.iter().rev().filter_map(|s| s.split('"').nth(1).map(str::to_string)));
+            let mut names: Vec<String> = self
+                .schema
+                .tables
+                .iter()
+                .rev()
+                .map(|t| t.name.clone())
+                .collect();
+            names.extend(
+                SYSTEM_DDL
+                    .iter()
+                    .rev()
+                    .filter_map(|s| s.split('"').nth(1).map(str::to_string)),
+            );
             if self.dialect() == Dialect::Sqlite {
                 self.conn.batch("PRAGMA defer_foreign_keys = ON")?;
             }
             for n in names {
-                self.conn.batch(&format!("DROP TABLE IF EXISTS {}{cascade}", q(&n)))?;
+                self.conn
+                    .batch(&format!("DROP TABLE IF EXISTS {}{cascade}", q(&n)))?;
             }
             Ok(())
         })();
@@ -337,7 +494,17 @@ impl Database {
                 &[],
             )?,
         };
-        Ok(rows.into_iter().map(|r| (r[0].clone().unwrap_or_default(), r[1].clone().unwrap_or_default(), r[2].as_deref() == Some("1"))).filter(|(_, t, _)| !t.starts_with("_quadra_")).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r[0].clone().unwrap_or_default(),
+                    r[1].clone().unwrap_or_default(),
+                    r[2].as_deref() == Some("1"),
+                )
+            })
+            .filter(|(_, t, _)| !t.starts_with("_quadra_"))
+            .collect())
     }
 
     /// Bring the indexes of the projection tables in step with the model: create those
@@ -345,12 +512,19 @@ impl Database {
     /// `tables`, when given. Outside a transaction: on PostgreSQL the indexes are built
     /// `CONCURRENTLY` (writes go on meanwhile); an interrupted build leaves an invalid index,
     /// rebuilt by the next call. Returns (created, dropped).
-    pub fn ensure_indexes(&mut self, tables: Option<&std::collections::BTreeSet<String>>) -> Result<(Vec<String>, Vec<String>), String> {
+    pub fn ensure_indexes(
+        &mut self,
+        tables: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<(Vec<String>, Vec<String>), String> {
         self.sync_indexes(tables, self.dialect() == Dialect::Postgres)
     }
 
     /// Like `ensure_indexes`, inside the caller's transaction (no `CONCURRENTLY`).
-    pub(crate) fn sync_indexes(&mut self, tables: Option<&std::collections::BTreeSet<String>>, concurrently: bool) -> Result<(Vec<String>, Vec<String>), String> {
+    pub(crate) fn sync_indexes(
+        &mut self,
+        tables: Option<&std::collections::BTreeSet<String>>,
+        concurrently: bool,
+    ) -> Result<(Vec<String>, Vec<String>), String> {
         let wanted = |t: &str| tables.map_or(true, |ts| ts.contains(t));
         if self.dialect() == Dialect::Sqlite {
             self.sync_search(tables)?;
@@ -363,14 +537,18 @@ impl Database {
                 continue;
             }
             if !*valid || !self.schema.indexes.iter().any(|i| &i.name == name) {
-                self.conn.batch(&format!("DROP INDEX {conc}IF EXISTS \"{name}\""))?;
+                self.conn
+                    .batch(&format!("DROP INDEX {conc}IF EXISTS \"{name}\""))?;
                 dropped.push(name.clone());
             }
         }
         let mut created = Vec::new();
         let indexes = self.schema.indexes.clone();
         let sqlite = self.dialect() == Dialect::Sqlite;
-        for i in indexes.iter().filter(|i| wanted(&i.table) && !(sqlite && i.fts)) {
+        for i in indexes
+            .iter()
+            .filter(|i| wanted(&i.table) && !(sqlite && i.fts))
+        {
             if existing.iter().any(|(n, _, valid)| *n == i.name && *valid) {
                 continue;
             }
@@ -380,7 +558,10 @@ impl Database {
                 // no statistics of the words (`ANALYZE` would compute them for every sample row:
                 // a third of an import's analysis of the table); the planner's default
                 // selectivity of `@@` is enough to use the index
-                self.conn.batch(&format!("ALTER INDEX \"{}\" ALTER COLUMN 1 SET STATISTICS 0", i.name))?;
+                self.conn.batch(&format!(
+                    "ALTER INDEX \"{}\" ALTER COLUMN 1 SET STATISTICS 0",
+                    i.name
+                ))?;
             }
             created.push(i.name.clone());
         }
@@ -394,7 +575,10 @@ impl Database {
     /// deploy, an import that dropped them) or the FTS table is, it is built again from the
     /// table. Only the tables in `tables`, when given; the FTS tables of tables without search
     /// columns go.
-    pub fn sync_search(&mut self, tables: Option<&std::collections::BTreeSet<String>>) -> Result<(), String> {
+    pub fn sync_search(
+        &mut self,
+        tables: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<(), String> {
         let wanted = |t: &str| tables.map_or(true, |ts| ts.contains(t));
         let present: Vec<(String, String)> = self
             .conn
@@ -403,17 +587,31 @@ impl Database {
             .map(|r| (r[0].clone().unwrap_or_default(), r[1].clone().unwrap_or_default()))
             .collect();
         let has = |kind: &str, name: &str| present.iter().any(|(k, n)| k == kind && n == name);
-        let entity_tables: Vec<String> = self.schema.tables.iter().filter(|t| matches!(t.source, crate::schema::Source::Entity(_))).map(|t| t.name.clone()).collect();
+        let entity_tables: Vec<String> = self
+            .schema
+            .tables
+            .iter()
+            .filter(|t| matches!(t.source, crate::schema::Source::Entity(_)))
+            .map(|t| t.name.clone())
+            .collect();
         // FTS tables of tables no longer searched (or gone)
         for (kind, name) in &present {
             if kind != "table" || !name.ends_with("_fts") {
                 continue;
             }
-            let base = name.trim_start_matches("qx_").trim_end_matches("_fts").to_string();
-            let keep = entity_tables.iter().any(|t| *t == base && !self.schema.search_columns(t).is_empty());
+            let base = name
+                .trim_start_matches("qx_")
+                .trim_end_matches("_fts")
+                .to_string();
+            let keep = entity_tables
+                .iter()
+                .any(|t| *t == base && !self.schema.search_columns(t).is_empty());
             if !keep && (wanted(&base) || !entity_tables.contains(&base)) {
                 self.drop_search(&base)?;
-                self.conn.exec("DELETE FROM \"_quadra_meta\" WHERE \"key\" = ?text", &[Sql::Text(format!("search:{base}"))])?;
+                self.conn.exec(
+                    "DELETE FROM \"_quadra_meta\" WHERE \"key\" = ?text",
+                    &[Sql::Text(format!("search:{base}"))],
+                )?;
             }
         }
         for t in entity_tables.iter().filter(|t| wanted(t)) {
@@ -423,21 +621,53 @@ impl Database {
             }
             let fts = crate::schema::fts_table(t);
             let sig = serde_json::to_string(&cols).unwrap();
-            let current = self.meta(&format!("search:{t}"))?.as_deref() == Some(sig.as_str()) && has("table", &fts) && ["ai", "ad", "au"].iter().all(|k| has("trigger", &format!("{fts}_{k}")));
+            let current = self.meta(&format!("search:{t}"))?.as_deref() == Some(sig.as_str())
+                && has("table", &fts)
+                && ["ai", "ad", "au"]
+                    .iter()
+                    .all(|k| has("trigger", &format!("{fts}_{k}")));
             if current {
                 continue;
             }
             self.drop_search(t)?;
             let c: Vec<String> = (0..cols.len()).map(|i| format!("c{i}")).collect();
             self.conn.batch(&format!("CREATE VIRTUAL TABLE {} USING fts5({}, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 0')", q(&fts), c.join(", ")))?;
-            let words = |row: &str| cols.iter().map(|x| format!("quadra_words({row}.{})", q(x))).collect::<Vec<_>>().join(", ");
-            self.conn.batch(&format!("INSERT INTO {}(\"rowid\", {}) SELECT \"id\", {} FROM {}", q(&fts), c.join(", "), words(q(t).as_str()), q(t)))?;
-            let ins = format!("INSERT INTO {}(\"rowid\", {}) VALUES (new.\"id\", {});", q(&fts), c.join(", "), words("new"));
+            let words = |row: &str| {
+                cols.iter()
+                    .map(|x| format!("quadra_words({row}.{})", q(x)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            self.conn.batch(&format!(
+                "INSERT INTO {}(\"rowid\", {}) SELECT \"id\", {} FROM {}",
+                q(&fts),
+                c.join(", "),
+                words(q(t).as_str()),
+                q(t)
+            ))?;
+            let ins = format!(
+                "INSERT INTO {}(\"rowid\", {}) VALUES (new.\"id\", {});",
+                q(&fts),
+                c.join(", "),
+                words("new")
+            );
             let del = format!("DELETE FROM {} WHERE \"rowid\" = old.\"id\";", q(&fts));
-            self.conn.batch(&format!("CREATE TRIGGER {} AFTER INSERT ON {} BEGIN {ins} END", q(&format!("{fts}_ai")), q(t)))?;
-            self.conn.batch(&format!("CREATE TRIGGER {} AFTER DELETE ON {} BEGIN {del} END", q(&format!("{fts}_ad")), q(t)))?;
+            self.conn.batch(&format!(
+                "CREATE TRIGGER {} AFTER INSERT ON {} BEGIN {ins} END",
+                q(&format!("{fts}_ai")),
+                q(t)
+            ))?;
+            self.conn.batch(&format!(
+                "CREATE TRIGGER {} AFTER DELETE ON {} BEGIN {del} END",
+                q(&format!("{fts}_ad")),
+                q(t)
+            ))?;
             let of = cols.iter().map(|x| q(x)).collect::<Vec<_>>().join(", ");
-            self.conn.batch(&format!("CREATE TRIGGER {} AFTER UPDATE OF {of} ON {} BEGIN {del} {ins} END", q(&format!("{fts}_au")), q(t)))?;
+            self.conn.batch(&format!(
+                "CREATE TRIGGER {} AFTER UPDATE OF {of} ON {} BEGIN {del} {ins} END",
+                q(&format!("{fts}_au")),
+                q(t)
+            ))?;
             self.set_meta(&format!("search:{t}"), &sig)?;
         }
         Ok(())
@@ -447,7 +677,10 @@ impl Database {
     /// first, a deploy drops or changes its columns: `sync_search` builds them again).
     pub fn drop_search(&mut self, table: &str) -> Result<(), String> {
         drop_search_triggers(&mut self.conn, table)?;
-        self.conn.batch(&format!("DROP TABLE IF EXISTS {}", q(&crate::schema::fts_table(table))))
+        self.conn.batch(&format!(
+            "DROP TABLE IF EXISTS {}",
+            q(&crate::schema::fts_table(table))
+        ))
     }
 
     // ---- loading ----------------------------------------------------------------------
@@ -480,8 +713,13 @@ impl Database {
         for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), \"entity\", \"old_name\", \"new_name\" FROM \"_quadra_renames\" ORDER BY \"_quadra_renames\".\"seq\"", &[])? {
             store.renames.push((r[1].clone().unwrap_or_default(), r[2].clone().unwrap_or_default(), r[3].clone().unwrap_or_default(), num(&r[0]) as u64));
         }
-        for r in self.conn.query("SELECT \"key\", CAST(\"tx\" AS TEXT) FROM \"_quadra_applied\"", &[])? {
-            store.applied.insert(r[0].clone().unwrap_or_default(), num(&r[1]) as u64);
+        for r in self.conn.query(
+            "SELECT \"key\", CAST(\"tx\" AS TEXT) FROM \"_quadra_applied\"",
+            &[],
+        )? {
+            store
+                .applied
+                .insert(r[0].clone().unwrap_or_default(), num(&r[1]) as u64);
         }
         for r in self.conn.query("SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\" FROM \"_quadra_history\" ORDER BY \"_quadra_history\".\"seq\"", &[])? {
             self.seq = self.seq.max(num(&r[0]));
@@ -510,8 +748,13 @@ impl Database {
             let rows = rows.as_array().map(|a| a.iter().map(|o| o.as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), from_json(v))).collect()).unwrap_or_default()).collect()).unwrap_or_default();
             store.postings.insert((num(&r[0]) as u64, r[1].clone().unwrap_or_default()), rows);
         }
-        for r in self.conn.query("SELECT \"key\", CAST(\"n\" AS TEXT) FROM \"_quadra_counters\"", &[])? {
-            store.counters.insert(r[0].clone().unwrap_or_default(), num(&r[1]) as u64);
+        for r in self.conn.query(
+            "SELECT \"key\", CAST(\"n\" AS TEXT) FROM \"_quadra_counters\"",
+            &[],
+        )? {
+            store
+                .counters
+                .insert(r[0].clone().unwrap_or_default(), num(&r[1]) as u64);
         }
         for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT) FROM \"_quadra_commits\"", &[])? {
             if let Ok(at) = chrono::NaiveDateTime::parse_from_str(r[1].as_deref().unwrap_or(""), "%Y-%m-%dT%H:%M:%S") {
@@ -524,7 +767,10 @@ impl Database {
             store.tx = s["tx"].as_u64().unwrap_or(0);
         }
         // ids reserved by engines loading on demand come after
-        let reserved = self.meta("id_reserved")?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let reserved = self
+            .meta("id_reserved")?
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
         store.next_id = store.next_id.max(reserved);
         store.base = store.tx;
         let last = self.conn.query("SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1", &[])?;
@@ -540,12 +786,31 @@ impl Database {
         encode(c, v)
     }
 
-    pub(crate) fn upsert(&mut self, table: &str, cols: &[(String, ColType, Sql)], key: &[&str]) -> Result<(), String> {
+    pub(crate) fn upsert(
+        &mut self,
+        table: &str,
+        cols: &[(String, ColType, Sql)],
+        key: &[&str],
+    ) -> Result<(), String> {
         let names: Vec<String> = cols.iter().map(|(n, _, _)| q(n)).collect();
         let params: Vec<&str> = cols.iter().map(|(_, t, _)| t.param()).collect();
-        let updates: Vec<String> = cols.iter().filter(|(n, _, _)| !key.contains(&n.as_str())).map(|(n, _, _)| format!("{} = excluded.{}", q(n), q(n))).collect();
-        let conflict = if updates.is_empty() { "DO NOTHING".to_string() } else { format!("DO UPDATE SET {}", updates.join(", ")) };
-        let sql = format!("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {conflict}", q(table), names.join(", "), params.join(", "), key.iter().map(|k| q(k)).collect::<Vec<_>>().join(", "));
+        let updates: Vec<String> = cols
+            .iter()
+            .filter(|(n, _, _)| !key.contains(&n.as_str()))
+            .map(|(n, _, _)| format!("{} = excluded.{}", q(n), q(n)))
+            .collect();
+        let conflict = if updates.is_empty() {
+            "DO NOTHING".to_string()
+        } else {
+            format!("DO UPDATE SET {}", updates.join(", "))
+        };
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {conflict}",
+            q(table),
+            names.join(", "),
+            params.join(", "),
+            key.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")
+        );
         let values: Vec<Sql> = cols.iter().map(|(_, _, v)| v.clone()).collect();
         self.wexec(sql, values)
     }
@@ -599,14 +864,24 @@ impl Database {
 
     fn field_value(store: &Store, rec: &Record, fm: &FieldMap) -> V {
         if fm.formula {
-            store.materialized.get(&(rec.id, fm.field.clone())).cloned().unwrap_or(V::None)
+            store
+                .materialized
+                .get(&(rec.id, fm.field.clone()))
+                .cloned()
+                .unwrap_or(V::None)
         } else {
             rec.fields.get(&fm.field).cloned().unwrap_or(V::None)
         }
     }
 
     /// Write the projection rows of one record (entity table, trait tables, sets, per company).
-    pub(crate) fn project_record(&mut self, model: &Model, store: &Store, id: u64, map: &dyn Fn(u64) -> u64) -> Result<(), String> {
+    pub(crate) fn project_record(
+        &mut self,
+        model: &Model,
+        store: &Store,
+        id: u64,
+        map: &dyn Fn(u64) -> u64,
+    ) -> Result<(), String> {
         if let Some((table, cols)) = self.entity_row(store, id, map) {
             self.upsert(&table, &cols, &["id"])?;
         }
@@ -615,23 +890,51 @@ impl Database {
 
     /// The row of a record in its entity table: (table, columns with their values). Formulas
     /// only when computed (with storage on demand only those that may have changed were).
-    fn entity_row(&self, store: &Store, id: u64, map: &dyn Fn(u64) -> u64) -> Option<(String, Vec<(String, ColType, Sql)>)> {
+    fn entity_row(
+        &self,
+        store: &Store,
+        id: u64,
+        map: &dyn Fn(u64) -> u64,
+    ) -> Option<(String, Vec<(String, ColType, Sql)>)> {
         let rec = store.records.get(&id)?;
         let &ti = self.entity_tables.get(&*rec.ent)?;
         let table = &self.schema.tables[ti];
         let mut cols: Vec<(String, ColType, Sql)> = vec![
             ("id".into(), ColType::BigInt, Sql::Int(id as i64)),
-            ("_created_tx".into(), ColType::BigInt, Sql::Int(map(rec.created_tx) as i64)),
-            ("_created_at".into(), ColType::Timestamp, Sql::Text(rec.created_at.format("%Y-%m-%d %H:%M:%S").to_string())),
-            ("_created_by".into(), ColType::BigInt, rec.created_by.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null)),
-            ("_frozen_tx".into(), ColType::BigInt, rec.frozen_at.map(|t| Sql::Int(map(t) as i64)).unwrap_or(Sql::Null)),
+            (
+                "_created_tx".into(),
+                ColType::BigInt,
+                Sql::Int(map(rec.created_tx) as i64),
+            ),
+            (
+                "_created_at".into(),
+                ColType::Timestamp,
+                Sql::Text(rec.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+            ),
+            (
+                "_created_by".into(),
+                ColType::BigInt,
+                rec.created_by
+                    .map(|u| Sql::Int(u as i64))
+                    .unwrap_or(Sql::Null),
+            ),
+            (
+                "_frozen_tx".into(),
+                ColType::BigInt,
+                rec.frozen_at
+                    .map(|t| Sql::Int(map(t) as i64))
+                    .unwrap_or(Sql::Null),
+            ),
         ];
         for fm in &table.fields {
             if fm.formula && !store.materialized.contains_key(&(id, fm.field.clone())) {
                 continue;
             }
             // a rollup changed by delta is added to, not set (`delta_ops`)
-            if fm.formula && self.recording.is_some() && store.deltas.contains_key(&(id, fm.field.clone())) {
+            if fm.formula
+                && self.recording.is_some()
+                && store.deltas.contains_key(&(id, fm.field.clone()))
+            {
                 continue;
             }
             let v = Self::field_value(store, rec, fm);
@@ -645,7 +948,13 @@ impl Database {
     /// The other projection rows of a record: its trait tables, join tables, per-company
     /// tables. `written`: only the sets and per-company fields this transaction wrote (all of
     /// them when the record was created in it); None: all of them.
-    fn project_extras(&mut self, model: &Model, store: &Store, id: u64, written: Option<u64>) -> Result<(), String> {
+    fn project_extras(
+        &mut self,
+        model: &Model,
+        store: &Store,
+        id: u64,
+        written: Option<u64>,
+    ) -> Result<(), String> {
         let Some(rec) = store.records.get(&id) else {
             return Ok(());
         };
@@ -654,15 +963,33 @@ impl Database {
             return Ok(());
         }
         let fresh = written.map_or(true, |tx| rec.created_tx == tx);
-        let wrote = |field: &str| fresh || written.is_some_and(|tx| rec.history.iter().any(|(t, f, _)| *t == tx && (f == field || f.starts_with(&format!("{field}@")))));
+        let wrote = |field: &str| {
+            fresh
+                || written.is_some_and(|tx| {
+                    rec.history.iter().any(|(t, f, _)| {
+                        *t == tx && (f == field || f.starts_with(&format!("{field}@")))
+                    })
+                })
+        };
         // trait tables
         if fresh {
             if let Some(e) = model.entity(&ent) {
                 let mut stack: Vec<String> = e.traits.clone();
                 while let Some(t) = stack.pop() {
                     let tname = schema::snake(&t);
-                    if self.schema.table(&tname).map_or(false, |x| matches!(x.source, Source::Trait(_))) {
-                        self.upsert(&tname, &[("id".into(), ColType::BigInt, Sql::Int(id as i64)), ("entity".into(), ColType::Text, Sql::Text(ent.clone()))], &["id"])?;
+                    if self
+                        .schema
+                        .table(&tname)
+                        .map_or(false, |x| matches!(x.source, Source::Trait(_)))
+                    {
+                        self.upsert(
+                            &tname,
+                            &[
+                                ("id".into(), ColType::BigInt, Sql::Int(id as i64)),
+                                ("entity".into(), ColType::Text, Sql::Text(ent.clone())),
+                            ],
+                            &["id"],
+                        )?;
                     }
                     if let Some(te) = model.entity(&t) {
                         stack.extend(te.traits.iter().cloned());
@@ -681,7 +1008,11 @@ impl Database {
                     } else {
                         self.conn.exec(&delete, &[Sql::Int(id as i64)])?;
                     }
-                    let items = rec.fields.get(field).and_then(|v| v.items().map(|i| i.to_vec())).unwrap_or_default();
+                    let items = rec
+                        .fields
+                        .get(field)
+                        .and_then(|v| v.items().map(|i| i.to_vec()))
+                        .unwrap_or_default();
                     // one row per reference, at its last position (a reference given twice
                     // would be the same row twice in one statement)
                     let mut last: HashMap<u64, usize> = HashMap::new();
@@ -697,7 +1028,11 @@ impl Database {
                             }
                             self.upsert(
                                 &t.name,
-                                &[("owner_id".into(), ColType::BigInt, Sql::Int(id as i64)), ("target_id".into(), ColType::BigInt, Sql::Int(target as i64)), ("ord".into(), ColType::BigInt, Sql::Int(n as i64))],
+                                &[
+                                    ("owner_id".into(), ColType::BigInt, Sql::Int(id as i64)),
+                                    ("target_id".into(), ColType::BigInt, Sql::Int(target as i64)),
+                                    ("ord".into(), ColType::BigInt, Sql::Int(n as i64)),
+                                ],
                                 &["owner_id", "target_id"],
                             )?;
                         }
@@ -711,7 +1046,10 @@ impl Database {
                         if company == 0 {
                             continue;
                         }
-                        let mut cols = vec![("owner_id".to_string(), ColType::BigInt, Sql::Int(id as i64)), ("company_id".to_string(), ColType::BigInt, Sql::Int(company))];
+                        let mut cols = vec![
+                            ("owner_id".to_string(), ColType::BigInt, Sql::Int(id as i64)),
+                            ("company_id".to_string(), ColType::BigInt, Sql::Int(company)),
+                        ];
                         for c in &fm.columns {
                             cols.push((c.name.clone(), c.ty, self.encode(c, v)));
                         }
@@ -726,23 +1064,51 @@ impl Database {
 
     /// Many rows into a table, a few hundred per statement (`INSERT … VALUES (…), (…)`); an
     /// upsert on `key` when given (every other column is updated).
-    pub(crate) fn insert_rows(&mut self, table: &str, cols: &[(String, ColType)], rows: &[Vec<Sql>], key: Option<&[&str]>) -> Result<(), String> {
+    pub(crate) fn insert_rows(
+        &mut self,
+        table: &str,
+        cols: &[(String, ColType)],
+        rows: &[Vec<Sql>],
+        key: Option<&[&str]>,
+    ) -> Result<(), String> {
         if rows.is_empty() {
             return Ok(());
         }
         let names: Vec<String> = cols.iter().map(|(n, _)| q(n)).collect();
-        let one = format!("({})", cols.iter().map(|(_, t)| t.param()).collect::<Vec<_>>().join(", "));
+        let one = format!(
+            "({})",
+            cols.iter()
+                .map(|(_, t)| t.param())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let conflict = match key {
             Some(key) => {
-                let updates: Vec<String> = cols.iter().filter(|(n, _)| !key.contains(&n.as_str())).map(|(n, _)| format!("{} = excluded.{}", q(n), q(n))).collect();
-                let action = if updates.is_empty() { "DO NOTHING".to_string() } else { format!("DO UPDATE SET {}", updates.join(", ")) };
-                format!(" ON CONFLICT ({}) {action}", key.iter().map(|k| q(k)).collect::<Vec<_>>().join(", "))
+                let updates: Vec<String> = cols
+                    .iter()
+                    .filter(|(n, _)| !key.contains(&n.as_str()))
+                    .map(|(n, _)| format!("{} = excluded.{}", q(n), q(n)))
+                    .collect();
+                let action = if updates.is_empty() {
+                    "DO NOTHING".to_string()
+                } else {
+                    format!("DO UPDATE SET {}", updates.join(", "))
+                };
+                format!(
+                    " ON CONFLICT ({}) {action}",
+                    key.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")
+                )
             }
             None => String::new(),
         };
         let per = (2000 / cols.len().max(1)).max(1);
         for chunk in rows.chunks(per) {
-            let sql = format!("INSERT INTO {} ({}) VALUES {}{conflict}", q(table), names.join(", "), vec![one.as_str(); chunk.len()].join(", "));
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES {}{conflict}",
+                q(table),
+                names.join(", "),
+                vec![one.as_str(); chunk.len()].join(", ")
+            );
             let params: Vec<Sql> = chunk.iter().flat_map(|r| r.iter().cloned()).collect();
             self.wexec(sql, params)?;
         }
@@ -751,20 +1117,41 @@ impl Database {
 
     /// Update columns of many rows by id, a few hundred per statement (`WITH v AS (VALUES …)
     /// UPDATE … FROM v`): `cols` are the columns set, each row is the id then their values.
-    pub(crate) fn update_rows(&mut self, table: &str, cols: &[(String, ColType)], rows: &[Vec<Sql>]) -> Result<(), String> {
+    pub(crate) fn update_rows(
+        &mut self,
+        table: &str,
+        cols: &[(String, ColType)],
+        rows: &[Vec<Sql>],
+    ) -> Result<(), String> {
         if rows.is_empty() || cols.is_empty() {
             return Ok(());
         }
         let mut all: Vec<(String, ColType)> = vec![("id".into(), ColType::BigInt)];
         all.extend(cols.iter().cloned());
         let names: Vec<String> = all.iter().map(|(n, _)| q(n)).collect();
-        let one = format!("({})", all.iter().map(|(_, t)| t.param()).collect::<Vec<_>>().join(", "));
-        let set: Vec<String> = cols.iter().map(|(n, _)| format!("{} = \"_v\".{}", q(n), q(n))).collect();
+        let one = format!(
+            "({})",
+            all.iter()
+                .map(|(_, t)| t.param())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let set: Vec<String> = cols
+            .iter()
+            .map(|(n, _)| format!("{} = \"_v\".{}", q(n), q(n)))
+            .collect();
         let per = (2000 / all.len()).max(1);
         for chunk in rows.chunks(per) {
             let sql = if chunk.len() == 1 {
-                let set1: Vec<String> = cols.iter().map(|(n, t)| format!("{} = {}", q(n), t.param())).collect();
-                format!("UPDATE {} SET {} WHERE \"id\" = ?bigint", q(table), set1.join(", "))
+                let set1: Vec<String> = cols
+                    .iter()
+                    .map(|(n, t)| format!("{} = {}", q(n), t.param()))
+                    .collect();
+                format!(
+                    "UPDATE {} SET {} WHERE \"id\" = ?bigint",
+                    q(table),
+                    set1.join(", ")
+                )
             } else if self.dialect() == Dialect::Postgres {
                 // (no `WITH` of its own: it may be one of a commit's `WITH`s, `flush`)
                 format!("UPDATE {} SET {} FROM (VALUES {}) AS \"_v\" ({}) WHERE {}.\"id\" = \"_v\".\"id\"", q(table), set.join(", "), vec![one.as_str(); chunk.len()].join(", "), names.join(", "), q(table))
@@ -773,7 +1160,11 @@ impl Database {
             };
             let params: Vec<Sql> = if chunk.len() == 1 {
                 let r = &chunk[0];
-                r[1..].iter().cloned().chain(std::iter::once(r[0].clone())).collect()
+                r[1..]
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(r[0].clone()))
+                    .collect()
             } else {
                 chunk.iter().flat_map(|r| r.iter().cloned()).collect()
             };
@@ -794,7 +1185,11 @@ impl Database {
         let mut cols: Vec<(String, ColType, Sql)> = vec![
             ("id".into(), ColType::BigInt, Sql::Int(row.id as i64)),
             ("_tx".into(), ColType::BigInt, Sql::Int(row.tx as i64)),
-            ("_date".into(), ColType::Timestamp, Sql::Text(row.date.format("%Y-%m-%d %H:%M:%S").to_string())),
+            (
+                "_date".into(),
+                ColType::Timestamp,
+                Sql::Text(row.date.format("%Y-%m-%d %H:%M:%S").to_string()),
+            ),
             ("_source_entity".into(), ColType::Text, src_ent),
             ("_source_id".into(), ColType::BigInt, src_id),
         ];
@@ -809,8 +1204,17 @@ impl Database {
 
     /// The record's row of `_quadra_records`: `last_tx` the transaction writing it, `version_tx`
     /// the last one that wrote its fields.
-    pub(crate) fn record_meta(&mut self, rec: &Record, last_tx: u64, version_tx: u64) -> Result<(), String> {
-        let version_tx = if exact_row(&self.schema, rec) { version_tx } else { 0 };
+    pub(crate) fn record_meta(
+        &mut self,
+        rec: &Record,
+        last_tx: u64,
+        version_tx: u64,
+    ) -> Result<(), String> {
+        let version_tx = if exact_row(&self.schema, rec) {
+            version_tx
+        } else {
+            0
+        };
         let kinds = kinds_of(&self.schema, rec);
         let row = Self::meta_row(rec, last_tx, version_tx, kinds, &|t| t);
         self.insert_rows("_quadra_records", &Self::meta_cols(), &[row], Some(&["id"]))
@@ -836,7 +1240,13 @@ impl Database {
     }
 
     /// The values of `meta_cols` for a record (`map`: its transactions as the database numbers them).
-    fn meta_row(rec: &Record, last_tx: u64, version_tx: u64, kinds: Option<String>, map: &dyn Fn(u64) -> u64) -> Vec<Sql> {
+    fn meta_row(
+        rec: &Record,
+        last_tx: u64,
+        version_tx: u64,
+        kinds: Option<String>,
+        map: &dyn Fn(u64) -> u64,
+    ) -> Vec<Sql> {
         vec![
             Sql::Int(last_tx as i64),
             Sql::Int(version_tx as i64),
@@ -844,8 +1254,12 @@ impl Database {
             Sql::Text(rec.ent.to_string()),
             Sql::Int(map(rec.created_tx) as i64),
             Sql::Text(rec.created_at.format("%Y-%m-%dT%H:%M:%S").to_string()),
-            rec.created_by.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null),
-            rec.frozen_at.map(|t| Sql::Int(map(t) as i64)).unwrap_or(Sql::Null),
+            rec.created_by
+                .map(|u| Sql::Int(u as i64))
+                .unwrap_or(Sql::Null),
+            rec.frozen_at
+                .map(|t| Sql::Int(map(t) as i64))
+                .unwrap_or(Sql::Null),
             Sql::Text(cause_to_json(&rec.cause).to_string()),
             Sql::Text(serde_json::to_string(&rec.warnings).unwrap()),
             kinds.map(Sql::Text).unwrap_or(Sql::Null),
@@ -854,7 +1268,13 @@ impl Database {
 
     /// Write one engine transaction: truth, projections and the signed commit row.
     /// Write a transaction: `c.tx` is the engine's number, `tx` the one the database assigned.
-    fn write_tx(&mut self, model: &Model, c: &Commit, tx: u64, stored_next: u64) -> Result<(), String> {
+    fn write_tx(
+        &mut self,
+        model: &Model,
+        c: &Commit,
+        tx: u64,
+        stored_next: u64,
+    ) -> Result<(), String> {
         // PostgreSQL: the writes go in a few statements of data-modifying `WITH`s
         if self.dialect() == Dialect::Postgres {
             self.deferred = Some(Vec::new());
@@ -864,7 +1284,13 @@ impl Database {
         r
     }
 
-    fn write_tx_inner(&mut self, model: &Model, c: &Commit, tx: u64, stored_next: u64) -> Result<(), String> {
+    fn write_tx_inner(
+        &mut self,
+        model: &Model,
+        c: &Commit,
+        tx: u64,
+        stored_next: u64,
+    ) -> Result<(), String> {
         let mut payload = self.write_effects(model, c, tx, None)?;
         self.write_scripts(c, &mut payload, &|t: u64| if t == c.tx { tx } else { t })?;
         self.flush()?;
@@ -887,7 +1313,13 @@ impl Database {
     /// the state; returns the entries of its hash (the scripts' come after, `write_scripts`).
     /// `outbox_from`: the outbox ids start after it (the sequencer reserved them); None: after
     /// the last one in the database.
-    fn write_effects(&mut self, model: &Model, c: &Commit, tx: u64, outbox_from: Option<i64>) -> Result<Vec<J>, String> {
+    fn write_effects(
+        &mut self,
+        model: &Model,
+        c: &Commit,
+        tx: u64,
+        outbox_from: Option<i64>,
+    ) -> Result<Vec<J>, String> {
         let local = c.tx;
         let map = |t: u64| if t == local { tx } else { t };
         let mut payload: Vec<J> = Vec::new();
@@ -909,18 +1341,41 @@ impl Database {
             self.seq += 1;
             let value = to_json(v).to_string();
             payload.push(json!(["h", id, f, value]));
-            hist.push(vec![Sql::Int(self.seq), Sql::Int(tx as i64), Sql::Int(*id as i64), Sql::Text(f.clone()), Sql::Text(value)]);
+            hist.push(vec![
+                Sql::Int(self.seq),
+                Sql::Int(tx as i64),
+                Sql::Int(*id as i64),
+                Sql::Text(f.clone()),
+                Sql::Text(value),
+            ]);
             touched.insert(*id);
         }
-        let hcols: Vec<(String, ColType)> =
-            [("seq", ColType::BigInt), ("tx", ColType::BigInt), ("record_id", ColType::BigInt), ("field", ColType::Text), ("value", ColType::Text)].iter().map(|(n, t)| (n.to_string(), *t)).collect();
+        let hcols: Vec<(String, ColType)> = [
+            ("seq", ColType::BigInt),
+            ("tx", ColType::BigInt),
+            ("record_id", ColType::BigInt),
+            ("field", ColType::Text),
+            ("value", ColType::Text),
+        ]
+        .iter()
+        .map(|(n, t)| (n.to_string(), *t))
+        .collect();
         self.insert_rows("_quadra_history", &hcols, &hist, None)?;
         // records created or changed (meta, freeze, warnings, cause)
         for r in c.after.records.values() {
             let changed = match (c.before.records.get(&r.id), c.after.origin.get(&r.id)) {
-                (Some(b), _) => b.frozen_at != r.frozen_at || b.warnings != r.warnings || !Rc::ptr_eq(&b.cause, &r.cause),
+                (Some(b), _) => {
+                    b.frozen_at != r.frozen_at
+                        || b.warnings != r.warnings
+                        || !Rc::ptr_eq(&b.cause, &r.cause)
+                }
                 // loaded during the transaction: as it was loaded, unless changed since
-                (None, Some((frozen, warnings, cause))) => r.created_tx == local || *frozen != r.frozen_at || *warnings != r.warnings || !Rc::ptr_eq(cause, &r.cause),
+                (None, Some((frozen, warnings, cause))) => {
+                    r.created_tx == local
+                        || *frozen != r.frozen_at
+                        || *warnings != r.warnings
+                        || !Rc::ptr_eq(cause, &r.cause)
+                }
                 // created here
                 (None, None) => true,
             };
@@ -933,8 +1388,18 @@ impl Database {
         let mut metas: Vec<Vec<Sql>> = Vec::new();
         for id in &ids {
             if let Some(r) = c.after.records.get(id) {
-                let version = if exact_row(&self.schema, r) { map(r.version()) } else { 0 };
-                metas.push(Self::meta_row(r, tx, version, kinds_of(&self.schema, r), &map));
+                let version = if exact_row(&self.schema, r) {
+                    map(r.version())
+                } else {
+                    0
+                };
+                metas.push(Self::meta_row(
+                    r,
+                    tx,
+                    version,
+                    kinds_of(&self.schema, r),
+                    &map,
+                ));
             }
         }
         self.insert_rows("_quadra_records", &Self::meta_cols(), &metas, Some(&["id"]))?;
@@ -943,7 +1408,12 @@ impl Database {
         let mut changed_formulas: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
         let mut added_to: std::collections::BTreeSet<u64> = Default::default();
         for (k, v) in &c.after.materialized {
-            let stored = c.after.records.get(&k.0).and_then(|r| r.formulas.get(&k.1)).or_else(|| c.before.materialized.get(k));
+            let stored = c
+                .after
+                .records
+                .get(&k.0)
+                .and_then(|r| r.formulas.get(&k.1))
+                .or_else(|| c.before.materialized.get(k));
             if stored != Some(v) {
                 // through the sequencer, a rollup changed by delta is an addition
                 if self.recording.is_some() && c.after.deltas.contains_key(k) {
@@ -957,11 +1427,19 @@ impl Database {
             }
         }
         // entity rows, one statement per table and set of columns
-        let mut rows: std::collections::BTreeMap<(String, Vec<String>), (Vec<(String, ColType)>, Vec<Vec<Sql>>)> = Default::default();
+        let mut rows: std::collections::BTreeMap<
+            (String, Vec<String>),
+            (Vec<(String, ColType)>, Vec<Vec<Sql>>),
+        > = Default::default();
         for id in &ids {
             if let Some((table, cols)) = self.entity_row(c.after, *id, &map) {
                 let names: Vec<String> = cols.iter().map(|(n, _, _)| n.clone()).collect();
-                let e = rows.entry((table, names)).or_insert_with(|| (cols.iter().map(|(n, t, _)| (n.clone(), *t)).collect(), Vec::new()));
+                let e = rows.entry((table, names)).or_insert_with(|| {
+                    (
+                        cols.iter().map(|(n, t, _)| (n.clone(), *t)).collect(),
+                        Vec::new(),
+                    )
+                });
                 e.1.push(cols.into_iter().map(|(_, _, v)| v).collect());
             }
         }
@@ -972,7 +1450,10 @@ impl Database {
             self.project_extras(model, c.after, *id, Some(local))?;
         }
         // formula columns only
-        let mut updates: std::collections::BTreeMap<(String, Vec<String>), (Vec<(String, ColType)>, Vec<Vec<Sql>>)> = Default::default();
+        let mut updates: std::collections::BTreeMap<
+            (String, Vec<String>),
+            (Vec<(String, ColType)>, Vec<Vec<Sql>>),
+        > = Default::default();
         let mut bumped: Vec<u64> = Vec::new();
         for (id, fields) in &changed_formulas {
             if touched.contains(id) {
@@ -987,8 +1468,17 @@ impl Database {
             let table = &self.schema.tables[ti];
             let mut cols: Vec<(String, ColType)> = Vec::new();
             let mut vals: Vec<Sql> = vec![Sql::Int(*id as i64)];
-            for fm in table.fields.iter().filter(|fm| fm.formula && fields.contains(&fm.field)) {
-                let v = c.after.materialized.get(&(*id, fm.field.clone())).cloned().unwrap_or(V::None);
+            for fm in table
+                .fields
+                .iter()
+                .filter(|fm| fm.formula && fields.contains(&fm.field))
+            {
+                let v = c
+                    .after
+                    .materialized
+                    .get(&(*id, fm.field.clone()))
+                    .cloned()
+                    .unwrap_or(V::None);
                 for col in &fm.columns {
                     cols.push((col.name.clone(), col.ty));
                     vals.push(encode(col, &v));
@@ -999,7 +1489,11 @@ impl Database {
             }
             bumped.push(*id);
             let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
-            updates.entry((table.name.clone(), names)).or_insert_with(|| (cols, Vec::new())).1.push(vals);
+            updates
+                .entry((table.name.clone(), names))
+                .or_insert_with(|| (cols, Vec::new()))
+                .1
+                .push(vals);
         }
         for ((table, _), (cols, vals)) in updates {
             self.update_rows(&table, &cols, &vals)?;
@@ -1013,16 +1507,36 @@ impl Database {
         // their rows changed: caches and snapshot checks see it (`last_tx`)
         for chunk in bumped.chunks(500) {
             let list: Vec<String> = chunk.iter().map(|i| i.to_string()).collect();
-            self.wexec(format!("UPDATE \"_quadra_records\" SET \"last_tx\" = ?bigint WHERE \"id\" IN ({})", list.join(", ")), vec![Sql::Int(tx as i64)])?;
+            self.wexec(
+                format!(
+                    "UPDATE \"_quadra_records\" SET \"last_tx\" = ?bigint WHERE \"id\" IN ({})",
+                    list.join(", ")
+                ),
+                vec![Sql::Int(tx as i64)],
+            )?;
         }
         // ledger rows
         let before_rows: HashSet<u64> = c.before.rows.iter().map(|r| r.id).collect();
-        for row in c.after.rows.iter().filter(|r| r.tx == local && !before_rows.contains(&r.id)) {
+        for row in c
+            .after
+            .rows
+            .iter()
+            .filter(|r| r.tx == local && !before_rows.contains(&r.id))
+        {
             let mut row = row.clone();
             row.tx = tx;
-            let cols: serde_json::Map<String, J> = row.cols.iter().map(|(k, v)| (k.clone(), to_json(v))).collect();
+            let cols: serde_json::Map<String, J> = row
+                .cols
+                .iter()
+                .map(|(k, v)| (k.clone(), to_json(v)))
+                .collect();
             let cols = J::Object(cols).to_string();
-            let source = row.source.as_ref().map(to_json).unwrap_or(J::Null).to_string();
+            let source = row
+                .source
+                .as_ref()
+                .map(to_json)
+                .unwrap_or(J::Null)
+                .to_string();
             payload.push(json!(["r", row.id, row.ledger.to_string(), cols]));
             self.wexec(
                 "INSERT INTO \"_quadra_ledger_rows\" (\"id\", \"ledger\", \"tx\", \"date\", \"source\", \"cols\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)".into(),
@@ -1032,17 +1546,35 @@ impl Database {
         }
         for (k, rows) in &c.after.postings {
             if c.before.postings.get(k) != Some(rows) {
-                let js: Vec<J> = rows.iter().map(|r| J::Object(r.iter().map(|(k, v)| (k.clone(), to_json(v))).collect())).collect();
+                let js: Vec<J> = rows
+                    .iter()
+                    .map(|r| J::Object(r.iter().map(|(k, v)| (k.clone(), to_json(v))).collect()))
+                    .collect();
                 self.upsert(
                     "_quadra_postings",
-                    &[("record_id".into(), ColType::BigInt, Sql::Int(k.0 as i64)), ("ledger_key".into(), ColType::Text, Sql::Text(k.1.clone())), ("rows".into(), ColType::Text, Sql::Text(J::Array(js).to_string()))],
+                    &[
+                        ("record_id".into(), ColType::BigInt, Sql::Int(k.0 as i64)),
+                        ("ledger_key".into(), ColType::Text, Sql::Text(k.1.clone())),
+                        (
+                            "rows".into(),
+                            ColType::Text,
+                            Sql::Text(J::Array(js).to_string()),
+                        ),
+                    ],
                     &["record_id", "ledger_key"],
                 )?;
             }
         }
         for (k, n) in &c.after.counters {
             if c.before.counters.get(k) != Some(n) {
-                self.upsert("_quadra_counters", &[("key".into(), ColType::Text, Sql::Text(k.clone())), ("n".into(), ColType::BigInt, Sql::Int(*n as i64))], &["key"])?;
+                self.upsert(
+                    "_quadra_counters",
+                    &[
+                        ("key".into(), ColType::Text, Sql::Text(k.clone())),
+                        ("n".into(), ColType::BigInt, Sql::Int(*n as i64)),
+                    ],
+                    &["key"],
+                )?;
             }
         }
         // an API request with an idempotency key: remembered with the commit it produced
@@ -1072,7 +1604,10 @@ impl Database {
                     rows.insert(r.id, r.ent.to_string());
                     // the value it was written to, and the one it was written from
                     let old = r.before(local, f).unwrap_or(V::None);
-                    for k in quadra_runtime::store::value_keys(v).into_iter().chain(quadra_runtime::store::value_keys(&old)) {
+                    for k in quadra_runtime::store::value_keys(v)
+                        .into_iter()
+                        .chain(quadra_runtime::store::value_keys(&old))
+                    {
                         ws.field_values.push((r.ent.to_string(), f.clone(), k));
                     }
                 }
@@ -1082,8 +1617,16 @@ impl Database {
                 rows.insert(r.id, r.ent.to_string());
             }
             let changed = match (c.before.records.get(&r.id), c.after.origin.get(&r.id)) {
-                (Some(b), _) => b.frozen_at != r.frozen_at || b.warnings != r.warnings || !Rc::ptr_eq(&b.cause, &r.cause),
-                (None, Some((frozen, warnings, cause))) => *frozen != r.frozen_at || *warnings != r.warnings || !Rc::ptr_eq(cause, &r.cause),
+                (Some(b), _) => {
+                    b.frozen_at != r.frozen_at
+                        || b.warnings != r.warnings
+                        || !Rc::ptr_eq(&b.cause, &r.cause)
+                }
+                (None, Some((frozen, warnings, cause))) => {
+                    *frozen != r.frozen_at
+                        || *warnings != r.warnings
+                        || !Rc::ptr_eq(cause, &r.cause)
+                }
                 (None, None) => false,
             };
             if changed {
@@ -1091,7 +1634,12 @@ impl Database {
             }
         }
         for (k, v) in &c.after.materialized {
-            let stored = c.after.records.get(&k.0).and_then(|r| r.formulas.get(&k.1)).or_else(|| c.before.materialized.get(k));
+            let stored = c
+                .after
+                .records
+                .get(&k.0)
+                .and_then(|r| r.formulas.get(&k.1))
+                .or_else(|| c.before.materialized.get(k));
             if stored != Some(v) {
                 if let Some(r) = c.after.records.get(&k.0) {
                     rows.insert(r.id, r.ent.to_string());
@@ -1101,7 +1649,12 @@ impl Database {
         }
         ws.rows = rows.into_iter().collect();
         let before_rows: HashSet<u64> = c.before.rows.iter().map(|r| r.id).collect();
-        for row in c.after.rows.iter().filter(|r| r.tx == local && !before_rows.contains(&r.id)) {
+        for row in c
+            .after
+            .rows
+            .iter()
+            .filter(|r| r.tx == local && !before_rows.contains(&r.id))
+        {
             let cols = row
                 .cols
                 .iter()
@@ -1120,33 +1673,70 @@ impl Database {
                 ws.counters.push((k.clone(), *n));
             }
         }
-        ws.idempotency = c.after.idempotency.as_ref().map(|(user, key, _, _)| (*user, key.clone()));
+        ws.idempotency = c
+            .after
+            .idempotency
+            .as_ref()
+            .map(|(user, key, _, _)| (*user, key.clone()));
         for ((id, field), (old, _)) in &c.after.deltas {
             let now = c.after.materialized.get(&(*id, field.clone()));
             if let Some(d) = now.and_then(|now| quadra_runtime::store::delta_amount(old, now)) {
                 ws.deltas.push((*id, field.clone(), d));
             }
         }
-        let outbox = c.after.outbox.iter().filter(|v| matches!(v, V::Event { .. })).count() as u64;
+        let outbox = c
+            .after
+            .outbox
+            .iter()
+            .filter(|v| matches!(v, V::Event { .. }))
+            .count() as u64;
         (ws, history, outbox)
     }
 
     /// The additions that bring the columns of a rollup from the value stored before the
     /// transaction to `now` (None: it is not one that adds up).
-    fn delta_op(&self, store: &Store, id: u64, field: &str, now: &V) -> Option<Vec<crate::sequencer::DeltaOp>> {
+    fn delta_op(
+        &self,
+        store: &Store,
+        id: u64,
+        field: &str,
+        now: &V,
+    ) -> Option<Vec<crate::sequencer::DeltaOp>> {
         let (old, _) = store.deltas.get(&(id, field.to_string()))?;
         quadra_runtime::store::delta_amount(old, now)?;
         let rec = store.records.get(&id)?;
         let &ti = self.entity_tables.get(&*rec.ent)?;
         let table = &self.schema.tables[ti];
-        let fm = table.fields.iter().find(|f| f.formula && f.field == field)?;
+        let fm = table
+            .fields
+            .iter()
+            .find(|f| f.formula && f.field == field)?;
         let mut ops = Vec::new();
         for col in &fm.columns {
             match (col.part, encode(col, old), encode(col, now)) {
-                (Part::Amount | Part::Scalar, Sql::Int(a), Sql::Int(b)) => ops.push(crate::sequencer::DeltaOp { table: table.name.clone(), id, column: col.name.clone(), int: true, amount: (b - a).to_string(), param: col.ty.param().to_string() }),
+                (Part::Amount | Part::Scalar, Sql::Int(a), Sql::Int(b)) => {
+                    ops.push(crate::sequencer::DeltaOp {
+                        table: table.name.clone(),
+                        id,
+                        column: col.name.clone(),
+                        int: true,
+                        amount: (b - a).to_string(),
+                        param: col.ty.param().to_string(),
+                    })
+                }
                 (Part::Amount | Part::Scalar, Sql::Text(a), Sql::Text(b)) => {
-                    let (a, b) = (a.parse::<rust_decimal::Decimal>().ok()?, b.parse::<rust_decimal::Decimal>().ok()?);
-                    ops.push(crate::sequencer::DeltaOp { table: table.name.clone(), id, column: col.name.clone(), int: false, amount: (b - a).to_string(), param: col.ty.param().to_string() });
+                    let (a, b) = (
+                        a.parse::<rust_decimal::Decimal>().ok()?,
+                        b.parse::<rust_decimal::Decimal>().ok()?,
+                    );
+                    ops.push(crate::sequencer::DeltaOp {
+                        table: table.name.clone(),
+                        id,
+                        column: col.name.clone(),
+                        int: false,
+                        amount: (b - a).to_string(),
+                        param: col.ty.param().to_string(),
+                    });
                 }
                 // the currency, the unit: the same before and after
                 (_, a, b) if a == b => {}
@@ -1159,10 +1749,17 @@ impl Database {
     /// The writes of a transaction the sequencer numbered, kept instead of sent: the sequencer
     /// sends them in its batch, with the commit row. Migrations and changes (scripts) do not go
     /// through the sequencer: they run with the project paused.
-    pub(crate) fn prepare(&mut self, model: &Model, c: &Commit, r: &crate::sequencer::Reservation) -> Result<crate::sequencer::Prepared, String> {
+    pub(crate) fn prepare(
+        &mut self,
+        model: &Model,
+        c: &Commit,
+        r: &crate::sequencer::Reservation,
+    ) -> Result<crate::sequencer::Prepared, String> {
         let (applied, renames) = script_payload(c.before, c.after);
         if !applied.is_empty() || !renames.is_empty() {
-            return Err("migrations and changes run with the project paused, not while it serves".into());
+            return Err(
+                "migrations and changes run with the project paused, not while it serves".into(),
+            );
         }
         self.recording = Some(Vec::new());
         self.delta_ops.clear();
@@ -1171,20 +1768,33 @@ impl Database {
         let statements = self.recording.take().unwrap_or_default();
         let deltas = std::mem::take(&mut self.delta_ops);
         let payload = res?;
-        Ok(crate::sequencer::Prepared { statements, deltas, payload: payload.iter().map(|p| p.to_string()).collect(), next_id: c.after.next_id })
+        Ok(crate::sequencer::Prepared {
+            statements,
+            deltas,
+            payload: payload.iter().map(|p| p.to_string()).collect(),
+            next_id: c.after.next_id,
+        })
     }
 
     /// The events the transaction emitted, in the order of `emit`: pending until an
     /// integration marks them delivered. Not part of the commit hash (the outbox is an
     /// operational queue: its `delivered` column changes).
-    pub(crate) fn write_outbox(&mut self, c: &Commit, tx: u64, from: Option<i64>) -> Result<(), String> {
+    pub(crate) fn write_outbox(
+        &mut self,
+        c: &Commit,
+        tx: u64,
+        from: Option<i64>,
+    ) -> Result<(), String> {
         if c.after.outbox.is_empty() {
             return Ok(());
         }
         let mut id = match from {
             Some(id) => id,
             None => {
-                let last = self.conn.query("SELECT CAST(MAX(\"id\") AS TEXT) FROM \"_quadra_outbox\"", &[])?;
+                let last = self.conn.query(
+                    "SELECT CAST(MAX(\"id\") AS TEXT) FROM \"_quadra_outbox\"",
+                    &[],
+                )?;
                 last.first().map(|r| num(&r[0])).unwrap_or(0)
             }
         };
@@ -1194,9 +1804,20 @@ impl Database {
                 continue;
             };
             id += 1;
-            let fields: serde_json::Map<String, J> = fields.iter().map(|(n, v)| (n.clone(), to_json(v))).collect();
+            let fields: serde_json::Map<String, J> = fields
+                .iter()
+                .map(|(n, v)| (n.clone(), to_json(v)))
+                .collect();
             let insert = "INSERT INTO \"_quadra_outbox\" (\"id\", \"tx\", \"event\", \"fields\", \"created_at\", \"delivered\", \"delivered_at\") VALUES (?bigint, ?bigint, ?text, ?text, ?text, ?boolean, ?text)";
-            let params = vec![Sql::Int(id), Sql::Int(tx as i64), Sql::Text(name.to_string()), Sql::Text(J::Object(fields).to_string()), Sql::Text(at.clone()), Sql::Bool(false), Sql::Null];
+            let params = vec![
+                Sql::Int(id),
+                Sql::Int(tx as i64),
+                Sql::Text(name.to_string()),
+                Sql::Text(J::Object(fields).to_string()),
+                Sql::Text(at.clone()),
+                Sql::Bool(false),
+                Sql::Null,
+            ];
             if self.recording.is_some() {
                 self.wexec(insert.into(), params)?;
             } else {
@@ -1208,7 +1829,11 @@ impl Database {
 
     /// The events of the outbox, oldest first (only those not delivered yet: `pending`).
     pub fn outbox(&mut self, pending: bool) -> Result<Vec<OutboxEvent>, String> {
-        let filter = if pending { " WHERE \"delivered_at\" IS NULL" } else { "" };
+        let filter = if pending {
+            " WHERE \"delivered_at\" IS NULL"
+        } else {
+            ""
+        };
         let rows = self
             .conn
             .query(&format!("SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"event\", \"fields\", \"created_at\", \"delivered_at\" FROM \"_quadra_outbox\"{filter} ORDER BY \"_quadra_outbox\".\"id\""), &[])?;
@@ -1218,7 +1843,10 @@ impl Database {
                 id: num(&r[0]) as u64,
                 tx: num(&r[1]) as u64,
                 event: r[2].clone().unwrap_or_default(),
-                fields: r[3].as_deref().and_then(|f| serde_json::from_str(f).ok()).unwrap_or(J::Null),
+                fields: r[3]
+                    .as_deref()
+                    .and_then(|f| serde_json::from_str(f).ok())
+                    .unwrap_or(J::Null),
                 created_at: r[4].clone().unwrap_or_default(),
                 delivered_at: r[5].clone(),
             })
@@ -1227,7 +1855,11 @@ impl Database {
 
     /// Mark events delivered (an integration has handed them on). Returns how many were
     /// pending and are now delivered.
-    pub fn mark_delivered(&mut self, ids: &[u64], time: chrono::NaiveDateTime) -> Result<usize, String> {
+    pub fn mark_delivered(
+        &mut self,
+        ids: &[u64],
+        time: chrono::NaiveDateTime,
+    ) -> Result<usize, String> {
         let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
         self.conn.batch("BEGIN")?;
         let mut n = 0;
@@ -1255,17 +1887,31 @@ impl Database {
     }
 
     /// Migrations and changes applied, and renames, in this transaction.
-    pub(crate) fn write_scripts(&mut self, c: &Commit, payload: &mut Vec<J>, map: &dyn Fn(u64) -> u64) -> Result<(), String> {
+    pub(crate) fn write_scripts(
+        &mut self,
+        c: &Commit,
+        payload: &mut Vec<J>,
+        map: &dyn Fn(u64) -> u64,
+    ) -> Result<(), String> {
         let (applied, renames) = script_payload(c.before, c.after);
         let applied: Vec<(String, u64)> = applied.into_iter().map(|(k, t)| (k, map(t))).collect();
-        let renames: Vec<(String, String, String, u64)> = renames.into_iter().map(|(e, o, n, t)| (e, o, n, map(t))).collect();
+        let renames: Vec<(String, String, String, u64)> = renames
+            .into_iter()
+            .map(|(e, o, n, t)| (e, o, n, map(t)))
+            .collect();
         for (k, t) in applied {
             payload.push(json!(["a", k]));
-            self.conn.exec("INSERT INTO \"_quadra_applied\" (\"key\", \"tx\") VALUES (?text, ?bigint)", &[Sql::Text(k), Sql::Int(t as i64)])?;
+            self.conn.exec(
+                "INSERT INTO \"_quadra_applied\" (\"key\", \"tx\") VALUES (?text, ?bigint)",
+                &[Sql::Text(k), Sql::Int(t as i64)],
+            )?;
         }
         for (e, old, new, t) in renames {
             payload.push(json!(["n", e, old, new]));
-            let seq = self.conn.query("SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_renames\"", &[])?;
+            let seq = self.conn.query(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_renames\"",
+                &[],
+            )?;
             let seq = num(&seq[0][0]) + 1;
             self.conn.exec(
                 "INSERT INTO \"_quadra_renames\" (\"seq\", \"tx\", \"entity\", \"old_name\", \"new_name\") VALUES (?bigint, ?bigint, ?text, ?text, ?text)",
@@ -1279,22 +1925,48 @@ impl Database {
 
     /// Tables added and removed compared to the schema stored in the database.
     pub fn plan(&mut self) -> Result<(Vec<String>, Vec<String>), String> {
-        let stored: Vec<String> = self.meta("schema_tables")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let stored: Vec<String> = self
+            .meta("schema_tables")?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         let current: Vec<String> = self.schema.tables.iter().map(|t| t.name.clone()).collect();
-        let added = current.iter().filter(|t| !stored.contains(t)).cloned().collect();
-        let removed = stored.iter().filter(|t| !current.contains(t)).cloned().collect();
+        let added = current
+            .iter()
+            .filter(|t| !stored.contains(t))
+            .cloned()
+            .collect();
+        let removed = stored
+            .iter()
+            .filter(|t| !current.contains(t))
+            .cloned()
+            .collect();
         Ok((added, removed))
     }
 
     /// Replace every projection table with the current schema and fill it from `after`,
     /// recording the migration transaction (`after.tx`) in the same database transaction.
-    pub fn apply_migration(&mut self, model: &Model, before: &Store, after: &Store, cause: &str, time: chrono::NaiveDateTime) -> Result<(), String> {
-        let stored: Vec<String> = self.meta("schema_tables")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    pub fn apply_migration(
+        &mut self,
+        model: &Model,
+        before: &Store,
+        after: &Store,
+        cause: &str,
+        time: chrono::NaiveDateTime,
+    ) -> Result<(), String> {
+        let stored: Vec<String> = self
+            .meta("schema_tables")?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         self.conn.batch("BEGIN")?;
         let r = (|| -> Result<(), String> {
-            let cascade = if self.dialect() == Dialect::Postgres { " CASCADE" } else { "" };
+            let cascade = if self.dialect() == Dialect::Postgres {
+                " CASCADE"
+            } else {
+                ""
+            };
             for t in stored.iter().rev() {
-                self.conn.batch(&format!("DROP TABLE IF EXISTS {}{cascade}", q(t)))?;
+                self.conn
+                    .batch(&format!("DROP TABLE IF EXISTS {}{cascade}", q(t)))?;
             }
             for s in self.schema.ddl(self.dialect()) {
                 self.conn.batch(&s)?;
@@ -1310,12 +1982,23 @@ impl Database {
             for row in &after.rows {
                 self.project_row(row)?;
             }
-            let commit = Commit { tx: after.tx, base: before.tx, before, after, user: None, cause: cause.to_string(), time };
+            let commit = Commit {
+                tx: after.tx,
+                base: before.tx,
+                before,
+                after,
+                user: None,
+                cause: cause.to_string(),
+                time,
+            };
             if after.tx > before.tx {
                 // the migration's own writes (defaults of new fields) go through the log
                 let mut only_new = before.clone();
                 only_new.materialized = after.materialized.clone();
-                let commit = Commit { before: &only_new, ..commit };
+                let commit = Commit {
+                    before: &only_new,
+                    ..commit
+                };
                 self.write_tx_without_projections(&commit)?;
             }
             let fp = self.schema.fingerprint();
@@ -1372,7 +2055,10 @@ impl Database {
             by_tx.entry(num(&r[0])).or_default().push(json!(["r", num(&r[1]), r[2].clone().unwrap_or_default(), r[3].clone().unwrap_or_default()]));
         }
         let mut applied: Vec<(i64, String)> = Vec::new();
-        for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), \"key\" FROM \"_quadra_applied\"", &[])? {
+        for r in self.conn.query(
+            "SELECT CAST(\"tx\" AS TEXT), \"key\" FROM \"_quadra_applied\"",
+            &[],
+        )? {
             applied.push((num(&r[0]), r[1].clone().unwrap_or_default()));
         }
         applied.sort();
@@ -1400,7 +2086,13 @@ impl Database {
             problems.push(format!("writes of transaction {tx} have no commit row"));
         }
         // 2. projections against the truth
-        let tables: Vec<Table> = self.schema.tables.iter().filter(|t| matches!(t.source, Source::Entity(_))).cloned().collect();
+        let tables: Vec<Table> = self
+            .schema
+            .tables
+            .iter()
+            .filter(|t| matches!(t.source, Source::Entity(_)))
+            .cloned()
+            .collect();
         for t in tables {
             let Source::Entity(ent) = &t.source else {
                 continue;
@@ -1417,12 +2109,33 @@ impl Database {
                 }
                 expected.insert(id, row);
             }
-            let cols: Vec<String> = t.fields.iter().flat_map(|f| f.columns.iter().map(|c| format!("CAST({} AS TEXT)", q(&c.name)))).collect();
-            let names: Vec<String> = t.fields.iter().flat_map(|f| f.columns.iter().map(|c| c.name.clone())).collect();
-            let sql = format!("SELECT CAST(\"id\" AS TEXT){} FROM {}", cols.iter().map(|c| format!(", {c}")).collect::<String>(), q(&t.name));
+            let cols: Vec<String> = t
+                .fields
+                .iter()
+                .flat_map(|f| {
+                    f.columns
+                        .iter()
+                        .map(|c| format!("CAST({} AS TEXT)", q(&c.name)))
+                })
+                .collect();
+            let names: Vec<String> = t
+                .fields
+                .iter()
+                .flat_map(|f| f.columns.iter().map(|c| c.name.clone()))
+                .collect();
+            let sql = format!(
+                "SELECT CAST(\"id\" AS TEXT){} FROM {}",
+                cols.iter().map(|c| format!(", {c}")).collect::<String>(),
+                q(&t.name)
+            );
             let rows = self.conn.query(&sql, &[])?;
             if rows.len() != expected.len() {
-                problems.push(format!("table {}: {} rows, the history has {}", t.name, rows.len(), expected.len()));
+                problems.push(format!(
+                    "table {}: {} rows, the history has {}",
+                    t.name,
+                    rows.len(),
+                    expected.len()
+                ));
             }
             for r in rows {
                 let id = num(&r[0]) as u64;
@@ -1432,7 +2145,13 @@ impl Database {
                 };
                 for (i, name) in names.iter().enumerate() {
                     if !same(&r[i + 1], &exp[i]) {
-                        problems.push(format!("{}.{} of {id}: the table has {}, the history says {}", t.name, name, r[i + 1].as_deref().unwrap_or("NULL"), exp[i].as_deref().unwrap_or("NULL")));
+                        problems.push(format!(
+                            "{}.{} of {id}: the table has {}, the history says {}",
+                            t.name,
+                            name,
+                            r[i + 1].as_deref().unwrap_or("NULL"),
+                            exp[i].as_deref().unwrap_or("NULL")
+                        ));
                     }
                 }
             }
@@ -1449,11 +2168,19 @@ impl Database {
 /// provisional marker. Otherwise `_quadra_records.version_tx` is 0 and the record is read
 /// from its history.
 pub(crate) fn exact_row(schema: &Schema, rec: &Record) -> bool {
-    exact_values(schema, &rec.ent, rec.fields.iter().map(|(k, v)| (k.as_str(), v)))
+    exact_values(
+        schema,
+        &rec.ent,
+        rec.fields.iter().map(|(k, v)| (k.as_str(), v)),
+    )
 }
 
 /// `exact_row` of the stored values of a record of `ent`.
-pub(crate) fn exact_values<'a>(schema: &Schema, ent: &str, fields: impl Iterator<Item = (&'a str, &'a V)>) -> bool {
+pub(crate) fn exact_values<'a>(
+    schema: &Schema,
+    ent: &str,
+    fields: impl Iterator<Item = (&'a str, &'a V)>,
+) -> bool {
     if !schema.readable.contains(ent) {
         return false;
     }
@@ -1470,7 +2197,12 @@ pub(crate) fn exact_values<'a>(schema: &Schema, ent: &str, fields: impl Iterator
             let Some(pt) = schema.per_company_table(ent, f) else {
                 return false;
             };
-            if company.parse::<u64>().map_or(true, |c| c == 0) || !pt.fields.first().is_some_and(|fm| fits(&fm.decode, v) || kind_note(&fm.decode, v).is_some()) {
+            if company.parse::<u64>().map_or(true, |c| c == 0)
+                || !pt
+                    .fields
+                    .first()
+                    .is_some_and(|fm| fits(&fm.decode, v) || kind_note(&fm.decode, v).is_some())
+            {
                 return false;
             }
             continue;
@@ -1496,7 +2228,10 @@ pub(crate) fn exact_values<'a>(schema: &Schema, ent: &str, fields: impl Iterator
 /// as itself (`_quadra_records.kinds`, `source::decode_kind`).
 pub(crate) fn kind_note(d: &crate::schema::Decode, v: &V) -> Option<&'static str> {
     use crate::schema::Decode;
-    let numeric = matches!(d, Decode::Dec | Decode::Pct | Decode::Money | Decode::Price | Decode::Qty);
+    let numeric = matches!(
+        d,
+        Decode::Dec | Decode::Pct | Decode::Money | Decode::Price | Decode::Qty
+    );
     match v {
         V::Int(_) if numeric => Some("int"),
         V::Dec(_) if numeric && *d != Decode::Dec => Some("dec"),
@@ -1512,7 +2247,9 @@ pub(crate) fn kinds_of(schema: &Schema, rec: &Record) -> Option<String> {
     let mut out = serde_json::Map::new();
     for (k, v) in &rec.fields {
         let fm = match k.split_once('@') {
-            Some((f, _)) => schema.per_company_table(&rec.ent, f).and_then(|pt| pt.fields.first()),
+            Some((f, _)) => schema
+                .per_company_table(&rec.ent, f)
+                .and_then(|pt| pt.fields.first()),
             None => t.fields.iter().find(|f| f.field == *k && !f.formula),
         };
         if let Some(n) = fm.and_then(|fm| kind_note(&fm.decode, v)) {
@@ -1532,7 +2269,9 @@ pub(crate) fn fits_refs(sm: &crate::schema::SetMap, v: &V) -> bool {
         _ => return false,
     };
     let mut seen = HashSet::new();
-    items.iter().all(|it| matches!(it, V::Ref { ent, id } if **ent == *sm.target && seen.insert(*id)))
+    items
+        .iter()
+        .all(|it| matches!(it, V::Ref { ent, id } if **ent == *sm.target && seen.insert(*id)))
 }
 
 /// Whether a value reads back from columns of this kind as itself (`exact_row`).
@@ -1579,9 +2318,13 @@ pub(crate) fn encode(c: &Column, v: &V) -> Sql {
         (Part::Duration, V::Duration(s)) => Sql::Int(*s),
         (Part::Scalar, V::Bool(b)) => Sql::Bool(*b),
         (Part::Scalar, V::Int(i)) if c.ty == ColType::BigInt => Sql::Int(*i),
-        (Part::Scalar, x @ (V::Int(_) | V::Dec(_) | V::Pct(_))) => x.num().map(|n| dec_text(&n)).unwrap_or(Sql::Null),
+        (Part::Scalar, x @ (V::Int(_) | V::Dec(_) | V::Pct(_))) => {
+            x.num().map(|n| dec_text(&n)).unwrap_or(Sql::Null)
+        }
         (Part::Scalar, x @ (V::Date(_) | V::DateTime(_))) => date_text(x),
-        (Part::Scalar, V::Variant { name, .. }) | (Part::Scalar, V::Role(name)) => Sql::Text(name.to_string()),
+        (Part::Scalar, V::Variant { name, .. }) | (Part::Scalar, V::Role(name)) => {
+            Sql::Text(name.to_string())
+        }
         (Part::Scalar, V::Text(t)) => Sql::Text(t.to_string()),
         (Part::Scalar, V::YearMonth(y, m)) => Sql::Text(format!("{y}-{m:02}")),
         _ => Sql::Null,
@@ -1604,7 +2347,10 @@ pub(crate) fn same(a: &Option<String>, b: &Option<String>) -> bool {
             if let (Some(p), Some(q)) = (norm_bool(x), norm_bool(y)) {
                 return p == q;
             }
-            if let (Ok(p), Ok(q)) = (x.parse::<rust_decimal::Decimal>(), y.parse::<rust_decimal::Decimal>()) {
+            if let (Ok(p), Ok(q)) = (
+                x.parse::<rust_decimal::Decimal>(),
+                y.parse::<rust_decimal::Decimal>(),
+            ) {
                 return p == q;
             }
             if let (Ok(p), Ok(q)) = (serde_json::from_str::<J>(x), serde_json::from_str::<J>(y)) {
@@ -1617,15 +2363,32 @@ pub(crate) fn same(a: &Option<String>, b: &Option<String>) -> bool {
 }
 
 /// Applied scripts and renames of a transaction: written next to the history, part of the hash.
-fn script_payload(before: &Store, after: &Store) -> (Vec<(String, u64)>, Vec<(String, String, String, u64)>) {
-    let mut applied: Vec<(String, u64)> = after.applied.iter().filter(|(k, _)| !before.applied.contains_key(*k)).map(|(k, t)| (k.clone(), *t)).collect();
+fn script_payload(
+    before: &Store,
+    after: &Store,
+) -> (Vec<(String, u64)>, Vec<(String, String, String, u64)>) {
+    let mut applied: Vec<(String, u64)> = after
+        .applied
+        .iter()
+        .filter(|(k, _)| !before.applied.contains_key(*k))
+        .map(|(k, t)| (k.clone(), *t))
+        .collect();
     applied.sort();
-    let renames = after.renames.iter().skip(before.renames.len()).cloned().collect();
+    let renames = after
+        .renames
+        .iter()
+        .skip(before.renames.len())
+        .cloned()
+        .collect();
     (applied, renames)
 }
 
 /// Commits after `base` that touched what a transaction read.
-pub(crate) fn find_conflicts(conn: &mut Conn, base: u64, reads: &ReadSet) -> Result<Vec<Conflict>, String> {
+pub(crate) fn find_conflicts(
+    conn: &mut Conn,
+    base: u64,
+    reads: &ReadSet,
+) -> Result<Vec<Conflict>, String> {
     let b = Sql::Int(base as i64);
     let mut what: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
     let ids: Vec<String> = reads.records.iter().map(|i| i.to_string()).collect();
@@ -1666,8 +2429,16 @@ pub(crate) fn find_conflicts(conn: &mut Conn, base: u64, reads: &ReadSet) -> Res
             what.entry(num(&r[0]) as u64).or_default().push(format!("new {ent}#{}", num(&r[1])));
         }
     }
-    let by_value: std::collections::BTreeSet<(String, String)> = reads.find_values.iter().map(|(e, f, _)| (e.clone(), f.clone())).collect();
-    for (ent, field) in reads.finds.iter().chain(by_value.iter().filter(|k| !reads.finds.contains(*k))) {
+    let by_value: std::collections::BTreeSet<(String, String)> = reads
+        .find_values
+        .iter()
+        .map(|(e, f, _)| (e.clone(), f.clone()))
+        .collect();
+    for (ent, field) in reads
+        .finds
+        .iter()
+        .chain(by_value.iter().filter(|k| !reads.finds.contains(*k)))
+    {
         for r in conn.query(
             "SELECT CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT) FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE h.\"tx\" > ?bigint AND r.\"entity\" = ?text AND h.\"field\" = ?text",
             &[b.clone(), Sql::Text(ent.clone()), Sql::Text(field.clone())],
@@ -1698,7 +2469,10 @@ pub(crate) fn find_conflicts(conn: &mut Conn, base: u64, reads: &ReadSet) -> Res
         }
     }
     for (key, seen) in &reads.counters {
-        let r = conn.query("SELECT CAST(\"n\" AS TEXT) FROM \"_quadra_counters\" WHERE \"key\" = ?text", &[Sql::Text(key.clone())])?;
+        let r = conn.query(
+            "SELECT CAST(\"n\" AS TEXT) FROM \"_quadra_counters\" WHERE \"key\" = ?text",
+            &[Sql::Text(key.clone())],
+        )?;
         let now = r.first().map(|r| num(&r[0]) as u64).unwrap_or(0);
         if now != *seen {
             // the counter has no transaction: attribute it to the last commit
@@ -1712,13 +2486,21 @@ pub(crate) fn find_conflicts(conn: &mut Conn, base: u64, reads: &ReadSet) -> Res
 /// Every commit after `base` (a working set loaded in full relies on everything).
 pub(crate) fn commits_after(conn: &mut Conn, base: u64) -> Result<Vec<Conflict>, String> {
     let mut what: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
-    for r in conn.query("SELECT CAST(\"tx\" AS TEXT) FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint", &[Sql::Int(base as i64)])? {
-        what.entry(num(&r[0]) as u64).or_default().push("data read by this transaction".into());
+    for r in conn.query(
+        "SELECT CAST(\"tx\" AS TEXT) FROM \"_quadra_commits\" WHERE \"tx\" > ?bigint",
+        &[Sql::Int(base as i64)],
+    )? {
+        what.entry(num(&r[0]) as u64)
+            .or_default()
+            .push("data read by this transaction".into());
     }
     describe_commits(conn, what)
 }
 
-fn describe_commits(conn: &mut Conn, what: std::collections::BTreeMap<u64, Vec<String>>) -> Result<Vec<Conflict>, String> {
+fn describe_commits(
+    conn: &mut Conn,
+    what: std::collections::BTreeMap<u64, Vec<String>>,
+) -> Result<Vec<Conflict>, String> {
     let mut out = Vec::new();
     for (tx, mut items) in what {
         items.sort();
@@ -1733,13 +2515,25 @@ fn describe_commits(conn: &mut Conn, what: std::collections::BTreeMap<u64, Vec<S
                 .map(|v| from_json(&serde_json::from_str(&v).unwrap_or(J::Null)).to_string()),
             None => None,
         };
-        out.push(Conflict { tx, at: r[0].clone().unwrap_or_default(), user, cause: r[2].clone().unwrap_or_default(), what: items });
+        out.push(Conflict {
+            tx,
+            at: r[0].clone().unwrap_or_default(),
+            user,
+            cause: r[2].clone().unwrap_or_default(),
+            what: items,
+        });
     }
     Ok(out)
 }
 
-
-fn commit_hash(prev: &str, tx: u64, at: &str, user: Option<u64>, cause: &str, payload: &[J]) -> String {
+fn commit_hash(
+    prev: &str,
+    tx: u64,
+    at: &str,
+    user: Option<u64>,
+    cause: &str,
+    payload: &[J],
+) -> String {
     let mut h = CommitHasher::new(prev, tx, at, user, cause);
     for p in payload {
         h.entry(&p.to_string());
@@ -1752,10 +2546,22 @@ fn commit_hash(prev: &str, tx: u64, at: &str, user: Option<u64>, cause: &str, pa
 pub(crate) struct CommitHasher(Sha256);
 
 impl CommitHasher {
-    pub(crate) fn new(prev: &str, tx: u64, at: &str, user: Option<u64>, cause: &str) -> CommitHasher {
+    pub(crate) fn new(
+        prev: &str,
+        tx: u64,
+        at: &str,
+        user: Option<u64>,
+        cause: &str,
+    ) -> CommitHasher {
         let mut h = Sha256::new();
         h.update(prev.as_bytes());
-        h.update(format!("|{tx}|{at}|{}|{cause}|", user.map(|u| u.to_string()).unwrap_or_default()).as_bytes());
+        h.update(
+            format!(
+                "|{tx}|{at}|{}|{cause}|",
+                user.map(|u| u.to_string()).unwrap_or_default()
+            )
+            .as_bytes(),
+        );
         CommitHasher(h)
     }
 
@@ -1781,17 +2587,28 @@ impl<'m> CommitSink for Sink<'m> {
     /// transaction read after its base, write under the next transaction number.
     fn commit(&mut self, c: &Commit) -> Result<u64, CommitError> {
         let db = &mut self.db;
-        let begin = if db.dialect() == Dialect::Sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" };
+        let begin = if db.dialect() == Dialect::Sqlite {
+            "BEGIN IMMEDIATE"
+        } else {
+            "BEGIN"
+        };
         db.conn.batch(begin).map_err(CommitError::Failed)?;
         let model = self.model;
         let r = (|| -> Result<u64, CommitError> {
             let f = CommitError::Failed;
             if db.dialect() == Dialect::Postgres {
-                db.conn.batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE").map_err(f)?;
+                db.conn
+                    .batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE")
+                    .map_err(f)?;
             }
             let head = crate::source::head(&mut db.conn).map_err(f)?;
             if head > c.base {
-                let conflicts = if c.after.lazy() { db.find_conflicts(c.base, &c.after.reads) } else { db.commits_after(c.base) }.map_err(f)?;
+                let conflicts = if c.after.lazy() {
+                    db.find_conflicts(c.base, &c.after.reads)
+                } else {
+                    db.commits_after(c.base)
+                }
+                .map_err(f)?;
                 if !conflicts.is_empty() {
                     return Err(CommitError::Conflict(conflicts));
                 }
@@ -1807,8 +2624,18 @@ impl<'m> CommitSink for Sink<'m> {
                 .map_err(f)?;
             let row = r.into_iter().next().unwrap_or_default();
             db.seq = num(&row.first().cloned().flatten());
-            db.prev_hash = row.get(1).cloned().flatten().unwrap_or_else(|| "0".repeat(64));
-            let stored_next = row.get(2).cloned().flatten().and_then(|s| serde_json::from_str::<J>(&s).ok()).and_then(|s| s["next_id"].as_u64()).unwrap_or(0);
+            db.prev_hash = row
+                .get(1)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| "0".repeat(64));
+            let stored_next = row
+                .get(2)
+                .cloned()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<J>(&s).ok())
+                .and_then(|s| s["next_id"].as_u64())
+                .unwrap_or(0);
             let tx = head + 1;
             db.write_tx(model, c, tx, stored_next).map_err(f)?;
             Ok(tx)

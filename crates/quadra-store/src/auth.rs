@@ -16,7 +16,10 @@ pub struct Principal {
 }
 
 pub fn sha256_hex(s: &str) -> String {
-    Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(s.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 pub fn random_hex(bytes: usize) -> String {
@@ -30,8 +33,20 @@ fn ts(t: NaiveDateTime) -> String {
 }
 
 /// A new credential; returns (secret, csrf). The secret is not stored.
-pub fn create(conn: &mut Conn, kind: &str, user_id: u64, name: &str, read_only: bool, now: NaiveDateTime, expires: Option<NaiveDateTime>) -> Result<(String, Option<String>), String> {
-    let secret = format!("qd_{}_{}", if kind == "session" { "s" } else { "t" }, random_hex(32));
+pub fn create(
+    conn: &mut Conn,
+    kind: &str,
+    user_id: u64,
+    name: &str,
+    read_only: bool,
+    now: NaiveDateTime,
+    expires: Option<NaiveDateTime>,
+) -> Result<(String, Option<String>), String> {
+    let secret = format!(
+        "qd_{}_{}",
+        if kind == "session" { "s" } else { "t" },
+        random_hex(32)
+    );
     let csrf = (kind == "session").then(|| random_hex(16));
     conn.exec(
         "INSERT INTO \"_quadra_tokens\" (\"hash\", \"kind\", \"user_id\", \"name\", \"read_only\", \"csrf\", \"created_at\", \"expires_at\", \"revoked\") VALUES (?text, ?text, ?bigint, ?text, ?boolean, ?text, ?text, ?text, ?boolean)",
@@ -51,7 +66,11 @@ pub fn create(conn: &mut Conn, kind: &str, user_id: u64, name: &str, read_only: 
 }
 
 /// The principal behind a secret, if valid now.
-pub fn authenticate(conn: &mut Conn, secret: &str, now: NaiveDateTime) -> Result<Option<Principal>, String> {
+pub fn authenticate(
+    conn: &mut Conn,
+    secret: &str,
+    now: NaiveDateTime,
+) -> Result<Option<Principal>, String> {
     if !secret.starts_with("qd_") || secret.len() > 200 {
         return Ok(None);
     }
@@ -66,18 +85,30 @@ pub fn authenticate(conn: &mut Conn, secret: &str, now: NaiveDateTime) -> Result
     if truthy(&r[5]) {
         return Ok(None);
     }
-    if let Some(e) = r[4].as_deref().and_then(|e| NaiveDateTime::parse_from_str(e, "%Y-%m-%dT%H:%M:%S").ok()) {
+    if let Some(e) = r[4]
+        .as_deref()
+        .and_then(|e| NaiveDateTime::parse_from_str(e, "%Y-%m-%dT%H:%M:%S").ok())
+    {
         if e < now {
             return Ok(None);
         }
     }
-    Ok(Some(Principal { user_id: r[0].as_deref().and_then(|u| u.parse().ok()).unwrap_or(0), read_only: truthy(&r[1]), kind: r[2].clone().unwrap_or_default(), csrf: r[3].clone(), name: r[6].clone().unwrap_or_default() }))
+    Ok(Some(Principal {
+        user_id: r[0].as_deref().and_then(|u| u.parse().ok()).unwrap_or(0),
+        read_only: truthy(&r[1]),
+        kind: r[2].clone().unwrap_or_default(),
+        csrf: r[3].clone(),
+        name: r[6].clone().unwrap_or_default(),
+    }))
 }
 
 /// Revokes the credential of this secret, and only it (a logout): never by name, which anyone
 /// could guess (`email code <login>`).
 pub fn revoke_secret(conn: &mut Conn, secret: &str) -> Result<u64, String> {
-    conn.exec("UPDATE \"_quadra_tokens\" SET \"revoked\" = ?boolean WHERE \"hash\" = ?text", &[Sql::Bool(true), Sql::Text(sha256_hex(secret))])
+    conn.exec(
+        "UPDATE \"_quadra_tokens\" SET \"revoked\" = ?boolean WHERE \"hash\" = ?text",
+        &[Sql::Bool(true), Sql::Text(sha256_hex(secret))],
+    )
 }
 
 /// Revoke credentials by name (tokens, from the command line) or by secret. Returns how many.
@@ -86,10 +117,20 @@ pub fn revoke(conn: &mut Conn, name_or_secret: &str) -> Result<u64, String> {
 }
 
 /// A request already committed with this idempotency key: (request hash, response, tx).
-pub fn idempotent(conn: &mut Conn, user_id: u64, key: &str) -> Result<Option<(String, String, u64)>, String> {
+pub fn idempotent(
+    conn: &mut Conn,
+    user_id: u64,
+    key: &str,
+) -> Result<Option<(String, String, u64)>, String> {
     let rows =
         conn.query("SELECT \"request_hash\", \"response\", CAST(\"tx\" AS TEXT) FROM \"_quadra_idempotency\" WHERE \"user_id\" = ?bigint AND \"key\" = ?text", &[Sql::Int(user_id as i64), Sql::Text(key.into())])?;
-    Ok(rows.first().map(|r| (r[0].clone().unwrap_or_default(), r[1].clone().unwrap_or_default(), r[2].as_deref().and_then(|t| t.parse().ok()).unwrap_or(0))))
+    Ok(rows.first().map(|r| {
+        (
+            r[0].clone().unwrap_or_default(),
+            r[1].clone().unwrap_or_default(),
+            r[2].as_deref().and_then(|t| t.parse().ok()).unwrap_or(0),
+        )
+    }))
 }
 
 // ---- sign-in with a code sent by email ----------------------------------------------------
@@ -145,7 +186,11 @@ fn code_hash(id: &str, code: &str) -> String {
 }
 
 /// A new code for a user: Ok((request id, code)), or Err(why not) when they asked too often.
-pub fn code_start(conn: &mut Conn, user_id: u64, now: NaiveDateTime) -> Result<Result<(String, String), &'static str>, String> {
+pub fn code_start(
+    conn: &mut Conn,
+    user_id: u64,
+    now: NaiveDateTime,
+) -> Result<Result<(String, String), &'static str>, String> {
     let since = ts(now - chrono::Duration::minutes(15));
     let n: i64 = conn
         .query("SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_login_codes\" WHERE \"user_id\" = ?bigint AND \"created_at\" > ?text", &[Sql::Int(user_id as i64), Sql::Text(since)])?
@@ -179,7 +224,12 @@ pub fn code_start(conn: &mut Conn, user_id: u64, now: NaiveDateTime) -> Result<R
 
 /// A code typed for a request: Ok(user) once, or Err(why): `unknown`, `used`, `locked`,
 /// `expired`, `wrong` (with the attempts left).
-pub fn code_verify(conn: &mut Conn, id: &str, code: &str, now: NaiveDateTime) -> Result<Result<u64, (&'static str, i64)>, String> {
+pub fn code_verify(
+    conn: &mut Conn,
+    id: &str,
+    code: &str,
+    now: NaiveDateTime,
+) -> Result<Result<u64, (&'static str, i64)>, String> {
     let rows = conn.query(
         "SELECT CAST(\"user_id\" AS TEXT), \"code_hash\", CAST(\"attempts\" AS TEXT), \"expires_at\", CAST(\"used\" AS TEXT) FROM \"_quadra_login_codes\" WHERE \"id\" = ?text",
         &[Sql::Text(id.into())],
@@ -200,14 +250,29 @@ pub fn code_verify(conn: &mut Conn, id: &str, code: &str, now: NaiveDateTime) ->
     }
     let want = r[1].clone().unwrap_or_default();
     let got = code_hash(id, code);
-    let same = want.len() == got.len() && want.bytes().zip(got.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
+    let same = want.len() == got.len()
+        && want
+            .bytes()
+            .zip(got.bytes())
+            .fold(0u8, |a, (x, y)| a | (x ^ y))
+            == 0;
     if !same {
         conn.exec("UPDATE \"_quadra_login_codes\" SET \"attempts\" = \"attempts\" + 1 WHERE \"id\" = ?text", &[Sql::Text(id.into())])?;
         let left = CODE_ATTEMPTS - attempts - 1;
-        return Ok(Err(if left > 0 { ("wrong", left) } else { ("locked", 0) }));
+        return Ok(Err(if left > 0 {
+            ("wrong", left)
+        } else {
+            ("locked", 0)
+        }));
     }
-    conn.exec("UPDATE \"_quadra_login_codes\" SET \"used\" = ?boolean WHERE \"id\" = ?text", &[Sql::Bool(true), Sql::Text(id.into())])?;
-    Ok(Ok(r[0].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0)))
+    conn.exec(
+        "UPDATE \"_quadra_login_codes\" SET \"used\" = ?boolean WHERE \"id\" = ?text",
+        &[Sql::Bool(true), Sql::Text(id.into())],
+    )?;
+    Ok(Ok(r[0]
+        .as_deref()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)))
 }
 
 #[cfg(test)]

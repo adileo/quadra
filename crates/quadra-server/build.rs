@@ -15,9 +15,19 @@ fn main() {
     let dist = std::env::var_os("QUADRA_WEB_DIST").map(PathBuf::from);
     let Some(dist) = dist.filter(|d| d.join("index.html").is_file()) else {
         if let Some(d) = std::env::var_os("QUADRA_WEB_DIST") {
-            println!("cargo:warning=QUADRA_WEB_DIST={} has no index.html: building without the studio", Path::new(&d).display());
+            println!(
+                "cargo:warning=QUADRA_WEB_DIST={} has no index.html: building without the studio",
+                Path::new(&d).display()
+            );
         }
-        std::fs::write(&out, format!("pub static FILES: &[(&str, &[u8])] = &[(\"index.html\", {:?}.as_bytes())];\n", NO_STUDIO)).unwrap();
+        std::fs::write(
+            &out,
+            format!(
+                "pub static FILES: &[(&str, &[u8])] = &[(\"index.html\", {:?}.as_bytes())];\n",
+                NO_STUDIO
+            ),
+        )
+        .unwrap();
         return;
     };
     println!("cargo:rerun-if-changed={}", dist.display());
@@ -39,8 +49,15 @@ fn main() {
     files.sort();
     let mut s = String::from("pub static FILES: &[(&str, &[u8])] = &[\n");
     for f in &files {
-        let rel = f.strip_prefix(&dist).unwrap().to_string_lossy().replace('\\', "/");
-        s.push_str(&format!("    ({rel:?}, include_bytes!({:?})),\n", f.canonicalize().unwrap()));
+        let rel = f
+            .strip_prefix(&dist)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        s.push_str(&format!(
+            "    ({rel:?}, include_bytes!({:?})),\n",
+            f.canonicalize().unwrap()
+        ));
     }
     s.push_str("];\n");
     std::fs::write(out, s).unwrap();

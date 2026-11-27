@@ -18,7 +18,10 @@ fn copy_dir(from: &Path, to: &Path) {
                 continue;
             }
             copy_dir(&p, &to.join(e.file_name()));
-        } else if matches!(p.extension().and_then(|x| x.to_str()), Some("qd" | "toml" | "qdi")) {
+        } else if matches!(
+            p.extension().and_then(|x| x.to_str()),
+            Some("qd" | "toml" | "qdi")
+        ) {
             std::fs::copy(&p, to.join(e.file_name())).unwrap();
         }
     }
@@ -33,7 +36,13 @@ struct Lsp {
 
 impl Lsp {
     fn start() -> Lsp {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_quadra")).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_quadra"))
+            .arg("lsp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout: ChildStdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -65,7 +74,12 @@ impl Lsp {
                 }
             }
         });
-        Lsp { child, stdin, rx, next: 1 }
+        Lsp {
+            child,
+            stdin,
+            rx,
+            next: 1,
+        }
     }
 
     fn send(&mut self, j: J) {
@@ -82,7 +96,9 @@ impl Lsp {
         let id = self.next;
         self.next += 1;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-        self.wait(|m| m["id"] == json!(id)).map(|m| m["result"].clone()).unwrap_or_else(|| panic!("no answer to {method}"))
+        self.wait(|m| m["id"] == json!(id))
+            .map(|m| m["result"].clone())
+            .unwrap_or_else(|| panic!("no answer to {method}"))
     }
 
     fn wait(&mut self, f: impl Fn(&J) -> bool) -> Option<J> {
@@ -100,9 +116,19 @@ impl Lsp {
     /// The diagnostics published for `uri` next that satisfy `f`.
     fn diagnostics(&mut self, uri: &str, f: impl Fn(&[J]) -> bool) -> Vec<J> {
         let m = self
-            .wait(|m| m["method"] == json!("textDocument/publishDiagnostics") && m["params"]["uri"] == json!(uri) && f(m["params"]["diagnostics"].as_array().map(Vec::as_slice).unwrap_or(&[])))
+            .wait(|m| {
+                m["method"] == json!("textDocument/publishDiagnostics")
+                    && m["params"]["uri"] == json!(uri)
+                    && f(m["params"]["diagnostics"]
+                        .as_array()
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]))
+            })
             .unwrap_or_else(|| panic!("no diagnostics for {uri}"));
-        m["params"]["diagnostics"].as_array().cloned().unwrap_or_default()
+        m["params"]["diagnostics"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -131,43 +157,90 @@ fn interface_files_in_the_language_server() {
     let sales_text = std::fs::read_to_string(&sales).unwrap();
 
     let mut l = Lsp::start();
-    l.request("initialize", json!({ "processId": null, "rootUri": uri(&dir), "capabilities": {} }));
+    l.request(
+        "initialize",
+        json!({ "processId": null, "rootUri": uri(&dir), "capabilities": {} }),
+    );
     l.notify("initialized", json!({}));
     l.notify("textDocument/didOpen", json!({ "textDocument": { "uri": cockpit_uri, "languageId": "qdi", "version": 1, "text": cockpit_text } }));
     let d = l.diagnostics(&cockpit_uri, |_| true);
     assert!(d.is_empty(), "{d:?}");
 
     // the code changes: the interface file is wrong at once, where it uses the field
-    let renamed = sales_text.replace("o.total", "o.amount_total").replace("    total: Money<EUR> = lines", "    amount_total: Money<EUR> = lines");
+    let renamed = sales_text.replace("o.total", "o.amount_total").replace(
+        "    total: Money<EUR> = lines",
+        "    amount_total: Money<EUR> = lines",
+    );
     l.notify("textDocument/didOpen", json!({ "textDocument": { "uri": sales_uri, "languageId": "quadra", "version": 1, "text": renamed } }));
     let d = l.diagnostics(&cockpit_uri, |d| !d.is_empty());
-    assert!(d.iter().any(|x| x["range"]["start"]["line"] == json!(24) && x["message"].as_str().unwrap().contains("no field `total`")), "{d:?}");
+    assert!(
+        d.iter().any(|x| x["range"]["start"]["line"] == json!(24)
+            && x["message"].as_str().unwrap().contains("no field `total`")),
+        "{d:?}"
+    );
     // and right again when the code is
     l.notify("textDocument/didChange", json!({ "textDocument": { "uri": sales_uri, "version": 2 }, "contentChanges": [{ "text": sales_text }] }));
     let d = l.diagnostics(&cockpit_uri, |d| d.is_empty());
     assert!(d.is_empty());
 
     // `total` of Order in the code: its references include the interface files
-    let line = sales_text.lines().position(|x| x.starts_with("    total: Money<EUR> = lines")).unwrap();
+    let line = sales_text
+        .lines()
+        .position(|x| x.starts_with("    total: Money<EUR> = lines"))
+        .unwrap();
     let refs = l.request("textDocument/references", json!({ "textDocument": { "uri": sales_uri }, "position": { "line": line, "character": 5 }, "context": { "includeDeclaration": true } }));
-    let in_cockpit = refs.as_array().unwrap().iter().filter(|r| r["uri"] == json!(cockpit_uri)).count();
+    let in_cockpit = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["uri"] == json!(cockpit_uri))
+        .count();
     assert!(in_cockpit >= 8, "{refs}");
     // rename: the code and the interface files
     let edit = l.request("textDocument/rename", json!({ "textDocument": { "uri": sales_uri }, "position": { "line": line, "character": 5 }, "newName": "amount_total" }));
-    let edits = edit["changes"][&cockpit_uri].as_array().cloned().unwrap_or_default();
-    assert!(edits.len() >= 8 && edits.iter().all(|e| e["newText"] == json!("amount_total")), "{edit}");
-    assert!(edit["changes"][&sales_uri].as_array().is_some_and(|e| !e.is_empty()));
+    let edits = edit["changes"][&cockpit_uri]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        edits.len() >= 8 && edits.iter().all(|e| e["newText"] == json!("amount_total")),
+        "{edit}"
+    );
+    assert!(edit["changes"][&sales_uri]
+        .as_array()
+        .is_some_and(|e| !e.is_empty()));
 
     // in the interface file: hover and definition of `total`, completion
-    let (cl, cc) = cockpit_text.lines().enumerate().find_map(|(k, x)| x.find("o.total").map(|c| (k, c + 2))).unwrap();
+    let (cl, cc) = cockpit_text
+        .lines()
+        .enumerate()
+        .find_map(|(k, x)| x.find("o.total").map(|c| (k, c + 2)))
+        .unwrap();
     let hover = l.request("textDocument/hover", json!({ "textDocument": { "uri": cockpit_uri }, "position": { "line": cl, "character": cc } }));
-    assert!(hover["contents"]["value"].as_str().unwrap().contains("total"), "{hover}");
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("total"),
+        "{hover}"
+    );
     let def = l.request("textDocument/definition", json!({ "textDocument": { "uri": cockpit_uri }, "position": { "line": cl, "character": cc } }));
     assert_eq!(def["uri"], json!(sales_uri), "{def}");
     assert_eq!(def["range"]["start"]["line"], json!(line));
-    let (fl, fc) = cockpit_text.lines().enumerate().find_map(|(k, x)| x.find("fields: number").map(|c| (k, c + 8))).unwrap();
+    let (fl, fc) = cockpit_text
+        .lines()
+        .enumerate()
+        .find_map(|(k, x)| x.find("fields: number").map(|c| (k, c + 8)))
+        .unwrap();
     let items = l.request("textDocument/completion", json!({ "textDocument": { "uri": cockpit_uri }, "position": { "line": fl, "character": fc + 3 } }));
-    assert!(items.as_array().unwrap().iter().any(|i| i["label"] == json!("number")), "{items}");
+    assert!(
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["label"] == json!("number")),
+        "{items}"
+    );
     drop(l);
     let _ = std::fs::remove_dir_all(&dir);
 }

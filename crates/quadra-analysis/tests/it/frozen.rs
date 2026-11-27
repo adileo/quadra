@@ -6,9 +6,25 @@ use std::path::{Path, PathBuf};
 fn warnings(edit: impl Fn(&str, String) -> String) -> Vec<String> {
     let root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/extended");
     let base = Project::load(&root).unwrap();
-    let sources = base.user_files().map(|f| (f.path.clone(), edit(&f.path.file_name().unwrap().to_string_lossy(), f.text.clone()))).collect();
+    let sources = base
+        .user_files()
+        .map(|f| {
+            (
+                f.path.clone(),
+                edit(
+                    &f.path.file_name().unwrap().to_string_lossy(),
+                    f.text.clone(),
+                ),
+            )
+        })
+        .collect();
     let checked = quadra_analysis::check(&Project::from_sources(&root, sources));
-    checked.diagnostics.iter().filter(|d| d.severity == Severity::Warning).map(|d| d.message.clone()).collect()
+    checked
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .map(|d| d.message.clone())
+        .collect()
 }
 
 #[test]
@@ -19,16 +35,37 @@ fn the_example_declares_what_follows_the_data() {
 
 #[test]
 fn without_live_the_invoices_of_a_confirmed_order_are_flagged() {
-    let w = warnings(|name, t| if name == "invoicing.qd" { t.replace("    live invoices, invoice_status\n", "") } else { t });
-    assert!(w.iter().any(|m| m.starts_with("`invoices` reads InvoiceLine (via origin)") && m.contains("declare `live invoices` in this `extend`")), "{w:#?}");
-    assert!(w.iter().any(|m| m.starts_with("`invoice_status`")), "{w:#?}");
+    let w = warnings(|name, t| {
+        if name == "invoicing.qd" {
+            t.replace("    live invoices, invoice_status\n", "")
+        } else {
+            t
+        }
+    });
+    assert!(
+        w.iter().any(
+            |m| m.starts_with("`invoices` reads InvoiceLine (via origin)")
+                && m.contains("declare `live invoices` in this `extend`")
+        ),
+        "{w:#?}"
+    );
+    assert!(
+        w.iter().any(|m| m.starts_with("`invoice_status`")),
+        "{w:#?}"
+    );
     // frozen only when done: the snapshot is right, nothing said
     assert!(!w.iter().any(|m| m.contains("ProductionOrder")), "{w:#?}");
 }
 
 #[test]
 fn the_lines_of_a_frozen_document_are_frozen_with_it() {
-    let w = warnings(|name, t| if name == "sales.qd" { t.replace("    live delivered, to_deliver\n", "") } else { t });
+    let w = warnings(|name, t| {
+        if name == "sales.qd" {
+            t.replace("    live delivered, to_deliver\n", "")
+        } else {
+            t
+        }
+    });
     assert!(
         w.iter().any(|m| m.starts_with("`delivered` reads StockMove (via sale_line): records that point to the SalesLine and come after its SalesOrder is frozen. On a line of a frozen SalesOrder")
             && m.ends_with("declare `live delivered`")),
@@ -47,11 +84,19 @@ fn warnings_cover_the_declaration_line() {
     std::fs::write(dir.join("metrics.lock"), "").unwrap();
     let project = Project::from_sources(&dir, vec![(dir.join("main.qd"), src.to_string())]);
     let checked = quadra_analysis::check(&project);
-    let warnings: Vec<_> = checked.diagnostics.iter().filter(|d| d.severity == Severity::Warning).collect();
+    let warnings: Vec<_> = checked
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .collect();
     assert!(warnings.len() >= 3, "{warnings:#?}");
     for w in warnings {
         let text = &src[usize::from(w.range.start())..usize::from(w.range.end())];
-        assert!(!text.contains('\n') && !text.is_empty(), "{}: {text:?}", w.message);
+        assert!(
+            !text.contains('\n') && !text.is_empty(),
+            "{}: {text:?}",
+            w.message
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

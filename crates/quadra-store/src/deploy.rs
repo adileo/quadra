@@ -26,7 +26,9 @@ use crate::ops::MigrateReport;
 use crate::schema::{self, Column, Index, Schema, Source as TableSource, Table};
 use crate::source::{head, DbSource};
 use chrono::NaiveDateTime;
-use quadra_ir::{BinOp, Block, EntityKind, Expr, ExprKind, FieldKind, Lit, Model, StmtKind, Ty, UnOp};
+use quadra_ir::{
+    BinOp, Block, EntityKind, Expr, ExprKind, FieldKind, Lit, Model, StmtKind, Ty, UnOp,
+};
 use quadra_runtime::{Cause, Commit, Flow, Id, Interp, RuleSel, SharedSource, Store, V};
 use quadra_types::Report;
 use serde::{Deserialize, Serialize};
@@ -65,7 +67,11 @@ pub struct Catalog {
 }
 
 fn sha(s: &str) -> String {
-    Sha256::digest(s.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(s.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn to_value<T: Serialize>(t: &T) -> J {
@@ -98,7 +104,9 @@ impl Deep {
     fn new(m: &Model) -> Deep {
         let mut raw: HashMap<String, Vec<J>> = HashMap::new();
         for e in &m.entities {
-            raw.entry(e.name.clone()).or_default().push(json!({ "kind": to_value(&e.kind), "traits": e.traits, "ledger": e.is_ledger }));
+            raw.entry(e.name.clone()).or_default().push(
+                json!({ "kind": to_value(&e.kind), "traits": e.traits, "ledger": e.is_ledger }),
+            );
             for f in &e.fields {
                 raw.entry(f.name.clone()).or_default().push(json!({
                     "ty": to_value(&f.ty), "kind": to_value(&f.kind), "formula": to_value(&f.formula), "where": to_value(&f.where_),
@@ -129,7 +137,10 @@ impl Deep {
             for t in raw[name].iter() {
                 strings(t, &mut names);
             }
-            let names: Vec<String> = names.into_iter().filter(|n| n != name && raw.contains_key(n)).collect();
+            let names: Vec<String> = names
+                .into_iter()
+                .filter(|n| n != name && raw.contains_key(n))
+                .collect();
             defs.insert(name.clone(), (sha(&texts.join("\n")), names));
         }
         Deep { defs }
@@ -139,7 +150,10 @@ impl Deep {
         let mut start = BTreeSet::new();
         strings(&v, &mut start);
         let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut stack: Vec<String> = start.into_iter().filter(|n| self.defs.contains_key(n)).collect();
+        let mut stack: Vec<String> = start
+            .into_iter()
+            .filter(|n| self.defs.contains_key(n))
+            .collect();
         while let Some(n) = stack.pop() {
             if !seen.insert(n.clone()) {
                 continue;
@@ -171,7 +185,10 @@ enum RuleRef {
 }
 
 fn optional(t: Option<&Ty>) -> bool {
-    matches!(t, Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None)
+    matches!(
+        t,
+        Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None
+    )
 }
 
 /// The rules of an entity, each with its key in the catalog.
@@ -184,19 +201,38 @@ fn rules_of(m: &Model, d: &mut Deep, e: &quadra_ir::Entity) -> Vec<(String, Rule
         return out;
     }
     for (i, c) in m.all_checks(e).into_iter().enumerate() {
-        out.push((format!("{}:{}", if c.warn { "warn" } else { "check" }, d.item(json!({ "cond": to_value(&c.cond), "message": to_value(&c.message) }))), RuleRef::Check(i)));
+        out.push((
+            format!(
+                "{}:{}",
+                if c.warn { "warn" } else { "check" },
+                d.item(json!({ "cond": to_value(&c.cond), "message": to_value(&c.message) }))
+            ),
+            RuleRef::Check(i),
+        ));
     }
     for f in m.all_fields(e) {
         if f.formula.is_some() {
             continue;
         }
         // an optional field without `required when` is never missing
-        if f.required_when.is_some() || (!optional(f.ty.as_ref()) && f.kind == FieldKind::Stored && !f.per_company) {
+        if f.required_when.is_some()
+            || (!optional(f.ty.as_ref()) && f.kind == FieldKind::Stored && !f.per_company)
+        {
             let h = d.item(json!({ "ty": to_value(&f.ty), "required_when": to_value(&f.required_when), "kind": to_value(&f.kind), "per_company": f.per_company }));
-            out.push((format!("req:{}:{h}", f.name), RuleRef::Required(f.name.clone())));
+            out.push((
+                format!("req:{}:{h}", f.name),
+                RuleRef::Required(f.name.clone()),
+            ));
         }
         if let Some(w) = &f.where_ {
-            out.push((format!("where:{}:{}", f.name, d.item(json!({ "ty": to_value(&f.ty), "where": to_value(w) }))), RuleRef::Where(f.name.clone())));
+            out.push((
+                format!(
+                    "where:{}:{}",
+                    f.name,
+                    d.item(json!({ "ty": to_value(&f.ty), "where": to_value(w) }))
+                ),
+                RuleRef::Where(f.name.clone()),
+            ));
         }
         let inner = match &f.ty {
             Some(Ty::Optional(i)) | Some(Ty::List(i)) | Some(Ty::Set(i)) => match i.as_ref() {
@@ -206,46 +242,90 @@ fn rules_of(m: &Model, d: &mut Deep, e: &quadra_ir::Entity) -> Vec<(String, Rule
             other => other.clone(),
         };
         if let Some(Ty::Path { segments, .. }) = inner {
-            if let Some(re) = m.entity(&segments[0]).filter(|x| x.kind == EntityKind::Record) {
+            if let Some(re) = m
+                .entity(&segments[0])
+                .filter(|x| x.kind == EntityKind::Record)
+            {
                 let fields: Vec<J> = m.all_fields(re).iter().map(|x| to_value(x)).collect();
                 let checks: Vec<J> = m.all_checks(re).iter().map(|x| to_value(x)).collect();
-                out.push((format!("rec:{}:{}", f.name, d.item(json!({ "fields": fields, "checks": checks }))), RuleRef::Record(f.name.clone())));
+                out.push((
+                    format!(
+                        "rec:{}:{}",
+                        f.name,
+                        d.item(json!({ "fields": fields, "checks": checks }))
+                    ),
+                    RuleRef::Record(f.name.clone()),
+                ));
             }
         }
     }
     for u in m.all_uniques(e) {
-        out.push((format!("unique:{}:{}", u.fields.join(","), d.item(to_value(&u.when))), RuleRef::Unique(u.fields.clone(), u.when.clone())));
+        out.push((
+            format!(
+                "unique:{}:{}",
+                u.fields.join(","),
+                d.item(to_value(&u.when))
+            ),
+            RuleRef::Unique(u.fields.clone(), u.when.clone()),
+        ));
     }
     for f in m.all_fields(e).into_iter().filter(|f| f.unique) {
-        out.push((format!("unique:{}:-", f.name), RuleRef::Unique(vec![f.name.clone()], None)));
+        out.push((
+            format!("unique:{}:-", f.name),
+            RuleRef::Unique(vec![f.name.clone()], None),
+        ));
     }
     if let Some(fr) = &e.frozen {
-        out.push((format!("frozen:{}", d.item(json!({ "when": to_value(&fr.when), "live": fr.live, "except": fr.except }))), RuleRef::Frozen));
+        out.push((
+            format!(
+                "frozen:{}",
+                d.item(json!({ "when": to_value(&fr.when), "live": fr.live, "except": fr.except }))
+            ),
+            RuleRef::Frozen,
+        ));
     }
     out
 }
 
 fn concrete(m: &Model) -> impl Iterator<Item = &quadra_ir::Entity> {
-    m.entities.iter().filter(|e| e.kind == EntityKind::Entity && !e.temporary)
+    m.entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Entity && !e.temporary)
 }
 
 /// The fields that get their default on the records lacking them (as `migrate` always did).
 fn default_fields<'m>(m: &'m Model, e: &'m quadra_ir::Entity) -> Vec<&'m quadra_ir::Field> {
-    m.all_fields(e).into_iter().filter(|f| f.default.is_some() && f.formula.is_none() && !f.per_company).collect()
+    m.all_fields(e)
+        .into_iter()
+        .filter(|f| f.default.is_some() && f.formula.is_none() && !f.per_company)
+        .collect()
 }
 
 impl Catalog {
     /// The catalog of a model and its schema (`ever`: from `before`, plus the fields now).
     pub fn of(m: &Model, schema: &Schema, before: Option<&Catalog>) -> Catalog {
         let mut d = Deep::new(m);
-        let mut c = Catalog { version: CATALOG_VERSION, tables: schema.tables.clone(), indexes: schema.indexes.clone(), ..Default::default() };
+        let mut c = Catalog {
+            version: CATALOG_VERSION,
+            tables: schema.tables.clone(),
+            indexes: schema.indexes.clone(),
+            ..Default::default()
+        };
         for e in concrete(m) {
-            c.rules.insert(e.name.clone(), rules_of(m, &mut d, e).into_iter().map(|(k, _)| k).collect());
+            c.rules.insert(
+                e.name.clone(),
+                rules_of(m, &mut d, e).into_iter().map(|(k, _)| k).collect(),
+            );
             if !e.is_ledger {
                 for f in default_fields(m, e) {
                     c.defaults.insert(format!("{}.{}", e.name, f.name));
                 }
-                let fields: BTreeSet<String> = m.all_fields(e).iter().filter(|f| f.formula.is_none()).map(|f| f.name.clone()).collect();
+                let fields: BTreeSet<String> = m
+                    .all_fields(e)
+                    .iter()
+                    .filter(|f| f.formula.is_none())
+                    .map(|f| f.name.clone())
+                    .collect();
                 c.ever.insert(e.name.clone(), fields);
             }
         }
@@ -253,27 +333,42 @@ impl Catalog {
             let Some(f) = m.entity(&ent).and_then(|e| m.find_field(e, &field)) else {
                 continue;
             };
-            c.formulas.insert(format!("{ent}.{field}"), d.item(json!({ "formula": to_value(&f.formula), "ty": to_value(&f.ty) })));
+            c.formulas.insert(
+                format!("{ent}.{field}"),
+                d.item(json!({ "formula": to_value(&f.formula), "ty": to_value(&f.ty) })),
+            );
         }
         for t in &schema.tables {
             if let TableSource::Trait(tr) = &t.source {
-                c.traits.insert(t.name.clone(), m.implementors(tr).iter().map(|e| e.name.clone()).collect());
+                c.traits.insert(
+                    t.name.clone(),
+                    m.implementors(tr).iter().map(|e| e.name.clone()).collect(),
+                );
             }
         }
         if let Some(b) = before {
             for (e, fs) in &b.ever {
-                c.ever.entry(e.clone()).or_default().extend(fs.iter().cloned());
+                c.ever
+                    .entry(e.clone())
+                    .or_default()
+                    .extend(fs.iter().cloned());
             }
         }
         c
     }
 
     pub fn read(db: &mut Database) -> Result<Option<Catalog>, String> {
-        Ok(db.meta("catalog")?.and_then(|s| serde_json::from_str::<Catalog>(&s).ok()).filter(|c| c.version == CATALOG_VERSION))
+        Ok(db
+            .meta("catalog")?
+            .and_then(|s| serde_json::from_str::<Catalog>(&s).ok())
+            .filter(|c| c.version == CATALOG_VERSION))
     }
 
     pub fn write(&self, db: &mut Database) -> Result<(), String> {
-        db.set_meta("catalog", &serde_json::to_string(self).map_err(|e| e.to_string())?)
+        db.set_meta(
+            "catalog",
+            &serde_json::to_string(self).map_err(|e| e.to_string())?,
+        )
     }
 }
 
@@ -298,7 +393,9 @@ fn pending_renames(m: &Model, pending: &[&Block]) -> Vec<(String, String, String
             }
             let (ent, old, new) = (&from[0], &from[from.len() - 1], &to[to.len() - 1]);
             let names: Vec<String> = match m.entity(ent) {
-                Some(e) if e.kind == EntityKind::Trait => m.implementors(ent).iter().map(|e| e.name.clone()).collect(),
+                Some(e) if e.kind == EntityKind::Trait => {
+                    m.implementors(ent).iter().map(|e| e.name.clone()).collect()
+                }
                 _ => vec![ent.clone()],
             };
             for n in names {
@@ -316,14 +413,18 @@ fn renamed_column(col: &str, old: &str, new: &str) -> Option<String> {
     } else if col == format!("{old}_id") {
         Some(format!("{new}_id"))
     } else {
-        col.strip_prefix(&format!("{old}__")).map(|rest| format!("{new}__{rest}"))
+        col.strip_prefix(&format!("{old}__"))
+            .map(|rest| format!("{new}__{rest}"))
     }
 }
 
 /// Apply the renames of this deploy to the catalog of the model deployed last; returns the
 /// columns and tables renamed: (table, old column, new column), (old table, new table).
 #[allow(clippy::type_complexity)]
-fn rename_catalog(c: &mut Catalog, renames: &[(String, String, String)]) -> (Vec<(String, String, String)>, Vec<(String, String)>) {
+fn rename_catalog(
+    c: &mut Catalog,
+    renames: &[(String, String, String)],
+) -> (Vec<(String, String, String)>, Vec<(String, String)>) {
     let mut cols = Vec::new();
     let mut tables = Vec::new();
     for (ent, old, new) in renames {
@@ -343,7 +444,11 @@ fn rename_catalog(c: &mut Catalog, renames: &[(String, String, String)]) -> (Vec
                     for col in t.columns.iter_mut() {
                         if let Some((_, n)) = map.iter().find(|(o, _)| *o == col.name) {
                             if let Some(ch) = &col.check {
-                                col.check = Some(ch.replacen(&format!("\"{}\"", col.name), &format!("\"{n}\""), 1));
+                                col.check = Some(ch.replacen(
+                                    &format!("\"{}\"", col.name),
+                                    &format!("\"{n}\""),
+                                    1,
+                                ));
                             }
                             col.name = n.clone();
                         }
@@ -352,7 +457,11 @@ fn rename_catalog(c: &mut Catalog, renames: &[(String, String, String)]) -> (Vec
                         for col in fm.columns.iter_mut() {
                             if let Some((_, n)) = map.iter().find(|(o, _)| *o == col.name) {
                                 if let Some(ch) = &col.check {
-                                    col.check = Some(ch.replacen(&format!("\"{}\"", col.name), &format!("\"{n}\""), 1));
+                                    col.check = Some(ch.replacen(
+                                        &format!("\"{}\"", col.name),
+                                        &format!("\"{n}\""),
+                                        1,
+                                    ));
                                 }
                                 col.name = n.clone();
                             }
@@ -376,7 +485,9 @@ fn rename_catalog(c: &mut Catalog, renames: &[(String, String, String)]) -> (Vec
                         cols.push((t.name.clone(), o, n));
                     }
                 }
-                TableSource::Join(e, f) | TableSource::PerCompany(e, f) if e == *ent && f == *old => {
+                TableSource::Join(e, f) | TableSource::PerCompany(e, f)
+                    if e == *ent && f == *old =>
+                {
                     let from = t.name.clone();
                     let to = format!("{}__{new}", schema::snake(&e));
                     t.source = match &t.source {
@@ -405,7 +516,10 @@ fn rename_catalog(c: &mut Catalog, renames: &[(String, String, String)]) -> (Vec
                             format!("{kind}:{new}:{h}")
                         }
                         ["unique", fs, h] => {
-                            let fs: Vec<&str> = fs.split(',').map(|f| if f == old { new.as_str() } else { f }).collect();
+                            let fs: Vec<&str> = fs
+                                .split(',')
+                                .map(|f| if f == old { new.as_str() } else { f })
+                                .collect();
                             format!("unique:{}:{h}", fs.join(","))
                         }
                         _ => k.clone(),
@@ -445,7 +559,12 @@ struct Pass {
 
 impl Pass {
     fn is_empty(&self) -> bool {
-        self.defaults.is_empty() && self.refill.is_empty() && self.formulas.is_empty() && self.sel.is_empty() && self.uniques.is_empty() && !self.refreeze
+        self.defaults.is_empty()
+            && self.refill.is_empty()
+            && self.formulas.is_empty()
+            && self.sel.is_empty()
+            && self.uniques.is_empty()
+            && !self.refreeze
     }
 }
 
@@ -500,9 +619,21 @@ fn make_plan(m: &Model, schema: &Schema, old: &Catalog, new: &Catalog) -> Result
     for t in &schema.tables {
         let Some(o) = old.tables.iter().find(|x| x.name == t.name) else {
             match &t.source {
-                TableSource::Entity(e) if old.ever.contains_key(e) => return Err(Fallback(format!("the entity {e} is back: its records are projected again"))),
-                TableSource::Join(e, f) | TableSource::PerCompany(e, f) if old.ever.get(e).is_some_and(|s| s.contains(f)) && old.tables.iter().any(|x| matches!(&x.source, TableSource::Entity(y) if y == e)) => {
-                    return Err(Fallback(format!("{e}.{f} is back: its values are projected again")))
+                TableSource::Entity(e) if old.ever.contains_key(e) => {
+                    return Err(Fallback(format!(
+                        "the entity {e} is back: its records are projected again"
+                    )))
+                }
+                TableSource::Join(e, f) | TableSource::PerCompany(e, f)
+                    if old.ever.get(e).is_some_and(|s| s.contains(f))
+                        && old
+                            .tables
+                            .iter()
+                            .any(|x| matches!(&x.source, TableSource::Entity(y) if y == e)) =>
+                {
+                    return Err(Fallback(format!(
+                        "{e}.{f} is back: its values are projected again"
+                    )))
                 }
                 _ => {}
             }
@@ -512,18 +643,42 @@ fn make_plan(m: &Model, schema: &Schema, old: &Catalog, new: &Catalog) -> Result
         match (&t.source, &o.source) {
             (TableSource::Entity(e), TableSource::Entity(_)) => {
                 let pass = passes.entry(e.clone()).or_default();
-                let mut alter = Alter { table: t.clone(), old: o.clone(), drop: Vec::new(), add: Vec::new(), constraints: false };
-                let mut kept: BTreeSet<String> = ["id", "_created_tx", "_created_at", "_created_by", "_frozen_tx"].iter().map(|s| s.to_string()).collect();
+                let mut alter = Alter {
+                    table: t.clone(),
+                    old: o.clone(),
+                    drop: Vec::new(),
+                    add: Vec::new(),
+                    constraints: false,
+                };
+                let mut kept: BTreeSet<String> = [
+                    "id",
+                    "_created_tx",
+                    "_created_at",
+                    "_created_by",
+                    "_frozen_tx",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
                 for fm in &t.fields {
                     let ofm = o.fields.iter().find(|x| x.field == fm.field);
-                    let same = ofm.is_some_and(|x| x.formula == fm.formula && x.columns.len() == fm.columns.len() && x.columns.iter().zip(&fm.columns).all(|(a, b)| same_col(a, b)));
+                    let same = ofm.is_some_and(|x| {
+                        x.formula == fm.formula
+                            && x.columns.len() == fm.columns.len()
+                            && x.columns
+                                .iter()
+                                .zip(&fm.columns)
+                                .all(|(a, b)| same_col(a, b))
+                    });
                     if same {
                         kept.extend(fm.columns.iter().map(|c| c.name.clone()));
                         continue;
                     }
                     if fm.formula {
                         pass.formulas.insert(fm.field.clone());
-                    } else if ofm.is_some() || old.ever.get(e).is_some_and(|s| s.contains(&fm.field)) {
+                    } else if ofm.is_some()
+                        || old.ever.get(e).is_some_and(|s| s.contains(&fm.field))
+                    {
                         // another type, or a field added again: its values come from the history
                         pass.refill.insert(fm.field.clone());
                     }
@@ -538,7 +693,14 @@ fn make_plan(m: &Model, schema: &Schema, old: &Catalog, new: &Catalog) -> Result
                         alter.add.push(c.clone());
                     }
                 }
-                alter.constraints = o.uniques != t.uniques || t.columns.iter().filter(|c| kept.contains(&c.name)).any(|c| o.column(&c.name).map_or(true, |oc| !same_constraints(oc, c)));
+                alter.constraints = o.uniques != t.uniques
+                    || t.columns
+                        .iter()
+                        .filter(|c| kept.contains(&c.name))
+                        .any(|c| {
+                            o.column(&c.name)
+                                .map_or(true, |oc| !same_constraints(oc, c))
+                        });
                 if !alter.drop.is_empty() || !alter.add.is_empty() || alter.constraints {
                     tables.push(TableOp::Alter(alter));
                 }
@@ -553,19 +715,28 @@ fn make_plan(m: &Model, schema: &Schema, old: &Catalog, new: &Catalog) -> Result
                     tables.push(TableOp::Trait(t.clone()));
                 }
             }
-            (TableSource::Join(..), TableSource::Join(..)) | (TableSource::PerCompany(..), TableSource::PerCompany(..)) => {
-                if serde_json::to_string(&t.columns).ok() != serde_json::to_string(&o.columns).ok() {
+            (TableSource::Join(..), TableSource::Join(..))
+            | (TableSource::PerCompany(..), TableSource::PerCompany(..)) => {
+                if serde_json::to_string(&t.columns).ok() != serde_json::to_string(&o.columns).ok()
+                {
                     // a join table of an older version, without the position of each reference:
                     // the column is added (empty: those records are read from their history
                     // until written again, their `version_tx` is 0)
                     let ord_added = matches!(t.source, TableSource::Join(..))
                         && t.columns.len() == o.columns.len() + 1
                         && t.columns.last().is_some_and(|c| c.name == "ord")
-                        && serde_json::to_string(&t.columns[..o.columns.len()]).ok() == serde_json::to_string(&o.columns).ok();
+                        && serde_json::to_string(&t.columns[..o.columns.len()]).ok()
+                            == serde_json::to_string(&o.columns).ok();
                     if !ord_added {
                         return Err(Fallback(format!("the table {} changed", t.name)));
                     }
-                    tables.push(TableOp::Alter(Alter { table: t.clone(), old: o.clone(), drop: Vec::new(), add: vec![t.columns.last().unwrap().clone()], constraints: false }));
+                    tables.push(TableOp::Alter(Alter {
+                        table: t.clone(),
+                        old: o.clone(),
+                        drop: Vec::new(),
+                        add: vec![t.columns.last().unwrap().clone()],
+                        constraints: false,
+                    }));
                 }
             }
             _ => return Err(Fallback(format!("the table {} changed kind", t.name))),
@@ -581,8 +752,13 @@ fn make_plan(m: &Model, schema: &Schema, old: &Catalog, new: &Catalog) -> Result
     for e in concrete(m) {
         let before = old.rules.get(&e.name).cloned().unwrap_or_default();
         let rules = rules_of(m, &mut d, e);
-        let warn_keys = |ks: &mut dyn Iterator<Item = &String>| -> BTreeSet<String> { ks.filter(|k| k.starts_with("warn:") || k.starts_with("rec:")).cloned().collect() };
-        let warnings_changed = warn_keys(&mut rules.iter().map(|(k, _)| k)) != warn_keys(&mut before.iter());
+        let warn_keys = |ks: &mut dyn Iterator<Item = &String>| -> BTreeSet<String> {
+            ks.filter(|k| k.starts_with("warn:") || k.starts_with("rec:"))
+                .cloned()
+                .collect()
+        };
+        let warnings_changed =
+            warn_keys(&mut rules.iter().map(|(k, _)| k)) != warn_keys(&mut before.iter());
         let pass = passes.entry(e.name.clone()).or_default();
         pass.sel.warnings = warnings_changed;
         for (k, r) in rules {
@@ -604,7 +780,9 @@ fn make_plan(m: &Model, schema: &Schema, old: &Catalog, new: &Catalog) -> Result
                 }
                 RuleRef::Unique(fs, w) => pass.uniques.push((fs, w)),
                 RuleRef::Frozen => pass.refreeze = true,
-                RuleRef::Ledger => return Err(Fallback(format!("a rule of the ledger {} changed", e.name))),
+                RuleRef::Ledger => {
+                    return Err(Fallback(format!("a rule of the ledger {} changed", e.name)))
+                }
             }
         }
         if e.is_ledger {
@@ -613,18 +791,29 @@ fn make_plan(m: &Model, schema: &Schema, old: &Catalog, new: &Catalog) -> Result
         for f in default_fields(m, e) {
             if !old.defaults.contains(&format!("{}.{}", e.name, f.name)) {
                 pass.defaults.push(f.name.clone());
-                defaults.entry(e.name.clone()).or_default().push(f.name.clone());
+                defaults
+                    .entry(e.name.clone())
+                    .or_default()
+                    .push(f.name.clone());
             }
         }
     }
     for (key, h) in &new.formulas {
         if old.formulas.get(key) != Some(h) {
             let (ent, field) = key.split_once('.').unwrap_or_default();
-            passes.entry(ent.to_string()).or_default().formulas.insert(field.to_string());
+            passes
+                .entry(ent.to_string())
+                .or_default()
+                .formulas
+                .insert(field.to_string());
         }
     }
     passes.retain(|ent, p| !p.is_empty() && schema.entity_table(ent).is_some());
-    Ok(Plan { tables, passes, defaults })
+    Ok(Plan {
+        tables,
+        passes,
+        defaults,
+    })
 }
 
 // ---- running it -------------------------------------------------------------------------------
@@ -639,7 +828,10 @@ struct Stager {
 
 impl Stager {
     fn add(&mut self, table: &str, cols: Vec<String>, row: Vec<Sql>) {
-        self.groups.entry((table.to_string(), cols)).or_default().push(row);
+        self.groups
+            .entry((table.to_string(), cols))
+            .or_default()
+            .push(row);
     }
 
     fn flush(&mut self, conn: &mut Conn) -> Result<(), String> {
@@ -651,23 +843,37 @@ impl Stager {
                 Some(s) => s.clone(),
                 None => {
                     let s = format!("_qx_stage_{n}");
-                    let list: Vec<String> = std::iter::once("id".to_string()).chain(cols.iter().cloned()).map(|c| format!("\"{c}\"")).collect();
+                    let list: Vec<String> = std::iter::once("id".to_string())
+                        .chain(cols.iter().cloned())
+                        .map(|c| format!("\"{c}\""))
+                        .collect();
                     let sql = match conn.dialect() {
-                        Dialect::Sqlite => format!("CREATE TEMP TABLE \"{s}\" AS SELECT {} FROM \"{table}\" WHERE 0", list.join(", ")),
-                        Dialect::Postgres => format!("CREATE TEMP TABLE \"{s}\" AS SELECT {} FROM \"{table}\" WITH NO DATA", list.join(", ")),
+                        Dialect::Sqlite => format!(
+                            "CREATE TEMP TABLE \"{s}\" AS SELECT {} FROM \"{table}\" WHERE 0",
+                            list.join(", ")
+                        ),
+                        Dialect::Postgres => format!(
+                            "CREATE TEMP TABLE \"{s}\" AS SELECT {} FROM \"{table}\" WITH NO DATA",
+                            list.join(", ")
+                        ),
                     };
                     conn.batch(&sql)?;
                     self.tables.insert(key, s.clone());
                     s
                 }
             };
-            let names: Vec<&str> = std::iter::once("id").chain(cols.iter().map(String::as_str)).collect();
+            let names: Vec<&str> = std::iter::once("id")
+                .chain(cols.iter().map(String::as_str))
+                .collect();
             conn.bulk_insert(&stage, &names, &mut rows.into_iter())?;
             if conn.dialect() == Dialect::Postgres {
                 // the planner then joins by the primary key instead of scanning the table
                 conn.batch(&format!("ANALYZE \"{stage}\""))?;
             }
-            let set: Vec<String> = cols.iter().map(|c| format!("\"{c}\" = s.\"{c}\"")).collect();
+            let set: Vec<String> = cols
+                .iter()
+                .map(|c| format!("\"{c}\" = s.\"{c}\""))
+                .collect();
             conn.batch(&format!("UPDATE \"{table}\" SET {} FROM \"{stage}\" AS s WHERE \"{table}\".\"id\" = s.\"id\"", set.join(", ")))?;
             conn.batch(&format!("DELETE FROM \"{stage}\""))?;
         }
@@ -692,7 +898,10 @@ struct Cursors {
 
 impl Cursors {
     fn new(entities: impl Iterator<Item = String>, base: u64) -> Cursors {
-        Cursors { list: entities.map(|e| (e, 0, VecDeque::new(), false)).collect(), base }
+        Cursors {
+            list: entities.map(|e| (e, 0, VecDeque::new(), false)).collect(),
+            base,
+        }
     }
 
     fn next(&mut self, conn: &mut Conn, n: usize) -> Result<Vec<(Id, String)>, String> {
@@ -714,7 +923,10 @@ impl Cursors {
                     }
                 }
             }
-            let Some(i) = (0..self.list.len()).filter(|i| !self.list[*i].2.is_empty()).min_by_key(|i| self.list[*i].2[0]) else {
+            let Some(i) = (0..self.list.len())
+                .filter(|i| !self.list[*i].2.is_empty())
+                .min_by_key(|i| self.list[*i].2[0])
+            else {
                 break;
             };
             let id = self.list[i].2.pop_front().unwrap();
@@ -728,13 +940,37 @@ impl Cursors {
 /// it (`f != none`, `f != none or not (when)`); None when the field's value is a collection
 /// or per company (the batches check those).
 fn required_rule(m: &Model, e: &quadra_ir::Entity, f: &quadra_ir::Field) -> Option<Vec<Expr>> {
-    if f.per_company || f.kind != FieldKind::Stored || matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_)) | None) || schema::is_inverse(m, e, f) {
+    if f.per_company
+        || f.kind != FieldKind::Stored
+        || matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_)) | None)
+        || schema::is_inverse(m, e, f)
+    {
         return None;
     }
     let sp = f.span.clone();
-    let present = Expr::new(ExprKind::Binary { op: BinOp::Ne, lhs: Box::new(Expr::new(ExprKind::Name(f.name.clone()), sp.clone())), rhs: Box::new(Expr::new(ExprKind::Lit(Lit::None), sp.clone())) }, sp.clone());
+    let present = Expr::new(
+        ExprKind::Binary {
+            op: BinOp::Ne,
+            lhs: Box::new(Expr::new(ExprKind::Name(f.name.clone()), sp.clone())),
+            rhs: Box::new(Expr::new(ExprKind::Lit(Lit::None), sp.clone())),
+        },
+        sp.clone(),
+    );
     Some(match &f.required_when {
-        Some(c) => vec![Expr::new(ExprKind::Binary { op: BinOp::Or, lhs: Box::new(present), rhs: Box::new(Expr::new(ExprKind::Unary { op: UnOp::Not, expr: Box::new(c.clone()) }, sp.clone())) }, sp)],
+        Some(c) => vec![Expr::new(
+            ExprKind::Binary {
+                op: BinOp::Or,
+                lhs: Box::new(present),
+                rhs: Box::new(Expr::new(
+                    ExprKind::Unary {
+                        op: UnOp::Not,
+                        expr: Box::new(c.clone()),
+                    },
+                    sp.clone(),
+                )),
+            },
+            sp,
+        )],
         None if optional(f.ty.as_ref()) => Vec::new(),
         None => vec![present],
     })
@@ -744,22 +980,53 @@ fn required_rule(m: &Model, e: &quadra_ir::Entity, f: &quadra_ir::Field) -> Opti
 /// (f > 0)`, the lambda's parameter replaced by the field); None when it cannot be written
 /// so (a collection, a parameter shadowed by a nested lambda).
 fn where_rule(m: &Model, e: &quadra_ir::Entity, f: &quadra_ir::Field) -> Option<Expr> {
-    if f.per_company || f.kind != FieldKind::Stored || matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_)) | None) || schema::is_inverse(m, e, f) {
+    if f.per_company
+        || f.kind != FieldKind::Stored
+        || matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_)) | None)
+        || schema::is_inverse(m, e, f)
+    {
         return None;
     }
     let sp = f.span.clone();
     let name = || Expr::new(ExprKind::Name(f.name.clone()), sp.clone());
-    let bin = |op: BinOp, a: Expr, b: Expr| Expr::new(ExprKind::Binary { op, lhs: Box::new(a), rhs: Box::new(b) }, sp.clone());
+    let bin = |op: BinOp, a: Expr, b: Expr| {
+        Expr::new(
+            ExprKind::Binary {
+                op,
+                lhs: Box::new(a),
+                rhs: Box::new(b),
+            },
+            sp.clone(),
+        )
+    };
     let holds = match f.where_.as_ref()? {
         quadra_ir::Where::Compare(op, x) => bin(*op, name(), x.clone()),
         quadra_ir::Where::Expr(x) => match &x.kind {
-            ExprKind::Lambda { params, body } if params.len() == 1 => subst(body, &params[0], &f.name)?,
+            ExprKind::Lambda { params, body } if params.len() == 1 => {
+                subst(body, &params[0], &f.name)?
+            }
             ExprKind::Lambda { .. } => return None,
-            ExprKind::Binary { op: BinOp::Range, lhs, rhs } => bin(BinOp::And, bin(BinOp::Ge, name(), (**lhs).clone()), bin(BinOp::Le, name(), (**rhs).clone())),
+            ExprKind::Binary {
+                op: BinOp::Range,
+                lhs,
+                rhs,
+            } => bin(
+                BinOp::And,
+                bin(BinOp::Ge, name(), (**lhs).clone()),
+                bin(BinOp::Le, name(), (**rhs).clone()),
+            ),
             _ => x.clone(),
         },
     };
-    Some(bin(BinOp::Or, bin(BinOp::Eq, name(), Expr::new(ExprKind::Lit(Lit::None), sp.clone())), holds))
+    Some(bin(
+        BinOp::Or,
+        bin(
+            BinOp::Eq,
+            name(),
+            Expr::new(ExprKind::Lit(Lit::None), sp.clone()),
+        ),
+        holds,
+    ))
 }
 
 /// `e` with the name `param` replaced by the field `field` of the record; None when a nested
@@ -767,10 +1034,18 @@ fn where_rule(m: &Model, e: &quadra_ir::Entity, f: &quadra_ir::Field) -> Option<
 fn subst(e: &Expr, param: &str, field: &str) -> Option<Expr> {
     let s = |x: &Expr| subst(x, param, field);
     let b = |x: &Expr| s(x).map(Box::new);
-    let arg = |a: &quadra_ir::Arg| Some(quadra_ir::Arg { name: a.name.clone(), value: s(&a.value)?, spread: a.spread });
+    let arg = |a: &quadra_ir::Arg| {
+        Some(quadra_ir::Arg {
+            name: a.name.clone(),
+            value: s(&a.value)?,
+            spread: a.spread,
+        })
+    };
     let kind = match &e.kind {
         ExprKind::Name(n) if n == param => ExprKind::Name(field.to_string()),
-        ExprKind::Lit(_) | ExprKind::Quantity { .. } | ExprKind::Name(_) | ExprKind::SelfRef => e.kind.clone(),
+        ExprKind::Lit(_) | ExprKind::Quantity { .. } | ExprKind::Name(_) | ExprKind::SelfRef => {
+            e.kind.clone()
+        }
         ExprKind::FString(parts) => ExprKind::FString(
             parts
                 .iter()
@@ -780,13 +1055,47 @@ fn subst(e: &Expr, param: &str, field: &str) -> Option<Expr> {
                 })
                 .collect::<Option<Vec<_>>>()?,
         ),
-        ExprKind::Field { base, name, optional } => ExprKind::Field { base: b(base)?, name: name.clone(), optional: *optional },
-        ExprKind::Call { callee, args } => ExprKind::Call { callee: b(callee)?, args: args.iter().map(arg).collect::<Option<Vec<_>>>()? },
-        ExprKind::Index { base, index } => ExprKind::Index { base: b(base)?, index: b(index)? },
-        ExprKind::Unary { op, expr } => ExprKind::Unary { op: *op, expr: b(expr)? },
-        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary { op: *op, lhs: b(lhs)?, rhs: b(rhs)? },
-        ExprKind::If { cond, then, otherwise } => ExprKind::If { cond: b(cond)?, then: b(then)?, otherwise: b(otherwise)? },
-        ExprKind::Lambda { params, body } if !params.iter().any(|p| p == param || p == field) => ExprKind::Lambda { params: params.clone(), body: std::sync::Arc::new(s(body)?) },
+        ExprKind::Field {
+            base,
+            name,
+            optional,
+        } => ExprKind::Field {
+            base: b(base)?,
+            name: name.clone(),
+            optional: *optional,
+        },
+        ExprKind::Call { callee, args } => ExprKind::Call {
+            callee: b(callee)?,
+            args: args.iter().map(arg).collect::<Option<Vec<_>>>()?,
+        },
+        ExprKind::Index { base, index } => ExprKind::Index {
+            base: b(base)?,
+            index: b(index)?,
+        },
+        ExprKind::Unary { op, expr } => ExprKind::Unary {
+            op: *op,
+            expr: b(expr)?,
+        },
+        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+            op: *op,
+            lhs: b(lhs)?,
+            rhs: b(rhs)?,
+        },
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => ExprKind::If {
+            cond: b(cond)?,
+            then: b(then)?,
+            otherwise: b(otherwise)?,
+        },
+        ExprKind::Lambda { params, body } if !params.iter().any(|p| p == param || p == field) => {
+            ExprKind::Lambda {
+                params: params.clone(),
+                body: std::sync::Arc::new(s(body)?),
+            }
+        }
         ExprKind::List(items) => ExprKind::List(items.iter().map(arg).collect::<Option<Vec<_>>>()?),
         ExprKind::Set(items) => ExprKind::Set(items.iter().map(s).collect::<Option<Vec<_>>>()?),
         _ => return None,
@@ -799,7 +1108,13 @@ fn flow(prefix: &str, e: Flow) -> String {
         Flow::Fail(m) if prefix.is_empty() => m,
         Flow::Fail(m) => format!("{prefix}: {m}"),
         Flow::Return(_) => format!("{prefix}: unexpected return"),
-        Flow::Conflict(c) => format!("{prefix}: changed by others in the meantime: {}", c.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("; ")),
+        Flow::Conflict(c) => format!(
+            "{prefix}: changed by others in the meantime: {}",
+            c.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
     }
 }
 
@@ -836,7 +1151,10 @@ impl<'m> Run<'m> {
         self.src.borrow_mut()
     }
 
-    fn with_db<T>(&mut self, f: impl FnOnce(&mut Database) -> Result<T, String>) -> Result<T, String> {
+    fn with_db<T>(
+        &mut self,
+        f: impl FnOnce(&mut Database) -> Result<T, String>,
+    ) -> Result<T, String> {
         self.src.borrow_mut().swap_conn(&mut self.db.conn);
         let r = f(&mut self.db);
         self.src.borrow_mut().swap_conn(&mut self.db.conn);
@@ -851,9 +1169,18 @@ impl<'m> Run<'m> {
     }
 
     /// Migrations, on the engine loading on demand; what they write stays in memory.
-    fn migrations(&mut self, pending: &[&'m Block], root: &Path, scripts: &mut Vec<(String, Vec<String>)>) -> Result<(), String> {
+    fn migrations(
+        &mut self,
+        pending: &[&'m Block],
+        root: &Path,
+        scripts: &mut Vec<(String, Vec<String>)>,
+    ) -> Result<(), String> {
         for b in pending {
-            let lines = self.interp.run_migration(b, Some(root)).map_err(|e| Flow::Fail(flow(&format!("migration {}", b.name), e))).map_err(|e| self.fail(e))?;
+            let lines = self
+                .interp
+                .run_migration(b, Some(root))
+                .map_err(|e| Flow::Fail(flow(&format!("migration {}", b.name), e)))
+                .map_err(|e| self.fail(e))?;
             scripts.push((b.name.clone(), lines));
         }
         // the records in memory lacking a new default get it (those loaded from now on too)
@@ -902,12 +1229,26 @@ impl<'m> Run<'m> {
     /// five, same count; the first duplicate of a key). A rule that does not translate, a
     /// `warn`, new rules and new uniques together (the batches interleave them), any other
     /// work: None, every record is checked by the engine, batch by batch.
-    fn sql_checks(&mut self, passes: &BTreeMap<String, Pass>, steps: &mut Vec<String>) -> Result<Option<()>, String> {
-        let only_rules = |p: &Pass| p.defaults.is_empty() && p.refill.is_empty() && p.formulas.is_empty() && !p.refreeze && !p.sel.all && !p.sel.warnings && p.sel.records.is_empty();
+    fn sql_checks(
+        &mut self,
+        passes: &BTreeMap<String, Pass>,
+        steps: &mut Vec<String>,
+    ) -> Result<Option<()>, String> {
+        let only_rules = |p: &Pass| {
+            p.defaults.is_empty()
+                && p.refill.is_empty()
+                && p.formulas.is_empty()
+                && !p.refreeze
+                && !p.sel.all
+                && !p.sel.warnings
+                && p.sel.records.is_empty()
+        };
         if passes.is_empty() || !passes.values().all(only_rules) {
             return Ok(None);
         }
-        let rules = passes.values().any(|p| !p.sel.checks.is_empty() || !p.sel.required.is_empty() || !p.sel.wheres.is_empty());
+        let rules = passes.values().any(|p| {
+            !p.sel.checks.is_empty() || !p.sel.required.is_empty() || !p.sel.wheres.is_empty()
+        });
         let uniques = passes.values().any(|p| !p.uniques.is_empty());
         if rules == uniques {
             return Ok(None);
@@ -961,8 +1302,15 @@ impl<'m> Run<'m> {
             for cond in &conds {
                 let this = quadra_runtime::query::Binder::This;
                 let mut spec = quadra_runtime::Spec::new(ent);
-                spec.conds = vec![quadra_runtime::query::Cond { binder: &this, expr: cond, negate: true }];
-                match self.interp.sql_matching(&spec, &mut quadra_runtime::Ctx::default()) {
+                spec.conds = vec![quadra_runtime::query::Cond {
+                    binder: &this,
+                    expr: cond,
+                    negate: true,
+                }];
+                match self
+                    .interp
+                    .sql_matching(&spec, &mut quadra_runtime::Ctx::default())
+                {
                     Ok(Some(v)) => ids.extend(v),
                     _ => {
                         ok = false;
@@ -978,7 +1326,10 @@ impl<'m> Run<'m> {
             return Ok(None);
         }
         // in id order across the entities, as the batches go
-        let mut all: Vec<(Id, String)> = found.iter().flat_map(|(ent, ids)| ids.iter().map(move |id| (*id, ent.clone()))).collect();
+        let mut all: Vec<(Id, String)> = found
+            .iter()
+            .flat_map(|(ent, ids)| ids.iter().map(move |id| (*id, ent.clone())))
+            .collect();
         all.sort();
         for chunk in all.chunks(BATCH.load(std::sync::atomic::Ordering::Relaxed).max(1)) {
             let ids: Vec<Id> = chunk.iter().map(|(id, _)| *id).collect();
@@ -986,7 +1337,9 @@ impl<'m> Run<'m> {
             let mut missing = Vec::new();
             for (id, ent) in chunk {
                 let e = m.entity(ent).unwrap();
-                self.interp.check_record_sel(e, *id, Some(&passes[ent].sel), &mut missing).map_err(|err| self.fail(err))?;
+                self.interp
+                    .check_record_sel(e, *id, Some(&passes[ent].sel), &mut missing)
+                    .map_err(|err| self.fail(err))?;
             }
             for (id, msg) in missing {
                 let at = self.missing.entry(msg).or_insert(id);
@@ -996,7 +1349,10 @@ impl<'m> Run<'m> {
         }
         for (ent, p) in passes {
             let n = p.sel.checks.len() + p.sel.required.len() + p.sel.wheres.len();
-            steps.push(format!("every {ent}: {n} new or changed rule{} (in SQL)", if n == 1 { "" } else { "s" }));
+            steps.push(format!(
+                "every {ent}: {n} new or changed rule{} (in SQL)",
+                if n == 1 { "" } else { "s" }
+            ));
         }
         Ok(Some(()))
     }
@@ -1005,7 +1361,11 @@ impl<'m> Run<'m> {
     /// once (`GROUP BY … HAVING COUNT(*) > 1`), a page at a time in id order, keyed by the
     /// engine as the batches key every record: the first record whose key an earlier one has
     /// fails the deploy, with the same message.
-    fn sql_uniques(&mut self, passes: &BTreeMap<String, Pass>, steps: &mut Vec<String>) -> Result<Option<()>, String> {
+    fn sql_uniques(
+        &mut self,
+        passes: &BTreeMap<String, Pass>,
+        steps: &mut Vec<String>,
+    ) -> Result<Option<()>, String> {
         // (record, position of the unique among its entity's): the first duplicate
         let mut first: Option<(Id, usize, String)> = None;
         let mut plans: Vec<(String, usize, Vec<String>, Vec<String>, String)> = Vec::new();
@@ -1020,7 +1380,9 @@ impl<'m> Run<'m> {
                 let mut cols = Vec::new();
                 for f in fields {
                     match t.fields.iter().find(|fm| fm.field == *f && !fm.formula) {
-                        Some(fm) if !fm.columns.is_empty() => cols.extend(fm.columns.iter().map(|c| format!("\"{}\"", c.name))),
+                        Some(fm) if !fm.columns.is_empty() => {
+                            cols.extend(fm.columns.iter().map(|c| format!("\"{}\"", c.name)))
+                        }
                         _ => return Ok(None),
                     }
                 }
@@ -1029,7 +1391,17 @@ impl<'m> Run<'m> {
         }
         for (ent, n, fields, cols, table) in &plans {
             let list = cols.join(", ");
-            let tuple = if cols.len() == 1 { format!("t.{}", cols[0]) } else { format!("({})", cols.iter().map(|c| format!("t.{c}")).collect::<Vec<_>>().join(", ")) };
+            let tuple = if cols.len() == 1 {
+                format!("t.{}", cols[0])
+            } else {
+                format!(
+                    "({})",
+                    cols.iter()
+                        .map(|c| format!("t.{c}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             let not_null: Vec<String> = cols.iter().map(|c| format!("{c} IS NOT NULL")).collect();
             let sql = format!(
                 "SELECT CAST(t.\"id\" AS TEXT) FROM \"{table}\" t WHERE t.\"id\" > ?bigint AND {tuple} IN (SELECT {list} FROM \"{table}\" WHERE {} GROUP BY {list} HAVING COUNT(*) > 1) ORDER BY t.\"id\" LIMIT 1000",
@@ -1042,19 +1414,31 @@ impl<'m> Run<'m> {
                 if rows.is_empty() {
                     break;
                 }
-                let ids: Vec<Id> = rows.iter().filter_map(|r| r[0].as_deref().and_then(|x| x.parse().ok())).collect();
+                let ids: Vec<Id> = rows
+                    .iter()
+                    .filter_map(|r| r[0].as_deref().and_then(|x| x.parse().ok()))
+                    .collect();
                 last = ids.last().copied().unwrap_or(0) as i64;
                 self.interp.store.prefetch_as(ent, &ids);
                 for id in ids {
                     // a later duplicate than one found already: it is not the first
-                    if first.as_ref().is_some_and(|(f, fnr, _)| (*f, *fnr) < (id, *n)) {
+                    if first
+                        .as_ref()
+                        .is_some_and(|(f, fnr, _)| (*f, *fnr) < (id, *n))
+                    {
                         break 'pages;
                     }
-                    let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+                    let rec = V::Ref {
+                        ent: Rc::from(ent.as_str()),
+                        id,
+                    };
                     let mut key = Vec::new();
                     let mut shown = Vec::new();
                     for f in fields {
-                        let v = self.interp.get(&rec, f, None, None).map_err(|e| self.fail(e))?;
+                        let v = self
+                            .interp
+                            .get(&rec, f, None, None)
+                            .map_err(|e| self.fail(e))?;
                         if v.is_none() {
                             break;
                         }
@@ -1065,7 +1449,11 @@ impl<'m> Run<'m> {
                         continue;
                     }
                     if seen.insert(key.join("\u{1}"), id).is_some() {
-                        first = Some((id, *n, quadra_runtime::unique_message(ent, fields, false, &shown)));
+                        first = Some((
+                            id,
+                            *n,
+                            quadra_runtime::unique_message(ent, fields, false, &shown),
+                        ));
                         break 'pages;
                     }
                 }
@@ -1078,12 +1466,19 @@ impl<'m> Run<'m> {
         }
         for (ent, p) in passes {
             let n = p.uniques.len();
-            steps.push(format!("every {ent}: {n} new unique{} (in SQL)", if n == 1 { "" } else { "s" }));
+            steps.push(format!(
+                "every {ent}: {n} new unique{} (in SQL)",
+                if n == 1 { "" } else { "s" }
+            ));
         }
         Ok(Some(()))
     }
 
-    fn passes(&mut self, passes: &BTreeMap<String, Pass>, steps: &mut Vec<String>) -> Result<(), String> {
+    fn passes(
+        &mut self,
+        passes: &BTreeMap<String, Pass>,
+        steps: &mut Vec<String>,
+    ) -> Result<(), String> {
         if passes.is_empty() {
             return Ok(());
         }
@@ -1093,17 +1488,31 @@ impl<'m> Run<'m> {
                 what.push(format!("defaults of {}", p.defaults.join(", ")));
             }
             if !p.refill.is_empty() {
-                what.push(format!("{} from the history", p.refill.iter().cloned().collect::<Vec<_>>().join(", ")));
+                what.push(format!(
+                    "{} from the history",
+                    p.refill.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
             }
             if !p.formulas.is_empty() {
-                what.push(format!("formulas {}", p.formulas.iter().cloned().collect::<Vec<_>>().join(", ")));
+                what.push(format!(
+                    "formulas {}",
+                    p.formulas.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
             }
             let s = &p.sel;
-            let rules = if s.all { 1 } else { s.checks.len() + s.required.len() + s.wheres.len() + s.records.len() } + p.uniques.len() + p.refreeze as usize;
+            let rules = if s.all {
+                1
+            } else {
+                s.checks.len() + s.required.len() + s.wheres.len() + s.records.len()
+            } + p.uniques.len()
+                + p.refreeze as usize;
             if s.all {
                 what.push("every rule".into());
             } else if rules > 0 {
-                what.push(format!("{rules} new or changed rule{}", if rules == 1 { "" } else { "s" }));
+                what.push(format!(
+                    "{rules} new or changed rule{}",
+                    if rules == 1 { "" } else { "s" }
+                ));
             }
             if s.warnings {
                 what.push("warnings".into());
@@ -1122,7 +1531,11 @@ impl<'m> Run<'m> {
         Ok(())
     }
 
-    fn batch(&mut self, passes: &BTreeMap<String, Pass>, batch: &[(Id, String)]) -> Result<(), String> {
+    fn batch(
+        &mut self,
+        passes: &BTreeMap<String, Pass>,
+        batch: &[(Id, String)],
+    ) -> Result<(), String> {
         let m = self.m;
         let tx = self.tx;
         let ids: Vec<Id> = batch.iter().map(|b| b.0).collect();
@@ -1145,7 +1558,11 @@ impl<'m> Run<'m> {
             return Err(format!("database: {e}"));
         }
         let i = &mut self.interp;
-        let r = i.flush_defaults().and_then(|_| i.settle()).and_then(|_| i.thaw_records()).and_then(|_| i.check_provisional());
+        let r = i
+            .flush_defaults()
+            .and_then(|_| i.settle())
+            .and_then(|_| i.thaw_records())
+            .and_then(|_| i.check_provisional());
         r.map_err(|e| self.fail(e))?;
         // `frozen when` changed
         let mut frozen_changed: BTreeSet<Id> = BTreeSet::new();
@@ -1171,11 +1588,25 @@ impl<'m> Run<'m> {
             ids.sort();
             ids.dedup();
             for id in ids {
-                if self.interp.store.records.get(&id).map_or(true, |r| *r.ent != *e.name) {
+                if self
+                    .interp
+                    .store
+                    .records
+                    .get(&id)
+                    .map_or(true, |r| *r.ent != *e.name)
+                {
                     continue;
                 }
-                let before = self.interp.store.records.get(&id).map(|r| r.warnings.clone()).unwrap_or_default();
-                self.interp.check_record_sel(e, id, None, &mut missing).map_err(|err| self.fail(err))?;
+                let before = self
+                    .interp
+                    .store
+                    .records
+                    .get(&id)
+                    .map(|r| r.warnings.clone())
+                    .unwrap_or_default();
+                self.interp
+                    .check_record_sel(e, id, None, &mut missing)
+                    .map_err(|err| self.fail(err))?;
                 warned.insert(id, before);
                 checked.insert(id);
             }
@@ -1186,8 +1617,16 @@ impl<'m> Run<'m> {
                 continue;
             }
             let e = m.entity(ent).unwrap();
-            let before = self.interp.store.records.get(id).map(|r| r.warnings.clone()).unwrap_or_default();
-            self.interp.check_record_sel(e, *id, Some(&p.sel), &mut missing).map_err(|err| self.fail(err))?;
+            let before = self
+                .interp
+                .store
+                .records
+                .get(id)
+                .map(|r| r.warnings.clone())
+                .unwrap_or_default();
+            self.interp
+                .check_record_sel(e, *id, Some(&p.sel), &mut missing)
+                .map_err(|err| self.fail(err))?;
             warned.insert(*id, before);
         }
         for (id, msg) in missing {
@@ -1195,26 +1634,51 @@ impl<'m> Run<'m> {
             *at = (*at).min(id);
         }
         // uniqueness: of what was written, and the new rules over every record
-        let written_ents: BTreeSet<String> = self.interp.store.dirty.iter().filter_map(|id| self.interp.store.records.get(id).map(|r| r.ent.to_string())).collect();
+        let written_ents: BTreeSet<String> = self
+            .interp
+            .store
+            .dirty
+            .iter()
+            .filter_map(|id| self.interp.store.records.get(id).map(|r| r.ent.to_string()))
+            .collect();
         for ent in &written_ents {
             if let Some(e) = m.entity(ent) {
-                self.interp.check_uniques_written(e).map_err(|err| self.fail(err))?;
+                self.interp
+                    .check_uniques_written(e)
+                    .map_err(|err| self.fail(err))?;
             }
         }
         for (id, ent) in batch {
             let p = &passes[ent];
             for (fields, when) in &p.uniques {
-                let rec = V::Ref { ent: Rc::from(ent.as_str()), id: *id };
+                let rec = V::Ref {
+                    ent: Rc::from(ent.as_str()),
+                    id: *id,
+                };
                 if let Some(w) = when {
-                    let mut ctx = quadra_runtime::Ctx { this: Some(rec.clone()), entity: Some(ent.clone()), scopes: vec![Default::default()], company: None, as_of: None };
-                    if !self.interp.eval(w, &mut ctx).map_err(|e| self.fail(e))?.truthy() {
+                    let mut ctx = quadra_runtime::Ctx {
+                        this: Some(rec.clone()),
+                        entity: Some(ent.clone()),
+                        scopes: vec![Default::default()],
+                        company: None,
+                        as_of: None,
+                    };
+                    if !self
+                        .interp
+                        .eval(w, &mut ctx)
+                        .map_err(|e| self.fail(e))?
+                        .truthy()
+                    {
                         continue;
                     }
                 }
                 let mut key = Vec::new();
                 let mut shown = Vec::new();
                 for f in fields {
-                    let v = self.interp.get(&rec, f, None, None).map_err(|e| self.fail(e))?;
+                    let v = self
+                        .interp
+                        .get(&rec, f, None, None)
+                        .map_err(|e| self.fail(e))?;
                     if v.is_none() {
                         break;
                     }
@@ -1224,9 +1688,20 @@ impl<'m> Run<'m> {
                 if key.len() < fields.len() {
                     continue;
                 }
-                let seen = self.uniques.entry(format!("{ent}|{}|{}", fields.join(","), when.is_some())).or_default();
+                let seen = self
+                    .uniques
+                    .entry(format!("{ent}|{}|{}", fields.join(","), when.is_some()))
+                    .or_default();
                 if seen.insert(key.join("\u{1}"), *id).is_some() {
-                    return Err(flow(NOT_FIT, Flow::Fail(quadra_runtime::unique_message(ent, fields, when.is_some(), &shown))));
+                    return Err(flow(
+                        NOT_FIT,
+                        Flow::Fail(quadra_runtime::unique_message(
+                            ent,
+                            fields,
+                            when.is_some(),
+                            &shown,
+                        )),
+                    ));
                 }
             }
         }
@@ -1240,18 +1715,33 @@ impl<'m> Run<'m> {
             let mut ids = match self.interp.candidates_strict(ent, &deps) {
                 Some(ids) => ids,
                 None => {
-                    self.later.entry(ent.clone()).or_default().formulas.insert(field.clone());
+                    self.later
+                        .entry(ent.clone())
+                        .or_default()
+                        .formulas
+                        .insert(field.clone());
                     Vec::new()
                 }
             };
             ids.extend(self.interp.thawed_of(ent));
-            ids.extend(batch.iter().filter(|(_, e)| e == ent && passes[e].formulas.contains(field)).map(|(id, _)| *id));
+            ids.extend(
+                batch
+                    .iter()
+                    .filter(|(_, e)| e == ent && passes[e].formulas.contains(field))
+                    .map(|(id, _)| *id),
+            );
             ids.sort();
             ids.dedup();
             for id in ids {
-                let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+                let rec = V::Ref {
+                    ent: Rc::from(ent.as_str()),
+                    id,
+                };
                 let v = self.interp.get(&rec, field, None, None).unwrap_or(V::None);
-                self.interp.store.materialized.insert((id, field.clone()), v);
+                self.interp
+                    .store
+                    .materialized
+                    .insert((id, field.clone()), v);
                 formulas.entry(id).or_default().insert(field.clone());
             }
         }
@@ -1264,7 +1754,18 @@ impl<'m> Run<'m> {
         touched.extend(frozen_changed.iter().copied());
         touched.extend(self.interp.store.thawed.iter().copied());
         touched.extend(formulas.keys().copied());
-        touched.extend(warned.iter().filter(|(id, w)| self.interp.store.records.get(id).is_some_and(|r| r.warnings != **w)).map(|(id, _)| *id));
+        touched.extend(
+            warned
+                .iter()
+                .filter(|(id, w)| {
+                    self.interp
+                        .store
+                        .records
+                        .get(id)
+                        .is_some_and(|r| r.warnings != **w)
+                })
+                .map(|(id, _)| *id),
+        );
         for (id, ent) in batch {
             if !passes[ent].refill.is_empty() {
                 touched.insert(*id);
@@ -1277,7 +1778,12 @@ impl<'m> Run<'m> {
             let Some(r) = self.interp.store.records.get(&id) else {
                 continue;
             };
-            let entries: Vec<(String, V)> = r.history.iter().filter(|(t, _, _)| *t == tx).map(|(_, f, v)| (f.clone(), v.clone())).collect();
+            let entries: Vec<(String, V)> = r
+                .history
+                .iter()
+                .filter(|(t, _, _)| *t == tx)
+                .map(|(_, f, v)| (f.clone(), v.clone()))
+                .collect();
             if r.created_tx == tx {
                 self.overlay.insert(id);
                 continue;
@@ -1286,7 +1792,15 @@ impl<'m> Run<'m> {
             if !owned.contains(&id) && !entries.is_empty() {
                 // a record of another batch: its own batch gives it its defaults
                 let defaults = self.plan.defaults.get(&ent);
-                if entries.iter().all(|(f, _)| defaults.is_some_and(|d| d.contains(f))) && self.plan.passes.get(&ent).is_some_and(|p| !p.defaults.is_empty()) {
+                if entries
+                    .iter()
+                    .all(|(f, _)| defaults.is_some_and(|d| d.contains(f)))
+                    && self
+                        .plan
+                        .passes
+                        .get(&ent)
+                        .is_some_and(|p| !p.defaults.is_empty())
+                {
                     continue;
                 }
                 if self.emitted.contains(&id) {
@@ -1298,47 +1812,89 @@ impl<'m> Run<'m> {
             if !entries.is_empty() && !self.emitted.insert(id) {
                 return Err("a record was written by two batches of the deploy".into());
             }
-            let frozen = frozen_changed.contains(&id) || self.interp.store.thawed.contains(&id) || r.frozen_at == Some(tx);
+            let frozen = frozen_changed.contains(&id)
+                || self.interp.store.thawed.contains(&id)
+                || r.frozen_at == Some(tx);
             let warnings_changed = warned.get(&id).is_some_and(|w| *w != r.warnings);
             for (f, v) in &entries {
                 self.ord += 1;
-                self.hist.push(vec![Sql::Int(id as i64), Sql::Int(self.ord), Sql::Text(f.clone()), Sql::Text(to_json(v).to_string())]);
+                self.hist.push(vec![
+                    Sql::Int(id as i64),
+                    Sql::Int(self.ord),
+                    Sql::Text(f.clone()),
+                    Sql::Text(to_json(v).to_string()),
+                ]);
             }
             if !entries.is_empty() || frozen || warnings_changed {
                 let frozen_tx = r.frozen_at.map(|t| Sql::Int(t as i64)).unwrap_or(Sql::Null);
-                let kinds = crate::db::kinds_of(&self.schema, r).map(Sql::Text).unwrap_or(Sql::Null);
+                let kinds = crate::db::kinds_of(&self.schema, r)
+                    .map(Sql::Text)
+                    .unwrap_or(Sql::Null);
                 self.stager.add(
                     "_quadra_records",
-                    vec!["last_tx".into(), "version_tx".into(), "frozen_tx".into(), "warnings".into(), "kinds".into()],
+                    vec![
+                        "last_tx".into(),
+                        "version_tx".into(),
+                        "frozen_tx".into(),
+                        "warnings".into(),
+                        "kinds".into(),
+                    ],
                     vec![
                         Sql::Int(id as i64),
                         Sql::Int(tx as i64),
-                        Sql::Int(if crate::db::exact_row(&self.schema, r) { r.version() as i64 } else { 0 }),
+                        Sql::Int(if crate::db::exact_row(&self.schema, r) {
+                            r.version() as i64
+                        } else {
+                            0
+                        }),
                         frozen_tx.clone(),
                         Sql::Text(serde_json::to_string(&r.warnings).unwrap()),
                         kinds,
                     ],
                 );
-            } else if owned.contains(&id) && passes.get(&ent).is_some_and(|p| !p.refill.is_empty()) {
+            } else if owned.contains(&id) && passes.get(&ent).is_some_and(|p| !p.refill.is_empty())
+            {
                 // columns filled again (another type): whether the row reads back exactly
-                let v = if crate::db::exact_row(&self.schema, r) { r.version() as i64 } else { 0 };
-                let kinds = crate::db::kinds_of(&self.schema, r).map(Sql::Text).unwrap_or(Sql::Null);
-                self.stager.add("_quadra_records", vec!["last_tx".into(), "version_tx".into(), "kinds".into()], vec![Sql::Int(id as i64), Sql::Int(tx as i64), Sql::Int(v), kinds]);
+                let v = if crate::db::exact_row(&self.schema, r) {
+                    r.version() as i64
+                } else {
+                    0
+                };
+                let kinds = crate::db::kinds_of(&self.schema, r)
+                    .map(Sql::Text)
+                    .unwrap_or(Sql::Null);
+                self.stager.add(
+                    "_quadra_records",
+                    vec!["last_tx".into(), "version_tx".into(), "kinds".into()],
+                    vec![Sql::Int(id as i64), Sql::Int(tx as i64), Sql::Int(v), kinds],
+                );
             } else if formulas.contains_key(&id) {
                 // only its materialized formulas: caches and snapshots see the row changed
-                self.stager.add("_quadra_records", vec!["last_tx".into()], vec![Sql::Int(id as i64), Sql::Int(tx as i64)]);
+                self.stager.add(
+                    "_quadra_records",
+                    vec!["last_tx".into()],
+                    vec![Sql::Int(id as i64), Sql::Int(tx as i64)],
+                );
             }
             // the projection: the columns of what changed
             let Some(t) = self.schema.entity_table(&ent) else {
                 continue;
             };
-            let mut fields: BTreeSet<String> = entries.iter().map(|(f, _)| f.split(['@', '#']).next().unwrap_or(f).to_string()).collect();
+            let mut fields: BTreeSet<String> = entries
+                .iter()
+                .map(|(f, _)| f.split(['@', '#']).next().unwrap_or(f).to_string())
+                .collect();
             if owned.contains(&id) {
                 if let Some(p) = passes.get(&ent) {
                     fields.extend(p.refill.iter().cloned());
                 }
             }
-            let simple = fields.iter().all(|f| t.fields.iter().any(|fm| fm.field == *f && !fm.formula)) && entries.iter().all(|(f, _)| !f.contains('@') && !f.contains('#'));
+            let simple = fields
+                .iter()
+                .all(|f| t.fields.iter().any(|fm| fm.field == *f && !fm.formula))
+                && entries
+                    .iter()
+                    .all(|(f, _)| !f.contains('@') && !f.contains('#'));
             if !simple {
                 self.overlay.insert(id);
                 continue;
@@ -1350,7 +1906,12 @@ impl<'m> Run<'m> {
                     if !formulas.get(&id).is_some_and(|f| f.contains(&fm.field)) {
                         continue;
                     }
-                    self.interp.store.materialized.get(&(id, fm.field.clone())).cloned().unwrap_or(V::None)
+                    self.interp
+                        .store
+                        .materialized
+                        .get(&(id, fm.field.clone()))
+                        .cloned()
+                        .unwrap_or(V::None)
                 } else {
                     if !fields.contains(&fm.field) {
                         continue;
@@ -1376,7 +1937,11 @@ impl<'m> Run<'m> {
             let mut src = self.src.borrow_mut();
             let conn = src.conn();
             if !hist.is_empty() {
-                conn.bulk_insert("_qx_hist", &["record_id", "ord", "field", "value"], &mut hist.into_iter())?;
+                conn.bulk_insert(
+                    "_qx_hist",
+                    &["record_id", "ord", "field", "value"],
+                    &mut hist.into_iter(),
+                )?;
             }
             self.stager.flush(conn)?;
         }
@@ -1398,13 +1963,22 @@ impl<'m> Run<'m> {
             for (t, f, v) in &r.history {
                 if *t == tx {
                     self.ord += 1;
-                    self.hist.push(vec![Sql::Int(*id as i64), Sql::Int(self.ord), Sql::Text(f.clone()), Sql::Text(to_json(v).to_string())]);
+                    self.hist.push(vec![
+                        Sql::Int(*id as i64),
+                        Sql::Int(self.ord),
+                        Sql::Text(f.clone()),
+                        Sql::Text(to_json(v).to_string()),
+                    ]);
                 }
             }
         }
         let hist = std::mem::take(&mut self.hist);
         if !hist.is_empty() {
-            self.conn().conn().bulk_insert("_qx_hist", &["record_id", "ord", "field", "value"], &mut hist.into_iter())?;
+            self.conn().conn().bulk_insert(
+                "_qx_hist",
+                &["record_id", "ord", "field", "value"],
+                &mut hist.into_iter(),
+            )?;
         }
         let m = self.m;
         let store = std::mem::take(&mut self.interp.store);
@@ -1413,7 +1987,10 @@ impl<'m> Run<'m> {
                 let Some(r) = store.records.get(id) else {
                     continue;
                 };
-                let changed = r.created_tx == tx || r.history.iter().any(|(t, _, _)| *t == tx) || r.frozen_at == Some(tx) || store.thawed.contains(id);
+                let changed = r.created_tx == tx
+                    || r.history.iter().any(|(t, _, _)| *t == tx)
+                    || r.frozen_at == Some(tx)
+                    || store.thawed.contains(id);
                 if changed || store.materialized.keys().any(|(x, _)| x == id) {
                     db.record_meta(r, tx, r.version())?;
                 }
@@ -1435,12 +2012,27 @@ impl<'m> Run<'m> {
         let (mut seq, prev) = {
             let mut src = self.src.borrow_mut();
             let conn = src.conn();
-            let seq = conn.query("SELECT CAST(MAX(\"seq\") AS TEXT) FROM \"_quadra_history\"", &[])?;
-            let seq: i64 = seq.first().and_then(|r| r[0].as_deref()).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let seq = conn.query(
+                "SELECT CAST(MAX(\"seq\") AS TEXT) FROM \"_quadra_history\"",
+                &[],
+            )?;
+            let seq: i64 = seq
+                .first()
+                .and_then(|r| r[0].as_deref())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             let last = conn.query("SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1", &[])?;
-            (seq, last.first().and_then(|r| r[0].clone()).unwrap_or_else(|| "0".repeat(64)))
+            (
+                seq,
+                last.first()
+                    .and_then(|r| r[0].clone())
+                    .unwrap_or_else(|| "0".repeat(64)),
+            )
         };
-        self.src.borrow_mut().conn().batch("CREATE INDEX \"_qx_hist_order\" ON \"_qx_hist\" (\"record_id\", \"ord\")")?;
+        self.src
+            .borrow_mut()
+            .conn()
+            .batch("CREATE INDEX \"_qx_hist_order\" ON \"_qx_hist\" (\"record_id\", \"ord\")")?;
         let mut hasher = CommitHasher::new(&prev, tx, &at, None, cause);
         let (mut last_id, mut last_ord) = (-1i64, -1i64);
         loop {
@@ -1462,14 +2054,32 @@ impl<'m> Run<'m> {
                 let value = r[3].clone().unwrap_or_default();
                 hasher.entry(&json!(["h", id, field, value]).to_string());
                 seq += 1;
-                out.push(vec![Sql::Int(seq), Sql::Int(tx as i64), Sql::Int(id), Sql::Text(field), Sql::Text(value)]);
+                out.push(vec![
+                    Sql::Int(seq),
+                    Sql::Int(tx as i64),
+                    Sql::Int(id),
+                    Sql::Text(field),
+                    Sql::Text(value),
+                ]);
             }
-            conn.bulk_insert("_quadra_history", &["seq", "tx", "record_id", "field", "value"], &mut out.into_iter())?;
+            conn.bulk_insert(
+                "_quadra_history",
+                &["seq", "tx", "record_id", "field", "value"],
+                &mut out.into_iter(),
+            )?;
         }
         // applied migrations and renames: in the hash after the history, as `write_tx` does
         let store = std::mem::take(&mut self.interp.store);
         let empty = Store::default();
-        let commit = Commit { tx, base: tx - 1, before: &empty, after: &store, user: None, cause: cause.to_string(), time };
+        let commit = Commit {
+            tx,
+            base: tx - 1,
+            before: &empty,
+            after: &store,
+            user: None,
+            cause: cause.to_string(),
+            time,
+        };
         let mut payload = Vec::new();
         let r = self.with_db(|db| {
             db.write_scripts(&commit, &mut payload, &|t| t)?;
@@ -1486,11 +2096,24 @@ impl<'m> Run<'m> {
         let mut src = self.src.borrow_mut();
         let conn = src.conn();
         let get = |conn: &mut Conn, k: &str| -> Result<Option<String>, String> {
-            Ok(conn.query("SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = ?text", &[Sql::Text(k.into())])?.into_iter().next().and_then(|r| r[0].clone()))
+            Ok(conn
+                .query(
+                    "SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = ?text",
+                    &[Sql::Text(k.into())],
+                )?
+                .into_iter()
+                .next()
+                .and_then(|r| r[0].clone()))
         };
-        let stored_next = get(conn, "state")?.and_then(|s| serde_json::from_str::<J>(&s).ok()).and_then(|s| s["next_id"].as_u64()).unwrap_or(0);
-        let reserved = get(conn, "id_reserved")?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        let state = json!({ "next_id": stored_next.max(reserved).max(next_id), "tx": tx }).to_string();
+        let stored_next = get(conn, "state")?
+            .and_then(|s| serde_json::from_str::<J>(&s).ok())
+            .and_then(|s| s["next_id"].as_u64())
+            .unwrap_or(0);
+        let reserved = get(conn, "id_reserved")?
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let state =
+            json!({ "next_id": stored_next.max(reserved).max(next_id), "tx": tx }).to_string();
         conn.exec("INSERT INTO \"_quadra_meta\" (\"key\", \"value\") VALUES ('state', ?text) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\"", &[Sql::Text(state)])?;
         conn.exec(
             "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text)",
@@ -1526,18 +2149,41 @@ fn permissive(t: &Table, relax: &BTreeSet<String>, old: &Table) -> (Table, bool)
 /// SQLite: replace a table by a copy with another definition (the columns of both are copied).
 fn sqlite_rebuild(conn: &mut Conn, def: &Table) -> Result<(), String> {
     let tmp = format!("{}__qx_new", def.name);
-    let existing: BTreeSet<String> = conn.query(&format!("SELECT \"name\" FROM pragma_table_info('{}')", def.name.replace('\'', "''")), &[])?.into_iter().filter_map(|r| r[0].clone()).collect();
-    let cols: Vec<String> = def.columns.iter().filter(|c| existing.contains(&c.name)).map(|c| format!("\"{}\"", c.name)).collect();
+    let existing: BTreeSet<String> = conn
+        .query(
+            &format!(
+                "SELECT \"name\" FROM pragma_table_info('{}')",
+                def.name.replace('\'', "''")
+            ),
+            &[],
+        )?
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect();
+    let cols: Vec<String> = def
+        .columns
+        .iter()
+        .filter(|c| existing.contains(&c.name))
+        .map(|c| format!("\"{}\"", c.name))
+        .collect();
     conn.batch(&format!("DROP TABLE IF EXISTS \"{tmp}\""))?;
     conn.batch(&def.create_sql_as(&tmp, Dialect::Sqlite))?;
-    conn.batch(&format!("INSERT INTO \"{tmp}\" ({0}) SELECT {0} FROM \"{1}\"", cols.join(", "), def.name))?;
+    conn.batch(&format!(
+        "INSERT INTO \"{tmp}\" ({0}) SELECT {0} FROM \"{1}\"",
+        cols.join(", "),
+        def.name
+    ))?;
     conn.batch(&format!("DROP TABLE \"{}\"", def.name))?;
     conn.batch(&format!("ALTER TABLE \"{tmp}\" RENAME TO \"{}\"", def.name))?;
     Ok(())
 }
 
 /// PostgreSQL: the constraints of a table of type `kind` (`u`, `c`, `f`), with their columns.
-pub(crate) fn pg_constraints(conn: &mut Conn, table: &str, kind: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+pub(crate) fn pg_constraints(
+    conn: &mut Conn,
+    table: &str,
+    kind: &str,
+) -> Result<Vec<(String, Vec<String>)>, String> {
     let rows = conn.query(
         "SELECT CAST(c.conname AS TEXT), CAST(a.attname AS TEXT) FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
          CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
@@ -1546,7 +2192,10 @@ pub(crate) fn pg_constraints(conn: &mut Conn, table: &str, kind: &str) -> Result
     )?;
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for r in rows {
-        let (name, col) = (r[0].clone().unwrap_or_default(), r[1].clone().unwrap_or_default());
+        let (name, col) = (
+            r[0].clone().unwrap_or_default(),
+            r[1].clone().unwrap_or_default(),
+        );
         match out.last_mut() {
             Some((n, cols)) if *n == name => cols.push(col),
             _ => out.push((name, vec![col])),
@@ -1560,7 +2209,10 @@ fn fill_ledger(conn: &mut Conn, t: &Table) -> Result<(), String> {
     let TableSource::Ledger(ledger) = &t.source else {
         return Ok(());
     };
-    let mut names: Vec<String> = ["id", "_tx", "_date", "_source_entity", "_source_id"].iter().map(|s| s.to_string()).collect();
+    let mut names: Vec<String> = ["id", "_tx", "_date", "_source_entity", "_source_id"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     for fm in &t.fields {
         names.extend(fm.columns.iter().map(|c| c.name.clone()));
     }
@@ -1585,7 +2237,13 @@ fn fill_ledger(conn: &mut Conn, t: &Table) -> Result<(), String> {
                 Some(V::Ref { ent, id }) => (Sql::Text(ent.to_string()), Sql::Int(*id as i64)),
                 _ => (Sql::Null, Sql::Null),
             };
-            let mut v = vec![Sql::Int(row.id as i64), Sql::Int(row.tx as i64), Sql::Text(row.date.format("%Y-%m-%d %H:%M:%S").to_string()), src_ent, src_id];
+            let mut v = vec![
+                Sql::Int(row.id as i64),
+                Sql::Int(row.tx as i64),
+                Sql::Text(row.date.format("%Y-%m-%d %H:%M:%S").to_string()),
+                src_ent,
+                src_id,
+            ];
             for fm in &t.fields {
                 let val = row.cols.get(&fm.field).cloned().unwrap_or(V::None);
                 for c in &fm.columns {
@@ -1601,7 +2259,14 @@ fn fill_ledger(conn: &mut Conn, t: &Table) -> Result<(), String> {
 /// The changes of the tables, before the data: renames, new tables and columns, drops.
 /// Returns the tables created or rebuilt (their indexes are built in the transaction) and
 /// the SQLite tables to copy at the end (to their exact definition).
-fn ddl_before(conn: &mut Conn, plan: &Plan, renamed_tables: &[(String, String)], col_renames: &[(String, String, String)], old: &Catalog, steps: &mut Vec<String>) -> Result<(BTreeSet<String>, Vec<Table>), String> {
+fn ddl_before(
+    conn: &mut Conn,
+    plan: &Plan,
+    renamed_tables: &[(String, String)],
+    col_renames: &[(String, String, String)],
+    old: &Catalog,
+    steps: &mut Vec<String>,
+) -> Result<(BTreeSet<String>, Vec<Table>), String> {
     let d = conn.dialect();
     let mut fresh = BTreeSet::new();
     let mut end = Vec::new();
@@ -1610,7 +2275,9 @@ fn ddl_before(conn: &mut Conn, plan: &Plan, renamed_tables: &[(String, String)],
         steps.push(format!("rename table {from} → {to}"));
     }
     for (t, from, to) in col_renames {
-        conn.batch(&format!("ALTER TABLE \"{t}\" RENAME COLUMN \"{from}\" TO \"{to}\""))?;
+        conn.batch(&format!(
+            "ALTER TABLE \"{t}\" RENAME COLUMN \"{from}\" TO \"{to}\""
+        ))?;
         steps.push(format!("rename column {t}.{from} → {to}"));
     }
     for op in &plan.tables {
@@ -1626,18 +2293,38 @@ fn ddl_before(conn: &mut Conn, plan: &Plan, renamed_tables: &[(String, String)],
                 // the `qx_` indexes on dropped columns go first (SQLite refuses to drop them), and
                 // the triggers of the full-text search (they name the columns; the search is built
                 // again at the end)
-                for i in old.indexes.iter().filter(|i| i.table == t.name && i.columns.iter().any(|c| dropping.contains(c))) {
+                for i in old
+                    .indexes
+                    .iter()
+                    .filter(|i| i.table == t.name && i.columns.iter().any(|c| dropping.contains(c)))
+                {
                     conn.batch(&format!("DROP INDEX IF EXISTS \"{}\"", i.name))?;
                 }
                 if d == Dialect::Sqlite {
                     crate::db::drop_search_triggers(conn, &t.name)?;
                 }
-                let droppable = |c: &str| a.old.column(c).is_some_and(|oc| oc.references.is_none()) && !a.old.uniques.iter().any(|u| u.iter().any(|x| x == c)) && !a.old.primary.iter().any(|p| p == c);
+                let droppable = |c: &str| {
+                    a.old.column(c).is_some_and(|oc| oc.references.is_none())
+                        && !a.old.uniques.iter().any(|u| u.iter().any(|x| x == c))
+                        && !a.old.primary.iter().any(|p| p == c)
+                };
                 if d == Dialect::Sqlite && (a.constraints || !a.drop.iter().all(|c| droppable(c))) {
                     // the table is copied: now, without the constraints the data must be checked
                     // against first (the engine reports what breaks them), and at the end with them
-                    let mut relax: BTreeSet<String> = a.add.iter().filter(|c| c.not_null).map(|c| c.name.clone()).collect();
-                    relax.extend(t.columns.iter().filter(|c| c.not_null && a.old.column(&c.name).is_some_and(|oc| !oc.not_null)).map(|c| c.name.clone()));
+                    let mut relax: BTreeSet<String> = a
+                        .add
+                        .iter()
+                        .filter(|c| c.not_null)
+                        .map(|c| c.name.clone())
+                        .collect();
+                    relax.extend(
+                        t.columns
+                            .iter()
+                            .filter(|c| {
+                                c.not_null && a.old.column(&c.name).is_some_and(|oc| !oc.not_null)
+                            })
+                            .map(|c| c.name.clone()),
+                    );
                     let (def, relaxed) = permissive(t, &relax, &a.old);
                     sqlite_rebuild(conn, &def)?;
                     fresh.insert(t.name.clone());
@@ -1654,7 +2341,9 @@ fn ddl_before(conn: &mut Conn, plan: &Plan, renamed_tables: &[(String, String)],
                 for c in &a.add {
                     let mut def = c.definition(d, false);
                     if let (Dialect::Sqlite, Some(r)) = (d, &c.references) {
-                        def.push_str(&format!(" REFERENCES \"{r}\" (\"id\") DEFERRABLE INITIALLY DEFERRED"));
+                        def.push_str(&format!(
+                            " REFERENCES \"{r}\" (\"id\") DEFERRABLE INITIALLY DEFERRED"
+                        ));
                     }
                     conn.batch(&format!("ALTER TABLE \"{}\" ADD COLUMN {def}", t.name))?;
                     steps.push(format!("add column {}.{}", t.name, c.name));
@@ -1665,7 +2354,11 @@ fn ddl_before(conn: &mut Conn, plan: &Plan, renamed_tables: &[(String, String)],
                 }
             }
             TableOp::Ledger(t) => {
-                let cascade = if d == Dialect::Postgres { " CASCADE" } else { "" };
+                let cascade = if d == Dialect::Postgres {
+                    " CASCADE"
+                } else {
+                    ""
+                };
                 conn.batch(&format!("DROP TABLE IF EXISTS \"{}\"{cascade}", t.name))?;
                 conn.batch(&t.create_sql(d))?;
                 fill_ledger(conn, t)?;
@@ -1681,7 +2374,11 @@ fn ddl_before(conn: &mut Conn, plan: &Plan, renamed_tables: &[(String, String)],
     }
     for op in &plan.tables {
         if let TableOp::Drop(name) = op {
-            let cascade = if d == Dialect::Postgres { " CASCADE" } else { "" };
+            let cascade = if d == Dialect::Postgres {
+                " CASCADE"
+            } else {
+                ""
+            };
             conn.batch(&format!("DROP TABLE IF EXISTS \"{name}\"{cascade}"))?;
             steps.push(format!("drop table {name}"));
         }
@@ -1702,7 +2399,10 @@ fn fill_traits(conn: &mut Conn, plan: &Plan, new: &Catalog) -> Result<(), String
         if ents.is_empty() {
             continue;
         }
-        let list: Vec<String> = ents.iter().map(|e| format!("'{}'", e.replace('\'', "''"))).collect();
+        let list: Vec<String> = ents
+            .iter()
+            .map(|e| format!("'{}'", e.replace('\'', "''")))
+            .collect();
         conn.batch(&format!("INSERT INTO \"{}\" (\"id\", \"entity\") SELECT \"id\", \"entity\" FROM \"_quadra_records\" WHERE \"entity\" IN ({})", t.name, list.join(", ")))?;
     }
     Ok(())
@@ -1710,7 +2410,12 @@ fn fill_traits(conn: &mut Conn, plan: &Plan, new: &Catalog) -> Result<(), String
 
 /// The changes of the tables after the data: `NOT NULL`, constraints and foreign keys
 /// (PostgreSQL), the SQLite copies to the exact definition.
-fn ddl_after(conn: &mut Conn, plan: &Plan, end: &[Table], copied: &BTreeSet<String>) -> Result<(), String> {
+fn ddl_after(
+    conn: &mut Conn,
+    plan: &Plan,
+    end: &[Table],
+    copied: &BTreeSet<String>,
+) -> Result<(), String> {
     match conn.dialect() {
         Dialect::Sqlite => {
             for t in end {
@@ -1718,9 +2423,18 @@ fn ddl_after(conn: &mut Conn, plan: &Plan, end: &[Table], copied: &BTreeSet<Stri
             }
             // the tables copied with the foreign keys off: their references still hold
             for t in copied {
-                let bad = conn.query(&format!("SELECT \"table\" FROM pragma_foreign_key_check('{}')", t.replace('\'', "''")), &[])?;
+                let bad = conn.query(
+                    &format!(
+                        "SELECT \"table\" FROM pragma_foreign_key_check('{}')",
+                        t.replace('\'', "''")
+                    ),
+                    &[],
+                )?;
                 if let Some(r) = bad.first() {
-                    return Err(format!("a reference of {} points to no record", r[0].clone().unwrap_or_default()));
+                    return Err(format!(
+                        "a reference of {} points to no record",
+                        r[0].clone().unwrap_or_default()
+                    ));
                 }
             }
         }
@@ -1738,7 +2452,10 @@ fn ddl_after(conn: &mut Conn, plan: &Plan, end: &[Table], copied: &BTreeSet<Stri
                         let t = &a.table;
                         for c in &a.add {
                             if c.not_null {
-                                conn.batch(&format!("ALTER TABLE \"{}\" ALTER COLUMN \"{}\" SET NOT NULL", t.name, c.name))?;
+                                conn.batch(&format!(
+                                    "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" SET NOT NULL",
+                                    t.name, c.name
+                                ))?;
                             }
                             if let Some(r) = &c.references {
                                 conn.batch(&schema::foreign_key(&t.name, &c.name, r))?;
@@ -1754,22 +2471,34 @@ fn ddl_after(conn: &mut Conn, plan: &Plan, end: &[Table], copied: &BTreeSet<Stri
                             };
                             if oc.not_null != c.not_null && !t.primary.contains(&c.name) {
                                 let set = if c.not_null { "SET" } else { "DROP" };
-                                conn.batch(&format!("ALTER TABLE \"{}\" ALTER COLUMN \"{}\" {set} NOT NULL", t.name, c.name))?;
+                                conn.batch(&format!(
+                                    "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" {set} NOT NULL",
+                                    t.name, c.name
+                                ))?;
                             }
                             if oc.check != c.check {
                                 for (name, cols) in pg_constraints(conn, &t.name, "c")? {
                                     if cols == [c.name.clone()] {
-                                        conn.batch(&format!("ALTER TABLE \"{}\" DROP CONSTRAINT \"{name}\"", t.name))?;
+                                        conn.batch(&format!(
+                                            "ALTER TABLE \"{}\" DROP CONSTRAINT \"{name}\"",
+                                            t.name
+                                        ))?;
                                     }
                                 }
                                 if let Some(ch) = &c.check {
-                                    conn.batch(&format!("ALTER TABLE \"{}\" ADD CHECK ({ch})", t.name))?;
+                                    conn.batch(&format!(
+                                        "ALTER TABLE \"{}\" ADD CHECK ({ch})",
+                                        t.name
+                                    ))?;
                                 }
                             }
                             if oc.references != c.references {
                                 for (name, cols) in pg_constraints(conn, &t.name, "f")? {
                                     if cols == [c.name.clone()] {
-                                        conn.batch(&format!("ALTER TABLE \"{}\" DROP CONSTRAINT \"{name}\"", t.name))?;
+                                        conn.batch(&format!(
+                                            "ALTER TABLE \"{}\" DROP CONSTRAINT \"{name}\"",
+                                            t.name
+                                        ))?;
                                     }
                                 }
                                 if let Some(r) = &c.references {
@@ -1780,12 +2509,25 @@ fn ddl_after(conn: &mut Conn, plan: &Plan, end: &[Table], copied: &BTreeSet<Stri
                         if a.old.uniques != t.uniques {
                             for (name, cols) in pg_constraints(conn, &t.name, "u")? {
                                 if !t.uniques.contains(&cols) {
-                                    conn.batch(&format!("ALTER TABLE \"{}\" DROP CONSTRAINT \"{name}\"", t.name))?;
+                                    conn.batch(&format!(
+                                        "ALTER TABLE \"{}\" DROP CONSTRAINT \"{name}\"",
+                                        t.name
+                                    ))?;
                                 }
                             }
-                            let now: Vec<Vec<String>> = pg_constraints(conn, &t.name, "u")?.into_iter().map(|(_, c)| c).collect();
+                            let now: Vec<Vec<String>> = pg_constraints(conn, &t.name, "u")?
+                                .into_iter()
+                                .map(|(_, c)| c)
+                                .collect();
                             for u in t.uniques.iter().filter(|u| !now.contains(u)) {
-                                conn.batch(&format!("ALTER TABLE \"{}\" ADD UNIQUE ({})", t.name, u.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ")))?;
+                                conn.batch(&format!(
+                                    "ALTER TABLE \"{}\" ADD UNIQUE ({})",
+                                    t.name,
+                                    u.iter()
+                                        .map(|c| format!("\"{c}\""))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ))?;
                             }
                         }
                     }
@@ -1799,16 +2541,29 @@ fn ddl_after(conn: &mut Conn, plan: &Plan, end: &[Table], copied: &BTreeSet<Stri
 
 /// Indexes renamed with their table or column (PostgreSQL: `ALTER INDEX … RENAME`; SQLite
 /// builds them again with the others).
-fn rename_indexes(conn: &mut Conn, old: &Catalog, schema: &Schema, existing: &[(String, String, bool)]) -> Result<(), String> {
+fn rename_indexes(
+    conn: &mut Conn,
+    old: &Catalog,
+    schema: &Schema,
+    existing: &[(String, String, bool)],
+) -> Result<(), String> {
     if conn.dialect() != Dialect::Postgres {
         return Ok(());
     }
     for i in &old.indexes {
-        let Some(want) = schema.indexes.iter().find(|w| w.table == i.table && w.columns == i.columns && w.lower == i.lower && w.fts == i.fts) else {
+        let Some(want) = schema.indexes.iter().find(|w| {
+            w.table == i.table && w.columns == i.columns && w.lower == i.lower && w.fts == i.fts
+        }) else {
             continue;
         };
-        if want.name != i.name && existing.iter().any(|(n, _, valid)| *n == i.name && *valid) && !existing.iter().any(|(n, _, _)| *n == want.name) {
-            conn.batch(&format!("ALTER INDEX \"{}\" RENAME TO \"{}\"", i.name, want.name))?;
+        if want.name != i.name
+            && existing.iter().any(|(n, _, valid)| *n == i.name && *valid)
+            && !existing.iter().any(|(n, _, _)| *n == want.name)
+        {
+            conn.batch(&format!(
+                "ALTER INDEX \"{}\" RENAME TO \"{}\"",
+                i.name, want.name
+            ))?;
         }
     }
     Ok(())
@@ -1822,7 +2577,16 @@ pub(crate) enum Done {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, time: NaiveDateTime, dry: bool, always: bool, label: Option<&str>) -> Result<Result<Done, Fallback>, String> {
+pub(crate) fn deploy(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    root: &Path,
+    time: NaiveDateTime,
+    dry: bool,
+    always: bool,
+    label: Option<&str>,
+) -> Result<Result<Done, Fallback>, String> {
     let mut db = Database::open(url, model, report)?;
     let status = db.status()?;
     if !status.initialized {
@@ -1831,13 +2595,29 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
     let Some(mut old) = Catalog::read(&mut db)? else {
         return Ok(Err(Fallback("the database has no catalog yet".into())));
     };
-    let applied: BTreeSet<String> = db.conn.query("SELECT \"key\" FROM \"_quadra_applied\"", &[])?.into_iter().filter_map(|r| r[0].clone()).collect();
-    let pending: Vec<&Block> = model.migrations.iter().filter(|m| !applied.contains(&format!("migration:{}", m.name))).collect();
+    let applied: BTreeSet<String> = db
+        .conn
+        .query("SELECT \"key\" FROM \"_quadra_applied\"", &[])?
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect();
+    let pending: Vec<&Block> = model
+        .migrations
+        .iter()
+        .filter(|m| !applied.contains(&format!("migration:{}", m.name)))
+        .collect();
     if status.schema_current && pending.is_empty() && !always {
         return Ok(Ok(Done::Nothing));
     }
     let (added, removed) = db.plan()?;
-    let mut out = MigrateReport { schema_changed: !status.schema_current, fingerprint: status.fingerprint.clone(), added, removed, incremental: true, ..Default::default() };
+    let mut out = MigrateReport {
+        schema_changed: !status.schema_current,
+        fingerprint: status.fingerprint.clone(),
+        added,
+        removed,
+        incremental: true,
+        ..Default::default()
+    };
     let renames = pending_renames(model, &pending);
     let (col_renames, renamed_tables) = rename_catalog(&mut old, &renames);
     let schema = db.schema.clone();
@@ -1846,7 +2626,11 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
         Ok(p) => p,
         Err(f) => return Ok(Err(f)),
     };
-    let tables = Plan { tables: std::mem::take(&mut plan.tables), passes: BTreeMap::new(), defaults: HashMap::new() };
+    let tables = Plan {
+        tables: std::mem::take(&mut plan.tables),
+        passes: BTreeMap::new(),
+        defaults: HashMap::new(),
+    };
     let names: Vec<String> = pending.iter().map(|m| m.name.clone()).collect();
     let cause = match (label, names.is_empty()) {
         (Some(l), true) => l.to_string(),
@@ -1857,20 +2641,36 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
     let d = db.dialect();
     // SQLite: a table copied while other tables refer to it needs foreign keys off (they are
     // checked before the commit)
-    let copies = d == Dialect::Sqlite && tables.tables.iter().any(|op| !matches!(op, TableOp::Create(_) | TableOp::Trait(_)));
+    let copies = d == Dialect::Sqlite
+        && tables
+            .tables
+            .iter()
+            .any(|op| !matches!(op, TableOp::Create(_) | TableOp::Trait(_)));
     if copies {
         db.conn.batch("PRAGMA foreign_keys = OFF")?;
     }
-    db.conn.batch(if d == Dialect::Sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" })?;
+    db.conn.batch(if d == Dialect::Sqlite {
+        "BEGIN IMMEDIATE"
+    } else {
+        "BEGIN"
+    })?;
     let mut steps = Vec::new();
     let mut concurrent: BTreeSet<String> = BTreeSet::new();
     let result = (|| -> Result<(), String> {
         if d == Dialect::Postgres {
-            db.conn.batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE")?;
+            db.conn
+                .batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE")?;
         }
         let base = head(&mut db.conn)?;
         let existing = db.existing_indexes()?;
-        let (fresh, end) = ddl_before(&mut db.conn, &tables, &renamed_tables, &col_renames, &old, &mut steps)?;
+        let (fresh, end) = ddl_before(
+            &mut db.conn,
+            &tables,
+            &renamed_tables,
+            &col_renames,
+            &old,
+            &mut steps,
+        )?;
         fill_traits(&mut db.conn, &tables, &new)?;
         // a field whose columns now read back as another kind of value, an entity without
         // its table: its records are read from the history until written again
@@ -1889,7 +2689,12 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
             let Some(o) = old.tables.iter().find(|x| x.name == t.name) else {
                 continue;
             };
-            let changed = t.fields.iter().filter(|fm| !fm.formula).any(|fm| o.fields.iter().find(|x| x.field == fm.field && !x.formula).is_some_and(|x| x.decode != fm.decode && x.decode != schema::Decode::Unknown));
+            let changed = t.fields.iter().filter(|fm| !fm.formula).any(|fm| {
+                o.fields
+                    .iter()
+                    .find(|x| x.field == fm.field && !x.formula)
+                    .is_some_and(|x| x.decode != fm.decode && x.decode != schema::Decode::Unknown)
+            });
             if changed {
                 db.conn.exec("UPDATE \"_quadra_records\" SET \"version_tx\" = 0 WHERE \"entity\" = ?text AND \"version_tx\" <> 0", &[Sql::Text(ent.clone())])?;
             }
@@ -1897,7 +2702,13 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
         // the engine, reading through the deploy's connection (inside its transaction)
         let spare = Pooled::own(Conn::open(url)?);
         let renames_now = crate::source::load_renames(&mut db.conn)?;
-        let src = Rc::new(RefCell::new(DbSource::with_renames(spare, base, schema.clone(), None, renames_now)?));
+        let src = Rc::new(RefCell::new(DbSource::with_renames(
+            spare,
+            base,
+            schema.clone(),
+            None,
+            renames_now,
+        )?));
         src.borrow_mut().swap_conn(&mut db.conn);
         src.borrow_mut().in_tx = true;
         let shared: SharedSource = src.clone();
@@ -1913,7 +2724,12 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
         interp.store.tx = tx;
         interp.store.commits.insert(tx, (time, None));
         let parent = interp.cause.clone();
-        interp.cause = Rc::new(Cause { desc: cause.clone(), user: "system".into(), time, parent: Some(parent) });
+        interp.cause = Rc::new(Cause {
+            desc: cause.clone(),
+            user: "system".into(),
+            time,
+            parent: Some(parent),
+        });
         let mut run = Run {
             m: model,
             schema: schema.clone(),
@@ -1934,7 +2750,9 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
         };
         let r = (|| -> Result<(), String> {
             run.conn().conn().batch("CREATE TEMP TABLE \"_qx_hist\" (\"record_id\" BIGINT NOT NULL, \"ord\" BIGINT NOT NULL, \"field\" TEXT NOT NULL, \"value\" TEXT NOT NULL)")?;
-            run.conn().conn().batch("DROP INDEX IF EXISTS \"_qx_hist_order\"")?;
+            run.conn()
+                .conn()
+                .batch("DROP INDEX IF EXISTS \"_qx_hist_order\"")?;
             if !pending.is_empty() {
                 let mut scripts = Vec::new();
                 run.migrations(&pending, root, &mut scripts)?;
@@ -1943,7 +2761,11 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
                 run.interp.store.load_defaults = run.plan.defaults.clone();
             }
             let passes = run.plan.passes.clone();
-            let in_sql = if pending.is_empty() { run.sql_checks(&passes, &mut steps)? } else { None };
+            let in_sql = if pending.is_empty() {
+                run.sql_checks(&passes, &mut steps)?
+            } else {
+                None
+            };
             if in_sql.is_none() {
                 run.passes(&passes, &mut steps)?;
             }
@@ -1953,7 +2775,10 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
                 let mut again = BTreeMap::new();
                 for (ent, mut p) in later {
                     if p.sel.all {
-                        p.sel = RuleSel { all: true, ..Default::default() };
+                        p.sel = RuleSel {
+                            all: true,
+                            ..Default::default()
+                        };
                     }
                     if run.schema.entity_table(&ent).is_some() {
                         again.insert(ent, p);
@@ -1965,9 +2790,19 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
                 return Err(run.interp.violations_report());
             }
             if !run.missing.is_empty() {
-                let mut msgs: Vec<(Id, String)> = run.missing.iter().map(|(m, id)| (*id, m.clone())).collect();
+                let mut msgs: Vec<(Id, String)> =
+                    run.missing.iter().map(|(m, id)| (*id, m.clone())).collect();
                 msgs.sort();
-                return Err(flow(NOT_FIT, Flow::Fail(msgs.into_iter().take(6).map(|(_, m)| m).collect::<Vec<_>>().join("; "))));
+                return Err(flow(
+                    NOT_FIT,
+                    Flow::Fail(
+                        msgs.into_iter()
+                            .take(6)
+                            .map(|(_, m)| m)
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ),
+                ));
             }
             run.overlay()?;
             run.commit(&cause, time)?;
@@ -1980,7 +2815,12 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
             Ok(())
         })();
         out.new_defaults = run.new_defaults;
-        let Run { mut db, src, interp, .. } = run;
+        let Run {
+            mut db,
+            src,
+            interp,
+            ..
+        } = run;
         drop(interp);
         src.borrow_mut().swap_conn(&mut db.conn);
         drop(src);
@@ -1990,17 +2830,30 @@ pub(crate) fn deploy(url: &str, model: &Model, report: &Report, root: &Path, tim
             // indexes: in the transaction on SQLite and for the tables made here; the others
             // on PostgreSQL after the commit, without blocking writes
             let all: BTreeSet<String> = schema.tables.iter().map(|t| t.name.clone()).collect();
-            let now: BTreeSet<String> = if d == Dialect::Sqlite { all.clone() } else { fresh.clone() };
+            let now: BTreeSet<String> = if d == Dialect::Sqlite {
+                all.clone()
+            } else {
+                fresh.clone()
+            };
             let (created, dropped) = db.sync_indexes(Some(&now), false)?;
             // (indexes built again with a copied table are not new)
-            out.indexes_created.extend(created.into_iter().filter(|n| !existing.iter().any(|(e, _, _)| e == n)));
-            out.indexes_dropped.extend(dropped.into_iter().filter(|n| !schema.indexes.iter().any(|i| &i.name == n)));
+            out.indexes_created.extend(
+                created
+                    .into_iter()
+                    .filter(|n| !existing.iter().any(|(e, _, _)| e == n)),
+            );
+            out.indexes_dropped.extend(
+                dropped
+                    .into_iter()
+                    .filter(|n| !schema.indexes.iter().any(|i| &i.name == n)),
+            );
             if d == Dialect::Postgres {
                 concurrent = all.difference(&fresh).cloned().collect();
                 // the indexes no longer wanted go now
                 let existing = db.existing_indexes()?;
                 for (name, table, _) in existing {
-                    if concurrent.contains(&table) && !schema.indexes.iter().any(|i| i.name == name) {
+                    if concurrent.contains(&table) && !schema.indexes.iter().any(|i| i.name == name)
+                    {
                         db.conn.batch(&format!("DROP INDEX IF EXISTS \"{name}\""))?;
                         out.indexes_dropped.push(name);
                     }
