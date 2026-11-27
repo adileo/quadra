@@ -840,11 +840,37 @@ async fn authenticate(
 }
 
 async fn call(t: &Tenant, who: Principal, req: Req) -> Response {
-    match t.ask(|reply| Job::Call { who, req, reply }).await {
-        Some(Reply { status, body, .. }) => json_response(status, body),
-        None => fail(503, "the engine is not available"),
+    match ask_call(t, who, req).await {
+        Ok(Some(Reply { status, body, .. })) => json_response(status, body),
+        Ok(None) => fail(503, "the engine is not available"),
+        Err(r) => r,
     }
 }
+
+/// A request to the engines, waiting at most the job's own limit and a margin for the queue
+/// and for the commit to be kept elsewhere (storage slow or down: the client hears it instead
+/// of waiting for minutes).
+async fn ask_call(t: &Tenant, who: Principal, req: Req) -> Result<Option<Reply>, Response> {
+    let limit = if req.is_long() {
+        t.config.limits.background
+    } else {
+        t.config.limits.job
+    };
+    let asked = t.ask(|reply| Job::Call { who, req, reply });
+    match limit {
+        Some(l) => tokio::time::timeout(l + CALL_MARGIN, asked).await.map_err(|_| {
+            fail(
+                503,
+                "not confirmed in time: if it was a change, send it again with the same Idempotency-Key (it is applied once)",
+            )
+        }),
+        None => Ok(asked.await),
+    }
+}
+
+/// How long a request may wait past its job's limit: in the queue, and for its commit to be
+/// kept where the plan says.
+const CALL_MARGIN: Duration = Duration::from_secs(60);
 
 async fn me(
     State(app): State<Shared>,
@@ -1314,7 +1340,11 @@ async fn views_api(
         query,
         body,
     };
-    match t.ask(|reply| Job::Call { who, req, reply }).await {
+    let answer = match ask_call(&t, who, req).await {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match answer {
         Some(Reply { status, body, .. }) => {
             if write && status < 300 {
                 let entity = body["view"]["entity"].clone();
@@ -1792,6 +1822,9 @@ fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenan
             let written = |t: &Tenant| t.written();
             let mut due = Instant::now() + every.min(Duration::from_secs(5));
             let mut seen = written(&sweeper);
+            // (looked up again after commits at most every 10 s: the lookup reads an ordered
+            // column, which a busy tenant with many records should not pay at every commit)
+            let mut asked = Instant::now();
             while sweeper
                 .pause(
                     due.saturating_duration_since(Instant::now())
@@ -1800,10 +1833,12 @@ fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenan
                 .await
             {
                 let w = written(&sweeper);
-                if Instant::now() < due && w == seen {
+                if Instant::now() < due && (w == seen || asked.elapsed() < Duration::from_secs(10))
+                {
                     continue;
                 }
                 seen = w;
+                asked = Instant::now();
                 let until = |at: chrono::NaiveDateTime| {
                     (at - chrono::Utc::now().naive_utc())
                         .to_std()

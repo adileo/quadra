@@ -307,7 +307,7 @@ impl Req {
     }
 
     /// The editor's operations that may take long: they get the background limit.
-    fn is_long(&self) -> bool {
+    pub(crate) fn is_long(&self) -> bool {
         matches!(
             self,
             Req::DevTest { .. } | Req::DevCommit { .. } | Req::DevSchema { .. }
