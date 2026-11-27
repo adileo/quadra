@@ -264,6 +264,9 @@ pub struct Erasure {
     /// why: `erase`'s reason, or the retention that ended
     pub reason: String,
     pub by: Option<Id>,
+    /// `history 1 year` of the entity: the values of all its records replaced before this
+    /// instant leave the history (`id` 0, no fields); the values in force stay
+    pub before: Option<chrono::NaiveDateTime>,
 }
 
 #[derive(Clone, Default)]

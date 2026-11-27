@@ -1004,6 +1004,24 @@ pub fn sweep_with(
     if !expired.is_empty() {
         written = Some(interp.store.tx);
     }
+    // `history …`: once a day, the values replaced long enough ago leave the history
+    let compacted = Database::open(url, model, report)?
+        .meta("last_history")?
+        .and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S").ok());
+    if model.entities.iter().any(|e| e.history.is_some())
+        && compacted.map_or(true, |t| time - t >= chrono::Duration::days(1))
+    {
+        if interp.compact_history().map_err(|e| flow("history", e))? > 0 {
+            written = Some(interp.store.tx);
+        }
+        let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+        match sequencer {
+            Some(s) => s.side(move |c| {
+                c.exec("INSERT INTO \"_quadra_meta\" (\"key\", \"value\") VALUES ('last_history', ?text) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\"", &[crate::conn::Sql::Text(at)]).map(|_| ())
+            })?,
+            None => Database::open(url, model, report)?.set_meta("last_history", &at)?,
+        }
+    }
     drop(interp);
     // through the sequencer when there is one: a database rebuilt from the log knows the last
     // sweep too (else a `becomes` already fired could fire again)

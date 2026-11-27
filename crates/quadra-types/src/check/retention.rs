@@ -51,6 +51,18 @@ impl<'m> Checker<'m> {
                 self.check_term(e, t);
             }
             self.check_pair(&e.retention, &e.name);
+            if let Some(h) = &e.history {
+                if m.read_as_of().contains(&e.name) {
+                    self.error(
+                        h.span,
+                        format!(
+                            "{} is read by frozen records, which read it as it was when they froze: \
+                             its history is kept whole (`history` drops old values)",
+                            e.name
+                        ),
+                    );
+                }
+            }
             if let Some(x) = &e.retention.expire {
                 if let Some(p) = e.posts.first() {
                     self.error(

@@ -732,6 +732,19 @@ impl Term {
         }
     }
 
+    /// The instant `n` units before `to` (`history 1 year`: the values replaced before it go).
+    pub fn before(&self, to: chrono::NaiveDateTime) -> Option<chrono::NaiveDateTime> {
+        use chrono::Months;
+        let n = self.n.max(0);
+        match self.unit()? {
+            "hours" => to.checked_sub_signed(chrono::Duration::hours(n)),
+            "days" => to.checked_sub_signed(chrono::Duration::days(n)),
+            "weeks" => to.checked_sub_signed(chrono::Duration::weeks(n)),
+            "months" => to.checked_sub_months(Months::new(n as u32)),
+            _ => to.checked_sub_months(Months::new((n * 12) as u32)),
+        }
+    }
+
     /// As written: `10 years after date`.
     pub fn text(&self) -> String {
         format!("{} {} after {}", self.n, self.unit, self.after)
@@ -1329,6 +1342,42 @@ impl Model {
     }
 
     /// All fields of an entity, including those inherited from traits (own fields first).
+    /// The entities whose past values a frozen record may read (it reads the world as of when
+    /// it froze): the frozen ones, their lines, and every entity they reach through references.
+    /// Their history is kept whole (no `history`, nothing archived).
+    pub fn read_as_of(&self) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut todo: Vec<String> = self
+            .entities
+            .iter()
+            .filter(|e| e.frozen.is_some())
+            .map(|e| e.name.clone())
+            .collect();
+        while let Some(n) = todo.pop() {
+            if !out.insert(n.clone()) {
+                continue;
+            }
+            let Some(e) = self.entity(&n) else { continue };
+            // its lines
+            for l in &self.entities {
+                if l.fields
+                    .iter()
+                    .any(|f| f.parent && type_name(f.ty.as_ref()).as_deref() == Some(n.as_str()))
+                {
+                    todo.push(l.name.clone());
+                }
+            }
+            for f in self.all_fields(e) {
+                if let Some(t) = type_name(f.ty.as_ref()) {
+                    if self.entity(&t).is_some() {
+                        todo.push(t);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn all_fields<'m>(&'m self, entity: &'m Entity) -> Vec<&'m Field> {
         let mut out: Vec<&Field> = entity
             .fields
@@ -1551,6 +1600,15 @@ pub fn inline_enum(ty: &Ty) -> Option<&Vec<Variant>> {
     match ty {
         Ty::Enum(vs) => Some(vs),
         Ty::Optional(inner) => inline_enum(inner),
+        _ => None,
+    }
+}
+
+/// The name a type refers to, through `?`, lists and sets: `Customer`, `[Line]`, `Address?`.
+fn type_name(t: Option<&Ty>) -> Option<String> {
+    match t? {
+        Ty::Path { segments, .. } => segments.last().cloned(),
+        Ty::Optional(i) | Ty::List(i) | Ty::Set(i) => type_name(Some(i)),
         _ => None,
     }
 }

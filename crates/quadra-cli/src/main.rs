@@ -410,6 +410,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--reason",
     "--state",
     "--key",
+    "--before",
 ];
 
 /// The first positional argument (see `positionals`) and the other arguments.
@@ -507,6 +508,14 @@ fn finish(result: Result<(), String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The project's store of files (`[files]` of quadra.toml, or `.quadra/files`): where its
+/// files and the archives of its history are kept.
+fn files_store(root: &std::path::Path) -> Result<std::sync::Arc<quadra_blobs::Files>, String> {
+    let manifest = quadra_sema::manifest::read(root)?;
+    let env = quadra_sema::manifest::values_from_env(root, &manifest);
+    quadra_blobs::open(root, &manifest, &env)
 }
 
 /// `quadra db key`: the key signing the commits; `init` makes one, `rotate` replaces it.
@@ -632,6 +641,16 @@ fn erase(args: &[String]) -> ExitCode {
             now(),
             &who(),
         )?;
+        // the archives of the history hold its values replaced long ago: out of them too
+        let files = files_store(&_root)?;
+        let n = quadra_store::archive::redact(
+            &mut quadra_store::Conn::open(&url)?,
+            &mut |k| files.blobs.get(k),
+            &mut |k, b| files.blobs.put(k, b, "application/gzip", "attachment"),
+        )?;
+        if n > 0 {
+            println!("  {n} older values taken out of the archives of the history");
+        }
         if fields.is_empty() {
             println!("✓ {ent}#{id}: nothing to erase (its personal fields are empty)");
         } else {
@@ -734,8 +753,44 @@ fn db(args: &[String]) -> ExitCode {
             println!("  last        {}", s.last_hash.unwrap_or_default());
             Ok(())
         }
+        "archive" => {
+            let before = flag(rest, "--before").ok_or("`archive` needs the date: --before 2028-01-01 (the values replaced before it move to the archive)")?;
+            let before = chrono::NaiveDate::parse_from_str(&before, "%Y-%m-%d")
+                .map_err(|_| format!("--before {before}: a date, as 2028-01-01"))?
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let _writer = quadra_store::writer::acquire(&url)?;
+            let files = files_store(&root)?;
+            let r = quadra_store::archive::archive(&url, model, report, before, now(), &mut |key, bytes| {
+                files.blobs.put(key, bytes, "application/gzip", "attachment")
+            })?;
+            match r {
+                None => println!("nothing to archive: no value was replaced before {}", before.format("%Y-%m-%d")),
+                Some(c) => {
+                    println!("✓ commit {}: {} values replaced before {} moved to {}", c.tx, c.rows, before.format("%Y-%m-%d"), c.archive);
+                    println!("  sha256 {}", c.sha256);
+                    println!("  `quadra db verify --full` reads it back and checks every commit");
+                }
+            }
+            Ok(())
+        }
         "verify" => {
-            let (problems, records) = ops::verify(&url, model, report, now())?;
+            let full = rest.iter().any(|a| a == "--full");
+            let mut conn = quadra_store::Conn::open(&url)?;
+            let checkpoints = quadra_store::archive::checkpoints(&mut conn)?;
+            drop(conn);
+            let archived = if full && !checkpoints.is_empty() {
+                let files = files_store(&root)?;
+                let mut rows = Vec::new();
+                for c in &checkpoints {
+                    let bytes = files.blobs.get(&c.archive)?.ok_or(format!("{}: not in the store of files", c.archive))?;
+                    rows.extend(quadra_store::archive::read(c, &bytes)?);
+                }
+                Some(rows)
+            } else {
+                None
+            };
+            let (problems, records) = quadra_store::verify::verify_with(&url, model, report, now(), archived.clone())?;
             let (erased, signed, key) = quadra_store::verify::facts(&url)?;
             if problems.is_empty() {
                 println!("✓ hash chain intact, tables match the history ({records} records)");
@@ -744,6 +799,14 @@ fn db(args: &[String]) -> ExitCode {
                 }
                 if let Some(k) = key {
                     println!("✓ {signed} commits signed, the last ones by the key {}…", &k[..12]);
+                }
+                if let Some(last) = checkpoints.last() {
+                    if archived.is_some() {
+                        let rows: u64 = checkpoints.iter().map(|c| c.rows).sum();
+                        println!("✓ {} archive(s) read back ({rows} values): every commit computed", checkpoints.len());
+                    } else {
+                        println!("✓ the commits up to {} have values in archives: checked by their links and signatures (`--full` reads the archives)", last.before_tx);
+                    }
                 }
                 Ok(())
             } else {

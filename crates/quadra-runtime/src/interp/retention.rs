@@ -219,6 +219,7 @@ impl<'m> Interp<'m> {
             whole: false,
             reason: reason.to_string(),
             by: self.user,
+            before: None,
         });
         Ok(())
     }
@@ -385,6 +386,46 @@ impl<'m> Interp<'m> {
         Ok(done)
     }
 
+    /// `history 1 year`: for each entity that has it, the values replaced before then leave
+    /// the history (their digests kept), in a transaction of its own. Returns how many
+    /// entities.
+    pub fn compact_history(&mut self) -> R<usize> {
+        let m = self.m;
+        let mut n = 0;
+        for e in &m.entities {
+            let Some(t) = &e.history else { continue };
+            let Some(before) = t.before(self.clock) else {
+                continue;
+            };
+            let reason = format!(
+                "history {} {}: the values replaced before {}",
+                t.n,
+                t.unit,
+                before.format("%Y-%m-%d %H:%M")
+            );
+            let ent = e.name.clone();
+            self.system += 1;
+            let r = self.with_cause(format!("history: {ent}"), |i| {
+                i.transaction(|i| {
+                    i.store.erasures.push(Erasure {
+                        id: 0,
+                        ent: Rc::from(ent.as_str()),
+                        fields: Vec::new(),
+                        whole: false,
+                        reason: reason.clone(),
+                        by: None,
+                        before: Some(before),
+                    });
+                    Ok(())
+                })
+            });
+            self.system -= 1;
+            r?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// A record whose entity's `expire` ended taken away, with its lines; optional references
     /// to it become none. False (nothing done) while it is kept: a `retain`, or a required
     /// reference from a record that stays.
@@ -449,6 +490,7 @@ impl<'m> Interp<'m> {
                 whole: true,
                 reason: cause.to_string(),
                 by: None,
+                before: None,
             });
         }
         Ok(true)

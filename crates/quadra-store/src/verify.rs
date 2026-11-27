@@ -58,12 +58,25 @@ pub fn verify(
     report: &Report,
     time: NaiveDateTime,
 ) -> Result<(Vec<String>, usize), String> {
+    verify_with(url, model, report, time, None)
+}
+
+/// `verify`, with the rows of the archives read back (`quadra db verify --full`): every commit
+/// computed, those before the checkpoints too. Without them, the commits whose rows went to an
+/// archive are checked by their links and signatures only.
+pub fn verify_with(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    archived: Option<Vec<crate::archive::Row>>,
+) -> Result<(Vec<String>, usize), String> {
     let mut db = Database::open(url, model, report)?;
     // the chain on a connection of its own, while the tables are checked
     let chain_url = url.to_string();
     let chain_check = std::thread::Builder::new()
         .name("quadra-verify-chain".into())
-        .spawn(move || chain(&mut Conn::open(&chain_url)?))
+        .spawn(move || chain(&mut Conn::open(&chain_url)?, archived))
         .map_err(|e| e.to_string())?;
     // every write of the history, those of a transaction without commit row too (as loading
     // the whole database reads them)
@@ -140,14 +153,66 @@ impl Stream {
 }
 
 /// The hash chain, commit by commit (`commit_hash`), streaming what each commit wrote.
-fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
+fn chain(
+    conn: &mut Conn,
+    archived: Option<Vec<crate::archive::Row>>,
+) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
+    // the checkpoints: the commits up to the last one's `before_tx` are computed only with the
+    // rows of the archives
+    let checkpoints = crate::archive::checkpoints(conn)?;
+    let archived_to = checkpoints
+        .iter()
+        .map(|c| c.before_tx as i64)
+        .max()
+        .unwrap_or(0);
+    let full = archived.is_some();
+    if let Some(rows) = archived {
+        conn.batch("CREATE TEMP TABLE \"_qx_archived\" (\"seq\" BIGINT, \"tx\" BIGINT, \"record_id\" BIGINT, \"field\" TEXT, \"value\" TEXT, \"salt\" TEXT, \"digest\" TEXT)")?;
+        for chunk in rows.chunks(500) {
+            let mut params = Vec::new();
+            let mut values = Vec::new();
+            for (seq, tx, rec, f, v, salt, d) in chunk {
+                values.push("(?bigint, ?bigint, ?bigint, ?text, ?text, ?text, ?text)");
+                params.extend([
+                    Sql::Int(*seq),
+                    Sql::Int(*tx),
+                    Sql::Int(*rec),
+                    Sql::Text(f.clone()),
+                    v.clone().map(Sql::Text).unwrap_or(Sql::Null),
+                    salt.clone().map(Sql::Text).unwrap_or(Sql::Null),
+                    d.clone().map(Sql::Text).unwrap_or(Sql::Null),
+                ]);
+            }
+            conn.exec(
+                &format!("INSERT INTO \"_qx_archived\" VALUES {}", values.join(", ")),
+                &params,
+            )?;
+        }
+    }
     let mut hist = Stream {
-        sql: "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" WHERE \"seq\" > ?bigint ORDER BY \"_quadra_history\".\"seq\" LIMIT ?bigint",
+        sql: if full {
+            "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM (SELECT \"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" UNION ALL SELECT \"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\", \"digest\" FROM \"_qx_archived\") h WHERE \"seq\" > ?bigint ORDER BY \"seq\" LIMIT ?bigint"
+        } else {
+            "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" WHERE \"seq\" > ?bigint ORDER BY \"_quadra_history\".\"seq\" LIMIT ?bigint"
+        },
         after: i64::MIN,
         buf: VecDeque::new(),
         done: false,
-        row: |r| (num(&r[0]), num(&r[1]), history_entry(json!(num(&r[2])), r[3].as_deref().unwrap_or(""), r[4].as_deref(), r[5].as_deref(), r[6].as_deref()).to_string()),
+        row: |r| {
+            (
+                num(&r[0]),
+                num(&r[1]),
+                history_entry(
+                    json!(num(&r[2])),
+                    r[3].as_deref().unwrap_or(""),
+                    r[4].as_deref(),
+                    r[5].as_deref(),
+                    r[6].as_deref(),
+                )
+                .to_string(),
+            )
+        },
     };
     let mut ledger = Stream {
         sql: "SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"ledger\", \"cols\" FROM \"_quadra_ledger_rows\" WHERE \"id\" > ?bigint ORDER BY \"_quadra_ledger_rows\".\"id\" LIMIT ?bigint",
@@ -240,7 +305,12 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
             if let Some(e) = keys.entry(tx) {
                 h.entry(&e);
             }
-            if r[5].as_deref() != Some(h.finish().as_str()) {
+            if let Some(c) = checkpoints.iter().find(|c| c.tx as i64 == tx) {
+                h.entry(&crate::archive::entry(c).to_string());
+            }
+            let computed = h.finish();
+            // (a commit some of whose rows are in an archive: computed with `--full` only)
+            if (full || tx > archived_to) && r[5].as_deref() != Some(computed.as_str()) {
                 problems.push(format!("commit {tx}: content does not match its hash (history or ledger rows were altered)"));
             }
             if let Some(p) = keys.check(tx, r[5].as_deref().unwrap_or(""), r[6].as_deref()) {

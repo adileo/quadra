@@ -27,6 +27,9 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_erasures\" (\"tx\" BIGINT NOT NULL, \"n\" BIGINT NOT NULL, \"record_id\" BIGINT NOT NULL, \"entity\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"whole\" BOOLEAN NOT NULL, \"reason\" TEXT NOT NULL, \"user_id\" BIGINT, PRIMARY KEY (\"tx\", \"n\"))",
     // the records taken away when their entity's `expire` came: what is left of them
     "CREATE TABLE \"_quadra_erased\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"created_tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"erased_tx\" BIGINT NOT NULL, \"erased_at\" TEXT NOT NULL, \"cause\" TEXT NOT NULL)",
+    // the history moved to archives (crate::archive): a checkpoint commit each, `["x", …]` in
+    // its hash, with the archive's name and SHA-256
+    "CREATE TABLE \"_quadra_checkpoints\" (\"tx\" BIGINT PRIMARY KEY, \"before_tx\" BIGINT NOT NULL, \"archive\" TEXT NOT NULL, \"sha256\" TEXT NOT NULL, \"rows\" BIGINT NOT NULL)",
     // the keys that sign the commits (crate::signing), each set by a commit of its own
     "CREATE TABLE \"_quadra_keys\" (\"tx\" BIGINT PRIMARY KEY, \"public\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_records\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"created_tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"frozen_tx\" BIGINT, \"cause\" TEXT NOT NULL, \"warnings\" TEXT NOT NULL, \"last_tx\" BIGINT NOT NULL DEFAULT 0, \"version_tx\" BIGINT NOT NULL DEFAULT 0, \"kinds\" TEXT)",
@@ -2071,6 +2074,15 @@ impl Database {
         let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
         for (n, er) in c.after.erasures.iter().enumerate() {
             let id = er.id as i64;
+            if let Some(before) = er.before {
+                self.compact_history(er, before, tx)?;
+                payload.push(erasure_entry(0, &er.ent, "[]", false, &er.reason));
+                self.wexec(
+                    "INSERT INTO \"_quadra_erasures\" (\"tx\", \"n\", \"record_id\", \"entity\", \"fields\", \"whole\", \"reason\", \"user_id\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?boolean, ?text, ?bigint)".into(),
+                    vec![Sql::Int(tx as i64), Sql::Int(n as i64), Sql::Int(0), Sql::Text(er.ent.to_string()), Sql::Text("[]".into()), Sql::Bool(false), Sql::Text(er.reason.clone()), Sql::Null],
+                )?;
+                continue;
+            }
             let rows = if er.whole {
                 self.conn.query(
                     "SELECT CAST(\"seq\" AS TEXT), \"value\", \"salt\" FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"digest\" IS NULL AND \"tx\" < ?bigint",
@@ -2175,6 +2187,41 @@ impl Database {
             self.wexec(
                 "INSERT INTO \"_quadra_erasures\" (\"tx\", \"n\", \"record_id\", \"entity\", \"fields\", \"whole\", \"reason\", \"user_id\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?boolean, ?text, ?bigint)".into(),
                 vec![Sql::Int(tx as i64), Sql::Int(n as i64), Sql::Int(id), Sql::Text(er.ent.to_string()), Sql::Text(fields), Sql::Bool(er.whole), Sql::Text(er.reason.clone()), er.by.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null)],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `history …` of an entity: the values of its records replaced by a write committed at
+    /// or before `before` leave the history (value and salt removed, digest kept). The value in
+    /// force then stays, and every value written since.
+    fn compact_history(
+        &mut self,
+        er: &quadra_runtime::store::Erasure,
+        before: chrono::NaiveDateTime,
+        tx: u64,
+    ) -> Result<(), String> {
+        let at = before.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let cut = self.conn.query(
+            "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_commits\" WHERE \"at\" <= ?text",
+            &[Sql::Text(at)],
+        )?;
+        let cut = num(&cut.first().and_then(|r| r[0].clone()));
+        if cut == 0 {
+            return Ok(());
+        }
+        let rows = self.conn.query(
+            "SELECT CAST(h.\"seq\" AS TEXT), h.\"value\", h.\"salt\" FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE r.\"entity\" = ?text AND h.\"digest\" IS NULL AND EXISTS (SELECT 1 FROM \"_quadra_history\" h2 WHERE h2.\"record_id\" = h.\"record_id\" AND h2.\"field\" = h.\"field\" AND h2.\"seq\" > h.\"seq\" AND h2.\"tx\" <= ?bigint)",
+            &[Sql::Text(er.ent.to_string()), Sql::Int(cut)],
+        )?;
+        for r in rows {
+            let digest = value_digest(
+                r[2].as_deref().unwrap_or(""),
+                r[1].as_deref().unwrap_or("null"),
+            );
+            self.wexec(
+                format!("{ERASE}UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint"),
+                vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],
             )?;
         }
         Ok(())
@@ -2556,6 +2603,12 @@ impl Database {
             by_tx.entry(num(&r[0])).or_default().push(json!(["n", r[1], r[2], r[3]]));
         }
         let mut keys = crate::signing::Keys::read(&mut self.conn)?;
+        let checkpoints = crate::archive::checkpoints(&mut self.conn)?;
+        let archived_to = checkpoints
+            .iter()
+            .map(|c| c.before_tx as i64)
+            .max()
+            .unwrap_or(0);
         let mut prev = "0".repeat(64);
         for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"cause\", \"prev_hash\", \"hash\", \"signature\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\"", &[])? {
             let tx = num(&r[0]);
@@ -2567,8 +2620,12 @@ impl Database {
             if let Some(e) = keys.entry(tx) {
                 payload.push(serde_json::from_str(&e).unwrap_or(J::Null));
             }
+            if let Some(c) = checkpoints.iter().find(|c| c.tx as i64 == tx) {
+                payload.push(crate::archive::entry(c));
+            }
             let h = commit_hash(&prev, tx as u64, r[1].as_deref().unwrap_or(""), user, r[3].as_deref().unwrap_or(""), &payload);
-            if r[5].as_deref() != Some(h.as_str()) {
+            // (some rows of the commits up to a checkpoint are in an archive)
+            if tx > archived_to && r[5].as_deref() != Some(h.as_str()) {
                 problems.push(format!("commit {tx}: content does not match its hash (history or ledger rows were altered)"));
             }
             if let Some(p) = keys.check(tx, r[5].as_deref().unwrap_or(""), r[6].as_deref()) {
@@ -3023,7 +3080,7 @@ fn describe_commits(
     Ok(out)
 }
 
-fn commit_hash(
+pub(crate) fn commit_hash(
     prev: &str,
     tx: u64,
     at: &str,

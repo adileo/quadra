@@ -5,6 +5,7 @@
 //! projections (one table per entity, with real constraints and materialized formulas).
 
 pub mod agents;
+pub mod archive;
 pub mod auth;
 pub mod bulk;
 pub mod codec;
