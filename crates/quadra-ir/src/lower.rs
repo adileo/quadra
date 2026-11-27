@@ -322,9 +322,38 @@ impl<'a> Lower<'a> {
                 let ty = ast::child(item, PATH)
                     .map(|p| ast::path_text(&p))
                     .unwrap_or_default();
-                let key = ast::children(item, OUTBOUND_CLAUSE)
-                    .find(|c| ctx_words(c).first().map(String::as_str) == Some("key"))
-                    .and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                let clause = |w: &str| {
+                    ast::children(item, OUTBOUND_CLAUSE)
+                        .find(|c| ctx_words(c).first().map(String::as_str) == Some(w))
+                };
+                let key = clause("key").and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                let pull = clause("pull").map(|c| {
+                    let path = c
+                        .children_with_tokens()
+                        .filter_map(|t| t.into_token())
+                        .find(|t| t.kind() == STRING)
+                        .map(|t| unquote(t.text()))
+                        .unwrap_or_default();
+                    let every = exprs(&c)
+                        .first()
+                        .map(|x| self.expr(x))
+                        .unwrap_or_else(|| self.error_expr(&c));
+                    let items = clause("items")
+                        .and_then(|c| ast::child(&c, PATH))
+                        .map(|p| ast::path_text(&p))
+                        .and_then(|t| {
+                            t.split_once('.')
+                                .map(|(a, b)| (a.to_string(), b.to_string()))
+                        });
+                    let cursor =
+                        clause("cursor").and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                    Pull {
+                        path,
+                        every,
+                        items,
+                        cursor,
+                    }
+                });
                 let body = ast::child(item, BLOCK)
                     .map(|b| self.stmts(&b))
                     .unwrap_or_default();
@@ -335,6 +364,7 @@ impl<'a> Lower<'a> {
                     binding,
                     ty,
                     key,
+                    pull,
                     body,
                     span,
                 });

@@ -943,6 +943,62 @@ pub fn respond(conn: &mut Conn, id: u64, response: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where the pull of `inbound` is: its cursor and when it pulls next (none: never pulled).
+pub fn pull_state(
+    conn: &mut Conn,
+    inbound: &str,
+) -> Result<(Option<String>, Option<String>), String> {
+    Ok(conn
+        .query(
+            "SELECT \"cursor\", \"next_at\" FROM \"_quadra_cursors\" WHERE \"inbound\" = ?text",
+            &[Sql::Text(inbound.to_string())],
+        )?
+        .into_iter()
+        .next()
+        .map(|r| (r[0].clone(), r[1].clone()))
+        .unwrap_or((None, None)))
+}
+
+/// A pull done at `now`: the next at `next_at`, its new cursor (kept as it was when `None`),
+/// the error if it failed. Written with the messages it brought, in one batch.
+pub fn pulled(
+    conn: &mut Conn,
+    inbound: &str,
+    now: &str,
+    next_at: &str,
+    cursor: Option<&str>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let (old, _) = pull_state(conn, inbound)?;
+    let cursor = cursor.map(|c| c.to_string()).or(old);
+    conn.exec(
+        "INSERT INTO \"_quadra_cursors\" (\"inbound\", \"cursor\", \"pulled_at\", \"next_at\", \"error\") VALUES (?text, ?text, ?text, ?text, ?text) ON CONFLICT (\"inbound\") DO UPDATE SET \"cursor\" = excluded.\"cursor\", \"pulled_at\" = excluded.\"pulled_at\", \"next_at\" = excluded.\"next_at\", \"error\" = excluded.\"error\"",
+        &[
+            Sql::Text(inbound.to_string()),
+            cursor.map(Sql::Text).unwrap_or(Sql::Null),
+            Sql::Text(now.to_string()),
+            Sql::Text(next_at.to_string()),
+            error.map(|e| Sql::Text(e.to_string())).unwrap_or(Sql::Null),
+        ],
+    )?;
+    if let Some(e) = error {
+        log_dir(
+            conn,
+            "in",
+            0,
+            inbound,
+            now,
+            "pull",
+            "failed",
+            None,
+            Some(e),
+            None,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 /// The transaction that already handled message `id` (`inbound:Name#id`), if one did: a
 /// message is handled once even if the server stopped between the transaction and writing it.
 pub fn handled_by(conn: &mut Conn, name: &str, id: u64) -> Result<Option<u64>, String> {

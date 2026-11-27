@@ -2127,7 +2127,8 @@ impl<'m> Checker<'m> {
             match m.manifest.connection(&i.connection) {
                 None => self.error(i.span, format!("no connection `{}` in quadra.toml ([connections.{}])", i.connection, i.connection)),
                 Some(c) if c.kind_name() != "http" => self.error(i.span, format!("`{}` is not an HTTP connection: messages come in over HTTP", i.connection)),
-                Some(c) if c.inbound.is_none() => self.error(i.span, format!("`{}` does not say how its messages are signed (`inbound_signature` and `inbound_secret` in quadra.toml): without it anyone could send them", i.connection)),
+                // a pull fetches its messages: only messages sent in prove their sender
+                Some(c) if c.inbound.is_none() && (i.pull.is_none() || i.path.is_some()) => self.error(i.span, format!("`{}` does not say how its messages are signed (`inbound_signature` and `inbound_secret` in quadra.toml): without it anyone could send them", i.connection)),
                 _ => {}
             }
             if let Some(p) = &i.path {
@@ -2147,10 +2148,43 @@ impl<'m> Checker<'m> {
                     ),
                 );
             }
+            if let Some(p) = &i.pull {
+                let t = self.infer(&p.every);
+                let fixed = matches!(&p.every.kind, ExprKind::Quantity { .. });
+                if !matches!(t, T::Duration | T::Unknown) || !fixed {
+                    self.error(
+                        p.every.span,
+                        "`every` takes a fixed duration: `every 5 minutes`",
+                    );
+                }
+                if !p.path.starts_with('/')
+                    || p.path.contains("..")
+                    || p.path.chars().any(|c| c.is_whitespace())
+                {
+                    self.error(i.span, format!("the path `{}`: from `/`, no spaces, no `..` (the cursor as `{{cursor}}`)", p.path));
+                }
+                if p.path.contains("{cursor}") && p.cursor.is_none() {
+                    self.error(
+                        i.span,
+                        "the path has `{cursor}`: say what it is with `cursor m.<field>`",
+                    );
+                }
+                if let Some((page, field)) = &p.items {
+                    let ok = m.entity(page).filter(|e| e.format.is_some()).and_then(|e| m.find_field(e, field)).is_some_and(|f| {
+                        matches!(&f.ty, Some(Ty::List(t)) if matches!(t.as_ref(), Ty::Path { segments, .. } if segments.len() == 1 && segments[0] == i.ty))
+                    });
+                    if !ok {
+                        self.error(i.span, format!("`items {page}.{field}`: a record `from json` whose `{field}` is a list of `{}`", i.ty));
+                    }
+                }
+            }
             self.entity = None;
             self.context = format!("inbound {}", i.name);
             self.push();
             self.bind(&i.binding, T::Ent(i.ty.clone()));
+            if let Some(c) = i.pull.as_ref().and_then(|p| p.cursor.as_ref()) {
+                self.infer(c);
+            }
             if let Some(k) = &i.key {
                 let t = self.infer(k);
                 if !matches!(t.unopt(), T::Text(_) | T::Num(_) | T::Unknown) {

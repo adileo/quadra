@@ -61,6 +61,18 @@ pub struct Config {
     pub outside: Outside,
 }
 
+/// Text as it goes in a url: letters, digits and `-._~` as they are, the rest `%XX`.
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// A checked project, its model given the values of the variables where it runs.
 pub(crate) fn with_env(
     mut checked: Checked,
@@ -411,6 +423,16 @@ pub enum Job {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
         reply: oneshot::Sender<Option<(u16, J)>>,
+    },
+    /// the pulls due now (`inbound … pull`), and when the next one is due after them
+    Pulls {
+        reply: oneshot::Sender<(Vec<crate::deliver::Pull>, Option<chrono::NaiveDateTime>)>,
+    },
+    /// what a pull brought: its messages kept in the inbox, its cursor moved; how many new
+    Pulled {
+        inbound: String,
+        result: Result<(u16, String, Option<u64>), String>,
+        reply: oneshot::Sender<usize>,
     },
     /// the host's inbox: up to `limit` messages received handled; how many, and whether the
     /// model has any `inbound`
@@ -1420,6 +1442,182 @@ impl Engine {
         Some((status, body))
     }
 
+    /// The pulls due now: each `inbound … pull` whose time came (or that never pulled), its
+    /// url with the cursor, and when the next one is due after them.
+    fn pulls(&mut self) -> (Vec<crate::deliver::Pull>, Option<chrono::NaiveDateTime>) {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return (Vec::new(), None);
+        };
+        let at = now();
+        let mut out = Vec::new();
+        let mut next: Option<chrono::NaiveDateTime> = None;
+        for i in &model.inbounds {
+            let Some(p) = &i.pull else { continue };
+            let (cursor, next_at) = quadra_store::deliveries::pull_state(&mut self.conn, &i.name)
+                .unwrap_or((None, None));
+            let due = next_at
+                .as_deref()
+                .and_then(|n| chrono::NaiveDateTime::parse_from_str(n, "%Y-%m-%dT%H:%M:%S").ok());
+            if let Some(d) = due.filter(|d| *d > at) {
+                next = Some(next.map_or(d, |n| n.min(d)));
+                continue;
+            }
+            match crate::deliver::connection_request(&model.manifest, &self.env, &i.connection) {
+                Ok((base, headers, timeout)) => {
+                    let path = p
+                        .path
+                        .replace("{cursor}", &encode(cursor.as_deref().unwrap_or("")));
+                    out.push(crate::deliver::Pull {
+                        inbound: i.name.clone(),
+                        url: format!("{base}{path}"),
+                        headers,
+                        timeout,
+                    })
+                }
+                Err(e) => eprintln!("pull {}: {e}", i.name),
+            }
+        }
+        (out, next)
+    }
+
+    /// What a pull of `inbound` brought: each message kept in the inbox like one sent in (its
+    /// key, its hash; read as its record, else `rejected`), the cursor moved to the largest of
+    /// theirs, and the time of the next pull, in one write. A failed pull is tried again sooner
+    /// (or after `Retry-After`). Returns how many messages are new.
+    fn pulled(
+        &mut self,
+        inbound: &str,
+        result: Result<(u16, String, Option<u64>), String>,
+    ) -> usize {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return 0;
+        };
+        let Some(i) = model.inbounds.iter().find(|i| i.name == inbound) else {
+            return 0;
+        };
+        let Some(p) = &i.pull else { return 0 };
+        let at = now();
+        let stamp = |t: chrono::NaiveDateTime| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let every = match quadra_store::ops::eval_fixed(model, &p.every) {
+            Ok(quadra_runtime::V::Duration(s)) => s.max(60),
+            _ => 300,
+        };
+        let (name, conn) = (i.name.clone(), i.connection.clone());
+        let fail = |s: &mut Self, why: String, after: Option<u64>| {
+            let wait = after.unwrap_or((every as u64).min(300)).clamp(5, 3600);
+            let (n, t, nx) = (
+                name.clone(),
+                stamp(at),
+                stamp(at + chrono::Duration::seconds(wait as i64)),
+            );
+            let _ =
+                s.side(move |c| quadra_store::deliveries::pulled(c, &n, &t, &nx, None, Some(&why)));
+            0
+        };
+        let (status, body, retry_after) = match result {
+            Ok(r) => r,
+            Err(e) => return fail(self, e, None),
+        };
+        if !(200..300).contains(&status) {
+            let text: String = body.chars().take(200).collect();
+            return fail(
+                self,
+                format!("the pull answered {status}: {}", text.trim()),
+                retry_after,
+            );
+        }
+        let doc: J = match serde_json::from_str(&body) {
+            Ok(d) => d,
+            Err(e) => return fail(self, format!("the answer is not JSON: {e}"), None),
+        };
+        // the messages: the list in the page (`items Page.field`), or the answer itself
+        let list = match &p.items {
+            Some((page, field)) => {
+                let keys = model
+                    .entity(page)
+                    .and_then(|e| model.find_field(e, field))
+                    .map(quadra_ir::formats::place)
+                    .unwrap_or_else(|| vec![field.clone()]);
+                let mut cur = Some(&doc);
+                for k in &keys {
+                    cur = cur.and_then(|c| c.get(k));
+                }
+                cur.cloned()
+            }
+            None => Some(doc.clone()),
+        };
+        let Some(J::Array(items)) = list else {
+            return fail(
+                self,
+                "the answer has no list of messages where the inbound says".into(),
+                None,
+            );
+        };
+        let mut kept: Vec<(String, String, String, Option<String>)> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for item in items {
+            let text = item.to_string();
+            let hash = crate::inbound::hash(text.as_bytes());
+            let parsed = quadra_runtime::formats::parse_json(model, &i.ty, &text);
+            let eval = |e: &quadra_ir::Expr, doc: &quadra_runtime::V| -> Option<String> {
+                let mut interp = quadra_runtime::Interp::new(model);
+                let mut ctx = quadra_runtime::Ctx::default();
+                ctx.bind(&i.binding, doc.clone());
+                interp.eval(e, &mut ctx).ok().map(|v| match v {
+                    quadra_runtime::V::Text(t) => t.to_string(),
+                    quadra_runtime::V::DateTime(t) => t.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                    other => other.to_string(),
+                })
+            };
+            let key = match (&parsed, &i.key) {
+                (Ok(d), Some(k)) => eval(k, d).unwrap_or_else(|| hash.clone()),
+                _ => hash.clone(),
+            };
+            if let (Ok(d), Some(c)) = (&parsed, &p.cursor) {
+                if let Some(v) = eval(c, d) {
+                    if cursor.as_deref().is_none_or(|old| v.as_str() > old) {
+                        cursor = Some(v);
+                    }
+                }
+            }
+            let error = parsed.err().map(|e| format!("{}: {e}", i.ty));
+            kept.push((key, hash, text, error));
+        }
+        let (n, c, t, nx) = (
+            name.clone(),
+            conn.clone(),
+            stamp(at),
+            stamp(at + chrono::Duration::seconds(every)),
+        );
+        let r = self.side(move |cn| {
+            let mut new = 0;
+            for (key, hash, text, error) in &kept {
+                if let quadra_store::deliveries::Received::New(_) =
+                    quadra_store::deliveries::receive(
+                        cn,
+                        &n,
+                        &c,
+                        key,
+                        hash,
+                        text,
+                        &t,
+                        error.as_deref(),
+                    )?
+                {
+                    new += 1;
+                }
+            }
+            quadra_store::deliveries::pulled(cn, &n, &t, &nx, cursor.as_deref(), None)?;
+            Ok(new)
+        });
+        r.unwrap_or_else(|e| {
+            eprintln!("pull {inbound}: the messages were not kept: {e}");
+            0
+        })
+    }
+
     /// Up to `limit` messages of the inbox handled, oldest first, each in a transaction of its
     /// own with the cause `inbound:Name#id handled`; one that fails is `rejected` with the
     /// error. Returns how many, and whether the model has any inbound.
@@ -2047,6 +2245,16 @@ impl Engine {
                         &headers,
                         &body,
                     ));
+                }
+                Job::Pulls { reply } => {
+                    let _ = reply.send(self.pulls());
+                }
+                Job::Pulled {
+                    inbound,
+                    result,
+                    reply,
+                } => {
+                    let _ = reply.send(self.pulled(&inbound, result));
                 }
                 Job::Inbox { limit, reply } => {
                     let _ = reply.send(self.handle_inbox(limit));

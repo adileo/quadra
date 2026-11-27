@@ -235,6 +235,109 @@ pub enum Built {
     },
 }
 
+/// A pull of an `inbound` to make: a `GET` of `url` with the connection's authentication.
+#[derive(Clone, Debug)]
+pub struct Pull {
+    pub inbound: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub timeout: Duration,
+}
+
+/// The base url, the headers of authentication and the timeout of an HTTP connection.
+pub fn connection_request(
+    manifest: &Manifest,
+    env: &BTreeMap<String, String>,
+    connection: &str,
+) -> Result<(String, Vec<(String, String)>, Duration), String> {
+    let value = |name: &str| -> Result<String, String> {
+        manifest
+            .value(env, name)
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("the variable {name} is not set where the app runs"))
+    };
+    let setting = |s: &Setting| -> Result<String, String> {
+        match s {
+            Setting::Literal(l) => Ok(l.clone()),
+            Setting::Var(v) => value(v),
+        }
+    };
+    let conn = manifest
+        .connection(connection)
+        .ok_or_else(|| format!("quadra.toml has no connection `{connection}`"))?;
+    let ConnectionKind::Http {
+        url,
+        auth,
+        timeout_s,
+        ..
+    } = &conn.kind
+    else {
+        return Err(format!("`{connection}` is not an HTTP connection"));
+    };
+    let mut headers = vec![
+        ("User-Agent".to_string(), "Quadra".to_string()),
+        ("Accept".to_string(), "application/json".to_string()),
+    ];
+    match auth {
+        HttpAuth::None => {}
+        HttpAuth::Bearer(v) => {
+            headers.push(("Authorization".into(), format!("Bearer {}", value(v)?)))
+        }
+        HttpAuth::ApiKey { header, key } => headers.push((header.clone(), value(key)?)),
+        HttpAuth::Basic { user, password } => {
+            use base64::Engine;
+            let token = base64::engine::general_purpose::STANDARD.encode(format!(
+                "{}:{}",
+                setting(user)?,
+                value(password)?
+            ));
+            headers.push(("Authorization".into(), format!("Basic {token}")));
+        }
+    }
+    Ok((
+        setting(url)?.trim_end_matches('/').to_string(),
+        headers,
+        Duration::from_secs(*timeout_s),
+    ))
+}
+
+/// What came of a pull: the status, the body (up to 16 MB), `Retry-After` in seconds.
+pub async fn fetch(
+    client: &reqwest::Client,
+    pull: &Pull,
+    public_only: bool,
+) -> Result<(u16, String, Option<u64>), String> {
+    let parsed = reqwest::Url::parse(&pull.url).map_err(|e| format!("{}: {e}", pull.url))?;
+    if public_only {
+        if let Some(host) = parsed.host_str() {
+            if host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .is_ok()
+            {
+                addresses(host, 0, true).await?;
+            }
+        }
+    }
+    let mut req = client.get(parsed).timeout(pull.timeout);
+    for (k, v) in &pull.headers {
+        req = req.header(k, v);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("{}: {}", host_of(&pull.url), root_cause(&e)))?;
+    let status = resp.status().as_u16();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let body = read_up_to(resp, 16 << 20).await;
+    Ok((status, body, retry_after))
+}
+
 /// What a block's last expression gave (`Interp::request`), as a request.
 pub fn built_of(v: &quadra_runtime::V) -> Result<Built, String> {
     use quadra_runtime::V;

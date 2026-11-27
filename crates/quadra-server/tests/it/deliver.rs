@@ -1347,3 +1347,45 @@ fn the_integrations_api_shows_and_settles_what_came_in() {
     assert_eq!(inbox_states(&cfg), ["done", "skipped"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const PULLING: &str = "entity Order:\n    number: Text\n\nrecord ShopOrder from json:\n    id: Text\n    number: Text at \"name\"\n    updated_at: Text\n\nrecord ShopOrders from json:\n    orders: [ShopOrder]\n\ninbound OrderPulled via hooks as m: ShopOrder:\n    pull \"/orders.json?since={cursor}\" every 1 minutes\n    items ShopOrders.orders\n    cursor m.updated_at\n    key m.id\n    let o = Order(number=m.number)\n";
+
+#[test]
+fn a_pull_fetches_the_messages_and_moves_its_cursor() {
+    // an API without webhooks: two orders, then nothing new after the cursor
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = l.local_addr().unwrap().port();
+    let paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = paths.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+            seen.lock().unwrap().push(path.clone());
+            let body = if path.ends_with("since=") {
+                "{\"orders\": [{\"id\": 1, \"name\": \"#1\", \"updated_at\": \"2026-11-27T10:00:00Z\"}, {\"id\": 2, \"name\": \"#2\", \"updated_at\": \"2026-11-27T11:00:00Z\"}]}"
+            } else {
+                "{\"orders\": [{\"id\": 2, \"name\": \"#2\", \"updated_at\": \"2026-11-27T11:00:00Z\"}]}"
+            };
+            let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        }
+    });
+    let dir = temp("pull");
+    let (cfg, token) = project_with(&dir, api, PULLING);
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    call(port, &token, "GET", "/v1/me", None);
+    let start = Instant::now();
+    while orders(&cfg).len() < 2 && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(orders(&cfg), ["#1", "#2"]);
+    let mut c = Conn::open(&cfg.url).unwrap();
+    let (cursor, next) = quadra_store::deliveries::pull_state(&mut c, "OrderPulled").unwrap();
+    assert_eq!(cursor.as_deref(), Some("2026-11-27T11:00:00Z"));
+    assert!(next.is_some());
+    assert_eq!(paths.lock().unwrap()[0], "/orders.json?since=");
+    let _ = std::fs::remove_dir_all(&dir);
+}

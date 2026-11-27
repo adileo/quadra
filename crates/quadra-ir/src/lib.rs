@@ -839,8 +839,23 @@ pub struct Inbound {
     pub ty: String,
     /// `key m.id`: a message with a key already received is not handled again (else its hash)
     pub key: Option<Expr>,
+    /// `pull "/orders?since={cursor}" every 5 minutes`: the messages are fetched, not sent
+    pub pull: Option<Pull>,
     pub body: Vec<Stmt>,
     pub span: Span,
+}
+
+/// How an `inbound` fetches its messages from an API that does not send them.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Pull {
+    /// the path, with `{cursor}` where the cursor goes
+    pub path: String,
+    /// how often (a fixed duration)
+    pub every: Expr,
+    /// `items Page.field`: the answer is a `Page`, its `field` the messages; else a list of them
+    pub items: Option<(String, String)>,
+    /// `cursor m.updated_at`: of each message; the largest is where the next pull starts
+    pub cursor: Option<Expr>,
 }
 
 /// `endpoint GET "/price" via pos as q: PriceQuery -> PosPrice:`: a request of a connection to

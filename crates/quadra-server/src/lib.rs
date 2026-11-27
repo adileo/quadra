@@ -1922,17 +1922,43 @@ fn start(
         });
     }
     if cfg.outside.deliver {
-        tokio::spawn(deliveries(t.clone(), egress));
+        tokio::spawn(deliveries(t.clone(), egress.clone()));
     }
-    tokio::spawn(inbox(t.clone()));
+    // the pulls go out only where events do (production): a copy never fetches with its
+    // connections
+    tokio::spawn(inbox(t.clone(), cfg.outside.deliver.then_some(egress)));
     t
 }
 
-/// A tenant's inbox (`Engine::handle_inbox`): the messages received handled, a few at a time;
-/// then a wait for the next one (or a minute: a message made pending again by `quadra inbox
-/// retry`). A model without any `inbound` is looked at once a minute.
-async fn inbox(t: Arc<Tenant>) {
+/// A tenant's inbox (`Engine::handle_inbox`): the pulls due made (`egress`: where it delivers),
+/// the messages received handled, a few at a time; then a wait for the next message, the next
+/// pull, or a minute (a message made pending again by `quadra inbox retry`). A model without
+/// any `inbound` is looked at once a minute.
+async fn inbox(t: Arc<Tenant>, egress: Option<Arc<Egress>>) {
     loop {
+        let mut next_pull = None;
+        if let Some(e) = &egress {
+            if let Some((pulls, next)) = t.ask(|reply| Job::Pulls { reply }).await {
+                next_pull = next;
+                for p in pulls {
+                    let result = deliver::fetch(&e.client, &p, e.public_only).await;
+                    let inbound = p.inbound.clone();
+                    let new = t
+                        .ask(|reply| Job::Pulled {
+                            inbound,
+                            result,
+                            reply,
+                        })
+                        .await
+                        .unwrap_or(0);
+                    if new > 0 {
+                        t.inbox.notify_one();
+                    }
+                    // the next one of the same is due later: look again
+                    next_pull = Some(chrono::Utc::now().naive_utc());
+                }
+            }
+        }
         let (n, serves) = t
             .ask(|reply| Job::Inbox { limit: 16, reply })
             .await
@@ -1943,7 +1969,13 @@ async fn inbox(t: Arc<Tenant>) {
             }
             continue;
         }
-        let wait = 60;
+        let mut wait = Duration::from_secs(60);
+        if let Some(at) = next_pull {
+            let until = (at - chrono::Utc::now().naive_utc())
+                .to_std()
+                .unwrap_or_default();
+            wait = wait.min(until.max(Duration::from_secs(1)));
+        }
         let notified = t.inbox.clone();
         let mut stop = t.stop.subscribe();
         if *stop.borrow_and_update() {
@@ -1951,7 +1983,7 @@ async fn inbox(t: Arc<Tenant>) {
         }
         tokio::select! {
             _ = notified.notified(), if serves => {}
-            _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = stop.changed() => return,
         }
     }
@@ -2550,10 +2582,17 @@ impl Host {
         } else {
             None
         };
-        match (sweep, delivery) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        // and a pull due (`inbound … pull`)
+        let pull = if t.config.outside.deliver {
+            match t.ask(|reply| Job::Pulls { reply }).await {
+                Some((due, _)) if !due.is_empty() => Some(Duration::ZERO),
+                Some((_, next)) => next.map(until),
+                None => None,
+            }
+        } else {
+            None
+        };
+        [sweep, delivery, pull].into_iter().flatten().min()
     }
 
     /// The roles of the project of an address and its users (`{roles, users: [{id, login,

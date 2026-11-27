@@ -36,6 +36,8 @@ const SYSTEM_DDL: &[&str] = &[
     // the messages received by an `inbound` (crate::deliveries): raw, with their hash, before
     // they are handled
     "CREATE TABLE \"_quadra_inbox\" (\"id\" BIGINT PRIMARY KEY, \"inbound\" TEXT NOT NULL, \"connection\" TEXT NOT NULL, \"key\" TEXT NOT NULL, \"hash\" TEXT NOT NULL, \"body\" TEXT NOT NULL, \"received_at\" TEXT NOT NULL, \"state\" TEXT NOT NULL, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"error\" TEXT, \"done_at\" TEXT, \"tx\" BIGINT, \"response\" TEXT)",
+    // where each `inbound … pull` is: its cursor, when it pulled and when it pulls next
+    "CREATE TABLE \"_quadra_cursors\" (\"inbound\" TEXT PRIMARY KEY, \"cursor\" TEXT, \"pulled_at\" TEXT, \"next_at\" TEXT, \"error\" TEXT)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
     // (crate::deliveries), written with what it records and never changed
     "CREATE TABLE \"_quadra_exchanges\" (\"id\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"message\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"connection\" TEXT, \"step\" TEXT NOT NULL, \"outcome\" TEXT NOT NULL, \"status\" BIGINT, \"duration_ms\" BIGINT, \"error\" TEXT, \"excerpt\" TEXT, \"by\" TEXT, \"reason\" TEXT)",

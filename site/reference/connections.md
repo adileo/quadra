@@ -465,6 +465,35 @@ quadra inbox retry 12                     # handled again by the code deployed n
 quadra inbox skip 13 --reason "a test order from the shop"
 ```
 
+### Pulled instead of sent
+
+An API that sends nothing is asked, at intervals, for what changed since the last time:
+
+```quadra
+record ShopOrders from json:
+    orders: [ShopOrder]
+
+inbound OrderPulled via shop as m: ShopOrder:
+    pull "/orders.json?updated_at_min={cursor}" every 5 minutes
+    items ShopOrders.orders
+    cursor m.updated_at
+    key m.id
+    let o = Order(number=m.number, total=m.total)
+```
+
+| Line | Effect |
+|---|---|
+| `pull "path" every D` | a `GET` of the connection's url and `path` every `D` (a minute at least), with the connection's authentication; `{cursor}` in the path is replaced by the cursor (empty the first time), encoded for a url |
+| `items Page.field` | the answer is a `Page` and its `field` (a list of the inbound's record) holds the messages; without it the answer is that list |
+| `cursor m.field` | of each message; the largest becomes the cursor, kept with the messages in one write, so that the next pull starts there. Ask for `>=` rather than `>`: what is seen twice is a duplicate of its `key`, what falls between two pulls is not lost |
+
+Each message pulled is kept and handled as one sent in: the same states, duplicates, log
+and commands. A pull that fails (no answer, not a 2xx, not JSON) is tried again within five
+minutes, or after its `Retry-After`; the error is in the log of message 0 of the inbound. Pulls
+run only where the app delivers its events (production on Quadra Cloud), and a sleeping app is
+woken for the one due. A pull can sit next to webhooks on the same inbound (`path`), to catch
+what a webhook missed.
+
 ## `endpoint`: answered at once
 
 Some systems ask and wait for the answer: a cash register asks for a price, a checkout for the

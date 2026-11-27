@@ -492,6 +492,24 @@ fn inbound(p: &mut Parser) {
             if p.at_ctx("key") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
                 p.bump_ctx();
                 expr(p);
+            } else if p.at_ctx("pull") && p.nth(1) == STRING {
+                // `pull "/orders?since={cursor}" every 5 minutes`
+                p.bump_ctx();
+                p.bump();
+                if p.at_ctx("every") {
+                    p.bump_ctx();
+                    expr(p);
+                } else {
+                    p.error("expected `every` and how often: `pull \"/orders\" every 5 minutes`");
+                }
+            } else if p.at_ctx("items") && p.nth(1) == IDENT {
+                // `items ShopOrders.orders`: the answer is a ShopOrders, its `orders` the messages
+                p.bump_ctx();
+                path(p);
+            } else if p.at_ctx("cursor") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
+                // `cursor m.updated_at`: where the next pull starts
+                p.bump_ctx();
+                expr(p);
             } else {
                 c.abandon(p);
                 break;
