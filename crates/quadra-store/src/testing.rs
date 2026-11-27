@@ -190,8 +190,16 @@ pub fn compare_working_set(ws: &Store, db: &Store) -> Vec<String> {
             out.push(format!("record {}#{id} missing", r.ent));
             continue;
         };
-        if r.fields != s.fields {
-            out.push(format!("{}#{id}: fields differ: {:?} vs {:?}", r.ent, r.fields, s.fields));
+        // a field without a value and one whose value is none are the same (a record read
+        // from its row has no key for an empty column)
+        let set = |f: &rustc_hash::FxHashMap<String, quadra_runtime::V>| {
+            f.iter()
+                .filter(|(_, v)| !v.is_none())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        if set(&r.fields) != set(&s.fields) {
+            out.push(format!("{}#{id}: fields differ", r.ent));
         }
         // a record read from its projection row has only its values since its last write
         if r.partial.is_none() && r.history.len() != s.history.len() {
