@@ -152,7 +152,9 @@ impl Conn {
     pub fn open(url: &str) -> Result<Conn, String> {
         if let Some(path) = url.strip_prefix("sqlite:") {
             let c = if path == ":memory:" { rusqlite::Connection::open_in_memory() } else { rusqlite::Connection::open(path) }.map_err(|e| e.to_string())?;
-            c.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;").map_err(|e| e.to_string())?;
+            // another connection's checkpoint or write holds the file a moment: wait for it
+            // rather than fail at once ("database is locked")
+            c.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;").map_err(|e| e.to_string())?;
             // the file mapped in memory: every connection (every engine of a project) reads the
             // same pages from the system's cache instead of copying them into its own
             if path != ":memory:" {

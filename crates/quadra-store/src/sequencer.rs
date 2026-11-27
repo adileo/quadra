@@ -861,10 +861,11 @@ impl State {
                 // the WAL written back into the file before anyone takes the file (a hibernation
                 // uploads it whole): checked, and tried again while a reader holds it
                 if self.conn.dialect() == Dialect::Sqlite {
-                    for attempt in 0..50 {
+                    // (each try waits for readers up to the connection's busy timeout)
+                    for attempt in 0..3 {
                         match self.conn.query("PRAGMA wal_checkpoint(TRUNCATE)", &[]) {
                             Ok(r) if r.first().and_then(|r| r[0].as_deref()) == Some("0") => break,
-                            _ if attempt == 49 => eprintln!("sequencer: the WAL could not be written back into the file at the stop"),
+                            _ if attempt == 2 => eprintln!("sequencer: the WAL could not be written back into the file at the stop"),
                             _ => std::thread::sleep(Duration::from_millis(100)),
                         }
                     }
@@ -901,7 +902,10 @@ impl State {
                 None => break,
             }
         }
-        let first = first?;
+        let Some(first) = first else {
+            // the first in line is still being prepared: woken when it is given up at the latest
+            return self.pending.values().filter(|p| p.submitted.is_none() && !p.cancelled).map(|p| self.options.abandon_after.saturating_sub(p.since.elapsed())).min();
+        };
         if ready >= self.options.max_batch {
             return Some(Duration::ZERO);
         }

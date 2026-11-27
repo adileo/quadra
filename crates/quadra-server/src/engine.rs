@@ -634,6 +634,8 @@ impl Engine {
     /// After an internal error: what a request may have left half done is thrown away (the
     /// record cache, connections with a transaction open). The model does not change.
     fn reset(&mut self) {
+        // the commits handed over by the request that failed are not the next one's
+        self.tickets.borrow_mut().clear();
         self.cache = Rc::new(RefCell::new(Cache::new(self.cache_mb << 20, std::time::Duration::from_secs(600))));
         self.pool.borrow_mut().clear();
         match Conn::open(&self.url) {
