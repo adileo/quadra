@@ -41,6 +41,8 @@ pub struct Plan {
     /// attempts made before this one
     pub attempts: u64,
     pub created_at: String,
+    /// its fields, as the outbox keeps them (for the reactions to its outcome)
+    pub fields: J,
     pub send: Send,
 }
 
@@ -188,6 +190,7 @@ pub fn plan(
         connection: connection.to_string(),
         attempts: due.attempts,
         created_at: due.created_at.clone(),
+        fields: due.fields.clone(),
         send,
     };
     let value = |name: &str| -> Result<String, String> {
@@ -760,6 +763,7 @@ mod tests {
             connection: "c".into(),
             attempts: 40,
             created_at: "2020-01-01T00:00:00".into(),
+            fields: J::Null,
             send: Send::Broken("the variable TOKEN is not set where the app runs".into()),
         };
         let client = http_client(false);

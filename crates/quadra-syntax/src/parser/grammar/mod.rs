@@ -411,7 +411,11 @@ fn reaction(p: &mut Parser) {
                 expr(p);
             }
             "created" | "changes" | "deleted" => p.bump_ctx(),
-            _ => p.error("expected `enters`, `becomes`, `created` or `changes`"),
+            // the outcome of an event's delivery: `on OrderShipped delivered as d:`
+            "delivered" | "failed" => p.bump_ctx(),
+            _ => p.error(
+                "expected `enters`, `becomes`, `created` or `changes` (or, for an event, `delivered` or `failed`)",
+            ),
         }
     }
     p.expect(AS_KW);

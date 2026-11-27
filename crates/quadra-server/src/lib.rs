@@ -1320,6 +1320,45 @@ async fn dev_commit(
 
 /// Saved views, teams and the directory of whom to share with (engine/views.rs). Every
 /// change is announced to open clients (`views` events), who read their list again.
+/// `/v1/outbox`: the events no `outbound` delivers, taken and settled by an integration
+/// (`Engine::outbox_api`).
+async fn outbox_api(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    Query(query): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let who = match authenticate(&app, &t, &method, &headers).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let body: J = if body.is_empty() {
+        J::Null
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(j) => j,
+            Err(e) => return fail(400, &format!("the body is not JSON: {e}")),
+        }
+    };
+    let req = Req::Outbox {
+        path: uri.path().to_string(),
+        query,
+        body,
+    };
+    match ask_call(&t, who, req).await {
+        Ok(Some(Reply { status, body, .. })) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(body),
+        )
+            .into_response(),
+        Ok(None) => fail(503, "the engine is not available"),
+        Err(r) => r,
+    }
+}
+
 async fn views_api(
     State(app): State<Shared>,
     Ten(t): Ten,
@@ -1944,6 +1983,8 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                     event: p.event.clone(),
                     outcome,
                     attempt,
+                    fields: p.fields.clone(),
+                    attempts: p.attempts,
                     reply,
                 })
                 .await
@@ -2080,6 +2121,9 @@ impl Host {
                     .delete(views_api),
             )
             .route("/v1/teams", get(views_api).post(views_api))
+            .route("/v1/outbox", get(outbox_api))
+            .route("/v1/outbox/ack", post(outbox_api))
+            .route("/v1/outbox/nack", post(outbox_api))
             .route(
                 "/v1/teams/{*rest}",
                 get(views_api).put(views_api).delete(views_api),

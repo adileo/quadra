@@ -195,8 +195,10 @@ receiver is unavailable:
 outbound SendEmail via mail
 ```
 
-The others are left to an integration outside Quadra, which reads the pending events, hands
-them on and marks them delivered:
+The others are left to an integration outside Quadra: a program that takes them through the
+API with a lease and settles each ([`/v1/outbox`](/reference/connections#without-outbound-an-integration-takes-them)),
+or, on the machine of the database, the CLI, which reads the pending events and marks them
+delivered:
 
 ```bash
 quadra outbox list --pending --json      # one JSON object per line, oldest first
@@ -210,7 +212,10 @@ dropped after the commit. See [`quadra outbox`](/reference/cli#events-quadra-out
 
 ## Reactions
 
-Reactions are code that runs by itself, in the same transaction as what triggered it.
+Reactions are code that runs by itself, in the same transaction as what triggered it. (The
+reactions to the delivery of an event, `on OrderShipped delivered as d:` and `on … failed as
+f:`, run in a transaction of their own when the delivery ends: see
+[Variables and connections](/reference/connections#reacting-to-the-outcome).)
 
 | Declaration | Runs |
 |---|---|

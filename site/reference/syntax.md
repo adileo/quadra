@@ -104,7 +104,7 @@ and is an ordinary name elsewhere. This keeps common words available as field na
 | `check`, `warn`, `unique`, `frozen`, `live`, `flow`, `action`, `post`, `load`, `key`, `measure`, `attr` | at the start of a member |
 | `default`, `required`, `parent`, `per`, `company`, `via`, `through`, `except` | in a field or a `frozen` line |
 | `by`, `unless` | in a flow transition |
-| `enters`, `becomes`, `created`, `changes`, `converges` | in a reaction |
+| `enters`, `becomes`, `created`, `changes`, `converges`, `delivered`, `failed` | in a reaction |
 | `require`, `fail`, `emit`, `use`, `clock`, `expect`, `expect_error`, `expect_compile_error` | at the start of a statement |
 | `rename`, `convert`, `backfill`, `verify` | in a migration |
 | `read`, `create`, `edit`, `run`, `all`, `hide`, `show`, `history` | in a permission rule |

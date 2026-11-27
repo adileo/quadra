@@ -282,8 +282,17 @@ impl<'m> Checker<'m> {
                 Trigger::Before(a) => format!("before {}.{a}", r.entity),
                 Trigger::Created => format!("on {} created", r.entity),
                 Trigger::Changes => format!("on {} changes", r.entity),
+                Trigger::Delivered => format!("on {} delivered", r.entity),
+                Trigger::Failed => format!("on {} failed", r.entity),
             };
             self.push();
+            if matches!(r.trigger, Trigger::Delivered | Trigger::Failed) {
+                let t = self.outcome_type(r);
+                self.bind(&r.binding, t);
+                self.stmts(&r.body);
+                self.pop();
+                continue;
+            }
             self.bind(&r.binding, T::Ent(r.entity.clone()));
             if let Trigger::Becomes(e) = &r.trigger {
                 self.entity = m.entity(&r.entity);
@@ -1754,6 +1763,46 @@ impl<'m> Checker<'m> {
             quadra_sema::manifest::VarType::Decimal => T::Num(Num::Decimal),
             quadra_sema::manifest::VarType::Boolean => T::Bool,
         }
+    }
+
+    /// The value an outcome reaction gets (`on OrderShipped delivered as d:`): `d.event` (its
+    /// fields), `d.at`, `d.attempts`, `d.status` (the HTTP status or SMTP reply), `d.response`
+    /// (the beginning of the answer) and, when it failed, `d.error`. The event must have an
+    /// `outbound`, else nothing would ever deliver it.
+    fn outcome_type(&mut self, r: &quadra_ir::Reaction) -> T {
+        let m = self.m;
+        let Some(ev) = m.events.iter().find(|e| e.name == r.entity) else {
+            self.error(
+                r.span,
+                format!("no event `{}`: `on … delivered` and `on … failed` are about the delivery of an event", r.entity),
+            );
+            return T::Unknown;
+        };
+        if !m.outbounds.iter().any(|o| o.event == ev.name) {
+            self.error(
+                r.span,
+                format!("`{}` has no `outbound`: nothing delivers it, so it is never delivered or failed (add `outbound {} via <connection>`)", ev.name, ev.name),
+            );
+        }
+        let fields: Vec<(Option<String>, T)> = ev
+            .fields
+            .iter()
+            .map(|(n, ty)| (Some(n.clone()), self.decl_ty(ty, &["self".into()])))
+            .collect();
+        let mut out = vec![
+            (Some("event".to_string()), T::Tuple(fields)),
+            (Some("at".to_string()), T::DateTime),
+            (Some("attempts".to_string()), T::Num(Num::Int)),
+            (
+                Some("status".to_string()),
+                T::Opt(Box::new(T::Num(Num::Int))),
+            ),
+            (Some("response".to_string()), T::Opt(Box::new(T::text()))),
+        ];
+        if r.trigger == Trigger::Failed {
+            out.push((Some("error".to_string()), T::text()));
+        }
+        T::Tuple(out)
     }
 
     /// `outbound Event via connection`: the event and the connection exist, one outbound per

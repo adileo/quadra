@@ -226,6 +226,45 @@ def verify(secret: bytes, body: bytes, header: str) -> bool:
 Through an SMTP connection an event is a plain-text email from the connection's `from` to the
 event's `to`, with its `subject` and `body`.
 
+### Reacting to the outcome
+
+When a delivery ends, delivered or failed for good, the code can react to it in a transaction
+of its own, as the system, with the cause `outbound:Event#id delivered` (or `failed`): the
+outcome is then in the history like any other write.
+
+```quadra
+entity Order:
+    number: Text
+    note: Text?
+
+event OrderPlaced(order: Order, number: Text)
+
+on Order created as o:
+    emit OrderPlaced(order=o, number=o.number)
+
+outbound OrderPlaced via shop path "/orders"
+
+on OrderPlaced delivered as d:
+    d.event.order.note = f"sent: {d.status ?? 0} after {d.attempts} attempt(s)"
+
+on OrderPlaced failed as f:
+    f.event.order.note = f"not sent: {f.error}"
+```
+
+| In the reaction | Value |
+|---|---|
+| `d.event` | the event's fields, as they were emitted (`d.event.order`, `d.event.number`) |
+| `d.at` | when the outcome came |
+| `d.attempts` | the attempts made, this one included |
+| `d.status` | the HTTP status or the SMTP reply code (optional) |
+| `d.response` | the beginning of the answer (optional) |
+| `f.error` | for `failed` only: why |
+
+The event must have an `outbound`: `` `Orphan` has no `outbound`: nothing delivers it, so it is
+never delivered or failed ``. A reaction that fails does not change the outcome (the receiver
+got the event, or not): the error goes to the event's log (`quadra outbox log`), as a step
+`reaction`.
+
 ### Attempts and failures
 
 | Answer | What happens |
@@ -265,6 +304,40 @@ server stops between sending and recording the answer, the event is sent again w
 On Quadra Cloud connections only reach public addresses: a name that resolves to a private,
 loopback or link-local address (the clouds' metadata, `169.254.169.254`) is refused, and so
 is a redirect. Previews and forks deliver nothing ([On Quadra Cloud](#on-quadra-cloud)).
+
+## Without `outbound`: an integration takes them
+
+The events no `outbound` delivers can be delivered by a program of your own, anywhere, which
+takes them through the [HTTP API](/reference/http-api) and says what came of each. It is the
+way out for whatever a connection does not cover yet (a protocol, a conversation of several
+calls, a system behind a firewall):
+
+```bash
+# up to 50 events, each leased to you for 60 seconds: no one else gets them meanwhile
+curl -H "Authorization: Bearer $TOKEN" "https://shop.quadra.run/v1/outbox?events=OrderShipped&limit=50&lease=60"
+```
+
+```json
+{"events": [{"id": 41, "key": "quadra-3f9a0c1d2b4e5f60-41", "event": "OrderShipped", "tx": 1207,
+  "created_at": "2026-11-27T10:14:03Z", "attempts": 0, "data": {"number": "A-1042"}}],
+ "lease_until": "2026-11-27T10:15:03Z"}
+```
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -d '{"ids": [41]}' https://shop.quadra.run/v1/outbox/ack
+curl -X POST -H "Authorization: Bearer $TOKEN" -d '{"id": 42, "error": "the ERP is down", "retry_after": 300}' https://shop.quadra.run/v1/outbox/nack
+```
+
+| Call | Effect |
+|---|---|
+| `GET /v1/outbox` | pending events whose commit is confirmed, oldest first, that no `outbound` delivers and no one else holds: `events` (a list of kinds), `limit` (1 to 500, 50), `lease` (10 to 3600 seconds, 60). Each is leased to the caller until `lease_until`; one neither acknowledged nor refused by then is handed out again |
+| `POST /v1/outbox/ack` | `{"ids": […]}`: delivered. Answers the ids that were pending |
+| `POST /v1/outbox/nack` | `{"id", "error", "retry_after"?, "final"?}`: not delivered; handed out again after `retry_after` seconds (30 when not given), or failed for good with `"final": true` |
+
+The same rules as the server's deliveries: at least once (use `key` to ignore what you have
+seen), the same states and the same log, with `pull:<user>` as the connection. Only a token
+of a user who may edit `User.roles` takes the outbox: its events may carry anything the app
+sends out.
 
 ## On Quadra Cloud
 

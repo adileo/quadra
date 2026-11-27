@@ -779,6 +779,10 @@ pub enum Trigger {
     Created,
     Changes,
     Before(String),
+    /// `on Event delivered as d:` (the reaction's `entity` is the event): its delivery succeeded
+    Delivered,
+    /// `on Event failed as f:`: its delivery failed for good
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

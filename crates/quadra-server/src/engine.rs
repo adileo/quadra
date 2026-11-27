@@ -282,6 +282,13 @@ pub enum Req {
         query: HashMap<String, String>,
         body: J,
     },
+    /// `/v1/outbox`: an integration takes the events no `outbound` delivers, and says what
+    /// came of them (`crate::deliver`)
+    Outbox {
+        path: String,
+        query: HashMap<String, String>,
+        body: J,
+    },
     /// a request that fails with an internal error (tests of the recovery)
     #[cfg(test)]
     Panic,
@@ -392,6 +399,9 @@ pub enum Job {
         event: String,
         outcome: quadra_store::deliveries::Outcome,
         attempt: quadra_store::deliveries::Attempt,
+        /// its fields and the attempts made before this one: for the reactions to its outcome
+        fields: J,
+        attempts: u64,
         reply: oneshot::Sender<Result<(), String>>,
     },
     People {
@@ -754,6 +764,234 @@ impl Engine {
         Ok((plans, next, true))
     }
 
+    /// `GET /v1/outbox?events=A,B&limit=50&lease=60`: up to `limit` pending events that no
+    /// `outbound` delivers, each leased to the caller for `lease` seconds (10 to 3600; 60 when
+    /// not given). `POST /v1/outbox/ack {"ids": […]}`: delivered. `POST /v1/outbox/nack {"id",
+    /// "error", "retry_after"?, "final"?}`: not delivered; tried again after `retry_after`
+    /// seconds (the usual wait when not given), or failed for good with `final`. Only those who
+    /// may edit `User.roles` take the outbox: its events may carry anything the app sends out.
+    fn outbox_api(
+        &mut self,
+        who: &Principal,
+        path: &str,
+        query: &HashMap<String, String>,
+        body: &J,
+    ) -> Result<Reply, Fail> {
+        if !self.who(who)?.admin {
+            return Err((
+                403,
+                "only who may edit `User.roles` takes the outbox (a token of such a user)".into(),
+            ));
+        }
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let served: Vec<String> = model.outbounds.iter().map(|o| o.event.clone()).collect();
+        let at = now();
+        let stamp = |t: chrono::NaiveDateTime| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let by = format!("user:{}", who.user_id);
+        match path {
+            "/v1/outbox" => {
+                let only: Option<Vec<String>> = query.get("events").map(|e| {
+                    e.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                });
+                let limit = query
+                    .get("limit")
+                    .and_then(|l| l.parse::<usize>().ok())
+                    .unwrap_or(50)
+                    .clamp(1, 500);
+                let lease = query
+                    .get("lease")
+                    .and_then(|l| l.parse::<i64>().ok())
+                    .unwrap_or(60)
+                    .clamp(10, 3600);
+                let durable = match &self.sequencer {
+                    Some(s) => s.durable().map_err(|e| (503, e))?,
+                    None => u64::MAX,
+                };
+                let until = at + chrono::Duration::seconds(lease);
+                let (now_s, until_s) = (stamp(at), stamp(until));
+                let taken = self
+                    .side(move |c| {
+                        quadra_store::deliveries::take(
+                            c,
+                            &served,
+                            only.as_deref(),
+                            &now_s,
+                            &until_s,
+                            durable,
+                            limit,
+                        )
+                    })
+                    .map_err(|e| (500, e))?;
+                let events: Vec<J> = taken
+                    .iter()
+                    .map(|d| {
+                        json!({
+                            "id": d.id,
+                            "key": crate::deliver::idempotency_key(d),
+                            "event": d.event,
+                            "tx": d.tx,
+                            "created_at": format!("{}Z", d.created_at),
+                            "attempts": d.attempts,
+                            "data": crate::deliver::plain_fields(&d.fields),
+                        })
+                    })
+                    .collect();
+                Ok(self::reply(
+                    200,
+                    json!({ "events": events, "lease_until": format!("{}Z", stamp(until)) }),
+                ))
+            }
+            "/v1/outbox/ack" => {
+                let ids: Vec<u64> = body["ids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_u64()).collect())
+                    .unwrap_or_default();
+                if ids.is_empty() {
+                    return Err((400, "`ids`: the events delivered".into()));
+                }
+                let now_s = stamp(at);
+                let done = self
+                    .side(move |c| {
+                        let mut n = Vec::new();
+                        for id in ids {
+                            if quadra_store::deliveries::settle(
+                                c,
+                                &served,
+                                id,
+                                &now_s,
+                                &quadra_store::deliveries::Outcome::Delivered,
+                                &by,
+                            )? {
+                                n.push(id);
+                            }
+                        }
+                        Ok(n)
+                    })
+                    .map_err(|e| (500, e))?;
+                Ok(self::reply(200, json!({ "delivered": done })))
+            }
+            "/v1/outbox/nack" => {
+                let Some(id) = body["id"].as_u64() else {
+                    return Err((400, "`id`: the event not delivered".into()));
+                };
+                let error = body["error"]
+                    .as_str()
+                    .unwrap_or("refused by the integration")
+                    .chars()
+                    .take(1000)
+                    .collect::<String>();
+                let outcome = if body["final"].as_bool() == Some(true) {
+                    quadra_store::deliveries::Outcome::Failed { error }
+                } else {
+                    let wait = body["retry_after"]
+                        .as_u64()
+                        .map(|s| std::time::Duration::from_secs(s.min(86_400)))
+                        .unwrap_or_else(|| quadra_store::deliveries::backoff(1, 0.5));
+                    quadra_store::deliveries::Outcome::Retry {
+                        at: stamp(at + chrono::Duration::from_std(wait).unwrap_or_default()),
+                        error,
+                    }
+                };
+                let now_s = stamp(at);
+                let changed = self
+                    .side(move |c| {
+                        quadra_store::deliveries::settle(c, &served, id, &now_s, &outcome, &by)
+                    })
+                    .map_err(|e| (500, e))?;
+                if !changed {
+                    return Err((
+                        404,
+                        format!("no pending event {id} that an integration delivers"),
+                    ));
+                }
+                Ok(self::reply(200, json!({ "id": id, "settled": true })))
+            }
+            _ => Err((404, "no such path".into())),
+        }
+    }
+
+    /// The reactions to the final outcome of event `id` (`on E delivered as d:`, `on E failed as
+    /// f:`), in a transaction of their own with the cause `outbound:E#id`. One that fails leaves
+    /// the outcome as it is (it is true: the receiver got it, or not) and goes to the event's log.
+    fn outcome_reactions(
+        &mut self,
+        id: u64,
+        event: &str,
+        outcome: &quadra_store::deliveries::Outcome,
+        attempt: &quadra_store::deliveries::Attempt,
+        fields: &J,
+        attempts: u64,
+    ) {
+        use quadra_runtime::V;
+        use quadra_store::deliveries::Outcome;
+        let (delivered, error) = match outcome {
+            Outcome::Delivered => (true, None),
+            Outcome::Failed { error } => (false, Some(error.clone())),
+            Outcome::Retry { .. } => return,
+        };
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return;
+        };
+        let at = now();
+        let text = |s: &str| V::Text(std::rc::Rc::from(s));
+        let event_fields: Vec<(Option<String>, V)> = fields
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| (Some(k.clone()), quadra_runtime::codec::from_json(v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut parts = vec![
+            (
+                Some("event".to_string()),
+                V::Tuple(std::rc::Rc::new(event_fields)),
+            ),
+            (Some("at".to_string()), V::DateTime(at)),
+            (Some("attempts".to_string()), V::Int(attempts as i64)),
+            (
+                Some("status".to_string()),
+                attempt.status.map_or(V::None, |s| V::Int(s as i64)),
+            ),
+            (
+                Some("response".to_string()),
+                attempt.excerpt.as_deref().map_or(V::None, text),
+            ),
+        ];
+        if let Some(e) = &error {
+            parts.push((Some("error".to_string()), text(e)));
+        }
+        let value = V::Tuple(std::rc::Rc::new(parts));
+        let r = quadra_store::ops::outcome_reactions(
+            &self.url,
+            model,
+            &checked.report,
+            at,
+            self.sequencer.as_ref(),
+            event,
+            delivered,
+            value,
+            format!(
+                "outbound:{event}#{id} {}",
+                if delivered { "delivered" } else { "failed" }
+            ),
+        );
+        if let Err(e) = r {
+            eprintln!("outbound {event}#{id}: the reaction failed: {e}");
+            let (ev, stamp) = (
+                event.to_string(),
+                at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            );
+            let _ =
+                self.side(move |c| quadra_store::deliveries::log_reaction(c, id, &ev, &stamp, &e));
+        }
+    }
+
     /// Where an interpreter's commits go: the tenant's sequencer, or the database directly.
     pub(crate) fn sink<'m>(
         &self,
@@ -967,12 +1205,26 @@ impl Engine {
                     event,
                     outcome,
                     attempt,
+                    fields,
+                    attempts,
                     reply,
                 } => {
                     let at = now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                    let _ = reply.send(self.side(move |c| {
-                        quadra_store::deliveries::record(c, id, &event, &at, &outcome, &attempt)
-                    }));
+                    let (ev, o, a) = (event.clone(), outcome.clone(), attempt.clone());
+                    let r = self
+                        .side(move |c| quadra_store::deliveries::record(c, id, &ev, &at, &o, &a));
+                    // a final outcome, written now: the reactions to it, in a transaction
+                    if let Ok(true) = r {
+                        self.outcome_reactions(
+                            id,
+                            &event,
+                            &outcome,
+                            &attempt,
+                            &fields,
+                            attempts + 1,
+                        );
+                    }
+                    let _ = reply.send(r.map(|_| ()));
                 }
                 Job::Sweep { reply } => {
                     let checked = self.checked.clone();
@@ -1072,6 +1324,7 @@ impl Engine {
                 query,
                 body,
             } => self.views_api(&who, &method, &path, &query, &body),
+            Req::Outbox { path, query, body } => self.outbox_api(&who, &path, &query, &body),
             #[cfg(test)]
             Req::Panic => panic!("a test of the recovery"),
         };

@@ -1110,6 +1110,22 @@ impl<'p> Resolver<'p> {
         };
         let segs = ast::path_segments(&path);
         let Some(first) = segs.first() else { return };
+        // `on OrderShipped delivered as d:`: the outcome of an event's delivery
+        let outcome = node
+            .children_with_tokens()
+            .filter_map(|t| t.into_token())
+            .any(|t| matches!(t.text(), "delivered" | "failed"));
+        if outcome {
+            match self
+                .a
+                .resolve(file, first.text())
+                .filter(|d| self.a.decl(*d).kind == DeclKind::Event)
+            {
+                Some(ev) => self.reference(file, first.text_range(), Target::Decl(ev)),
+                None => self.unknown(file, first, "event"),
+            }
+            return;
+        }
         let kinds = [DeclKind::Entity, DeclKind::Record];
         let Some(owner) = self
             .a

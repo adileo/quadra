@@ -32,7 +32,7 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_idempotency\" (\"user_id\" BIGINT NOT NULL, \"key\" TEXT NOT NULL, \"request_hash\" TEXT NOT NULL, \"response\" TEXT NOT NULL, \"tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, PRIMARY KEY (\"user_id\", \"key\"))",
     "CREATE TABLE \"_quadra_applied\" (\"key\" TEXT PRIMARY KEY, \"tx\" BIGINT NOT NULL)",
     "CREATE TABLE \"_quadra_renames\" (\"seq\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"entity\" TEXT NOT NULL, \"old_name\" TEXT NOT NULL, \"new_name\" TEXT NOT NULL)",
-    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT, \"state\" TEXT NOT NULL DEFAULT 'pending')",
+    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT, \"state\" TEXT NOT NULL DEFAULT 'pending', \"lease_until\" TEXT)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
     // (crate::deliveries), written with what it records and never changed
     "CREATE TABLE \"_quadra_exchanges\" (\"id\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"message\" BIGINT NOT NULL, \"name\" TEXT NOT NULL, \"connection\" TEXT, \"step\" TEXT NOT NULL, \"outcome\" TEXT NOT NULL, \"status\" BIGINT, \"duration_ms\" BIGINT, \"error\" TEXT, \"excerpt\" TEXT, \"by\" TEXT, \"reason\" TEXT)",
@@ -108,8 +108,9 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// 10: `_quadra_batches`, the batches of the sequencer (crate::sequencer).
 /// 11: `_quadra_outbox.attempts`, `next_at`, `error`, `failed_at`: the deliveries of the events
 /// with an `outbound` (crate::deliveries).
-/// 12: `_quadra_outbox.state` (pending, delivered, failed, skipped…) and `_quadra_exchanges`,
-/// the log of every step of a delivery.
+/// 12: `_quadra_outbox.state` (pending, delivered, failed, skipped…) and `lease_until` (an
+/// event taken by an integration), and `_quadra_exchanges`, the log of every step of a
+/// delivery.
 const SYSTEM_VERSION: &str = "12";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
@@ -386,6 +387,19 @@ impl Database {
             self.conn.batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"state\" TEXT NOT NULL DEFAULT 'pending'")?;
             self.conn.batch("UPDATE \"_quadra_outbox\" SET \"state\" = 'delivered' WHERE \"delivered_at\" IS NOT NULL")?;
             self.conn.batch("UPDATE \"_quadra_outbox\" SET \"state\" = 'failed' WHERE \"delivered_at\" IS NULL AND \"failed_at\" IS NOT NULL")?;
+        }
+        // the lease of an event taken by an integration (`GET /v1/outbox`)
+        if self.conn.table_exists("_quadra_outbox")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"lease_until\" FROM \"_quadra_outbox\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            self.conn
+                .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"lease_until\" TEXT")?;
         }
         for s in system_ddl(self.dialect()) {
             let name = s.split('"').nth(1).unwrap_or("").to_string();

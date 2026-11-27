@@ -131,6 +131,29 @@ pub struct Step {
     pub reason: Option<String>,
 }
 
+/// A reaction to the outcome of event `id` that failed (`on … delivered` / `failed`): in its
+/// log, to be looked at and fixed with a deploy.
+pub fn log_reaction(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    at: &str,
+    error: &str,
+) -> Result<(), String> {
+    log_step(
+        conn,
+        id,
+        name,
+        at,
+        "reaction",
+        "rejected",
+        None,
+        Some(error),
+        None,
+        None,
+    )
+}
+
 /// Adds a row to the log of event `id` (outgoing).
 #[allow(clippy::too_many_arguments)]
 fn log_step(
@@ -177,7 +200,7 @@ fn log_step(
 }
 
 /// Writes what came of an attempt on event `id` (named `name`) at `now`, and the attempt in its
-/// log. An event that is no longer pending is left as it is.
+/// log. An event that is no longer pending is left as it is: returns whether it changed.
 pub fn record(
     conn: &mut Conn,
     id: u64,
@@ -185,7 +208,7 @@ pub fn record(
     now: &str,
     outcome: &Outcome,
     attempt: &Attempt,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let key = Sql::Int(id as i64);
     let at = Sql::Text(now.to_string());
     let pending = "\"id\" = ?bigint AND \"state\" = 'pending'";
@@ -229,7 +252,7 @@ pub fn record(
             None,
         )?;
     }
-    Ok(())
+    Ok(n > 0)
 }
 
 /// Events that failed for good or were skipped made pending again (`quadra outbox retry`):
@@ -331,6 +354,101 @@ pub fn log(conn: &mut Conn, id: u64) -> Result<Vec<Step>, String> {
             reason: r[9].clone(),
         })
         .collect())
+}
+
+/// Takes up to `limit` pending events for an integration that delivers them itself
+/// (`GET /v1/outbox`): those not of the kinds in `served` (the server delivers them), of the
+/// kinds in `only` if given, not leased to another until after `now`, of commits up to
+/// `durable`. Each is leased until `until`: no one else gets it before, and if it is neither
+/// acknowledged nor refused by then it is handed out again.
+#[allow(clippy::too_many_arguments)]
+pub fn take(
+    conn: &mut Conn,
+    served: &[String],
+    only: Option<&[String]>,
+    now: &str,
+    until: &str,
+    durable: u64,
+    limit: usize,
+) -> Result<Vec<Due>, String> {
+    let mut filter = String::new();
+    let mut params = vec![
+        Sql::Text(now.to_string()),
+        Sql::Text(now.to_string()),
+        Sql::Int(durable.min(i64::MAX as u64) as i64),
+    ];
+    if !served.is_empty() {
+        let (marks, p) = in_list(served);
+        filter.push_str(&format!(" AND o.\"event\" NOT IN ({marks})"));
+        params.extend(p);
+    }
+    if let Some(only) = only {
+        if only.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (marks, p) = in_list(only);
+        filter.push_str(&format!(" AND o.\"event\" IN ({marks})"));
+        params.extend(p);
+    }
+    let rows = conn.query(
+        &format!("SELECT CAST(o.\"id\" AS TEXT), CAST(o.\"tx\" AS TEXT), o.\"event\", o.\"fields\", o.\"created_at\", CAST(o.\"attempts\" AS TEXT), c.\"hash\" FROM \"_quadra_outbox\" o LEFT JOIN \"_quadra_commits\" c ON c.\"tx\" = o.\"tx\" WHERE o.\"state\" = 'pending' AND (o.\"lease_until\" IS NULL OR o.\"lease_until\" <= ?text) AND (o.\"next_at\" IS NULL OR o.\"next_at\" <= ?text) AND o.\"tx\" <= ?bigint{filter} ORDER BY o.\"id\" LIMIT {limit}"),
+        &params,
+    )?;
+    let num = |v: &Option<String>| v.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0u64);
+    let mut out = Vec::new();
+    for r in rows {
+        let id = num(&r[0]);
+        conn.exec(
+            "UPDATE \"_quadra_outbox\" SET \"lease_until\" = ?text WHERE \"id\" = ?bigint",
+            &[Sql::Text(until.to_string()), Sql::Int(id as i64)],
+        )?;
+        out.push(Due {
+            id,
+            tx: num(&r[1]),
+            event: r[2].clone().unwrap_or_default(),
+            fields: r[3]
+                .as_deref()
+                .and_then(|f| serde_json::from_str(f).ok())
+                .unwrap_or(J::Null),
+            created_at: r[4].clone().unwrap_or_default(),
+            attempts: num(&r[5]),
+            commit: r[6].clone().unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// What an integration says of an event it took: delivered (`ack`), or not, with the error,
+/// tried again from `retry_at` or failed for good (`nack`). Only an event still pending and
+/// not of the kinds in `served` changes; the lease ends. Returns whether it changed.
+pub fn settle(
+    conn: &mut Conn,
+    served: &[String],
+    id: u64,
+    now: &str,
+    outcome: &Outcome,
+    by: &str,
+) -> Result<bool, String> {
+    let rows = conn.query(
+        "SELECT \"event\" FROM \"_quadra_outbox\" WHERE \"id\" = ?bigint AND \"state\" = 'pending'",
+        &[Sql::Int(id as i64)],
+    )?;
+    let Some(name) = rows.into_iter().next().and_then(|r| r[0].clone()) else {
+        return Ok(false);
+    };
+    if served.contains(&name) {
+        return Ok(false);
+    }
+    let attempt = Attempt {
+        connection: format!("pull:{by}"),
+        ..Default::default()
+    };
+    let changed = record(conn, id, &name, now, outcome, &attempt)?;
+    conn.exec(
+        "UPDATE \"_quadra_outbox\" SET \"lease_until\" = NULL WHERE \"id\" = ?bigint",
+        &[Sql::Int(id as i64)],
+    )?;
+    Ok(changed)
 }
 
 /// How long to wait after the `attempts`-th failed attempt: 30 s, doubled each time, at most

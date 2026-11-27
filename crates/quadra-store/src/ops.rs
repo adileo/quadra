@@ -731,6 +731,57 @@ pub fn sweep_with(
     Ok(written)
 }
 
+/// The reactions to the outcome of an event's delivery (`on OrderShipped delivered as d:`),
+/// run in a transaction of their own as the system, with `cause` (`outbound:OrderShipped#41`).
+/// Returns how many reactions ran (none: nothing written).
+#[allow(clippy::too_many_arguments)]
+pub fn outcome_reactions(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+    event: &str,
+    delivered: bool,
+    outcome: quadra_runtime::V,
+    cause: String,
+) -> Result<usize, String> {
+    let want = if delivered {
+        quadra_ir::Trigger::Delivered
+    } else {
+        quadra_ir::Trigger::Failed
+    };
+    if !model
+        .reactions
+        .iter()
+        .any(|r| r.entity == event && r.trigger == want)
+    {
+        return Ok(0);
+    }
+    let db = Database::open(url, model, report)?;
+    let schema = db.schema.clone();
+    let src = crate::source::DbSource::open(url, schema, None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(match sequencer {
+        Some(s) => Box::new(crate::SequencedSink {
+            db,
+            model,
+            sequencer: s.clone(),
+            tickets: None,
+        }),
+        None => Box::new(Sink { db, model }),
+    });
+    interp
+        .with_cause(cause, |i| {
+            i.transaction(|i| i.run_outcome(event, delivered, &outcome))
+        })
+        .map_err(|e| flow("the reaction", e))
+}
+
 /// When a project next needs a sweep, from its database (`quadra_analysis::clock`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Due {

@@ -104,6 +104,10 @@ fn temp(name: &str) -> PathBuf {
 
 /// The project in `dir`, its webhooks going to `port`, its database initialized; a token.
 fn project(dir: &Path, port: u16) -> (Config, String) {
+    project_with(dir, port, CODE)
+}
+
+fn project_with(dir: &Path, port: u16, code: &str) -> (Config, String) {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
@@ -111,7 +115,7 @@ fn project(dir: &Path, port: u16) -> (Config, String) {
         format!("[project]\nname = \"d\"\n\n[vars]\nHOOK_SECRET = {{ secret = true }}\n\n[connections.hooks]\nkind = \"http\"\nurl = \"http://127.0.0.1:{port}\"\ninsecure = true\nsigning_secret = {{ var = \"HOOK_SECRET\" }}\ntimeout = \"3s\"\n"),
     )
     .unwrap();
-    std::fs::write(dir.join("main.qd"), CODE).unwrap();
+    std::fs::write(dir.join("main.qd"), code).unwrap();
     let url = format!("sqlite:{}", dir.join("data.db").display());
     let checked = quadra_analysis::check(&Project::load(dir).unwrap());
     assert!(
@@ -472,7 +476,7 @@ fn the_compiler_keeps_secrets_out_of_the_code_and_variables_out_of_formulas() {
     .unwrap();
     std::fs::write(
         dir.join("main.qd"),
-        "entity Order:\n    number: Text\n    note: Text?\n    label: Text = f\"{number} {env.SHOP}\"\n\n    action ship():\n        note = env.SHOP\n        emit Leak(token=env.TOKEN)\n        emit Mail(to=\"a@example.com\")\n\nevent Leak(token: Text)\nevent Mail(to: Email)\n\noutbound Mail via mail\noutbound Leak via nowhere\n",
+        "entity Order:\n    number: Text\n    note: Text?\n    label: Text = f\"{number} {env.SHOP}\"\n\n    action ship():\n        note = env.SHOP\n        emit Leak(token=env.TOKEN)\n        emit Mail(to=\"a@example.com\")\n\nevent Leak(token: Text)\nevent Mail(to: Email)\nevent Orphan(x: Text)\n\noutbound Mail via mail\noutbound Leak via nowhere\n\non Orphan delivered as d:\n    let x = d.event.x\n\non Mail failed as f:\n    let e = f.error\n    let w = f.event.nope\n",
     )
     .unwrap();
     let checked = quadra_analysis::check(&Project::load(&dir).unwrap());
@@ -490,6 +494,9 @@ fn the_compiler_keeps_secrets_out_of_the_code_and_variables_out_of_formulas() {
     assert!(has("`env.SHOP` is not allowed here"), "{errors:?}");
     assert!(has("`Mail` has no `subject`"), "{errors:?}");
     assert!(has("no connection `nowhere`"), "{errors:?}");
+    // an outcome reaction: on an event that something delivers, with its fields
+    assert!(has("`Orphan` has no `outbound`"), "{errors:?}");
+    assert!(has("no field `nope`"), "{errors:?}");
     // the action may read the variable: no error on `note = env.SHOP`
     assert_eq!(
         errors.iter().filter(|e| e.contains("env.SHOP")).count(),
@@ -583,5 +590,167 @@ fn every_attempt_is_in_the_log_with_its_answer() {
     );
     assert_eq!(log[1].reason.as_deref(), Some("the order was cancelled"));
     assert_eq!(log[1].by.as_deref(), Some("cli:ann"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A JSON request to the host; the status and the body.
+fn call(port: u16, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    s.write_all(req.as_bytes()).unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    let (head, rest) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (status, serde_json::from_str(rest).unwrap_or(J::Null))
+}
+
+#[test]
+fn an_integration_takes_the_events_no_outbound_delivers_and_settles_them() {
+    // the same project, without its `outbound`: an integration delivers OrderPlaced
+    let dir = temp("pull");
+    let (cfg, token) = project(&dir, 9);
+    let code = std::fs::read_to_string(dir.join("main.qd")).unwrap();
+    std::fs::write(
+        dir.join("main.qd"),
+        code.replace("outbound OrderPlaced via hooks path \"/orders\"\n", ""),
+    )
+    .unwrap();
+    let (_host, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "P1");
+    place_order(port, &token, "P2");
+    // taken, leased: a second take within the lease gets nothing
+    let (s, v) = call(
+        port,
+        &token,
+        "GET",
+        "/v1/outbox?events=OrderPlaced&limit=10&lease=30",
+        None,
+    );
+    assert_eq!(s, 200, "{v}");
+    let events = v["events"].as_array().unwrap().clone();
+    assert_eq!(events.len(), 2, "{v}");
+    assert_eq!(events[0]["data"]["number"], "P1");
+    assert!(events[0]["key"].as_str().unwrap().starts_with("quadra-"));
+    let (_, again) = call(port, &token, "GET", "/v1/outbox", None);
+    assert!(again["events"].as_array().unwrap().is_empty(), "{again}");
+    // one delivered, one refused for now: the refused one comes back after its wait
+    let (id1, id2) = (
+        events[0]["id"].as_u64().unwrap(),
+        events[1]["id"].as_u64().unwrap(),
+    );
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/outbox/ack",
+        Some(json!({ "ids": [id1] })),
+    );
+    assert_eq!((s, v["delivered"].clone()), (200, json!([id1])));
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/outbox/nack",
+        Some(json!({ "id": id2, "error": "the ERP is down", "retry_after": 0 })),
+    );
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = call(port, &token, "GET", "/v1/outbox", None);
+    let back = v["events"].as_array().unwrap();
+    assert_eq!(back.len(), 1, "{v}");
+    assert_eq!(
+        (back[0]["id"].as_u64(), back[0]["attempts"].as_u64()),
+        (Some(id2), Some(1))
+    );
+    // an event already delivered is not settled again
+    let (s, _) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/outbox/nack",
+        Some(json!({ "id": id1, "error": "x" })),
+    );
+    assert_eq!(s, 404);
+    // the log says who settled them
+    let log = quadra_store::deliveries::log(&mut Conn::open(&cfg.url).unwrap(), id1).unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].outcome, "delivered");
+    assert!(
+        log[0]
+            .connection
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("pull:user:"),
+        "{log:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const REACTING: &str = "entity Order:\n    number: Text\n    note: Text?\n\nevent OrderPlaced(order: Order, number: Text)\n\non Order created as o:\n    emit OrderPlaced(order=o, number=o.number)\n\noutbound OrderPlaced via hooks path \"/orders\"\n\non OrderPlaced delivered as d:\n    d.event.order.note = f\"sent: {d.status ?? 0} after {d.attempts} attempt(s)\"\n\non OrderPlaced failed as f:\n    f.event.order.note = f\"not sent: {f.error}\"\n";
+
+fn note_of(cfg: &Config, number: &str) -> Option<String> {
+    let rows = Conn::open(&cfg.url)
+        .unwrap()
+        .query(
+            "SELECT \"note\" FROM \"order\" WHERE \"number\" = ?text",
+            &[quadra_store::conn::Sql::Text(number.to_string())],
+        )
+        .unwrap_or_default();
+    rows.into_iter().next().and_then(|r| r[0].clone())
+}
+
+#[test]
+fn the_outcome_of_a_delivery_is_a_transaction_the_code_reacts_to() {
+    // delivered: the reaction writes on the order, with the cause of the delivery
+    let r = receiver(vec![201]);
+    let dir = temp("react-ok");
+    let (cfg, token) = project_with(&dir, r.port, REACTING);
+    let (host, rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "R1");
+    let start = Instant::now();
+    while note_of(&cfg, "R1").is_none() && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        note_of(&cfg, "R1").as_deref(),
+        Some("sent: 201 after 1 attempt(s)")
+    );
+    let cause: String = Conn::open(&cfg.url)
+        .unwrap()
+        .query(
+            "SELECT \"cause\" FROM \"_quadra_commits\" ORDER BY \"tx\" DESC LIMIT 1",
+            &[],
+        )
+        .unwrap()[0][0]
+        .clone()
+        .unwrap();
+    assert!(
+        cause.contains("outbound:OrderPlaced#") && cause.contains("delivered"),
+        "{cause}"
+    );
+    drop((host, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // refused for good: the other reaction, with the error
+    let r = receiver(vec![422]);
+    let dir = temp("react-failed");
+    let (cfg, token) = project_with(&dir, r.port, REACTING);
+    let (_host, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "R2");
+    let start = Instant::now();
+    while note_of(&cfg, "R2").is_none() && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let note = note_of(&cfg, "R2").unwrap_or_default();
+    assert!(
+        note.starts_with("not sent:") && note.contains("422"),
+        "{note}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

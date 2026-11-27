@@ -4515,6 +4515,8 @@ impl<'m> Interp<'m> {
             Trigger::Before(a) => format!("before {}.{a}", r.entity),
             Trigger::Created => format!("on {} created", r.entity),
             Trigger::Changes => format!("on {} changes", r.entity),
+            Trigger::Delivered => format!("on {} delivered", r.entity),
+            Trigger::Failed => format!("on {} failed", r.entity),
         };
         self.system += 1;
         let res = self.with_cause(desc, |s| {
@@ -4527,6 +4529,29 @@ impl<'m> Interp<'m> {
             Err(Flow::Return(_)) => Ok(()),
             other => other,
         }
+    }
+
+    /// The reactions to the outcome of an event's delivery (`on OrderShipped delivered as d:`,
+    /// `delivered` true; `on … failed as f:`, false), each given `outcome`, run as the system in
+    /// the current transaction. Returns how many ran.
+    pub fn run_outcome(&mut self, event: &str, delivered: bool, outcome: &V) -> R<usize> {
+        let want = if delivered {
+            Trigger::Delivered
+        } else {
+            Trigger::Failed
+        };
+        let found: Vec<usize> = self
+            .m
+            .reactions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.entity == event && r.trigger == want)
+            .map(|(i, _)| i)
+            .collect();
+        for &i in &found {
+            self.run_reaction(i, outcome)?;
+        }
+        Ok(found.len())
     }
 
     /// Automatic transitions, `becomes` reactions and ledger postings, until stable.

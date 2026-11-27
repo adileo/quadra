@@ -777,6 +777,10 @@ impl<'a> Lower<'a> {
             Trigger::Created
         } else if words.iter().any(|w| w == "changes") {
             Trigger::Changes
+        } else if words.iter().any(|w| w == "delivered") {
+            Trigger::Delivered
+        } else if words.iter().any(|w| w == "failed") {
+            Trigger::Failed
         } else {
             if words.iter().any(|w| w == "deleted") {
                 self.model.errors.push((
