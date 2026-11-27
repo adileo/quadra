@@ -561,6 +561,26 @@ pub enum StmtKind {
     },
     Use(String),
     Clock(Expr),
+    /// in a test: the code of an `inbound` run on a message, as when it comes in (`file`: the
+    /// text is a path, from the project's folder)
+    Receive {
+        inbound: String,
+        body: Expr,
+        file: bool,
+    },
+    /// in a test: the events of `event` waiting in the outbox delivered (with the `reply` the
+    /// other side gave) or failed (with the error): their `on … delivered` / `failed` run
+    Deliver {
+        event: String,
+        reply: Option<Expr>,
+        failed: Option<Expr>,
+    },
+    /// in a test: an event like this one (`OrderPlaced(order=o)`: those fields, the others
+    /// whatever they are) was emitted, or (`negated`) was not
+    ExpectSent {
+        event: Expr,
+        negated: bool,
+    },
     As {
         user: String,
         body: Vec<Stmt>,

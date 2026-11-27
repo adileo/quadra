@@ -1203,6 +1203,29 @@ fn a_signed_message_comes_in_once_and_a_bad_one_never_touches_the_data() {
             .any(|c| c.contains("inbound:OrderIn#1 handled")),
         "{causes:?}"
     );
+    // what the code of now would do with them: said, nothing written
+    let checked = quadra_analysis::check(&Project::load(&dir).unwrap());
+    let lines = ops::inbox_dry_run(
+        &cfg.url,
+        checked.model.as_ref().unwrap(),
+        &checked.report,
+        &[1, 2, 3],
+        now(),
+    )
+    .unwrap();
+    let text = lines.join("\n");
+    assert!(text.contains("#1 OrderIn (done"), "{text}");
+    assert!(text.contains("would create Order#"), "{text}");
+    assert!(text.contains("number=#1001"), "{text}");
+    assert!(
+        text.contains("#2 OrderIn: would be rejected: not a ShopOrder"),
+        "{text}"
+    );
+    assert!(
+        text.contains("#3 OrderIn: would be rejected") && text.contains("a negative total"),
+        "{text}"
+    );
+    assert_eq!(orders(&cfg), ["#1001"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

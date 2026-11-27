@@ -86,6 +86,7 @@ pub fn run_tests_with(
             interp: Interp::new(&model),
             backend: backend.as_deref_mut(),
             bindings: HashMap::new(),
+            received: Default::default(),
         };
         let mut outcome = Ok(());
         if let Some(b) = runner.backend.as_deref_mut() {
@@ -153,6 +154,7 @@ pub fn run_session<T>(
         interp: Interp::new(&model),
         backend: None,
         bindings: HashMap::new(),
+        received: Default::default(),
     };
     let outcome = runner.run(&test);
     let Runner {
@@ -171,6 +173,8 @@ struct Runner<'a, 'b, 'c> {
     backend: Option<&'b mut (dyn TestBackend + 'c)>,
     /// the variables of the test at its end (the sandbox refers to records by them)
     bindings: HashMap<String, V>,
+    /// the keys of the messages received so far, per inbound: the same again is a duplicate
+    received: std::collections::HashSet<(String, String)>,
 }
 
 impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
@@ -188,6 +192,7 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
     }
 
     fn run(&mut self, test: &Block) -> Result<(), String> {
+        self.interp.sent = Some(Vec::new());
         // seeds of the standard library and of the project
         let seeds = self.model.seeds.clone();
         self.interp.system += 1;
@@ -235,10 +240,34 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
                 Ok(())
             }
             StmtKind::Expect(e) => self.expect(e, ctx),
+            StmtKind::Receive {
+                inbound,
+                body,
+                file,
+            } => self
+                .receive(inbound, body, *file, ctx)
+                .map_err(|e| format!("{}: {e}", self.at(s.span))),
+            StmtKind::Deliver {
+                event,
+                reply,
+                failed,
+            } => self
+                .deliver(event, reply.as_ref(), failed.as_ref(), ctx)
+                .map_err(|e| format!("{}: {e}", self.at(s.span))),
+            StmtKind::ExpectSent { event, negated } => self
+                .expect_sent(event, *negated, ctx)
+                .map_err(|e| format!("{}: {e}", self.at(s.span))),
             StmtKind::ExpectError { message, body } => {
                 let mut got = None;
                 for st in body {
-                    if let Err(e) = self.statement(st, ctx) {
+                    let r = match st.kind {
+                        // the statements of a test, run by the runner
+                        StmtKind::Receive { .. }
+                        | StmtKind::Deliver { .. }
+                        | StmtKind::ExpectSent { .. } => self.stmt(st, ctx),
+                        _ => self.statement(st, ctx),
+                    };
+                    if let Err(e) = r {
                         got = Some(e);
                         break;
                     }
@@ -278,6 +307,213 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
                 .statement(s, ctx)
                 .map_err(|e| format!("{}: {e}", self.at(s.span))),
         }
+    }
+
+    /// `receive OrderIn "…"`: the message read as the inbound's record and handled by its code,
+    /// as the system, in a transaction of its own (a message with a key already received is a
+    /// duplicate: nothing happens). A message that is not the record, or code that fails, fails
+    /// the statement: the message would be `rejected`.
+    fn receive(
+        &mut self,
+        name: &str,
+        body: &Expr,
+        file: bool,
+        ctx: &mut Ctx,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        let model = self.model;
+        let Some(i) = model.inbounds.iter().find(|i| i.name == name) else {
+            return Err(format!("no inbound `{name}`"));
+        };
+        let v = self.interp.eval(body, ctx).map_err(|e| describe(&e))?;
+        let text = if file {
+            let path = self.project.root.join(v.to_string());
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?
+        } else {
+            v.to_string()
+        };
+        let doc = crate::formats::parse(model, &i.ty, &text)
+            .map_err(|e| format!("rejected: the message is not a {}: {e}", i.ty))?;
+        if let Some(k) = &i.key {
+            let mut kctx = Ctx::default();
+            kctx.bind(&i.binding, doc.clone());
+            let key = self
+                .interp
+                .eval(k, &mut kctx)
+                .map_err(|e| describe(&e))?
+                .to_string();
+            if !self.received.insert((name.to_string(), key)) {
+                return Ok(());
+            }
+        }
+        let n = self.received.len();
+        self.interp.system += 1;
+        let r = self
+            .interp
+            .with_cause(format!("inbound:{name}#test{n} handled"), |it| {
+                it.transaction(|it| {
+                    let mut c = Ctx::default();
+                    c.bind(&i.binding, doc.clone());
+                    match it.stmts(&i.body, &mut c) {
+                        Ok(()) | Err(Flow::Return(_)) => Ok(()),
+                        Err(e) => Err(e),
+                    }
+                })
+            });
+        self.interp.system -= 1;
+        r.map_err(|e| format!("rejected: {}", describe(&e)))
+    }
+
+    /// `deliver OrderPlaced [reply …|failed "…"]`: what the other side would do with the events
+    /// of `event` waiting in the outbox; each outcome runs its reactions in a transaction of its
+    /// own, as the system.
+    fn deliver(
+        &mut self,
+        event: &str,
+        reply: Option<&Expr>,
+        failed: Option<&Expr>,
+        ctx: &mut Ctx,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        let reply = reply
+            .map(|r| self.interp.eval(r, ctx))
+            .transpose()
+            .map_err(|e| describe(&e))?;
+        let error = failed
+            .map(|f| self.interp.eval(f, ctx))
+            .transpose()
+            .map_err(|e| describe(&e))?
+            .map(|v| v.to_string());
+        let waiting: Vec<(usize, V)> = self
+            .interp
+            .sent
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, (v, pending))| {
+                *pending && matches!(v, V::Event { name, .. } if &**name == event)
+            })
+            .map(|(i, (v, _))| (i, v.clone()))
+            .collect();
+        if waiting.is_empty() {
+            return Err(format!("no {event} waiting to be delivered"));
+        }
+        let has_reply = self
+            .model
+            .outbounds
+            .iter()
+            .find(|o| o.event == event)
+            .is_some_and(|o| o.reply.is_some());
+        for (i, v) in waiting {
+            if let Some(sent) = &mut self.interp.sent {
+                sent[i].1 = false;
+            }
+            let V::Event { fields, .. } = &v else {
+                continue;
+            };
+            let text = |s: &str| V::Text(std::rc::Rc::from(s));
+            let mut parts = vec![
+                (
+                    Some("event".to_string()),
+                    V::Tuple(std::rc::Rc::new(
+                        fields
+                            .iter()
+                            .map(|(k, v)| (Some(k.to_string()), v.clone()))
+                            .collect(),
+                    )),
+                ),
+                (Some("at".to_string()), V::DateTime(self.interp.clock)),
+                (Some("attempts".to_string()), V::Int(1)),
+                (
+                    Some("status".to_string()),
+                    if error.is_some() {
+                        V::None
+                    } else {
+                        V::Int(200)
+                    },
+                ),
+                (Some("response".to_string()), V::None),
+            ];
+            if let Some(e) = &error {
+                parts.push((Some("error".to_string()), text(e)));
+            }
+            if has_reply {
+                parts.push((Some("reply".to_string()), reply.clone().unwrap_or(V::None)));
+            }
+            let outcome = V::Tuple(std::rc::Rc::new(parts));
+            let delivered = error.is_none();
+            self.interp.system += 1;
+            let r = self.interp.with_cause(
+                format!(
+                    "outbound:{event}#test{i} {}",
+                    if delivered { "delivered" } else { "failed" }
+                ),
+                |it| it.transaction(|it| it.run_outcome(event, delivered, &outcome)),
+            );
+            self.interp.system -= 1;
+            r.map_err(|e| describe(&e))?;
+        }
+        Ok(())
+    }
+
+    /// `expect sent OrderPlaced(order=o)`: an event of that name with those fields was emitted
+    /// (or, `negated`, none was).
+    fn expect_sent(&mut self, event: &Expr, negated: bool, ctx: &mut Ctx) -> Result<(), String> {
+        self.refresh()?;
+        let (name, args): (&str, &[Arg]) = match &event.kind {
+            ExprKind::Call { callee, args } => match &callee.kind {
+                ExprKind::Name(n) => (n.as_str(), args.as_slice()),
+                _ => return Err("`expect sent` takes an event".into()),
+            },
+            ExprKind::Name(n) => (n.as_str(), &[]),
+            _ => return Err("`expect sent` takes an event".into()),
+        };
+        let mut want = Vec::new();
+        for a in args {
+            let v = self.interp.eval(&a.value, ctx).map_err(|e| describe(&e))?;
+            want.push((a.name.clone().unwrap_or_default(), v));
+        }
+        let events: Vec<V> = self
+            .interp
+            .sent
+            .iter()
+            .flatten()
+            .filter(|(v, _)| matches!(v, V::Event { name: n, .. } if &**n == name))
+            .map(|(v, _)| v.clone())
+            .collect();
+        let found = events.iter().any(|v| {
+            let V::Event { fields, .. } = v else {
+                return false;
+            };
+            want.iter()
+                .all(|(k, w)| fields.iter().any(|(f, x)| &**f == k.as_str() && x == w))
+        });
+        if found != negated {
+            return Ok(());
+        }
+        let shown: Vec<String> = events
+            .iter()
+            .map(|v| match v {
+                V::Event { name, fields } => {
+                    let parts: Vec<String> = fields
+                        .iter()
+                        .map(|(k, x)| format!("{k}={}", self.interp.display(x)))
+                        .collect();
+                    format!("{name}({})", parts.join(", "))
+                }
+                other => self.interp.display(other),
+            })
+            .collect();
+        Err(format!(
+            "expected {} {}: {}",
+            if negated { "no" } else { "an event like" },
+            print::expr(event),
+            if shown.is_empty() {
+                format!("no {name} was sent")
+            } else {
+                format!("sent: {}", shown.join(", "))
+            }
+        ))
     }
 
     fn login(&mut self, login: &str) -> Option<u64> {

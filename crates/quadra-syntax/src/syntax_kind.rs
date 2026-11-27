@@ -138,6 +138,8 @@ pub enum SyntaxKind {
     ENDPOINT,
     /// `publish Product to shop as p:`: the state of records sent to a connection
     PUBLISH,
+    /// in a test: `receive OrderIn "…"`, `deliver OrderPlaced reply …`, `expect sent …`
+    TEST_STMT,
 
     // members
     MEMBER_LIST,

@@ -281,6 +281,9 @@ pub struct Interp<'m> {
     pub sweep: bool,
     /// evaluating the block of an `outbound … as e:`: `post(…)`, `email(…)`… build its request
     pub building_request: bool,
+    /// in a test: every event emitted by a committed transaction, in order (`expect sent`,
+    /// `deliver`), with whether it is still to be delivered
+    pub sent: Option<Vec<(V, bool)>>,
     /// when the previous sweep ran: what a `becomes` condition that reads the clock was then
     pub last_sweep: Option<NaiveDateTime>,
     /// checking every existing record against a new model (a deploy): the broken rules are
@@ -436,6 +439,7 @@ impl<'m> Interp<'m> {
             statics: Rc::new(Statics::default()),
             sweep: false,
             building_request: false,
+            sent: None,
             last_sweep: None,
             whole_data: false,
             violations: Vec::new(),
@@ -4481,6 +4485,9 @@ impl<'m> Interp<'m> {
                 let v = self.eval(e, ctx)?;
                 self.store.outbox.push(v);
             }
+            StmtKind::Receive { .. } | StmtKind::Deliver { .. } | StmtKind::ExpectSent { .. } => {
+                return fail("`receive`, `deliver` and `expect sent` are statements of a test");
+            }
             StmtKind::Assign { target, op, value } => {
                 // `x.f = provisional(v, reason=…, until=…)`: the value plus a marker next to it
                 let marker = match &value.kind {
@@ -6066,6 +6073,11 @@ impl<'m> Interp<'m> {
             }
             Ok(v)
         });
+        if r.is_ok() {
+            if let Some(sent) = &mut self.sent {
+                sent.extend(self.store.outbox.iter().map(|v| (v.clone(), true)));
+            }
+        }
         if r.is_err() {
             self.reset_incremental();
             // ids are never reused, even after a rollback (as with a database sequence)

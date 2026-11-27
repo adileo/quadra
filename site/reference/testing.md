@@ -52,6 +52,9 @@ All the [statements](/reference/expressions#statements) of actions are available
 | `use fixture` | loads a fixture |
 | `clock time` | sets the clock |
 | `as login: …` | runs with a user's permissions |
+| `receive Inbound "…"`, `receive Inbound file "…"` | a message comes in ([Integrations](#integrations)) |
+| `expect sent Event(field=…)`, `expect not sent …` | an event was emitted, or was not |
+| `deliver Event`, `deliver Event reply R(…)`, `deliver Event failed "…"` | the other side answers |
 
 ## `expect`
 
@@ -209,6 +212,44 @@ the statements that follow (in a test or a fixture). It is how `current.user` an
 `current.company` get a value in tests.
 
 See [Security](/reference/security#testing-permissions) for permission tests.
+
+## Integrations
+
+Tests send nothing and receive nothing: they play the other side.
+
+```quadra
+test "an order from the shop is fulfilled and tracked":
+    receive OrderIn file "tests/shop/order-1001.json"     # as if the shop sent it
+    receive OrderIn file "tests/shop/order-1001.json"     # the same again: a duplicate, nothing happens
+    let o = Order.where(x => x.number == "#1001").first() ?? fail "no order"
+    expect sent OrderPlaced(order=o)
+    deliver OrderPlaced reply ErpAck(tracking="TRK-1")  # the ERP accepted it, with this answer
+    expect o.tracking == "TRK-1"
+
+test "a bad message changes nothing":
+    expect_error "a negative total":
+        receive OrderIn "{\"id\": \"7\", \"name\": \"#7\", \"total_price\": \"-1\"}"
+    expect not sent OrderPlaced
+
+test "a refusal is handled":
+    let o = Order(number="A1", total=1)
+    deliver OrderPlaced failed "503: busy"
+    expect o.state is OnHold
+```
+
+| Statement | What it does |
+|---|---|
+| `receive Inbound "…"` | the text is read as the inbound's record and its code runs, as the system, in a transaction of its own, as when the message comes in. A message with a key already received is a duplicate: nothing happens. One that is not the record, or whose code fails, fails the statement with `rejected: …` (in production it would be `rejected`) |
+| `receive Inbound file "path"` | the same with the text of a file, from the project's folder (a message saved from the inbox: `quadra inbox show <id>`) |
+| `expect sent Event(field=v, …)` | an event of that kind with those fields was emitted by a committed transaction (the other fields whatever they are); `expect sent Event`, any of them. On failure, the message lists those sent |
+| `expect not sent Event(…)` | none was |
+| `deliver Event` | each event of that kind still waiting is delivered: its `on Event delivered` reactions run, each in a transaction of its own |
+| `deliver Event reply R(…)` | the same, with the answer the outbound's `reply` reads (`d.reply`) |
+| `deliver Event failed "error"` | each fails for good: its `on Event failed` reactions run, with `f.error` |
+
+A `deliver` with no event waiting fails (`no OrderPlaced waiting to be delivered`). What the
+code of a `publish` and of a delivery's reaction writes is not published back, as in
+production ([`publish`](/reference/connections#publish-keeping-a-record-in-step-with-another-system)).
 
 ## Variables
 

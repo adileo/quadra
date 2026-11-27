@@ -1403,6 +1403,32 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
+            TEST_STMT => {
+                let words = ctx_words(s);
+                let target = ast::child(s, NAME)
+                    .map(|n| n.text().to_string().trim().to_string())
+                    .unwrap_or_default();
+                match words.first().map(String::as_str) {
+                    Some("receive") => StmtKind::Receive {
+                        inbound: target,
+                        body: first(self),
+                        file: words.iter().any(|w| w == "file"),
+                    },
+                    Some("deliver") => {
+                        let value = es.first().map(|e| self.expr(e));
+                        let failed = words.iter().any(|w| w == "failed");
+                        StmtKind::Deliver {
+                            event: target,
+                            reply: if failed { None } else { value.clone() },
+                            failed: if failed { value } else { None },
+                        }
+                    }
+                    _ => StmtKind::ExpectSent {
+                        event: first(self),
+                        negated: ast::token(s, NOT_KW).is_some(),
+                    },
+                }
+            }
             EXPECT_BLOCK => {
                 let kw = ast::ctx_keyword(s).unwrap_or_default();
                 let message = tokens(s)

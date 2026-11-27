@@ -2,5 +2,6 @@
 //! `cargo test -p quadra-runtime --test it [filter]`.
 
 mod examples;
+mod integrations;
 mod regressions;
 mod timezones;

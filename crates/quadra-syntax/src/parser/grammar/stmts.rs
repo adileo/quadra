@@ -102,6 +102,47 @@ pub(crate) fn stmt(p: &mut Parser) {
                     m.complete(p, KEYWORD_STMT);
                     return;
                 }
+                // `receive OrderIn "{…}"`, `receive OrderIn file "tests/order.json"`
+                "receive" if p.nth(1) == IDENT => {
+                    let m = p.start();
+                    p.bump_ctx();
+                    super::name(p);
+                    if p.at_ctx("file") && p.nth(1) != L_PAREN {
+                        p.bump_ctx();
+                    }
+                    expr(p);
+                    end_line(p);
+                    m.complete(p, TEST_STMT);
+                    return;
+                }
+                // `deliver OrderPlaced`, `deliver OrderPlaced reply ErpAck(…)`, `deliver
+                // OrderPlaced failed "503 busy"`
+                "deliver" if p.nth(1) == IDENT => {
+                    let m = p.start();
+                    p.bump_ctx();
+                    super::name(p);
+                    if (p.at_ctx("reply") || p.at_ctx("failed")) && !p.at(NEWLINE) {
+                        p.bump_ctx();
+                        expr(p);
+                    }
+                    end_line(p);
+                    m.complete(p, TEST_STMT);
+                    return;
+                }
+                // `expect sent OrderPlaced(order=o)`, `expect not sent …`
+                "expect"
+                    if p.nth_at_ctx(1, "sent") && p.nth(2) == IDENT
+                        || p.nth(1) == NOT_KW && p.nth_at_ctx(2, "sent") =>
+                {
+                    let m = p.start();
+                    p.bump_ctx();
+                    p.eat(NOT_KW);
+                    p.bump_ctx();
+                    expr(p);
+                    end_line(p);
+                    m.complete(p, TEST_STMT);
+                    return;
+                }
                 "expect" if p.nth(1) != COLON => {
                     let m = p.start();
                     p.bump_ctx();

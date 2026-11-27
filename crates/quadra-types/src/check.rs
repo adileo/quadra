@@ -1033,6 +1033,85 @@ impl<'m> Checker<'m> {
             StmtKind::Emit(e) => {
                 self.infer(e);
             }
+            StmtKind::Receive { inbound, body, .. } => {
+                if !self.m.inbounds.iter().any(|i| &i.name == inbound) {
+                    self.error(s.span, format!("no inbound `{inbound}`: `receive` runs the code of an inbound on a message"));
+                }
+                let t = self.infer(body);
+                if !matches!(t.unopt(), T::Text(_) | T::Unknown) {
+                    self.error(body.span, "`receive` takes the message as text (`receive OrderIn \"{…}\"`) or a file (`receive OrderIn file \"tests/order.json\"`)");
+                }
+            }
+            StmtKind::Deliver {
+                event,
+                reply,
+                failed,
+            } => {
+                let m = self.m;
+                match m.outbounds.iter().find(|o| &o.event == event) {
+                    None => self.error(
+                        s.span,
+                        format!("`{event}` has no `outbound`: nothing delivers it"),
+                    ),
+                    Some(o) => {
+                        if let Some(r) = reply {
+                            let t = self.infer(r);
+                            match &o.reply {
+                                None => self.error(r.span, format!("the outbound of `{event}` has no `reply`: nothing reads the answer")),
+                                Some(want) => {
+                                    if !matches!(t.unopt(), T::Ent(n) if n == want) && t != T::Unknown {
+                                        self.error(r.span, format!("the reply of `{event}` is a {want}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(f) = failed {
+                    let t = self.infer(f);
+                    if !matches!(t.unopt(), T::Text(_) | T::Unknown) {
+                        self.error(f.span, "`deliver … failed` takes the error, as text");
+                    }
+                }
+            }
+            StmtKind::ExpectSent { event, .. } => {
+                let known = match &event.kind {
+                    ExprKind::Call { callee, .. } | ExprKind::Field { base: callee, .. } => {
+                        matches!(&callee.kind, ExprKind::Name(n) if self.m.events.iter().any(|e| &e.name == n))
+                    }
+                    ExprKind::Name(n) => self.m.events.iter().any(|e| &e.name == n),
+                    _ => false,
+                };
+                if !known {
+                    self.error(event.span, "`expect sent` takes an event, with the fields to match: `expect sent OrderPlaced(order=o)`");
+                } else if matches!(event.kind, ExprKind::Call { .. }) {
+                    // the fields given, typed as the event's; the others are not needed
+                    if let ExprKind::Call { callee, args } = &event.kind {
+                        let ExprKind::Name(n) = &callee.kind else {
+                            unreachable!()
+                        };
+                        let ev = self.m.events.iter().find(|e| &e.name == n).cloned();
+                        for a in args {
+                            let t = self.infer(&a.value);
+                            match (a.name.as_deref(), &ev) {
+                                (Some(f), Some(ev)) => match ev.fields.iter().find(|(x, _)| x == f)
+                                {
+                                    None => self
+                                        .error(a.value.span, format!("`{n}` has no field `{f}`")),
+                                    Some((_, ty)) => {
+                                        let want = self.decl_ty(ty, &["self".into()]);
+                                        self.assign(&want, &t, a.value.span, "field");
+                                    }
+                                },
+                                _ => self.error(
+                                    a.value.span,
+                                    "the fields to match are named: `OrderPlaced(order=o)`",
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
             StmtKind::ExpectError { body, .. } => self.block(body),
             StmtKind::ExpectCompileError { .. } => {}
             StmtKind::Use(name) => {

@@ -892,7 +892,9 @@ quadra cloud env pull > .env                        # the values themselves: an 
 
 Tests do not read the environment, so that they give the same result everywhere: `env.NAME`
 is the variable's `test` value, else its default; reading a variable that has neither fails
-the test. Tests send nothing: the events stay in the outbox.
+the test. Tests send nothing and receive nothing: `receive` plays a message coming in,
+`expect sent` checks what was emitted, and `deliver` plays the other side's answer
+([Testing](/reference/testing#integrations)).
 
 ```toml
 [vars]

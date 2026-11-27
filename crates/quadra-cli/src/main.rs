@@ -14,7 +14,7 @@
 //!     quadra serve [path] [--url URL] [--port 8080] [--dev-login] [--secure-cookies] …
 //!     quadra token create <login> … | revoke <name>
 //!     quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R [path] [--url URL]
-//!     quadra inbox list [--state S] [--json] | log <id…> | retry <id…> | skip <id…> --reason R [path] [--url URL]
+//!     quadra inbox list [--state S] [--json] | log <id…> | show <id…> | replay <id…> --dry-run | retry <id…> | skip <id…> --reason R [path] [--url URL]
 //!     quadra bench gen|run …           the stress benchmark of examples/stress
 //!     quadra parse <file>              print the syntax tree of a file
 //!     quadra lsp                       start the language server on stdin/stdout
@@ -121,7 +121,7 @@ fn usage() -> ExitCode {
          quadra serve [path] [--url URL] [--port 8080] [--web dir] [--dev-login] [--secure-cookies] [--cache-mb 256] [--prewarm-days N] [--sweep-every secs] [--editors login,…] [--job-timeout 120] [--max-rows N] [--max-list N] [--max-queue 1000] [--readers 2] [--writers 1]\n  \
          quadra token create <login> [--name n] [--read-only] [--days 90] | revoke <name>   [path] [--url URL]\n  \
          quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R   [path] [--url URL]   events emitted by `emit`\n  \
-         quadra inbox list [--state S] [--json] | log <id…> | retry <id…> | skip <id…> --reason R   [path] [--url URL]   messages received by an `inbound`\n  \
+         quadra inbox list [--state S] [--json] | log <id…> | show <id…> | replay <id…> --dry-run | retry <id…> | skip <id…> --reason R   [path] [--url URL]   messages received by an `inbound`\n  \
          quadra bench gen --scale tiny|small|medium|large --out DIR [--seed N]   stress data as CSV\n  \
          quadra bench run [path] --url URL --scale … [--json file] [--timeout 60] [--reps 5] [--only a,b] [--skip a,b]   the stress benchmark\n  \
          quadra parse <file>                  print the syntax tree of a file\n  \
@@ -840,7 +840,7 @@ fn inbox(args: &[String]) -> ExitCode {
     };
     let mut rest = args[1..].to_vec();
     let mut ids: Vec<u64> = Vec::new();
-    if matches!(cmd, "retry" | "skip" | "log") {
+    if matches!(cmd, "retry" | "skip" | "log" | "show" | "replay") {
         while let (Some(word), others) = take_positional(&rest, VALUE_FLAGS) {
             let Ok(id) = word.trim_start_matches('#').parse::<u64>() else {
                 break;
@@ -913,6 +913,27 @@ fn inbox(args: &[String]) -> ExitCode {
             }
             Ok(())
         }
+        // the body as it came: `quadra inbox show 12 > tests/shop/order.json`
+        "show" => {
+            let all = ops::inbox(&url, model, report, None)?;
+            for id in &ids {
+                let m = all
+                    .iter()
+                    .find(|m| m.id == *id)
+                    .ok_or(format!("no message #{id}"))?;
+                println!("{}", m.body);
+            }
+            Ok(())
+        }
+        "replay" => {
+            if !rest.iter().any(|a| a == "--dry-run") {
+                return Err("`replay` runs the code of now on messages received, to see what it would do: with --dry-run (nothing is written). A message rejected is taken back with `retry`".into());
+            }
+            for line in ops::inbox_dry_run(&url, model, report, &ids, now())? {
+                println!("{line}");
+            }
+            Ok(())
+        }
         "retry" => {
             let n = ops::inbox_retry(&url, model, report, &ids, now(), &who())?;
             println!("✓ {n} message(s) received again: handled by the code deployed now");
@@ -925,7 +946,7 @@ fn inbox(args: &[String]) -> ExitCode {
             Ok(())
         }
         _ => Err(format!(
-            "unknown inbox command `{cmd}` (list, log, retry, skip)"
+            "unknown inbox command `{cmd}` (list, log, show, replay, retry, skip)"
         )),
     })())
 }

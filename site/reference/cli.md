@@ -523,6 +523,8 @@ raw before they are handled:
 | `--state S` | only the messages in state `S` |
 | `--json` | one JSON object per line, the raw body included |
 | `inbox log <id…>` | what happened to each, step by step: received, duplicates, handled (by which transaction) or rejected (why), `retry`, `skip` with who and why. Message `0` of an inbound holds the messages refused before they were kept |
+| `inbox show <id…>` | the body of each, as it came: `quadra inbox show 12 > tests/shop/order-12.json` keeps a real message for a test (`receive OrderIn file "tests/shop/order-12.json"`). Remove the personal data before committing it |
+| `inbox replay <id…> --dry-run` | the code of now run on messages already received, done or not, on the data as it is: what each would create, change and emit, or why it would be rejected. Nothing is written: to see what a change of the code would do before deploying it (on a copy of production, a fork) |
 | `inbox retry <id…>` | rejected or skipped messages received again: handled by the code deployed now |
 | `inbox skip <id…> --reason R` | messages not to be handled; the reason is required |
 

@@ -176,6 +176,115 @@ pub fn inbox_retry(
     crate::deliveries::inbox_retry(&mut db.conn, ids, &at, by)
 }
 
+/// What the code of now would do with messages already received (`quadra inbox replay
+/// --dry-run`): for each, its handling run on the data as it is, in memory, and then dropped;
+/// the lines say what it would create, change and emit, or why it would be rejected. Nothing
+/// is written.
+pub fn inbox_dry_run(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    ids: &[u64],
+    time: NaiveDateTime,
+) -> Result<Vec<String>, String> {
+    let mut db = outbox_db(url, model, report)?;
+    let all = crate::deliveries::inbox(&mut db.conn, None)?;
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(m) = all.iter().find(|m| m.id == *id) else {
+            out.push(format!("#{id}: no such message"));
+            continue;
+        };
+        let Some(i) = model.inbounds.iter().find(|i| i.name == m.inbound) else {
+            out.push(format!(
+                "#{id}: no inbound `{}` in the code of now",
+                m.inbound
+            ));
+            continue;
+        };
+        let doc = match quadra_runtime::formats::parse(model, &i.ty, &m.body) {
+            Ok(d) => d,
+            Err(e) => {
+                out.push(format!(
+                    "#{id} {}: would be rejected: not a {}: {e}",
+                    i.name, i.ty
+                ));
+                continue;
+            }
+        };
+        let db = Database::open(url, model, report)?;
+        let src = crate::source::DbSource::open(url, db.schema.clone(), None)?;
+        let mut interp = Interp::new(model);
+        interp.set_clock(time);
+        interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+        interp.load_units();
+        interp.system += 1;
+        let r = interp.with_cause(format!("inbound:{}#{id} replayed", i.name), |it| {
+            it.transaction(|it| {
+                let mut ctx = Ctx::default();
+                ctx.bind(&i.binding, doc.clone());
+                match it.stmts(&i.body, &mut ctx) {
+                    Err(Flow::Return(_)) => Ok(()),
+                    other => other,
+                }
+            })
+        });
+        if let Err(e) = r {
+            out.push(format!(
+                "#{id} {}: would be rejected: {}",
+                i.name,
+                flow(&format!("inbound {}", i.name), e)
+            ));
+            continue;
+        }
+        let tx = interp.store.tx;
+        let mut lines = Vec::new();
+        let mut written: Vec<u64> = interp.store.dirty.iter().copied().collect();
+        written.sort();
+        for rid in written {
+            let Some(rec) = interp.store.records.get(&rid) else {
+                continue;
+            };
+            let (ent, created) = (rec.ent.clone(), rec.created_tx == tx);
+            // each field written, with its last value
+            let mut fields: Vec<(String, V)> = Vec::new();
+            for (t, f, v) in &rec.history {
+                if *t != tx {
+                    continue;
+                }
+                match fields.iter_mut().find(|(n, _)| n == f) {
+                    Some(x) => x.1 = v.clone(),
+                    None => fields.push((f.clone(), v.clone())),
+                }
+            }
+            let shown: Vec<String> = fields
+                .iter()
+                .map(|(f, v)| format!("{f}={}", interp.display(v)))
+                .collect();
+            let what = if created { "create" } else { "change" };
+            lines.push(format!("  would {what} {ent}#{rid} ({})", shown.join(", ")));
+        }
+        for v in interp.store.outbox.clone() {
+            if let V::Event { name, fields } = &v {
+                let shown: Vec<String> = fields
+                    .iter()
+                    .map(|(k, x)| format!("{k}={}", interp.display(x)))
+                    .collect();
+                lines.push(format!("  would emit {name}({})", shown.join(", ")));
+            }
+        }
+        if lines.is_empty() {
+            lines.push("  would change nothing".into());
+        }
+        out.push(format!(
+            "#{id} {} ({}, {}):",
+            i.name, m.state, m.received_at
+        ));
+        out.extend(lines);
+    }
+    Ok(out)
+}
+
 /// Messages not to be handled, with a reason (`quadra inbox skip`).
 pub fn inbox_skip(
     url: &str,
