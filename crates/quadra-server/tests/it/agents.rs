@@ -44,7 +44,7 @@ fn agent(
     (h, lines)
 }
 
-fn until(what: &str, secs: u64, ok: impl Fn() -> bool) {
+fn until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
     let start = Instant::now();
     while !ok() {
         assert!(
@@ -297,5 +297,115 @@ fn an_http_service_of_another_network_is_reached_through_the_agent_with_its_secr
     );
     stop.store(true, Ordering::Relaxed);
     let _ = h;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The pass criterion of the on-premise agent: a database behind a firewall, with no port open
+/// to it, exchanges data with an app through the agent: its table pulled by the cursor, rows
+/// written to an exchange table, once each. Needs `QUADRA_TEST_PG` (a Postgres the test may
+/// create tables in); skipped without it.
+#[test]
+fn a_database_behind_a_firewall_exchanges_data_with_the_app_through_the_agent() {
+    let Ok(pg) = std::env::var("QUADRA_TEST_PG") else {
+        eprintln!("QUADRA_TEST_PG not set: skipped");
+        return;
+    };
+    // postgres://user:password@host:port/db
+    let rest = pg
+        .trim_start_matches("postgres://")
+        .trim_start_matches("postgresql://");
+    let (cred, place) = rest.split_once('@').unwrap();
+    let (user, password) = cred.split_once(':').unwrap();
+    let (hostport, db) = place.split_once('/').unwrap();
+    let mut c = postgres::Client::connect(&pg, postgres::NoTls).unwrap();
+    let t = format!("ordini_{}", std::process::id());
+    let x = format!("scambio_{}", std::process::id());
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {t}; DROP TABLE IF EXISTS {x};
+         CREATE TABLE {t} (id integer PRIMARY KEY, numero text NOT NULL, totale numeric(12,2) NOT NULL);
+         INSERT INTO {t} SELECT g, 'N' || g, g * 1.10 FROM generate_series(1, 40) g;
+         CREATE TABLE {x} (numero text NOT NULL, totale numeric(12,2) NOT NULL, quadra_key text UNIQUE);"
+    ))
+    .unwrap();
+    let code = format!("entity Order:\n    number: Text\n    total: Decimal\n\nrecord ErpOrder from json:\n    id: Int\n    number: Text at \"numero\"\n    total: Decimal at \"totale\"\n\nrecord ErpBack from json:\n    number: Text at \"numero\"\n    total: Decimal at \"totale\"\n\ninbound OrdersIn via erp as m: ErpOrder:\n    pull \"{t}\" every 1 minutes\n    cursor m.id\n    key f\"order-{{m.id}}\"\n    let o = Order(number=m.number, total=m.total)\n\nevent OrderTaken(order: Order)\n\non Order created as o:\n    emit OrderTaken(order=o)\n\noutbound OrderTaken via erp as e:\n    insert(\"{x}\", ErpBack(number=e.order.number, total=e.order.total))\n");
+    let settings = format!("\n[vars.ERP_PASSWORD]\nsecret = true\n\n[connections.erp]\nkind = \"postgres\"\nurl = \"postgres://{hostport}/{db}\"\nuser = \"{user}\"\npassword = {{ var = \"ERP_PASSWORD\" }}\ninsecure = true\nlocation = \"agent:sede\"\n");
+    let dir = temp("agents-db");
+    let (cfg, token) = project_at(&dir, "http://127.0.0.1:9", &code, &settings);
+    // the app reaches public addresses only: the database is the agent's network's
+    let (_h, _rt, port) = serve(
+        HostOptions {
+            public_egress_only: true,
+            ..Default::default()
+        },
+        cfg.clone(),
+    );
+    let (_, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/agents",
+        Some(json!({ "name": "sede" })),
+    );
+    let server = format!("http://127.0.0.1:{port}");
+    let (_, key) = quadra_server::agent::register(&server, v["code"].as_str().unwrap()).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    let pw = password.to_string();
+    let h = std::thread::spawn(move || {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("ERP_PASSWORD".to_string(), pw);
+        quadra_server::agent::run(
+            quadra_server::agent::Options {
+                server,
+                key,
+                env,
+                concurrency: 4,
+            },
+            |_| {},
+            s2,
+        )
+    });
+    let count = |sql: &str| -> i64 {
+        Conn::open(&cfg.url).unwrap().query(sql, &[]).unwrap()[0][0]
+            .as_deref()
+            .unwrap_or("0")
+            .parse()
+            .unwrap()
+    };
+    until("the orders of the table", 60, || {
+        count("SELECT COUNT(*) FROM \"order\"") == 40
+    });
+    let back = |c: &mut postgres::Client| -> i64 {
+        c.query_one(&format!("SELECT COUNT(*) FROM {x}"), &[])
+            .unwrap()
+            .get(0)
+    };
+    until("the rows written back", 60, || back(&mut c) == 40);
+    // exact, once each
+    let sum: String = c
+        .query_one(&format!("SELECT SUM(totale)::text FROM {x}"), &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(sum, "902.00");
+    let distinct: i64 = c
+        .query_one(&format!("SELECT COUNT(DISTINCT quadra_key) FROM {x}"), &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(distinct, 40);
+    // a row added there comes in at the next pull, from the cursor
+    c.batch_execute(&format!("INSERT INTO {t} VALUES (41, 'N41', 5.00)"))
+        .unwrap();
+    Conn::open(&cfg.url)
+        .unwrap()
+        .exec("UPDATE \"_quadra_cursors\" SET \"next_at\" = NULL", &[])
+        .unwrap();
+    until("the new row", 60, || {
+        count("SELECT COUNT(*) FROM \"order\"") == 41
+    });
+    until("its row back", 60, || back(&mut c) == 41);
+    stop.store(true, Ordering::Relaxed);
+    let _ = h;
+    c.batch_execute(&format!("DROP TABLE {t}; DROP TABLE {x};"))
+        .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

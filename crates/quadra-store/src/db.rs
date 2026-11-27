@@ -259,6 +259,14 @@ impl Database {
         Ok(db)
     }
 
+    /// The database at `url` with the schema of the model it serves, built and upgraded already
+    /// (an engine's): no schema built again, nothing checked.
+    pub fn open_with(url: &str, schema: Rc<Schema>) -> Result<Database, String> {
+        let mut db = Database::with(Pooled::own(Conn::open(url)?), schema);
+        db.url = Some(url.to_string());
+        Ok(db)
+    }
+
     /// A database over a connection already open (an engine's pool), with the schema of the
     /// model it serves: nothing is checked or upgraded.
     pub fn with(conn: Pooled, schema: Rc<Schema>) -> Database {

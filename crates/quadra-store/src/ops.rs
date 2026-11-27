@@ -1064,8 +1064,13 @@ pub fn handle_inbound(
     inbound: &quadra_ir::Inbound,
     doc: V,
     cause: String,
+    schema: Option<std::rc::Rc<crate::schema::Schema>>,
 ) -> Result<Option<u64>, String> {
-    let db = Database::open(url, model, report)?;
+    // the engine's schema when it gives it: not built again for every message
+    let db = match schema {
+        Some(s) => Database::open_with(url, s)?,
+        None => Database::open(url, model, report)?,
+    };
     let schema = db.schema.clone();
     let src = crate::source::DbSource::open(url, schema, None)?;
     let mut interp = Interp::new(model);

@@ -2306,6 +2306,7 @@ impl Engine {
                     i,
                     doc,
                     format!("inbound:{}#{} handled", i.name, m.id),
+                    Some(self.schema.clone()),
                 )
                 .map(|tx| tx.unwrap_or(0))
             })();
