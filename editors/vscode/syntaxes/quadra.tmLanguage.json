@@ -132,6 +132,90 @@
           }
         },
         {
+          "match": "^\\s*(inbound)\\s+([A-Za-z_]\\w*)\\s+(via)\\s+([a-z_]\\w*)(?:\\s+(path)\\b)?",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.event.quadra"
+            },
+            "3": {
+              "name": "keyword.other.quadra"
+            },
+            "4": {
+              "name": "variable.other.connection.quadra"
+            },
+            "5": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(endpoint)\\s+(GET|POST)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(publish)\\s+([A-Za-z_]\\w*)\\s+(to)\\s+([a-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.class.quadra"
+            },
+            "3": {
+              "name": "keyword.other.quadra"
+            },
+            "4": {
+              "name": "variable.other.connection.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(reply|retry(?:\\s+for)?|backoff|expires\\s+after|delay|window|ordered\\s+by|latest\\s+by|debounce|pull|every|items|cursor)\\b(?=\\s+[^=(.\\s])",
+          "captures": {
+            "1": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "\\b(using|times|batch|within)\\b(?=\\s+[^=(.\\s])",
+          "captures": {
+            "1": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(receive|deliver)\\s+(?=[A-Z])|\\b(expect)\\s+(not\\s+)?(sent)\\b|\\b(file|reply|failed)\\b(?=\\s+[\"A-Z])",
+          "captures": {
+            "1": {
+              "name": "keyword.other.quadra"
+            },
+            "2": {
+              "name": "keyword.other.quadra"
+            },
+            "3": {
+              "name": "keyword.other.quadra"
+            },
+            "4": {
+              "name": "keyword.other.quadra"
+            },
+            "5": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
           "match": "^\\s*(event)\\s+([A-Za-z_]\\w*)",
           "captures": {
             "1": {
@@ -259,7 +343,7 @@
           }
         },
         {
-          "match": "^\\s*(on)\\s+([A-Za-z_][\\w.]*)\\s+(enters|becomes|created|changes)\\b",
+          "match": "^\\s*(on)\\s+([A-Za-z_][\\w.]*)\\s+(enters|becomes|created|changes|delivered|failed|expired|skipped|rejected)\\b",
           "captures": {
             "1": {
               "name": "keyword.control.reaction.quadra"

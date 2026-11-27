@@ -116,6 +116,19 @@ pub enum Send {
     Broken(String),
 }
 
+impl Send {
+    /// The bytes it sends: its body (an email's, with its HTML).
+    pub fn bytes(&self) -> u64 {
+        match self {
+            Send::Http { body, .. } => body.len() as u64,
+            Send::Smtp { body, html, .. } => {
+                (body.len() + html.as_ref().map_or(0, |h| h.len())) as u64
+            }
+            Send::Broken(_) => 0,
+        }
+    }
+}
+
 /// A value of the outbox (the encoding of the history, which marks each kind of value) as plain
 /// JSON for a receiver: decimals, percentages, dates and instants as text (exact, an instant
 /// in UTC with a `Z`), an amount as `{"amount", "currency"}`, a quantity as

@@ -130,9 +130,25 @@ pub(crate) struct Meter {
     rows_read: std::sync::atomic::AtomicU64,
     rows_written: std::sync::atomic::AtomicU64,
     engine_us: std::sync::atomic::AtomicU64,
+    deliveries: std::sync::atomic::AtomicU64,
+    bytes_out: std::sync::atomic::AtomicU64,
+    messages_in: std::sync::atomic::AtomicU64,
 }
 
 impl Meter {
+    /// An attempt to deliver an event, of `bytes` (its body).
+    pub(crate) fn delivery(&self, bytes: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.deliveries.fetch_add(1, Relaxed);
+        self.bytes_out.fetch_add(bytes, Relaxed);
+    }
+
+    /// Messages kept in the inbox.
+    pub(crate) fn received(&self, n: u64) {
+        self.messages_in
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn add(&self, u: quadra_runtime::limits::Usage, request: bool, took: Duration) {
         use std::sync::atomic::Ordering::Relaxed;
         self.requests.fetch_add(request as u64, Relaxed);
@@ -150,6 +166,9 @@ impl Meter {
             rows_read: self.rows_read.swap(0, Relaxed),
             rows_written: self.rows_written.swap(0, Relaxed),
             engine_ms: self.engine_us.swap(0, Relaxed) / 1000,
+            deliveries: self.deliveries.swap(0, Relaxed),
+            bytes_out: self.bytes_out.swap(0, Relaxed),
+            messages_in: self.messages_in.swap(0, Relaxed),
         }
     }
 }
@@ -165,6 +184,12 @@ pub struct Usage {
     pub rows_read: u64,
     pub rows_written: u64,
     pub engine_ms: u64,
+    /// attempts to deliver an event (`outbound`)
+    pub deliveries: u64,
+    /// the bytes of their bodies
+    pub bytes_out: u64,
+    /// messages received (`inbound`: sent in or pulled)
+    pub messages_in: u64,
 }
 
 impl Usage {
@@ -175,6 +200,9 @@ impl Usage {
             rows_read: self.rows_read + o.rows_read,
             rows_written: self.rows_written + o.rows_written,
             engine_ms: self.engine_ms + o.engine_ms,
+            deliveries: self.deliveries + o.deliveries,
+            bytes_out: self.bytes_out + o.bytes_out,
+            messages_in: self.messages_in + o.messages_in,
         }
     }
 
@@ -1954,6 +1982,7 @@ async fn inbox(t: Arc<Tenant>, egress: Option<Arc<Egress>>) {
                         .await
                         .unwrap_or(0);
                     if new > 0 {
+                        t.usage.received(new as u64);
                         t.inbox.notify_one();
                     }
                     // the next one of the same is due later: look again
@@ -2058,6 +2087,7 @@ async fn inbound_api(
         return fail(503, "the engine is not available");
     };
     if status == 202 {
+        t.usage.received(1);
         t.inbox.notify_one();
     }
     (
@@ -2194,6 +2224,9 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                 lane.inflight += 1;
                 sent = true;
                 let e = egress.clone();
+                if !matches!(p.send, deliver::Send::Broken(_)) {
+                    t.usage.delivery(p.send.bytes());
+                }
                 set.spawn(async move {
                     tokio::time::sleep_until(start.into()).await;
                     let (outcome, attempt, answer) =
