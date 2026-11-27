@@ -395,40 +395,7 @@ impl<'a> Lower<'a> {
                         .map(|n| n.text().to_string().trim().to_string())
                 });
                 let body = ast::child(item, BLOCK_EXPR).map(|b| self.expr(&b));
-                let reply = ast::children(item, OUTBOUND_CLAUSE)
-                    .find(|c| {
-                        c.children_with_tokens()
-                            .filter_map(|t| t.into_token())
-                            .any(|t| t.text() == "reply")
-                    })
-                    .and_then(|c| ast::child(&c, PATH))
-                    .map(|p| ast::path_text(&p));
-                let mut policy = Policy::default();
-                for c in ast::children(item, OUTBOUND_CLAUSE) {
-                    let mut words = ctx_words(&c);
-                    // `retry for`: `for` is a keyword, not a contextual word
-                    if ast::token(&c, FOR_KW).is_some() {
-                        words.insert(1, "for".into());
-                    }
-                    let value = exprs(&c).first().map(|x| self.expr(x));
-                    let slot = match (
-                        words.first().map(String::as_str),
-                        words.get(1).map(String::as_str),
-                    ) {
-                        (Some("retry"), Some("for")) => &mut policy.retry_for,
-                        (Some("retry"), _) => &mut policy.retry_times,
-                        (Some("backoff"), _) => &mut policy.backoff,
-                        (Some("expires"), _) => &mut policy.expires,
-                        (Some("unless"), _) => &mut policy.unless,
-                        (Some("delay"), _) => &mut policy.delay,
-                        (Some("window"), _) => &mut policy.window,
-                        (Some("key"), _) => &mut policy.key,
-                        (Some("ordered"), _) => &mut policy.ordered,
-                        (Some("latest"), _) => &mut policy.latest,
-                        _ => continue,
-                    };
-                    *slot = value;
-                }
+                let (reply, policy) = self.outbound_policy(item);
                 let batch = ast::children(item, OUTBOUND_CLAUSE)
                     .find(|c| ctx_words(c).first().map(String::as_str) == Some("batch"))
                     .map(|c| {
@@ -457,6 +424,7 @@ impl<'a> Lower<'a> {
                     reply,
                     policy,
                     batch,
+                    publishes: None,
                     span,
                 });
             }
@@ -973,6 +941,45 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// The `reply` and the lines of policy of an `outbound` or a `publish`.
+    fn outbound_policy(&mut self, item: &SyntaxNode) -> (Option<String>, Policy) {
+        let reply = ast::children(item, OUTBOUND_CLAUSE)
+            .find(|c| {
+                c.children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .any(|t| t.text() == "reply")
+            })
+            .and_then(|c| ast::child(&c, PATH))
+            .map(|p| ast::path_text(&p));
+        let mut policy = Policy::default();
+        for c in ast::children(item, OUTBOUND_CLAUSE) {
+            let mut words = ctx_words(&c);
+            // `retry for`: `for` is a keyword, not a contextual word
+            if ast::token(&c, FOR_KW).is_some() {
+                words.insert(1, "for".into());
+            }
+            let value = exprs(&c).first().map(|x| self.expr(x));
+            let slot = match (
+                words.first().map(String::as_str),
+                words.get(1).map(String::as_str),
+            ) {
+                (Some("retry"), Some("for")) => &mut policy.retry_for,
+                (Some("retry"), _) => &mut policy.retry_times,
+                (Some("backoff"), _) => &mut policy.backoff,
+                (Some("expires"), _) => &mut policy.expires,
+                (Some("unless"), _) => &mut policy.unless,
+                (Some("delay"), _) => &mut policy.delay,
+                (Some("window"), _) => &mut policy.window,
+                (Some("key"), _) => &mut policy.key,
+                (Some("ordered"), _) => &mut policy.ordered,
+                (Some("latest"), _) => &mut policy.latest,
+                _ => continue,
+            };
+            *slot = value;
+        }
+        (reply, policy)
+    }
+
     /// `publish Product to shop as p:` is sugar for what it means: an event per record
     /// (`PublishProductToShop(record: Product)`), emitted when a record is created or one of
     /// the fields of `on` changes and `when` holds, unless the change came from an inbound of
@@ -1021,17 +1028,7 @@ impl<'a> Lower<'a> {
                 rhs: Box::new(b),
             })
         };
-        let cap = |s: &str| {
-            s.split('_')
-                .map(|w| {
-                    let mut c = w.chars();
-                    c.next()
-                        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
-                        .unwrap_or_default()
-                })
-                .collect::<String>()
-        };
-        let event = format!("Publish{entity}To{}", cap(&connection));
+        let event = ast::publish_event(item).map(|(n, _)| n).unwrap_or_default();
         self.model.events.push(Event {
             name: event.clone(),
             fields: vec![(
@@ -1090,43 +1087,25 @@ impl<'a> Lower<'a> {
                 span,
             });
         }
-        // the outbound: `let p = __published.record`, then the code
-        let record = e(ExprKind::Field {
-            base: Box::new(name("__published")),
-            name: "record".into(),
-            optional: false,
-        });
-        let body = match block.kind {
-            ExprKind::Block(mut stmts) => {
-                stmts.insert(
-                    0,
-                    Stmt {
-                        kind: StmtKind::Let {
-                            name: binding.clone(),
-                            ty: None,
-                            value: record.clone(),
-                        },
-                        span,
-                    },
-                );
-                e(ExprKind::Block(stmts))
-            }
-            other => e(other),
-        };
-        let policy = Policy {
-            latest: Some(record),
-            delay: debounce,
-            ..Default::default()
-        };
+        // the outbound, with `p` the record besides the event
+        let (reply, mut policy) = self.outbound_policy(item);
+        if policy.latest.is_none() {
+            policy.latest = Some(name(&binding));
+        }
+        if debounce.is_some() {
+            policy.delay = debounce;
+        }
+        let body = Some(block);
         self.model.outbounds.push(Outbound {
             event,
             connection,
             path: None,
             binding: Some("__published".into()),
-            body: Some(body),
-            reply: None,
+            body,
+            reply,
             policy,
             batch: None,
+            publishes: Some(binding),
             span,
         });
     }

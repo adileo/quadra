@@ -50,6 +50,29 @@ pub fn path_segments(path: &SyntaxNode) -> Vec<SyntaxToken> {
         .collect()
 }
 
+/// The event a `publish Product to shop` declares: `PublishProductToShop`, with the record's
+/// name and the connection's in capitals (`erp_eu` → `ErpEu`).
+pub fn publish_event(item: &SyntaxNode) -> Option<(String, rowan::TextRange)> {
+    let entity = child(item, SyntaxKind::PATH)?;
+    let conn = children(item, SyntaxKind::NAME).next()?;
+    let cap: String = conn
+        .text()
+        .to_string()
+        .trim()
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect();
+    Some((
+        format!("Publish{}To{cap}", path_text(&entity)),
+        entity.text_range(),
+    ))
+}
+
 pub fn path_text(path: &SyntaxNode) -> String {
     path_segments(path)
         .iter()

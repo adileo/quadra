@@ -827,6 +827,9 @@ pub struct Outbound {
     /// `batch 50 within 30 seconds`: up to so many events in one request (the block's binding
     /// is then the list of them), sent when full or when the oldest has waited that long
     pub batch: Option<(u32, Option<Expr>)>,
+    /// made by `publish Product to shop as p:`: the name of the record (the event's field
+    /// `record`), bound in the policy lines and the code besides the event
+    pub publishes: Option<String>,
     pub span: Span,
 }
 

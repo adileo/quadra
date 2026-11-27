@@ -2405,18 +2405,9 @@ impl<'m> Interp<'m> {
             }
             ExprKind::Block(stmts) => {
                 ctx.scopes.push(Default::default());
-                let mut last = V::None;
-                for (i, s) in stmts.iter().enumerate() {
-                    if i + 1 == stmts.len() {
-                        if let StmtKind::Expr(x) = &s.kind {
-                            last = self.eval(x, ctx)?;
-                            continue;
-                        }
-                    }
-                    self.stmt(s, ctx)?;
-                }
+                let r = self.block_value(stmts, ctx);
                 ctx.scopes.pop();
-                Ok(last)
+                r
             }
             ExprKind::As { user, body } => {
                 if self.viewer {
@@ -3342,6 +3333,47 @@ impl<'m> Interp<'m> {
         }
     }
 
+    /// The value of a block: its last expression. The block of an `outbound` may end with an
+    /// `if … else …` whose branches each end with the request: its value is the branch's.
+    fn block_value(&mut self, stmts: &[Stmt], ctx: &mut Ctx) -> R<V> {
+        let mut last = V::None;
+        for (i, s) in stmts.iter().enumerate() {
+            if i + 1 == stmts.len() {
+                match &s.kind {
+                    StmtKind::Expr(x) => {
+                        last = self.eval(x, ctx)?;
+                        continue;
+                    }
+                    StmtKind::If {
+                        binding,
+                        cond,
+                        then,
+                        otherwise: Some(otherwise),
+                    } if self.building_request => {
+                        let v = self.eval(cond, ctx)?;
+                        let go = if binding.is_some() {
+                            !v.is_none()
+                        } else {
+                            v.truthy()
+                        };
+                        ctx.scopes.push(Default::default());
+                        if go {
+                            if let Some(b) = binding {
+                                ctx.bind(b, v);
+                            }
+                        }
+                        let r = self.block_value(if go { then } else { otherwise }, ctx);
+                        ctx.scopes.pop();
+                        return r;
+                    }
+                    _ => {}
+                }
+            }
+            self.stmt(s, ctx)?;
+        }
+        Ok(last)
+    }
+
     fn call_name(&mut self, n: &str, args: &[Arg], ctx: &mut Ctx) -> R<V> {
         if let Some(f) = ctx.local(n).cloned() {
             let (pos, _) = self.eval_args(args, ctx)?;
@@ -3405,12 +3437,21 @@ impl<'m> Interp<'m> {
             "__from" => {
                 let (pos, _) = self.eval_args(args, ctx)?;
                 let conn = pos.first().map(|v| v.to_string()).unwrap_or_default();
+                // what an inbound of it received, or a reaction to the outcome of a delivery to
+                // it wrote (the id the other side gave the record)
                 let names: Vec<String> = self
                     .m
                     .inbounds
                     .iter()
                     .filter(|i| i.connection == conn)
                     .map(|i| format!("inbound:{}#", i.name))
+                    .chain(
+                        self.m
+                            .outbounds
+                            .iter()
+                            .filter(|o| o.connection == conn)
+                            .map(|o| format!("outbound:{}#", o.event)),
+                    )
                     .collect();
                 let mut cur = Some(self.cause.clone());
                 while let Some(c) = cur {

@@ -409,6 +409,31 @@ impl<'p> Resolver<'p> {
                     MIGRATION => DeclKind::Migration,
                     CHANGE => DeclKind::Change,
                     EVENT => DeclKind::Event,
+                    PUBLISH => {
+                        // the event it declares, named after the record and the connection
+                        let Some((name, range)) = ast::publish_event(&item) else {
+                            continue;
+                        };
+                        let id = DeclId(self.a.decls.len() as u32);
+                        self.a.decls.push(Decl {
+                            name: name.clone(),
+                            kind: DeclKind::Event,
+                            file: f.id,
+                            name_range: range,
+                            range: item.text_range(),
+                            header: ast::header(&item),
+                            doc: ast::doc_comment(&item),
+                            traits: Vec::new(),
+                        });
+                        if let std::collections::hash_map::Entry::Vacant(v) =
+                            names.entry(name.clone())
+                        {
+                            v.insert(id);
+                        } else {
+                            self.error(f.id, range, format!("`{name}` is already declared: one `publish` of a record to a connection"));
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 let Some(tok) = ast::name_token(&item) else {

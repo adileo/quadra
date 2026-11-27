@@ -595,6 +595,54 @@ fn endpoint(p: &mut Parser) {
     m.complete(p, ENDPOINT);
 }
 
+/// A line of policy of an `outbound … as e:` (or a `publish`): `reply ErpAck`, `retry for 3
+/// days`, `retry 10 times`, `ordered by …`, `latest by …`, `expires after …`, `backoff …`,
+/// `unless …`, `delay …`, `window …`, `key …`. False (nothing eaten) when the line is code.
+fn policy_line(p: &mut Parser) -> bool {
+    if p.at_ctx("reply") && p.nth(1) == IDENT {
+        p.bump_ctx();
+        path(p);
+    } else if p.at_ctx("retry") && p.nth(1) == FOR_KW {
+        // `retry for 3 days`
+        p.bump_ctx();
+        p.bump();
+        expr(p);
+    } else if p.at_ctx("retry") && !p.nth_at_ctx(1, "times") && p.nth(1) != L_PAREN {
+        // `retry 10 times` (the number alone: `10 times` is not a quantity)
+        p.bump_ctx();
+        let n = p.start();
+        p.expect(NUMBER);
+        n.complete(p, LITERAL);
+        if p.at_ctx("times") {
+            p.bump_ctx();
+        } else {
+            p.error("expected `times`: `retry 10 times` (or `retry for 3 days`)");
+        }
+    } else if (p.at_ctx("ordered") || p.at_ctx("latest")) && p.nth_at_ctx(1, "by") {
+        // `ordered by e.customer`, `latest by e.product`
+        p.bump_ctx();
+        p.bump_ctx();
+        expr(p);
+    } else if p.at_ctx("expires") && p.nth_at_ctx(1, "after") {
+        // `expires after 1 day`
+        p.bump_ctx();
+        p.bump_ctx();
+        expr(p);
+    } else if ["backoff", "unless", "delay", "window", "key"]
+        .iter()
+        .any(|k| p.at_ctx(k))
+        && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ)
+    {
+        // `backoff 30 seconds .. 1 hour`, `unless e.order.cancelled`, `delay 10
+        // minutes`, `window "02:00" .. "04:00"`, `key f"ship-{e.order.number}"`
+        p.bump_ctx();
+        expr(p);
+    } else {
+        return false;
+    }
+    true
+}
+
 /// `publish Product to shop as p:`, then lines (`when p.sellable`, `on price, stock`,
 /// `debounce 30 seconds`) and the code that builds the request from the record
 fn publish(p: &mut Parser) {
@@ -629,7 +677,7 @@ fn publish(p: &mut Parser) {
         } else if p.at_ctx("debounce") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
             p.bump_ctx();
             expr(p);
-        } else {
+        } else if !policy_line(p) {
             c.abandon(p);
             break;
         }
@@ -696,45 +744,7 @@ fn outbound(p: &mut Parser) {
             // the lines of policy, each a keyword and its value
             loop {
                 let c = p.start();
-                if p.at_ctx("reply") && p.nth(1) == IDENT {
-                    p.bump_ctx();
-                    path(p);
-                } else if p.at_ctx("retry") && p.nth(1) == FOR_KW {
-                    // `retry for 3 days`
-                    p.bump_ctx();
-                    p.bump();
-                    expr(p);
-                } else if p.at_ctx("retry") && !p.nth_at_ctx(1, "times") && p.nth(1) != L_PAREN {
-                    // `retry 10 times` (the number alone: `10 times` is not a quantity)
-                    p.bump_ctx();
-                    let n = p.start();
-                    p.expect(NUMBER);
-                    n.complete(p, LITERAL);
-                    if p.at_ctx("times") {
-                        p.bump_ctx();
-                    } else {
-                        p.error("expected `times`: `retry 10 times` (or `retry for 3 days`)");
-                    }
-                } else if (p.at_ctx("ordered") || p.at_ctx("latest")) && p.nth_at_ctx(1, "by") {
-                    // `ordered by e.customer`, `latest by e.product`
-                    p.bump_ctx();
-                    p.bump_ctx();
-                    expr(p);
-                } else if p.at_ctx("expires") && p.nth_at_ctx(1, "after") {
-                    // `expires after 1 day`
-                    p.bump_ctx();
-                    p.bump_ctx();
-                    expr(p);
-                } else if ["backoff", "unless", "delay", "window", "key"]
-                    .iter()
-                    .any(|k| p.at_ctx(k))
-                    && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ)
-                {
-                    // `backoff 30 seconds .. 1 hour`, `unless e.order.cancelled`, `delay 10
-                    // minutes`, `window "02:00" .. "04:00"`, `key f"ship-{e.order.number}"`
-                    p.bump_ctx();
-                    expr(p);
-                } else {
+                if !policy_line(p) {
                     c.abandon(p);
                     break;
                 }

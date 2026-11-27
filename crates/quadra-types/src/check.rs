@@ -957,6 +957,18 @@ impl<'m> Checker<'m> {
                 otherwise,
             } => {
                 let ct = self.infer(cond);
+                // `if x:` on a value that is not true or false would never run its block
+                if binding.is_none()
+                    && matches!(
+                        ct.unopt(),
+                        T::Text(_) | T::Num(_) | T::Ent(_) | T::Date | T::DateTime
+                    )
+                {
+                    self.error(
+                        cond.span,
+                        "`if` takes a condition, true or false: for a value that may be missing, `if let v = x:` (or `if x != none:`)",
+                    );
+                }
                 let facts = self.facts_true(cond);
                 self.push();
                 if let Some(b) = binding {
@@ -2076,6 +2088,12 @@ impl<'m> Checker<'m> {
                 self.error(o.span, "a batch is sent by its block: it builds one request from the list of its events");
             }
         }
+        // a `publish`: the record by its own name too
+        if let Some(p) = &o.publishes {
+            if let Some((_, t)) = fields.iter().find(|(k, _)| k.as_deref() == Some("record")) {
+                self.bind(p, t.clone());
+            }
+        }
         // the lines of policy are about each event; the code of a batch, about the list
         self.bind(binding, T::Tuple(fields.clone()));
         self.check_policy(o);
@@ -2099,20 +2117,28 @@ impl<'m> Checker<'m> {
         for span in w {
             self.error(span, "the block of an `outbound` builds the request: it does not write (do it in the transaction that emits the event, or in `on … delivered`)");
         }
-        let request = stmts.last().and_then(|s| match &s.kind {
-            StmtKind::Expr(e) => match &e.kind {
-                ExprKind::Call { callee, .. } => match &callee.kind {
-                    ExprKind::Name(n) => Some(n.as_str()),
-                    _ => None,
+        // the last statement is the request, or an `if … else …` each branch of which ends so
+        fn ends_with(stmts: &[quadra_ir::Stmt], ok: &dyn Fn(&str) -> bool) -> bool {
+            match stmts.last().map(|s| &s.kind) {
+                Some(StmtKind::Expr(e)) => match &e.kind {
+                    ExprKind::Call { callee, .. } => {
+                        matches!(&callee.kind, ExprKind::Name(n) if ok(n))
+                    }
+                    _ => false,
                 },
-                _ => None,
-            },
-            _ => None,
+                Some(StmtKind::If {
+                    then,
+                    otherwise: Some(o),
+                    ..
+                }) => ends_with(then, ok) && ends_with(o, ok),
+                _ => false,
+            }
+        }
+        let fits = ends_with(stmts, &|n| match kind {
+            "http" => matches!(n, "post" | "put" | "patch" | "delete"),
+            "smtp" => n == "email",
+            _ => false,
         });
-        let fits = matches!(
-            (kind, request),
-            ("http", Some("post" | "put" | "patch" | "delete")) | ("smtp", Some("email"))
-        );
         if !fits {
             let what = if kind == "smtp" {
                 "`email(to=…, subject=…, body=…)`"

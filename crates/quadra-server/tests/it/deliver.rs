@@ -1440,7 +1440,7 @@ fn a_batch_goes_when_full_or_when_its_oldest_waited() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-const PUBLISHING: &str = "entity Product:\n    sku: Text\n    price: Decimal\n    stock: Int default 0\n    note: Text?\n\nrecord ProductOut from json:\n    sku: Text\n    price: Decimal\n    stock: Int\n\nrecord StockIn from json:\n    sku: Text\n    stock: Int\n\npublish Product to hooks as p:\n    when p.price > 0\n    on price, stock\n    debounce 2 seconds\n    put(f\"/products/{p.sku}\", ProductOut(sku=p.sku, price=p.price, stock=p.stock))\n\ninbound StockFromShop via hooks path \"/orders\" as m: StockIn:\n    key m.sku\n    let p = Product.where(x => x.sku == m.sku).first() ?? fail \"unknown sku\"\n    p.stock = m.stock\n";
+const PUBLISHING: &str = "entity Product:\n    sku: Text\n    price: Decimal\n    stock: Int default 0\n    note: Text?\n    shop_ref: Text?\n\nrecord ProductOut from json:\n    sku: Text\n    price: Decimal\n    stock: Int\n\nrecord ShopAck from json:\n    tracking: Text\n\nrecord StockIn from json:\n    sku: Text\n    stock: Int\n\npublish Product to hooks as p:\n    when p.price > 0\n    on price, stock, shop_ref\n    debounce 2 seconds\n    reply ShopAck\n    unless p.note == \"hold\"\n    if let id = p.shop_ref:\n        put(f\"/products/{id}\", ProductOut(sku=p.sku, price=p.price, stock=p.stock))\n    else:\n        post(\"/products\", ProductOut(sku=p.sku, price=p.price, stock=p.stock))\n\non PublishProductToHooks delivered as d:\n    d.event.record.shop_ref = d.reply?.tracking\n\ninbound StockFromShop via hooks path \"/orders\" as m: StockIn:\n    key m.sku\n    let p = Product.where(x => x.sku == m.sku).first() ?? fail \"unknown sku\"\n    p.stock = m.stock\n";
 
 #[test]
 fn publish_sends_the_latest_state_of_a_record_and_never_echoes_what_came_from_there() {
@@ -1501,7 +1501,10 @@ fn publish_sends_the_latest_state_of_a_record_and_never_echoes_what_came_from_th
     std::thread::sleep(Duration::from_millis(500));
     let got = r.got.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(got[0].0[":path"], "/products/P1");
+    assert_eq!(
+        (got[0].0[":method"].as_str(), got[0].0[":path"].as_str()),
+        ("POST", "/products")
+    );
     assert_eq!(got[0].1, "{\"sku\":\"P1\",\"price\":12,\"stock\":0}");
     // the stock the shop sends: changed here, not sent back to it
     let (s, v) = send_in(port, "{\"sku\": \"P1\", \"stock\": 7}", Some("s3cret"));
@@ -1512,5 +1515,53 @@ fn publish_sends_the_latest_state_of_a_record_and_never_echoes_what_came_from_th
     }
     assert_eq!(inbox_states(&cfg), ["done"]);
     assert_eq!(events(&cfg), 2);
+    // the id the shop answered with, written by `on … delivered`: kept, not sent back either
+    let shop_ref = || {
+        Conn::open(&cfg.url)
+            .unwrap()
+            .query("SELECT \"shop_ref\", CAST(\"stock\" AS TEXT) FROM \"product\" WHERE \"sku\" = 'P1'", &[])
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+    };
+    let start = Instant::now();
+    while shop_ref()[0].is_none() && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        shop_ref(),
+        [Some("TRK-42".to_string()), Some("7".to_string())]
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(events(&cfg), 2);
+    // a policy line reads the record by its name: `unless p.note == "hold"` skips it
+    let held = tx(
+        json!([{ "op": "create", "entity": "Product", "values": { "sku": "P2", "price": 5, "note": "hold" } }]),
+    );
+    assert_eq!(
+        states(&cfg, |s| s.len() == 3 && s[2] != "pending"),
+        ["superseded", "delivered", "skipped"]
+    );
+    // known to the shop now: updated by its id
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/tx",
+        Some(
+            json!({ "base": held["base"], "ops": [{ "op": "update", "entity": "Product", "id": id, "values": { "price": 20 } }] }),
+        ),
+    );
+    assert_eq!(s, 200, "{v}");
+    let start = Instant::now();
+    while r.got.lock().unwrap().len() < 2 && start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let got = r.got.lock().unwrap().clone();
+    assert_eq!(
+        (got[1].0[":method"].as_str(), got[1].0[":path"].as_str()),
+        ("PUT", "/products/TRK-42")
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

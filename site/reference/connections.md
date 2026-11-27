@@ -312,10 +312,48 @@ attempts, the log, retry and skip, the policy lines of [above](#the-policy-how-l
 (`retry for`, `window`, `expires after`), and the reactions (`on PublishProductToShop failed as
 d:`).
 
+In the lines of policy and the code, `p` is the record (and the event's other name is not
+needed). The event is named after the record and the connection, in capitals:
+`publish Product to erp_eu` makes `PublishProductToErpEu`.
+
 A change that came from the same connection is not sent back: when an `inbound` of `shop`
-changes a product's stock, the product is not published to `shop` again (no echo between two
-systems that keep each other in step). A change made by anyone else, or by an inbound of
-another connection, is.
+changes a product's stock, or a reaction to the outcome of a delivery to `shop` writes the
+product, the product is not published to `shop` again (no echo between two systems that keep
+each other in step). A change made by anyone else, or through another connection, is.
+
+### The other system's ids
+
+Another system has its own id for each record. Keep it in a field of the record, one per
+system, set from its answer:
+
+```quadra
+entity Product:
+    sku: Text unique
+    price: Decimal
+    shop_id: Text?                                # the id the shop gave it
+
+record ShopProduct from json:
+    sku: Text
+    price: Decimal
+
+record ShopCreated from json:
+    id: Text
+
+publish Product to shop as p:
+    reply ShopCreated
+    if let id = p.shop_id:
+        put(f"/products/{id}", ShopProduct(sku=p.sku, price=p.price))
+    else:
+        post("/products", ShopProduct(sku=p.sku, price=p.price))
+
+on PublishProductToShop delivered as d:
+    d.event.record.shop_id = d.event.record.shop_id ?? d.reply?.id
+```
+
+The first delivery creates the product there and keeps its id; the next ones update it. What
+the shop sends in is matched the same way (`Product.where(x => x.shop_id == m.id).first()`),
+and writing the id is not sent back to the shop. To create a product only once even if the first
+answer is lost, give the shop a key of your own (`key f"product-{p.sku}"`) when it accepts one.
 
 ### Webhooks
 

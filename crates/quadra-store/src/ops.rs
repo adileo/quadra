@@ -872,6 +872,12 @@ pub fn eval_for_event(
         as_of: as_of.then_some(tx),
         ..Default::default()
     };
+    // a `publish`: the record by its own name too
+    if let Some(p) = &outbound.publishes {
+        if let Some((_, r)) = event.iter().find(|(k, _)| k.as_deref() == Some("record")) {
+            ctx.bind(p, r.clone());
+        }
+    }
     ctx.bind(binding, V::Tuple(std::rc::Rc::new(event)));
     interp
         .eval(expr, &mut ctx)
