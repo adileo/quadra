@@ -687,6 +687,9 @@ struct State {
     log_bytes: u64,
     /// transactions refused because too many were not kept by the destinations
     refused: u64,
+    /// numbered and never written (given up, or refused by the database): their deltas count
+    /// for no rule on a total
+    void: HashSet<u64>,
     /// what `Sequencer::health` reads
     health: std::sync::Arc<HealthCell>,
     url: String,
@@ -726,6 +729,7 @@ impl State {
             snapshot_due: None,
             log_bytes: 0,
             refused: 0,
+            void: HashSet::new(),
             health,
             url: url.to_string(),
         };
@@ -790,10 +794,13 @@ impl State {
         )?;
         let row = r.into_iter().next().unwrap_or_default();
         let at = |i: usize| row.get(i).cloned().flatten();
-        self.head = num(&at(0)) as u64;
-        self.durable = self.head;
+        let written = num(&at(0)) as u64;
+        // numbers given before a restart are never given again: an engine late with its writes
+        // for one of them must not land on a new transaction (the batch after covers the gap)
+        self.head = self.head.max(written);
+        self.durable = written;
         self.health.written.store(self.durable, std::sync::atomic::Ordering::Relaxed);
-        self.acked = self.head;
+        self.acked = written;
         self.seq = num(&at(1));
         self.prev_hash = at(2).unwrap_or_else(|| "0".repeat(64));
         self.outbox = num(&at(3));
@@ -803,7 +810,7 @@ impl State {
         let reserved = reserved.first().and_then(|r| r[0].as_deref()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         self.ids_given = self.ids_given.max(reserved).max(self.next_id);
         self.batch = num(&at(5)) as u64;
-        self.window = Window { floor: self.head, ..Default::default() };
+        self.window = Window { floor: self.durable, ..Default::default() };
         Ok(())
     }
 
@@ -1042,12 +1049,21 @@ impl State {
                 return Some(refused("a rule on a total read long ago"));
             }
             let mut now = g.seen + g.own;
-            for s in self.window.seen.iter().filter(|s| s.tx > r.base) {
+            // a lower bound (>=, >) can be broken by what takes away, an upper one by what adds
+            let lower = !matches!(g.op, quadra_ir::BinOp::Lt | quadra_ir::BinOp::Le);
+            for s in self.window.seen.iter().filter(|s| s.tx > r.base && !self.void.contains(&s.tx)) {
                 if !s.writes.rows.iter().any(|(id, _)| *id == g.id) {
                     continue;
                 }
                 match s.writes.deltas.iter().find(|(id, f, _)| *id == g.id && *f == g.field) {
-                    Some((_, _, d)) => now += *d,
+                    // written: as it is; still to be written (it may never be): only in the
+                    // direction that could break the rule
+                    Some((_, _, d)) if s.tx <= self.durable => now += *d,
+                    Some((_, _, d)) => {
+                        if (lower && d.is_sign_negative()) || (!lower && d.is_sign_positive()) {
+                            now += *d;
+                        }
+                    }
                     None => return Some(refused("the record changed since it was read")),
                 }
             }
@@ -1120,6 +1136,11 @@ impl State {
                 break;
             }
             items.push((tx, self.pending.remove(&tx).unwrap()));
+        }
+        for (tx, p) in &items {
+            if p.submitted.is_none() {
+                self.void.insert(*tx);
+            }
         }
         let submitted: Vec<(u64, Pending)> = items.into_iter().filter(|(_, p)| p.submitted.is_some()).collect();
         if submitted.is_empty() {
@@ -1198,6 +1219,8 @@ impl State {
             }
         }
         self.window.prune(self.options.keep, self.durable);
+        let floor = self.window.floor;
+        self.void.retain(|t| *t >= floor);
     }
 
     /// Results of the transactions written one by one. Those that went through and wait for the
@@ -1223,7 +1246,10 @@ impl State {
                         Ok(item.0)
                     }
                 }
-                Err(Failure::Db(e)) => Err(CommitError::Failed(e)),
+                Err(Failure::Db(e)) => {
+                    self.void.insert(item.0);
+                    Err(CommitError::Failed(e))
+                }
                 Err(Failure::Foreign) => Err(CommitError::Failed("the database was changed by another writer".into())),
             };
             out.push(res);
