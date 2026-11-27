@@ -2221,6 +2221,14 @@ impl Engine {
             }
         };
         let n = messages.len();
+        // the units, currencies and company, read once for the messages (the engine keeps them
+        // while none of those records is written)
+        let units = if messages.is_empty() {
+            None
+        } else {
+            let _ = self.interp(model, None, None);
+            self.units.as_ref().map(|(u, c, _)| (u.clone(), *c))
+        };
         for m in messages {
             let at = now();
             let stamp = at.format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -2307,6 +2315,7 @@ impl Engine {
                     doc,
                     format!("inbound:{}#{} handled", i.name, m.id),
                     Some(self.schema.clone()),
+                    units.as_ref().map(|(u, c)| (u, *c)),
                 )
                 .map(|tx| tx.unwrap_or(0))
             })();

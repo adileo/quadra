@@ -1065,6 +1065,7 @@ pub fn handle_inbound(
     doc: V,
     cause: String,
     schema: Option<std::rc::Rc<crate::schema::Schema>>,
+    units: Option<(&quadra_runtime::Units, Option<u64>)>,
 ) -> Result<Option<u64>, String> {
     // the engine's schema when it gives it: not built again for every message
     let db = match schema {
@@ -1076,7 +1077,14 @@ pub fn handle_inbound(
     let mut interp = Interp::new(model);
     interp.set_clock(time);
     interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
-    interp.load_units();
+    // the engine's units and company when it gives them: not read again for every message
+    match units {
+        Some((u, company)) => {
+            interp.set_units(u);
+            interp.company = company;
+        }
+        None => interp.load_units(),
+    }
     interp.materialize = materialized_formulas(&db.schema);
     interp.sink = Some(match sequencer {
         Some(s) => Box::new(crate::SequencedSink {
