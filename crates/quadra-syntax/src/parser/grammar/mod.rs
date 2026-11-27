@@ -270,11 +270,24 @@ fn entity(p: &mut Parser) {
             }
             c.complete(p, IS_CLAUSE);
         }
-        // `record ShopOrder from json:`
+        // `record ShopOrder from json:`, `record PosRow from csv(sep=";", header=false):`
         if p.at(FROM_KW) {
             let c = p.start();
             p.bump();
             name(p);
+            if p.eat(L_PAREN) {
+                while !p.at(R_PAREN) && !p.at_eof() && !p.at(NEWLINE) {
+                    let o = p.start();
+                    name(p);
+                    p.expect(EQ);
+                    expr(p);
+                    o.complete(p, FORMAT_OPTION);
+                    if !p.eat(COMMA) {
+                        break;
+                    }
+                }
+                p.expect(R_PAREN);
+            }
             c.complete(p, FORMAT_CLAUSE);
         }
     }
@@ -724,6 +737,18 @@ fn member(p: &mut Parser, ctx: MemberCtx) {
             "action" => return action(p),
             "post" if p.nth_at_ctx(1, "to") => return post(p),
             "load" if p.nth(1) == FROM_KW => return load(p),
+            // `ns cbc "urn:…"`, `ns "urn:…"`: the namespaces of a record `from xml`
+            "ns" if p.nth(1) == STRING || (p.nth(1) == IDENT && p.nth(2) == STRING) => {
+                let m = p.start();
+                p.bump_ctx();
+                if p.at(IDENT) {
+                    name(p);
+                }
+                p.bump();
+                end_line(p);
+                m.complete(p, NAMESPACE);
+                return;
+            }
             "key" | "measure" | "attr" if p.nth(1) == IDENT => {
                 let m = p.start();
                 p.bump_ctx();
@@ -843,8 +868,13 @@ fn modifiers(p: &mut Parser) -> bool {
         } else if p.at_ctx("via") || p.at_ctx("through") {
             p.bump_ctx();
             path(p);
-        } else if p.at_ctx("at") && p.nth(1) == STRING {
-            // where a field of a `record … from json` is in the document: `at "shipping.zip"`
+        } else if (p.at_ctx("at") || p.at_ctx("format")) && p.nth(1) == STRING {
+            // where a field of a record `from` a format is (`at "shipping.zip"`, `at "1..10"`)
+            // and how its value is written there (`format "%d/%m/%Y"`)
+            p.bump_ctx();
+            p.bump();
+        } else if p.at_ctx("decimals") && p.nth(1) == NUMBER {
+            // `decimals 2`: the decimals a number is written with in a format
             p.bump_ctx();
             p.bump();
         } else {

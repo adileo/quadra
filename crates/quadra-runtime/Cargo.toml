@@ -15,5 +15,7 @@ quadra-analysis.workspace = true
 quadra-types.workspace = true
 rust_decimal = "1"
 serde_json = "1"
+# XML documents of records `from xml` (MIT): read without a DTD, see `formats/xml.rs`
+quick-xml = "0.42"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"

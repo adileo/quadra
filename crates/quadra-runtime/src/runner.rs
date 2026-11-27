@@ -381,7 +381,7 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
     }
 
     fn expect_compile_error(&self, message: &str, source: &str, span: Span) -> Result<(), String> {
-        let is_item = ["extend ", "fn ", "patch ", "entity "]
+        let is_item = ["extend ", "fn ", "patch ", "entity ", "record "]
             .iter()
             .any(|k| source.starts_with(k));
         let text = if is_item {

@@ -203,8 +203,8 @@ on OrderPlaced delivered as d:
 | `e` | the event: its fields, as they were emitted |
 | The data | read **as it was when the event was emitted**: every attempt builds the same request, even a day later and after the order changed. The content is decided at `emit`; the block decides its shape |
 | No writes | the block builds the request and nothing else: an assignment or an `emit` there is an error (write in the transaction that emits, or in `on … delivered`) |
-| The request | the block ends with it. HTTP: `post(path, body)`, `put(path, body)`, `patch(path, body)`, `delete(path)`; the path is appended to the connection's url (and to the outbound's `path`), the body is a record `from json` (sent as `application/json`) or text. SMTP: `email(to=…, subject=…, body=…, html=…)` (with `html`, the email has both versions) |
-| `reply T` | the first line of the block: the answer of a 2xx, read as a record `from json`, is `d.reply` in `on … delivered` (none when it does not fit, said in the log) |
+| The request | the block ends with it. HTTP: `post(path, body)`, `put(path, body)`, `patch(path, body)`, `delete(path)`; the path is appended to the connection's url (and to the outbound's `path`), the body is a record `from json` (sent as `application/json`), a record `from xml` (sent as `application/xml`) or text. SMTP: `email(to=…, subject=…, body=…, html=…)` (with `html`, the email has both versions) |
+| `reply T` | the first line of the block: the answer of a 2xx, read as a record `from json` or `from xml`, is `d.reply` in `on … delivered` (none when it does not fit, said in the log) |
 | A block that fails | (a bug, a record that no longer exists) the event waits, without a time limit, for a deploy that fixes it; the error is in its log |
 
 The headers, the authentication, the signature and the `Idempotency-Key` are the connection's,
@@ -343,11 +343,27 @@ On Quadra Cloud connections only reach public addresses: a name that resolves to
 loopback or link-local address (the clouds' metadata, `169.254.169.254`) is refused, and so
 is a redirect. Previews and forks deliver nothing ([On Quadra Cloud](#on-quadra-cloud)).
 
-## Formats: `record … from json`
+## Formats: `record … from`
 
-The documents of another system (a shop's order, a carrier's label, the answer of an API) are
-described as records `from json`: what a field is called there, where it is, what type it has.
-Reading and writing them are pure functions, the same text always giving the same record:
+The documents and files of another system (a shop's order, an e-invoice, a point of sale's
+export, a bank's file) are described as records `from` their format: what a field is called
+there, where it is, what type it has. Four formats are read and written:
+
+| Format | Declared | Read | Written |
+|---|---|---|---|
+| JSON | `record ShopOrder from json:` | `ShopOrder.parse(text)` | `order.json()` |
+| XML | `record Invoice from xml:` | `Invoice.parse(text)` | `invoice.xml()` |
+| CSV | `record PosRow from csv(sep=";"):` | `PosRow.parse_rows(text)`, a `[PosRow]` | `rows.csv()` |
+| Fixed-width | `record CbiRow from fixed:` | `CbiRow.parse_rows(text)`, a `[CbiRow]` | `rows.fixed()` |
+
+Reading and writing are pure functions, the same text always giving the same records: they
+can be used in functions and tests, and to build what an [`outbound`](#outbound) sends (a
+record `from json` is sent as `application/json`, one `from xml` as `application/xml`; `reply`
+reads either). A text that does not fit fails with where and why: the path in a document, the
+line and the column in a file. Nothing is read from or written to disk: the text comes from
+the code, and what is written is text.
+
+### JSON
 
 ```quadra
 record ShopLine from json:
@@ -380,8 +396,125 @@ s.json()                                  # {"order":{"number":"#1001"},"parcel"
 |---|---|
 | Keys | a field is under its name, or under `at "a.b.c"`; keys the record does not declare are ignored when reading |
 | Types | `Text` (and `Code`, `Email`, `Phone`, `VatNumber`, `Barcode`): a string, or a number read as its text. `Int`, `Decimal` (written exactly; read from a number or a string), `Bool`, `Date` (`"2026-11-27"`), `DateTime` (`"2026-11-27T10:14:03Z"`; an instant without a zone is UTC), an enum (the variant's name), another record `from json`, `[T]`, `T?` (missing or `null`; left out when written) |
-| Not in a document | a record of the database (`Customer`): send its id, or a record `from json` made of its fields; amounts with a currency: a `Decimal` and a `Code` |
+
+### XML
+
+```quadra
+record InvoiceLine from xml:
+    ns cbc "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"
+    ns cac "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
+    id: Int at "cbc:ID"
+    quantity: Decimal at "cbc:InvoicedQuantity"
+    unit: Code at "cbc:InvoicedQuantity/@unitCode"     # an attribute
+    amount: Decimal at "cbc:LineExtensionAmount" decimals 2
+    name: Text at "cac:Item/cbc:Name"
+
+record Invoice from xml(root="Invoice"):
+    ns "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"   # the default namespace
+    ns cbc "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"
+    ns cac "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
+    number: Text at "cbc:ID"
+    issued: Date at "cbc:IssueDate"
+    supplier: Text at "cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name"
+    note: Text? at "cbc:Note"
+    total: Decimal at "cac:LegalMonetaryTotal/cbc:PayableAmount" decimals 2
+    currency: Code at "cac:LegalMonetaryTotal/cbc:PayableAmount/@currencyID"
+    lines: [InvoiceLine] at "cac:InvoiceLine"            # every such element, in order
+```
+
+```quadra
+let inv = Invoice.parse(text)       # `Invoice/cac:InvoiceLine[2]/cbc:InvoicedQuantity: a number was expected, not `two``
+inv.lines.sum(l => l.amount)
+inv.xml()                           # <?xml version="1.0" encoding="UTF-8"?>\n<Invoice xmlns="urn:…" xmlns:cbc="urn:…" …><cbc:ID>…
+```
+
+| Rule | Detail |
+|---|---|
+| Paths | `at "a/b"`: elements separated by `/`; `at "a/@id"`: an attribute (the last step); `at "."`: the text of the record's own element; without `at`, the child element of the field's name |
+| Namespaces | `ns prefix "uri"` lines at the top of the record bind the prefixes of its paths, `ns "uri"` the namespace of its unprefixed elements (an unprefixed attribute is in none). Each record declares the prefixes of its own paths, also one used inside another. Elements are matched by namespace and name, not by prefix: a document may use other prefixes |
+| `root` | the name of the root element (`root="p:FatturaElettronica"`); when given, a document with another root is refused. Without it, any root is read and the record's name is written |
+| Values | the text of an element (its text and CDATA, not its children) or an attribute; the types are those of JSON, written as text (`12.50`, `true`, `2026-11-27`). A record `from xml` is an element, `[T]` the repeated elements of the path, `T?` an element or attribute that may be missing (an empty element is none, except for text) |
+| Writing | in the order of the fields (declare them in the order of the schema); fields share the steps of their paths (`a/b` and `a/c` are in one `a`), each item of a list repeats the last element, an optional without a value is left out; the namespaces are declared on the root, or where an element needs another |
+| Safety | a DTD (`<!DOCTYPE …>`) is refused, so no entity is defined or expanded (no external entities, no "billion laughs"): only `&amp;` `&lt;` `&gt;` `&quot;` `&apos;` and character references. At most 10 MiB, 64 levels of elements, 200,000 elements |
+
+### CSV
+
+```quadra
+enum Payment:
+    Cash, Card, Voucher
+
+record PosRow from csv(sep=";", decimal=",", header=true, encoding="latin1"):
+    store: Code at "NEGOZIO"
+    day: Date at "DATA" format "%d/%m/%Y"
+    description: Text at "DESCRIZIONE"
+    quantity: Int at "QTA"
+    amount: Decimal at "IMPORTO" decimals 2
+    payment: Payment at "PAGAMENTO"
+    refund: Bool at "RESO" format "S/N"
+    note: Text? at "NOTE"
+
+record Movement from csv(header=false):
+    account: Code at "1"            # without a header: the position, from 1
+    amount: Decimal at "3"
+    reference: Text? at "2"
+```
+
+```quadra
+let rows = PosRow.parse_rows(text)  # `line 14, column `IMPORTO`: a number with `,` before the decimals was expected, not `3.50``
+rows.where(r => not r.refund).sum(r => r.amount)
+rows.csv()                          # NEGOZIO;DATA;DESCRIZIONE;…\r\nMI01;27/11/2026;"Penna; blu";…\r\n
+```
+
+| Rule | Detail |
+|---|---|
+| Options | `sep` (`","`; `"\t"` for tabs), `decimal` (the decimal separator, `"."`), `header` (`true`), `encoding` (`"utf-8"` or `"latin1"`, ISO-8859-1) |
+| Columns | with a header, a field is the column of its name or of `at "NAME"`: in any order, the columns the record does not declare ignored, a column missing from the header an error (none for an optional field). Without a header, `at "3"` is the position, from 1; a field without `at` is at its place among the fields |
+| Quoting | RFC 4180: a cell that holds the separator, a quote or a new line is between quotes, a quote inside doubled (`"say ""hi"""`). Rows end with `\r\n` when written (`\n` is read too); empty lines are skipped |
+| Values | one per cell: the types of JSON but lists and records. Numbers use `decimal` (`3,50`, refused as `3.50`); an empty cell is none for an optional, the empty text for a `Text`, an error for the others; a row too short for a field is an error with its line and column |
+| Formulas | a text cell that starts with `=`, `+`, `-`, `@` (or a tab or a carriage return) is written after a `'`, so that a spreadsheet shows it instead of running it; reading removes that `'` again. Numbers are never changed: `-3` stays `-3` |
+| Encoding | the text a program reads has already been decoded; `encoding="latin1"` makes writing refuse a character latin1 cannot hold (`row 3, column `DESCRIZIONE`: `€` cannot be written in latin1`), and a host that receives the file as bytes decodes it with it (invalid UTF-8 says its line) |
+| Empty | `rows.csv()` of no rows is the header alone |
+
+### Fixed-width
+
+The files of banks (CBI), of legacy systems and of AS/400: each field has its columns, from 1,
+both included.
+
+```quadra
+record CbiRow from fixed:
+    kind: Code at "1..2"
+    account: Code at "3..14"
+    value_date: Date at "15..20" format "%d%m%y"
+    amount: Decimal at "21..33" decimals 2      # 0000000001250 is 12.50
+    sign: Code at "34"                          # one column
+    description: Text at "35..64"
+    cro: Int? at "65..74"
+```
+
+```quadra
+let rows = CbiRow.parse_rows(text)  # `line 3, columns 21..33 (`amount`): digits were expected, not `0000000012,50``
+rows.fixed()                        # 611234567     2711260000000001250CFattura 118 …\r\n
+```
+
+| Rule | Detail |
+|---|---|
+| Columns | `at "11..20"` or `at "7"`, counted in characters; every field has them, and two fields may not overlap. The columns no field declares are spaces when written; a line shorter than the record reads as if it went on with spaces |
+| Text | left-aligned, padded with spaces (the spaces after it are not part of it when read); a text longer than its columns is an error, never cut. Enums, dates (`format "%d%m%y"`, else ISO 8601) and booleans (`1` / `0`, or `format "S/N"`) are written the same way |
+| Numbers | right-aligned, padded with zeros, the sign first (`-0042`). A `Decimal` says how many of its last digits are decimals, `decimals 2`, and no separator is written; a number that does not fit is an error |
+| Empty | columns of spaces are none for an optional field, the empty text for a `Text`, an error for the others |
+| Options | `encoding` (`"utf-8"` or `"latin1"`), as for CSV. Lines end with `\r\n` when written |
+| Not yet | EBCDIC and packed decimals (COMP-3) are not read or written: such files are converted to text first. A file mixing records of several layouts is read one layout at a time |
+
+### In every format
+
+| Rule | Detail |
+|---|---|
+| `format "…"` | how a date or an instant is written (`format "%d/%m/%Y"`, chrono's patterns), or the text of true and false (`format "S/N"`). Refused on other types |
+| `decimals N` | a `Decimal` is written with exactly `N` decimals (`12.50`); one with more is refused, not rounded (round it first). Refused on other types |
+| Not in a format | a record of the database (`Customer`): send its id, or a record `from` the format made of its fields; amounts with a currency: a `Decimal` and a `Code`. A record inside one is `from` the same format |
+| Refused | what the format cannot hold (a list in a CSV cell, a list of lists in XML), an `at` that is not in the syntax of the format, an unknown option, a prefix not declared, `parse` on a file of rows (`parse_rows`), and `at`, `format`, `decimals`, `ns` outside a record `from` a format |
 | Only records | `entity X from json` is refused: what comes from outside has no identity until the code makes a record of it |
+| Equality | a record read equals the same record built in code (`PosRow.parse_rows(rows.csv()) == rows`) |
 
 ## Without `outbound`: an integration takes them
 

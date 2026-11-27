@@ -100,10 +100,10 @@ impl<'m> Interp<'m> {
             let path = as_text(&get("path", Some(0))).unwrap_or_default();
             let (body, ctype) = match get("body", Some(1)) {
                 V::None => (V::None, V::None),
-                rec @ V::Rec { .. } => (
-                    text(&crate::formats::render_json(self.m, &rec).or_else(|e| fail(e))?),
-                    text("application/json"),
-                ),
+                rec @ V::Rec { .. } => {
+                    let (body, ctype) = crate::formats::render(self.m, &rec).or_else(fail)?;
+                    (text(&body), text(ctype))
+                }
                 other => (
                     as_text(&other).map(|t| text(&t)).unwrap_or(V::None),
                     text("text/plain; charset=utf-8"),
@@ -1618,14 +1618,22 @@ impl<'m> Interp<'m> {
             ));
         }
         if e.kind == EntityKind::Record {
-            let mut fields: Vec<(String, V)> = args.clone();
+            // in the order of the declaration, whatever the order of the arguments: two equal
+            // values are equal (`Address(city=…, zip=…) == Address(zip=…, city=…)`)
+            let mut fields: Vec<(String, V)> = Vec::new();
             for f in self.m.all_fields(e) {
-                if !fields.iter().any(|(n, _)| n == &f.name) {
-                    let v = match &f.default {
+                let v = match args.iter().find(|(n, _)| n == &f.name) {
+                    Some((_, v)) => v.clone(),
+                    None => match &f.default {
                         Some(d) => self.eval(d, &mut Ctx::default())?,
                         None => V::None,
-                    };
-                    fields.push((f.name.clone(), v));
+                    },
+                };
+                fields.push((f.name.clone(), v));
+            }
+            for (n, v) in &args {
+                if !fields.iter().any(|(x, _)| x == n) {
+                    fields.push((n.clone(), v.clone()));
                 }
             }
             return Ok(V::Rec {
@@ -3114,23 +3122,28 @@ impl<'m> Interp<'m> {
                 name,
                 optional,
             } => {
-                // `ShopOrder.parse(text)`: a document read into a record `from json`
-                if name == "parse" {
+                // `ShopOrder.parse(text)`, `PosRow.parse_rows(text)`: a document read into a
+                // record `from` a format, a file into its rows
+                if name == "parse" || name == "parse_rows" {
                     if let ExprKind::Name(r) = &base.kind {
                         if ctx.local(r).is_none()
                             && self.m.entity(r).is_some_and(|e| e.format.is_some())
                         {
                             let Some(a) = args.first() else {
-                                return fail(format!("`{r}.parse` takes the text to read"));
+                                return fail(format!("`{r}.{name}` takes the text to read"));
                             };
                             let text = match self.eval(&a.value, ctx)? {
                                 V::Text(t) => t,
                                 other => {
-                                    return fail(format!("`{r}.parse` reads text, not {other}"))
+                                    return fail(format!("`{r}.{name}` reads text, not {other}"))
                                 }
                             };
-                            return crate::formats::parse_json(self.m, r, &text)
-                                .or_else(|e| fail(format!("{r}: {e}")));
+                            let read = if name == "parse" {
+                                crate::formats::parse(self.m, r, &text)
+                            } else {
+                                crate::formats::parse_rows(self.m, r, &text)
+                            };
+                            return read.or_else(|e| fail(format!("{r}: {e}")));
                         }
                     }
                 }
@@ -3139,13 +3152,31 @@ impl<'m> Interp<'m> {
                     return Ok(v);
                 }
                 let b = self.eval(base, ctx)?;
-                // `order.json()`: a record `from json` written as its document
-                if name == "json" {
+                // `order.json()`, `invoice.xml()`: a record `from` a format written as its
+                // document
+                if name == "json" || name == "xml" {
                     if let V::Rec { ent, .. } = &b {
                         if self.m.entity(ent).is_some_and(|e| e.format.is_some()) {
-                            return crate::formats::render_json(self.m, &b)
+                            return crate::formats::render(self.m, &b)
+                                .map(|(t, _)| text(&t))
+                                .or_else(fail);
+                        }
+                    }
+                }
+                // `rows.csv()`, `rows.fixed()`: the file of a list of rows (the checker knows
+                // their record, which an empty list does not show)
+                if name == "csv" || name == "fixed" {
+                    if let V::List(items) = &b {
+                        let rec = self.m.row_records.get(&callee.span).cloned().or_else(|| {
+                            items.iter().find_map(|r| match r {
+                                V::Rec { ent, .. } => Some(ent.to_string()),
+                                _ => None,
+                            })
+                        });
+                        if let Some(rec) = rec {
+                            return crate::formats::render_rows(self.m, &rec, items)
                                 .map(|t| text(&t))
-                                .or_else(|e| fail(e));
+                                .or_else(|e| fail(format!("{rec}: {e}")));
                         }
                     }
                 }

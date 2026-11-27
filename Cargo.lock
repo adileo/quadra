@@ -1785,6 +1785,7 @@ dependencies = [
  "quadra-sema",
  "quadra-syntax",
  "quadra-types",
+ "quick-xml",
  "rust_decimal",
  "rustc-hash 1.1.0",
  "serde_json",

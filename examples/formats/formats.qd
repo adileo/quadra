@@ -1,0 +1,62 @@
+# Records read from and written to the files and documents of other systems: a point of sale's
+# CSV export, an e-invoice in XML, a bank's fixed-width file. Every reading and writing is a
+# pure function: tests give them text and compare text.
+
+enum Payment:
+    Cash, Card, Voucher
+
+# The daily export of a point of sale: semicolons, decimal commas, a latin1 file.
+record PosRow from csv(sep=";", decimal=",", header=true, encoding="latin1"):
+    store: Code at "NEGOZIO"
+    day: Date at "DATA" format "%d/%m/%Y"
+    sku: Code at "ARTICOLO"
+    description: Text at "DESCRIZIONE"
+    quantity: Int at "QTA"
+    amount: Decimal at "IMPORTO" decimals 2
+    payment: Payment at "PAGAMENTO"
+    refund: Bool at "RESO" format "S/N"
+    note: Text? at "NOTE"
+
+# A file without a header: the columns by position.
+record Movement from csv(header=false):
+    account: Code at "1"
+    amount: Decimal at "3"
+    reference: Text? at "2"
+
+# A UBL-like invoice: a default namespace and two prefixes.
+record InvoiceLine from xml:
+    ns cbc "urn:example:basic"
+    ns cac "urn:example:aggregate"
+    # written in the order of the fields: the order of the elements of the schema
+    id: Int at "cbc:ID"
+    quantity: Decimal at "cbc:InvoicedQuantity"
+    unit: Code at "cbc:InvoicedQuantity/@unitCode"
+    amount: Decimal at "cbc:LineExtensionAmount" decimals 2
+    name: Text at "cac:Item/cbc:Name"
+
+record Invoice from xml(root="Invoice"):
+    ns "urn:example:invoice"
+    ns cbc "urn:example:basic"
+    ns cac "urn:example:aggregate"
+    number: Text at "cbc:ID"
+    issued: Date at "cbc:IssueDate"
+    currency: Code at "cbc:DocumentCurrencyCode"
+    supplier: Text at "cac:AccountingSupplierParty/cac:Party/cbc:Name"
+    note: Text? at "cbc:Note"
+    total: Decimal at "cac:LegalMonetaryTotal/cbc:PayableAmount" decimals 2
+    total_currency: Code at "cac:LegalMonetaryTotal/cbc:PayableAmount/@currencyID"
+    lines: [InvoiceLine] at "cac:InvoiceLine"
+
+# A line of a bank's fixed-width file (CBI-like): columns from 1, both included.
+record CbiRow from fixed:
+    kind: Code at "1..2"
+    account: Code at "3..14"
+    value_date: Date at "15..20" format "%d%m%y"
+    amount: Decimal at "21..33" decimals 2
+    sign: Code at "34"
+    description: Text at "35..64"
+    cro: Int? at "65..74"
+
+# The takings of a day: the sales less the refunds.
+fn takings(rows: [PosRow]) -> Decimal:
+    return rows.where(r => not r.refund).sum(r => r.amount) - rows.where(r => r.refund).sum(r => r.amount)
