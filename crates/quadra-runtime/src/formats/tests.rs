@@ -472,6 +472,107 @@ fn fixed_width_refuses_what_does_not_fit() {
     );
 }
 
+const EBCDIC: &str = r#"
+record Closing from fixed(encoding="ibm-1144", length=24):
+    store: Code at "1..4"
+    item: Text at "5..12"
+    qty: Int at "13..15" zoned
+    amount: Decimal at "16..19" packed decimals 2
+    discount: Decimal? at "20..22" packed decimals 2
+"#;
+
+#[test]
+fn fixed_width_in_ebcdic_with_packed_and_zoned_numbers() {
+    let m = model(EBCDIC);
+    // MI01, "Caffè €" , qty -3 (zoned), 12345.67 (packed), no discount, 2 bytes of filler
+    let mut rec: Vec<u8> = Vec::new();
+    rec.extend(super::ebcdic::encode(1144, "MI01Caffè € ").unwrap());
+    rec.extend([0xF0, 0xF0, 0xD3]);
+    rec.extend([0x12, 0x34, 0x56, 0x7C]);
+    rec.extend([0x40, 0x40, 0x40]);
+    rec.extend([0x40, 0x40]);
+    assert_eq!(rec.len(), 24);
+    let mut two = rec.clone();
+    two[14] = 0xC5; // 005: +5
+    two[15..19].copy_from_slice(&[0x00, 0x00, 0x00, 0x5D]); // -0.05
+    two[19..22].copy_from_slice(&[0x00, 0x01, 0x0C]); // 0.10
+    let file = [rec.clone(), two].concat();
+    let v = parse_rows_bytes(&m, "Closing", &file).unwrap();
+    let r = rows(&v);
+    assert_eq!(get(&r[0], "item"), V::Text("Caffè €".into()));
+    assert_eq!(get(&r[0], "qty"), V::Int(-3));
+    assert_eq!(get(&r[0], "amount"), V::Dec(Decimal::new(1234567, 2)));
+    assert_eq!(get(&r[0], "discount"), V::None);
+    assert_eq!(get(&r[1], "qty"), V::Int(5));
+    assert_eq!(get(&r[1], "amount"), V::Dec(Decimal::new(-5, 2)));
+    assert_eq!(get(&r[1], "discount"), V::Dec(Decimal::new(10, 2)));
+    // written back: the same bytes (the zone of a positive number is C)
+    let mut expected = file.clone();
+    expected[24 + 14] = 0xC5;
+    assert_eq!(render_rows_bytes(&m, "Closing", &r).unwrap(), expected);
+    // as text, a character a byte: read back the same
+    let text = render_rows(&m, "Closing", &r).unwrap();
+    assert_eq!(text.chars().count(), 48);
+    assert_eq!(parse_rows(&m, "Closing", &text).unwrap(), v);
+    // what is wrong says the record and its bytes
+    let mut bad = rec.clone();
+    bad[18] = 0x67;
+    assert_eq!(
+        err(parse_rows_bytes(&m, "Closing", &bad)),
+        "record 1, bytes 16..19 (`amount`): not a packed decimal: its last half-byte (0x7) is not a sign (C, D or F)"
+    );
+    assert!(err(parse_rows_bytes(&m, "Closing", &file[..30])).starts_with("the file is 30 bytes"));
+    // each row on its own: the good one and the bad one
+    let each = read_rows(&m, "Closing", &[bad, rec].concat()).unwrap();
+    assert!(each[0].1.is_err() && each[1].1.is_ok());
+    assert_eq!(each[1].0, 2);
+}
+
+#[test]
+fn packed_numbers_that_do_not_fit_and_characters_the_page_has_not() {
+    let m = model(EBCDIC);
+    let v = parse_rows(
+        &m,
+        "Closing",
+        &ebcdic::decode(
+            1144,
+            &[
+                0xD4, 0xC9, 0xF0, 0xF1, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0xF0, 0xF0,
+                0xF1, 0x00, 0x00, 0x00, 0x0C, 0x40, 0x40, 0x40, 0x40, 0x40,
+            ],
+        ),
+    )
+    .unwrap();
+    let r = rows(&v);
+    let with = |name: &str, value: V| -> Vec<V> {
+        let V::Rec { ent, fields } = &r[0] else {
+            panic!()
+        };
+        let mut fields = fields.to_vec();
+        for f in fields.iter_mut() {
+            if f.0 == name {
+                f.1 = value.clone();
+            }
+        }
+        vec![V::Rec {
+            ent: ent.clone(),
+            fields: Rc::new(fields),
+        }]
+    };
+    assert_eq!(
+        err(render_rows_bytes(&m, "Closing", &with("amount", V::Dec(Decimal::new(123456789, 2))))),
+        "row 1, bytes 16..19 (`amount`): 123456789 does not fit in 4 bytes of packed decimal (7 digits)"
+    );
+    assert_eq!(
+        err(render_rows_bytes(
+            &m,
+            "Closing",
+            &with("item", V::Text("¤".into()))
+        )),
+        "row 1, bytes 5..12 (`item`): `¤` cannot be written in ibm-1144"
+    );
+}
+
 // ---- JSON ----------------------------------------------------------------------------------
 
 #[test]

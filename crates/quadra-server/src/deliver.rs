@@ -268,7 +268,7 @@ pub enum Built {
     Put {
         file: bool,
         path: String,
-        body: String,
+        body: Vec<u8>,
     },
 }
 
@@ -510,7 +510,15 @@ pub fn built_of(v: &quadra_runtime::V) -> Result<Built, String> {
         return Ok(Built::Put {
             file: method == "WRITE",
             path: get("path").unwrap_or_default(),
-            body: get("body").unwrap_or_default(),
+            // the bytes of a file of rows come a character per byte
+            body: match get("encoding").as_deref() {
+                Some("bytes") => get("body")
+                    .unwrap_or_default()
+                    .chars()
+                    .map(|c| c as u32 as u8)
+                    .collect(),
+                _ => get("body").unwrap_or_default().into_bytes(),
+            },
         });
     }
     if method == "EMAIL" {
@@ -706,12 +714,12 @@ pub fn plan(
                     }
                     crate::transport::Put::File {
                         path: path.clone(),
-                        body: body.as_bytes().to_vec(),
+                        body: body.clone(),
                     }
                 } else {
                     crate::transport::Put::Row {
                         table: path.clone(),
-                        row: serde_json::from_str(body).map_err(|e| e.to_string())?,
+                        row: serde_json::from_slice(body).map_err(|e| e.to_string())?,
                         key: idempotency_key(&due),
                     }
                 };
@@ -1011,7 +1019,11 @@ pub fn is_public(ip: IpAddr) -> bool {
 }
 
 /// The addresses of `host` that may be connected to (all of them, or only public ones).
-async fn addresses(host: &str, port: u16, public_only: bool) -> Result<Vec<SocketAddr>, String> {
+pub(crate) async fn addresses(
+    host: &str,
+    port: u16,
+    public_only: bool,
+) -> Result<Vec<SocketAddr>, String> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let all: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],

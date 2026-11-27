@@ -26,6 +26,7 @@
 //! decimals a number is written with) apply in every format.
 
 mod csv;
+pub(crate) mod ebcdic;
 mod fixed;
 #[cfg(test)]
 mod tests;
@@ -144,18 +145,52 @@ pub fn render_rows(m: &Model, rec: &str, rows: &[V]) -> Result<String, String> {
 /// Reads the bytes of a file of rows: decoded with the record's `encoding`, then
 /// `parse_rows`. For the hosts that receive files as bytes.
 pub fn parse_rows_bytes(m: &Model, rec: &str, bytes: &[u8]) -> Result<V, String> {
-    let enc = options(record(m, rec)?)?.encoding;
-    parse_rows(m, rec, &decode(bytes, enc)?)
+    let mut out = Vec::new();
+    for (_, row) in read_rows(m, rec, bytes)? {
+        out.push(row?);
+    }
+    Ok(V::List(Rc::new(out)))
 }
+
+/// Reads each row of the bytes of a file on its own: its line (its record, in EBCDIC), and
+/// the record or what is wrong with it; an error of the whole file (not in its encoding, a
+/// column missing from the header) is the outer one. What an inbound reports of a file.
+pub fn read_rows(m: &Model, rec: &str, bytes: &[u8]) -> Result<Rows, String> {
+    let e = record(m, rec)?;
+    let enc = options(e)?.encoding;
+    let fmt = format_of(m, rec)?;
+    if fmt == "fixed" && ebcdic::page(enc).is_some() {
+        return fixed::parse_each_bytes(m, rec, bytes);
+    }
+    let text = decode(bytes, enc)?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    match fmt {
+        "csv" => csv::parse_each(m, rec, text),
+        "fixed" => fixed::parse_each(m, rec, text),
+        _ => Err(format!("`{rec}` is one document: `{rec}.parse(text)`")),
+    }
+}
+
+/// Each row of a file on its own: its line (or record), and the record or what is wrong.
+pub type Rows = Vec<(usize, Result<V, String>)>;
 
 /// Writes rows as the bytes of the file, in the record's `encoding`.
 pub fn render_rows_bytes(m: &Model, rec: &str, rows: &[V]) -> Result<Vec<u8>, String> {
     let enc = options(record(m, rec)?)?.encoding;
+    if format_of(m, rec)? == "fixed" && ebcdic::page(enc).is_some() {
+        for (i, r) in rows.iter().enumerate() {
+            match r {
+                V::Rec { ent, .. } if &**ent == rec => {}
+                other => return Err(format!("row {}: {other} is not a `{rec}`", i + 1)),
+            }
+        }
+        return fixed::render_bytes(m, rec, rows);
+    }
     encode(&render_rows(m, rec, rows)?, enc)
 }
 
 /// The text of a file's bytes. UTF-8 must be valid (a byte that is not says its line);
-/// latin1 (ISO-8859-1) is one character per byte.
+/// latin1 (ISO-8859-1) and EBCDIC are one character per byte.
 pub fn decode(bytes: &[u8], enc: Encoding) -> Result<String, String> {
     match enc {
         Encoding::Utf8 => String::from_utf8(bytes.to_vec()).map_err(|e| {
@@ -164,10 +199,12 @@ pub fn decode(bytes: &[u8], enc: Encoding) -> Result<String, String> {
             format!("line {line}: not UTF-8 (a file in latin1 says `encoding=\"latin1\"`)")
         }),
         Encoding::Latin1 => Ok(bytes.iter().map(|b| *b as char).collect()),
+        Encoding::Ebcdic(page) => Ok(ebcdic::decode(page, bytes)),
     }
 }
 
-/// The bytes of a text in an encoding: latin1 refuses a character after U+00FF.
+/// The bytes of a text in an encoding: latin1 refuses a character after U+00FF, EBCDIC one
+/// its code page does not have.
 pub fn encode(text: &str, enc: Encoding) -> Result<Vec<u8>, String> {
     match enc {
         Encoding::Utf8 => Ok(text.as_bytes().to_vec()),
@@ -191,16 +228,23 @@ pub fn encode(text: &str, enc: Encoding) -> Result<Vec<u8>, String> {
             }
             Ok(out)
         }
+        Encoding::Ebcdic(page) => ebcdic::encode(page, text)
+            .map_err(|c| format!("`{c}` cannot be written in {}", enc.name())),
     }
 }
 
 /// A cell that the encoding of its file cannot hold.
 fn encodable(s: &str, enc: Encoding) -> Result<(), String> {
-    match (enc, s.chars().find(|c| u32::from(*c) > 0xFF)) {
-        (Encoding::Latin1, Some(c)) => {
-            Err(format!("`{c}` cannot be written in latin1 (ISO-8859-1)"))
-        }
-        _ => Ok(()),
+    match enc {
+        Encoding::Latin1 => match s.chars().find(|c| u32::from(*c) > 0xFF) {
+            Some(c) => Err(format!("`{c}` cannot be written in latin1 (ISO-8859-1)")),
+            None => Ok(()),
+        },
+        Encoding::Ebcdic(page) => match s.chars().find(|c| ebcdic::byte_of(page, *c).is_none()) {
+            Some(c) => Err(format!("`{c}` cannot be written in {}", enc.name())),
+            None => Ok(()),
+        },
+        Encoding::Utf8 => Ok(()),
     }
 }
 

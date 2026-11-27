@@ -12,6 +12,7 @@
 //! - Limits: request size, rows per query, operations per transaction, requests per second.
 
 mod engine;
+mod files;
 
 pub mod agents;
 pub mod deliver;

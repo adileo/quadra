@@ -340,12 +340,22 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
             return Err(format!("no inbound `{name}`"));
         };
         let v = self.interp.eval(body, ctx).map_err(|e| describe(&e))?;
-        let text = if file {
+        let bytes = if file {
             let path = self.project.root.join(v.to_string());
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?
+            std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?
         } else {
-            v.to_string()
+            v.to_string().into_bytes()
         };
+        // a file of rows: its rows, all in one transaction (`atomic per file`) or each in its
+        // own (`atomic per row`, the statement failing only when every row is refused)
+        if model
+            .entity(&i.ty)
+            .is_some_and(|e| matches!(e.format.as_deref(), Some("csv" | "fixed")))
+        {
+            return self.receive_rows(i, &bytes);
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| "rejected: the message is not text (UTF-8)".to_string())?;
         let doc = crate::formats::parse(model, &i.ty, &text)
             .map_err(|e| format!("rejected: the message is not a {}: {e}", i.ty))?;
         if let Some(k) = &i.key {
@@ -376,6 +386,63 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
             });
         self.interp.system -= 1;
         r.map_err(|e| format!("rejected: {}", describe(&e)))
+    }
+
+    /// `receive` of a file of rows (`from csv`, `from fixed`).
+    fn receive_rows(&mut self, i: &quadra_ir::Inbound, bytes: &[u8]) -> Result<(), String> {
+        let each = crate::formats::read_rows(self.model, &i.ty, bytes)
+            .map_err(|e| format!("rejected: the file is not a file of {}: {e}", i.ty))?;
+        let per_row = i.atomic == Some(quadra_ir::Atomic::Row);
+        let mut rows = Vec::new();
+        let mut refused = Vec::new();
+        for (n, r) in each {
+            match r {
+                Ok(v) => rows.push((n, v)),
+                Err(e) if per_row => refused.push(e),
+                Err(e) => return Err(format!("rejected: {e}")),
+            }
+        }
+        let n = self.received.len();
+        self.received.insert((i.name.clone(), format!("#file{n}")));
+        let groups: Vec<Vec<(usize, V)>> = if per_row {
+            rows.into_iter().map(|r| vec![r]).collect()
+        } else {
+            vec![rows]
+        };
+        let mut committed = 0;
+        self.interp.system += 1;
+        for (k, group) in groups.into_iter().enumerate() {
+            let line = std::cell::Cell::new(0);
+            let r =
+                self.interp
+                    .with_cause(format!("inbound:{}#test{n}/{k} handled", i.name), |it| {
+                        it.transaction(|it| {
+                            for (l, row) in &group {
+                                line.set(*l);
+                                let mut c = Ctx::default();
+                                c.bind(&i.binding, row.clone());
+                                match it.stmts(&i.body, &mut c) {
+                                    Ok(()) | Err(Flow::Return(_)) => {}
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            Ok(())
+                        })
+                    });
+            match r {
+                Ok(()) => committed += 1,
+                Err(e) if per_row => refused.push(format!("line {}: {}", line.get(), describe(&e))),
+                Err(e) => {
+                    self.interp.system -= 1;
+                    return Err(format!("rejected: line {}: {}", line.get(), describe(&e)));
+                }
+            }
+        }
+        self.interp.system -= 1;
+        if per_row && committed == 0 && !refused.is_empty() {
+            return Err(format!("rejected: every row was refused: {}", refused[0]));
+        }
+        Ok(())
     }
 
     /// `deliver OrderPlaced [reply …|failed "…"]`: what the other side would do with the events

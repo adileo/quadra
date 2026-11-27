@@ -3,6 +3,7 @@
 
 mod api;
 mod deliver;
+mod files;
 mod host;
 mod orchestration;
 mod signin;

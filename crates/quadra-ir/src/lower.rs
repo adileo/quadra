@@ -380,6 +380,13 @@ impl<'a> Lower<'a> {
                         _ => None,
                     }
                 });
+                let atomic = clause("atomic").map(|c| {
+                    if ctx_words(&c).get(2).map(String::as_str) == Some("row") {
+                        Atomic::Row
+                    } else {
+                        Atomic::File
+                    }
+                });
                 let body = ast::child(item, BLOCK)
                     .map(|b| self.stmts(&b))
                     .unwrap_or_default();
@@ -395,6 +402,7 @@ impl<'a> Lower<'a> {
                     backoff,
                     ordered,
                     latest,
+                    atomic,
                     body,
                     span,
                 });
@@ -892,6 +900,8 @@ impl<'a> Lower<'a> {
                     .find(|t| t.kind() == STRING)
                     .map(|t| unquote(t.text()))
             }
+            // a number of an EBCDIC file: packed (COMP-3) or zoned, kept as its `format`
+            (_, w @ ("packed" | "zoned")) => f.pattern = Some(w.to_string()),
             (_, "decimals") => {
                 // a number too large for one is refused as `u32::MAX` by the checker
                 f.decimals = tokens(m)

@@ -2108,6 +2108,9 @@ impl<'m> Checker<'m> {
                                 self.error(f.span, format!("{here}: columns {}..{} overlap those of `{other}` ({}..{})", r.0, r.1, o.0, o.1));
                             }
                             ranges.push((r, &f.name));
+                            if let Some(len) = opts.length.filter(|l| *l < r.1) {
+                                self.error(f.span, format!("{here}: columns {}..{} go past the end of the record (`length={len}`)", r.0, r.1));
+                            }
                             if item == Some(Kind::Decimal) && f.decimals.is_none() {
                                 self.error(f.span, format!("{here}: a number with decimals in a fixed-width line says how many of its digits are decimals: `decimals 2` (`0001250` is 12.50)"));
                             }
@@ -2115,7 +2118,20 @@ impl<'m> Checker<'m> {
                     },
                 },
             }
-            if let Some(p) = &f.pattern {
+            if let Some(p) = f
+                .pattern
+                .as_deref()
+                .filter(|p| matches!(*p, "packed" | "zoned"))
+            {
+                if fmt != "fixed" || !matches!(opts.encoding, formats::Encoding::Ebcdic(_)) {
+                    self.error(f.span, format!("{here}: `{p}` numbers are in fixed-width files in EBCDIC: `record {} from fixed(encoding=\"ibm-280\")`", e.name));
+                } else if !matches!(item, Some(Kind::Int | Kind::Decimal) | None) {
+                    self.error(
+                        f.span,
+                        format!("{here}: `{p}` is a way of writing an `Int` or a `Decimal`"),
+                    );
+                }
+            } else if let Some(p) = &f.pattern {
                 match &item {
                     Some(Kind::Date | Kind::DateTime) => {
                         let bad = chrono::format::StrftimeItems::new(p)
@@ -2338,6 +2354,9 @@ impl<'m> Checker<'m> {
             }
             // the record of a file of rows, of a row of a table, of a mail
             let format = m.entity(&i.ty).and_then(|e| e.format.clone());
+            if i.atomic.is_some() && !matches!(format.as_deref(), Some("csv" | "fixed")) {
+                self.error(i.span, format!("`atomic per …` says how the rows of a file are committed: `{}` is not a record `from csv` or `from fixed`", i.ty));
+            }
             match (pulls, format.as_deref()) {
                 ("table", Some(f)) if f != "json" => self.error(i.span, format!("`{}`: a row of a table is read as a record `from json`, its fields (or their `at`) the columns", i.ty)),
                 ("mailbox", Some(f)) if f != "json" => self.error(i.span, format!("`{}`: a mail is read as a record `from json` (`from`, `subject`, `text`, `attachments`…)", i.ty)),
@@ -3322,10 +3341,17 @@ impl<'m> Checker<'m> {
                     let ok = match ts[1].unopt() {
                         T::Ent(r) => self.m.entity(r).is_some_and(|e| e.format.is_some()),
                         T::Text(_) | T::Unknown => n == "write",
+                        // the rows of a file, written in the encoding of their record
+                        T::Coll {
+                            elem, set: false, ..
+                        } => {
+                            n == "write"
+                                && matches!(elem.unopt(), T::Ent(r) if self.m.entity(r).is_some_and(|e| matches!(e.format.as_deref(), Some("csv" | "fixed"))))
+                        }
                         _ => false,
                     };
                     if !ok {
-                        self.error(args[1].value.span, if n == "write" { "the content is text (`rows.csv()`) or a record with a format" } else { "the row is a record `from json` (its fields, or their `at`, are the columns)" });
+                        self.error(args[1].value.span, if n == "write" { "the content is text, a record with a format, or the rows of a file (a list of a record `from csv` or `from fixed`)" } else { "the row is a record `from json` (its fields, or their `at`, are the columns)" });
                     }
                 }
                 return T::Unknown;

@@ -877,8 +877,20 @@ pub struct Inbound {
     /// `latest by m.product using m.updated_at`: a message older (by `using`) than one of the
     /// same value already handled is `superseded`, not handled
     pub latest: Option<(Expr, Expr)>,
+    /// `atomic per file` (when not said) or `atomic per row`: how the rows of a file (a record
+    /// `from csv` or `from fixed`) are committed
+    pub atomic: Option<Atomic>,
     pub body: Vec<Stmt>,
     pub span: Span,
+}
+
+/// How the rows of a file an `inbound` reads are committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Atomic {
+    /// all of them in one transaction, or none: a row that fails rejects the file
+    File,
+    /// each row that works, by chunks; those that fail are reported
+    Row,
 }
 
 /// How an `inbound` fetches its messages from an API that does not send them.
