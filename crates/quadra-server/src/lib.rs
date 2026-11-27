@@ -1295,6 +1295,19 @@ impl Host {
         all.into_iter().collect()
     }
 
+    /// How the log of each running tenant stands (its sequencer: written, kept by the
+    /// destinations, whether they are down): for the host's monitoring and alarms.
+    pub fn log_health(&self) -> Vec<(String, quadra_store::sequencer::Health)> {
+        let running: Vec<Arc<Tenant>> = self.app.running.lock().unwrap().values().cloned().collect();
+        running
+            .into_iter()
+            .filter_map(|t| {
+                let s = t.sequencer.lock().unwrap().clone()?;
+                Some((t.id.clone(), s.health()?))
+            })
+            .collect()
+    }
+
     /// The number of users (`User` records) of the project of an address, if it is running:
     /// it never starts a tenant (a host measuring its tenants must not wake one that is going
     /// to sleep). `None`: not running.

@@ -662,6 +662,9 @@ fn a_destination_down_for_a_while_gets_every_batch_in_order() {
         assert!(commit(&format!("more {n}")).is_err());
     }
     assert!(commits() - before <= 3, "{} commits written while the destination was down", commits() - before);
+    // what the host's monitoring sees meanwhile
+    let h = s.health().unwrap();
+    assert!(h.destinations && h.down.is_some() && h.refused > 0 && h.kept < h.written, "{h:?}");
     down.store(false, std::sync::atomic::Ordering::SeqCst);
     // back: what was written goes out in order, and commits are confirmed again
     let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -669,6 +672,8 @@ fn a_destination_down_for_a_while_gets_every_batch_in_order() {
         assert!(std::time::Instant::now() < until, "commits are still refused once the destination is back");
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    let h = s.health().unwrap();
+    assert!(h.down.is_none() && h.kept == h.written, "{h:?}");
     s.stop();
     let target = std::env::temp_dir().join(format!("quadra-seq-{}-flaky-rebuilt.db", std::process::id()));
     quadra_store::segments::Folder::new(&dir).unwrap().restore(&target).unwrap();

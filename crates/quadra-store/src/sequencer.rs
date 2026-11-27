@@ -151,6 +151,21 @@ pub trait DurabilitySink: Send {
     }
 }
 
+/// How a tenant's log stands (`Sequencer::health`), for the host's monitoring.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Health {
+    /// the last transaction written to the database
+    pub written: u64,
+    /// the last transaction the destinations keep (`written` without destinations)
+    pub kept: u64,
+    /// why the destinations count as down, while they do
+    pub down: Option<String>,
+    /// transactions refused since the start because too many were not kept
+    pub refused: u64,
+    /// whether it has destinations at all
+    pub destinations: bool,
+}
+
 /// A change outside the hash chain, run by the sequencer (`Sequencer::side`).
 type SideFn = Box<dyn FnOnce(&mut Conn) -> Result<Box<dyn std::any::Any + Send>, String> + Send>;
 
@@ -273,6 +288,7 @@ enum Msg {
     Snapshot(Duration),
     Written(u64, Vec<u64>, mpsc::Sender<Option<bool>>),
     Side(SideFn, mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>, Responder),
+    Health(mpsc::Sender<Health>),
     Stop(mpsc::Sender<()>),
 }
 
@@ -379,6 +395,13 @@ impl Sequencer {
             Err(_) => return Err(gone()),
         }
         v.downcast::<T>().map(|v| *v).map_err(|_| "the sequencer answered with another type".into())
+    }
+
+    /// How its log stands: what is written, what is kept, whether the destinations are down.
+    pub fn health(&self) -> Option<Health> {
+        let (reply, rx) = mpsc::channel();
+        self.tx.send(Msg::Health(reply)).ok()?;
+        rx.recv().ok()
     }
 
     /// Gives up a reserved transaction (its writes could not be prepared).
@@ -646,6 +669,8 @@ struct State {
     snapshot_due: Option<Instant>,
     /// the size of the batches sent to the destinations since their last snapshot
     log_bytes: u64,
+    /// transactions refused because too many were not kept by the destinations
+    refused: u64,
     url: String,
 }
 
@@ -682,6 +707,7 @@ impl State {
             uploader: None,
             snapshot_due: None,
             log_bytes: 0,
+            refused: 0,
             url: url.to_string(),
         };
         s.reload()?;
@@ -876,6 +902,13 @@ impl State {
                 let known = base >= self.window.floor;
                 let _ = reply.send(known.then(|| records.iter().any(|id| self.window.fields.get(id).is_some_and(|t| *t > base))));
             }
+            Msg::Health(reply) => {
+                let (kept, down) = match &self.uploader {
+                    Some(u) => (u.acked.load(std::sync::atomic::Ordering::SeqCst), u.down.lock().unwrap().clone()),
+                    None => (self.durable, None),
+                };
+                let _ = reply.send(Health { written: self.durable, kept: kept.min(self.durable), down, refused: self.refused, destinations: self.uploader.is_some() });
+            }
             Msg::Side(f, value, kept) => {
                 // in the order of the log: the transactions ready before it are written first
                 self.flush();
@@ -901,6 +934,7 @@ impl State {
             // the destinations unreachable for long: no more commits only this machine holds
             let kept = u.acked.load(std::sync::atomic::Ordering::SeqCst);
             if self.durable.saturating_sub(kept) > self.options.max_behind {
+                self.refused += 1;
                 return Err(f(format!("{} commits are not yet kept elsewhere: try again later", self.durable - kept)));
             }
         }
@@ -1493,6 +1527,8 @@ struct Uploader {
     tx: mpsc::Sender<Upload>,
     handle: Option<std::thread::JoinHandle<()>>,
     acked: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// why the destinations count as down, while they do
+    down: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// set while it is told to stop: a batch it cannot keep is then given up
     stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -1504,6 +1540,8 @@ impl Uploader {
         let shared = acked.clone();
         let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = stopping.clone();
+        let down_shared = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let down_seen = down_shared.clone();
         let handle = std::thread::Builder::new()
             .name("quadra-uploader".into())
             .spawn(move || {
@@ -1582,6 +1620,7 @@ impl Uploader {
                         Ok(()) => {
                             attempt = 0;
                             if down.take().is_some() {
+                                *down_shared.lock().unwrap() = None;
                                 eprintln!("sequencer: the destinations are back");
                             }
                         }
@@ -1591,6 +1630,7 @@ impl Uploader {
                                 eprintln!("sequencer: the destinations are down ({e}): commits are kept here until they are back");
                                 fail_waiting(&mut queue, &e);
                                 down = Some(e.clone());
+                                *down_shared.lock().unwrap() = Some(e.clone());
                             }
                             if attempt >= 6 && stopping.load(std::sync::atomic::Ordering::SeqCst) {
                                 let last = queue.back().map_or(0, |u| u.last_tx);
@@ -1625,7 +1665,7 @@ impl Uploader {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Uploader { tx, handle: Some(handle), acked, stopping: stop })
+        Ok(Uploader { tx, handle: Some(handle), acked, down: down_seen, stopping: stop })
     }
 
     /// Keeps what it was given (a few tries for what does not go through), then stops.
