@@ -1008,6 +1008,50 @@ async fn record(
     }
 }
 
+/// `POST /v1/records/{E}/{id}/erase {"reason": "…"}`: a transaction with the `erase` operation
+/// (its `Idempotency-Key`, or one made from the record and the reason).
+async fn erase(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id)): Path<(String, u64)>,
+    Json(body): Json<J>,
+) -> Response {
+    let who = match authenticate(&app, &t, &method, &headers).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let reason = body["reason"].as_str().unwrap_or("").to_string();
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let h = quadra_store::auth::sha256_hex(&format!("{entity}#{id}|{reason}"));
+            format!("erase-{entity}-{id}-{}", &h[..16])
+        });
+    let body = serde_json::json!({
+        "ops": [{ "op": "erase", "entity": entity, "id": id, "reason": reason }],
+    });
+    call(&t, who, Req::Tx { body, key }).await
+}
+
+/// `GET /v1/records/{E}/{id}/export`: what the record holds about its person (art. 15 and 20),
+/// the export itself a commit of the chain.
+async fn export(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id)): Path<(String, u64)>,
+) -> Response {
+    match authenticate(&app, &t, &method, &headers).await {
+        Ok(who) => call(&t, who, Req::Export { entity, id }).await,
+        Err(r) => r,
+    }
+}
+
 async fn history(
     State(app): State<Shared>,
     Ten(t): Ten,
@@ -2971,6 +3015,8 @@ impl Host {
             .route("/v1/query", post(query))
             .route("/v1/records/{entity}/{id}", get(record))
             .route("/v1/records/{entity}/{id}/history", get(history))
+            .route("/v1/records/{entity}/{id}/erase", post(erase))
+            .route("/v1/records/{entity}/{id}/export", get(export))
             .route("/v1/records/{entity}/{id}/files/{field}", get(record_file))
             .route(
                 "/v1/records/{entity}/{id}/files/{field}/{n}",

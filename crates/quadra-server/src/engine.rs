@@ -321,6 +321,11 @@ pub enum Req {
         limit: Option<usize>,
         before: Option<u64>,
     },
+    /// what a record holds about its person, exported (a commit records who and when)
+    Export {
+        entity: String,
+        id: u64,
+    },
     /// the file a `File` field names (the `n`th of a list): a signed URL of it
     File {
         entity: String,
@@ -3326,6 +3331,7 @@ impl Engine {
             Req::Model => self.model(&who),
             Req::Query(q) => self.query(&who, &q),
             Req::Record { entity, id, base } => self.record(&who, &entity, id, base),
+            Req::Export { entity, id } => self.export(&who, &entity, id),
             Req::History {
                 entity,
                 id,
@@ -3899,10 +3905,53 @@ impl Engine {
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let mut i = self.interp(model, Some(who), base)?;
-        Ok(reply(
-            200,
-            quadra_api::record_json(&mut i, model, entity, id)?,
+        match quadra_api::record_json(&mut i, model, entity, id) {
+            Ok(j) => Ok(reply(200, j)),
+            Err((404, m)) => Err(self.erased(id).unwrap_or((404, m))),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A record taken away by its retention: `410` with when and why.
+    fn erased(&mut self, id: u64) -> Option<Fail> {
+        let r = self
+            .conn
+            .query(
+                "SELECT \"entity\", \"erased_at\", \"cause\" FROM \"_quadra_erased\" WHERE \"id\" = ?bigint",
+                &[quadra_store::conn::Sql::Int(id as i64)],
+            )
+            .ok()?;
+        let r = r.into_iter().next()?;
+        Some((
+            410,
+            format!(
+                "{}#{id} was erased on {}: {}",
+                r[0].clone().unwrap_or_default(),
+                r[1].clone().unwrap_or_default().replace('T', " "),
+                r[2].clone().unwrap_or_default()
+            ),
         ))
+    }
+
+    fn export(&mut self, who: &Principal, entity: &str, id: u64) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = self.interp(model, Some(who), None)?;
+        let out = match quadra_api::subject_json(&mut i, model, entity, id) {
+            Ok(j) => j,
+            Err((404, m)) => return Err(self.erased(id).unwrap_or((404, m))),
+            Err(e) => return Err(e),
+        };
+        // the export is in the chain: who exported whom, and when
+        let conn = Pooled::take(&self.pool, &self.url).map_err(|e| (500, e))?;
+        let db = Database::with(conn, self.schema.clone());
+        i.materialize = materialized_formulas(&db.schema);
+        i.sink = Some(self.sink_then(db, model));
+        i.with_cause(format!("export: {entity}#{id}"), |i| {
+            i.transaction(|_| Ok(()))
+        })
+        .map_err(|e| (500, describe(e)))?;
+        Ok(reply(200, out))
     }
 
     fn search(
@@ -4063,7 +4112,12 @@ impl Engine {
         let (resolved, uploads) = self.resolve_uploads(who, model, ops)?;
         let ops = &resolved;
         let base = body["base"].as_u64();
-        if base.is_none() && ops.iter().any(|o| o["op"] != json!("create")) {
+        // (an erasure decides nothing on values read: it needs no base)
+        if base.is_none()
+            && ops
+                .iter()
+                .any(|o| o["op"] != json!("create") && o["op"] != json!("erase"))
+        {
             return Err((400, "`base` is required to change existing records: the commit is refused if they changed since".into()));
         }
         // The client's base guards what the client decided on: the records it changes. If others

@@ -2083,7 +2083,10 @@ impl Database {
                 all
             };
             for r in rows {
-                let digest = value_digest(r[2].as_deref().unwrap_or(""), r[1].as_deref().unwrap_or("null"));
+                let digest = value_digest(
+                    r[2].as_deref().unwrap_or(""),
+                    r[1].as_deref().unwrap_or("null"),
+                );
                 self.wexec(
                     "UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint".into(),
                     vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],

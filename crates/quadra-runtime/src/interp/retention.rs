@@ -17,8 +17,17 @@ use std::rc::Rc;
 /// What has come due at a moment: a field to empty, or a whole record to take away.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Due {
-    Field { ent: String, id: Id, field: String, term: String },
-    Record { ent: String, id: Id, term: String },
+    Field {
+        ent: String,
+        id: Id,
+        field: String,
+        term: String,
+    },
+    Record {
+        ent: String,
+        id: Id,
+        term: String,
+    },
 }
 
 impl<'m> Interp<'m> {
@@ -107,15 +116,30 @@ impl<'m> Interp<'m> {
                     id: r,
                 };
                 if let Some(at) = self.term_end(&rv, &t)? {
-                    keep(at, format!("{}#{r} refers to it and is kept {}", of.name, t.text()));
+                    keep(
+                        at,
+                        format!("{}#{r} refers to it and is kept {}", of.name, t.text()),
+                    );
                 }
             }
         }
         Ok(latest)
     }
 
+    /// The records that refer to a record, and through which field: (entity, id, field). Its
+    /// lines are among them (their `parent` field).
+    pub fn referring(&mut self, ent: &str, id: Id) -> Vec<(String, Id, String)> {
+        let mut out = Vec::new();
+        for (of, field) in self.references_to(ent) {
+            for r in self.referrers(of, field, id, ent) {
+                out.push((of.name.clone(), r, field.name.clone()));
+            }
+        }
+        out
+    }
+
     /// The lines of a record (records whose `parent` field holds it), and theirs.
-    fn lines_of(&mut self, ent: &str, id: Id) -> Vec<(String, Id)> {
+    pub fn lines_of(&mut self, ent: &str, id: Id) -> Vec<(String, Id)> {
         let m = self.m;
         let mut out = Vec::new();
         for e in &m.entities {
@@ -203,7 +227,11 @@ impl<'m> Interp<'m> {
                 id: tid,
             };
             let mut fields = Vec::new();
-            for f in e.fields.iter().filter(|f| f.personal && f.formula.is_none()) {
+            for f in e
+                .fields
+                .iter()
+                .filter(|f| f.personal && f.formula.is_none())
+            {
                 // a field's own retention keeps it until then
                 if let Some(t) = &f.retention.retain {
                     if self.term_end(&trec, t)?.is_some_and(|at| at > now) {

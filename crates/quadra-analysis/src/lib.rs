@@ -461,6 +461,12 @@ pub fn reactions(model: &Model, report: &Report) -> Vec<Diagnostic> {
 /// periodic sweep, and a server that keeps it asleep must wake it for that (a project that
 /// does not read the clock changes only when someone writes).
 pub fn reads_clock(model: &Model) -> bool {
+    // a retention that ends (`expire`) is a change with time alone
+    if model.entities.iter().any(|e| {
+        e.retention.expire.is_some() || e.fields.iter().any(|f| f.retention.expire.is_some())
+    }) {
+        return true;
+    }
     let formulas = model.entities.iter().flat_map(|e| {
         model
             .all_fields(e)

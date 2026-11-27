@@ -1836,10 +1836,101 @@ pub fn apply_ops(
                 }
                 i.run_action(&rec, ent, name, action, Vec::new(), named)?;
             }
-            _ => return Err(fail("`op` must be create, update or action".into())),
+            Some("erase") => {
+                let id = op["id"]
+                    .as_u64()
+                    .ok_or_else(|| fail("`id` is required".into()))?;
+                let reason = op["reason"].as_str().unwrap_or("");
+                let of_it =
+                    i.store.exists(id, None) && i.store.get(id).is_some_and(|r| &*r.ent == ent);
+                if !of_it {
+                    return Err(fail(format!("{ent}#{id} does not exist")));
+                }
+                let rec = V::Ref {
+                    ent: Rc::from(ent),
+                    id,
+                };
+                i.erase(&rec, reason)?;
+            }
+            _ => return Err(fail("`op` must be create, update, action or erase".into())),
         }
     }
     Ok(created.into_inner())
+}
+
+/// What a record holds about the person it is (GDPR art. 15 and 20): the record and its lines
+/// as the API shows them, the past values of its `personal` fields with when and why they
+/// were written, and the records that refer to it. Readable by whoever may read the record and
+/// its history.
+pub fn subject_json(i: &mut Interp, model: &Model, entity: &str, id: u64) -> Result<J, Fail> {
+    let record = record_json(i, model, entity, id)?;
+    let actual = i
+        .store
+        .get(id)
+        .map(|r| r.ent.to_string())
+        .unwrap_or_default();
+    if !i.can_read_history(&actual) {
+        return Err((
+            403,
+            format!("permission denied: cannot read the history of {actual}#{id}"),
+        ));
+    }
+    let mut lines = Vec::new();
+    for (le, lid) in i.lines_of(&actual, id) {
+        if let Ok(l) = record_json(i, model, &le, lid) {
+            lines.push(l);
+        }
+    }
+    let e = model
+        .entity(&actual)
+        .ok_or((404, "not found".to_string()))?;
+    let personal: Vec<String> = e
+        .fields
+        .iter()
+        .filter(|f| f.personal)
+        .map(|f| f.name.clone())
+        .collect();
+    i.store.history_from(id, 0);
+    let entries: Vec<(u64, String, V)> = i
+        .store
+        .get(id)
+        .map(|r| {
+            r.history
+                .iter()
+                .filter(|(_, f, _)| personal.contains(f))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut history = Vec::new();
+    for (tx, f, v) in entries {
+        let (at, by) = i.store.commit_info(tx).unwrap_or_default();
+        let by = by.map(|u| {
+            i.display(&V::Ref {
+                ent: Rc::from("User"),
+                id: u,
+            })
+        });
+        history.push(json!({
+            "tx": tx,
+            "at": at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "by": by,
+            "field": f,
+            "value": json::wire(&v),
+        }));
+    }
+    let referred_by: Vec<J> = i
+        .referring(&actual, id)
+        .into_iter()
+        .map(|(e, r, f)| json!({ "entity": e, "id": r, "field": f }))
+        .collect();
+    Ok(json!({
+        "subject": { "entity": actual, "id": id },
+        "record": record,
+        "lines": lines,
+        "personal_history": history,
+        "referred_by": referred_by,
+    }))
 }
 
 /// Whether a collection field is computed from the other side (`schema::is_inverse`).

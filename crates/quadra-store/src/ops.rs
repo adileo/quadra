@@ -821,6 +821,54 @@ pub fn provisional(
     Ok(interp.provisional_values())
 }
 
+/// An engine over the database at `url`, committing to it directly (no sequencer: run with the
+/// project stopped, as `quadra change apply` is), its clock at `time`.
+pub fn engine<'m>(
+    url: &str,
+    model: &'m Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<Interp<'m>, String> {
+    let db = Database::open(url, model, report)?;
+    let src = crate::source::DbSource::open(url, db.schema.clone(), None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(Box::new(Sink { db, model }));
+    Ok(interp)
+}
+
+/// `quadra erase Customer 12 --reason …`: the record's `personal` fields and its lines'
+/// emptied, their past values out of the history, as the operator `who`. Returns the fields
+/// erased.
+#[allow(clippy::too_many_arguments)]
+pub fn erase(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    entity: &str,
+    id: u64,
+    reason: &str,
+    time: NaiveDateTime,
+    who: &str,
+) -> Result<Vec<String>, String> {
+    let mut i = engine(url, model, report, time)?;
+    if !i.store.exists(id, None) || i.store.get(id).is_some_and(|r| &*r.ent != entity) {
+        return Err(format!("{entity}#{id} does not exist"));
+    }
+    let rec = quadra_runtime::V::Ref {
+        ent: std::rc::Rc::from(entity),
+        id,
+    };
+    i.system += 1;
+    i.with_cause(format!("quadra erase by {who}"), |i| {
+        i.transaction(|i| i.erase(&rec, reason))
+    })
+    .map_err(|e| flow("erase", e))
+}
+
 /// Re-evaluate the rules that read the clock (`today()`, `now()`) on every record: automatic
 /// transitions, `becomes` reactions, postings. Loading on demand evaluates rules only where
 /// data changed, so time-driven ones need this periodic pass. Returns the transaction
@@ -873,11 +921,16 @@ pub fn sweep_with(
             i.transaction(|_| Ok(()))
         })
         .map_err(|e| flow("sweep", e))?;
-    let written = if interp.store.tx > before && !interp.store.dirty.is_empty() {
+    let mut written = if interp.store.tx > before && !interp.store.dirty.is_empty() {
         Some(interp.store.tx)
     } else {
         None
     };
+    // the retentions that ended: values emptied, records taken away, a transaction each
+    let expired = interp.expire_due().map_err(|e| flow("expire", e))?;
+    if !expired.is_empty() {
+        written = Some(interp.store.tx);
+    }
     drop(interp);
     // through the sequencer when there is one: a database rebuilt from the log knows the last
     // sweep too (else a `becomes` already fired could fire again)

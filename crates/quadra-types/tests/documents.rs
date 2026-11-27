@@ -43,17 +43,30 @@ fn errors(qdp: &str, more_qd: &str) -> Vec<String> {
         .collect();
     let model = quadra_ir::lower(&project, &analysis);
     out.extend(model.errors.iter().map(|(_, m)| m.clone()));
-    out.extend(quadra_types::check_model(&model).into_iter().filter(|d| d.severity == Severity::Error).map(|d| d.message));
+    out.extend(
+        quadra_types::check_model(&model)
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.message),
+    );
     out
 }
 
 fn doc(body: &str) -> String {
-    format!("from model import Invoice\n\ndocument D(inv: Invoice):\n{}", body.lines().map(|l| format!("    {l}\n")).collect::<String>())
+    format!(
+        "from model import Invoice\n\ndocument D(inv: Invoice):\n{}",
+        body.lines()
+            .map(|l| format!("    {l}\n"))
+            .collect::<String>()
+    )
 }
 
 fn assert_error(qdp: &str, expected: &str) {
     let e = errors(qdp, "");
-    assert!(e.iter().any(|m| m.contains(expected)), "{qdp}\nexpected {expected:?}, got {e:#?}");
+    assert!(
+        e.iter().any(|m| m.contains(expected)),
+        "{qdp}\nexpected {expected:?}, got {e:#?}"
+    );
 }
 
 #[test]
@@ -69,42 +82,86 @@ fn fields_are_checked_with_the_model() {
 
 #[test]
 fn elements_and_options_are_checked() {
-    assert_error(&doc("paragraph \"x\""), "a document has no element `paragraph`");
+    assert_error(
+        &doc("paragraph \"x\""),
+        "a document has no element `paragraph`",
+    );
     assert_error(&doc("text \"x\" level 2"), "`text` has no option `level`");
-    assert_error(&doc("text \"x\" align middle"), "`align` is left, center, right");
-    assert_error(&doc("table inv.lines:\n    column \"What\": l.what"), "a table names its rows");
+    assert_error(
+        &doc("text \"x\" align middle"),
+        "`align` is left, center, right",
+    );
+    assert_error(
+        &doc("table inv.lines:\n    column \"What\": l.what"),
+        "a table names its rows",
+    );
     assert_error(&doc("barcode \"x\""), "a barcode says its kind");
     assert_error(&doc("page B9"), "the size of the page");
-    assert_error(&doc("image \"/etc/passwd.png\""), "the path of an image is in the project");
-    assert_error(&doc("table inv.lines as l:\n    text \"no\""), "a table holds its columns");
+    assert_error(
+        &doc("image \"/etc/passwd.png\""),
+        "the path of an image is in the project",
+    );
+    assert_error(
+        &doc("table inv.lines as l:\n    text \"no\""),
+        "a table holds its columns",
+    );
 }
 
 #[test]
 fn a_label_has_a_size_and_places() {
     let qdp = "from model import Invoice\n\nlabel L(inv: Invoice) width 100 height 150 dpi 203:\n    text inv.customer.name x 5 y 5 size 12\n    box x 2 y 2 width 96 height 146\n";
     assert!(errors(qdp, "").is_empty(), "{:#?}", errors(qdp, ""));
-    assert_error("from model import Invoice\n\nlabel L(inv: Invoice):\n    text \"x\" x 1 y 1\n", "a label says its size");
+    assert_error(
+        "from model import Invoice\n\nlabel L(inv: Invoice):\n    text \"x\" x 1 y 1\n",
+        "a label says its size",
+    );
     assert_error("from model import Invoice\n\nlabel L(inv: Invoice) width 100 height 50 dpi 150:\n    text \"x\" x 1 y 1\n", "`dpi` is the printer's resolution");
-    assert_error("from model import Invoice\n\nlabel L(inv: Invoice) width 100 height 50:\n    text \"x\"\n", "an element of a label has its place");
+    assert_error(
+        "from model import Invoice\n\nlabel L(inv: Invoice) width 100 height 50:\n    text \"x\"\n",
+        "an element of a label has its place",
+    );
 }
 
 #[test]
 fn render_runs_after_the_commit() {
     let e = errors(&doc("text inv.total"), "from documents.doc import D\n\nextend Invoice:\n    action print_now:\n        let p = render(D(self))\n");
-    assert!(e.iter().any(|m| m.contains("it runs after the commit")), "{e:#?}");
+    assert!(
+        e.iter().any(|m| m.contains("it runs after the commit")),
+        "{e:#?}"
+    );
 }
 
 #[test]
 fn attach_needs_a_file_field_and_the_entity() {
     let base = doc("text inv.total");
-    assert!(errors(&format!("{base}\nattach D to Invoice.pdf when state is Posted\n"), "").is_empty());
-    assert_error(&format!("{base}\nattach D to Invoice.number when state is Posted\n"), "keeps the document: it is a `File?`");
-    assert_error(&format!("{base}\nattach D to Invoice.nope\n"), "`Invoice` has no field `nope`");
-    assert_error(&format!("{base}\nattach D to Invoice.pdf signed \"company\"\n"), "no signer `company`");
+    assert!(errors(
+        &format!("{base}\nattach D to Invoice.pdf when state is Posted\n"),
+        ""
+    )
+    .is_empty());
+    assert_error(
+        &format!("{base}\nattach D to Invoice.number when state is Posted\n"),
+        "keeps the document: it is a `File?`",
+    );
+    assert_error(
+        &format!("{base}\nattach D to Invoice.nope\n"),
+        "`Invoice` has no field `nope`",
+    );
+    assert_error(
+        &format!("{base}\nattach D to Invoice.pdf signed \"company\"\n"),
+        "no signer `company`",
+    );
 }
 
 #[test]
 fn documents_live_in_qdp_files() {
-    let e = errors("from model import Invoice\n\nentity Nope:\n    x: Int\n", "");
-    assert!(e.iter().any(|m| m.contains("a `.qdp` file holds documents and labels")), "{e:#?}");
+    let e = errors(
+        "from model import Invoice\n\nentity Nope:\n    x: Int\n",
+        "",
+    );
+    assert!(
+        e.iter()
+            .any(|m| m.contains("a `.qdp` file holds documents and labels")),
+        "{e:#?}"
+    );
 }

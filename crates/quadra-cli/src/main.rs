@@ -71,6 +71,8 @@ fn main() -> ExitCode {
         Some("token") => token(&args[1..]),
         Some("outbox") => outbox(&args[1..]),
         Some("inbox") => inbox(&args[1..]),
+        Some("erase") => erase(&args[1..]),
+        Some("subject") => subject(&args[1..]),
         Some("bench") => bench::bench(&args[1..]),
         Some("cloud") => cloud::main(&args[1..]),
         Some("upgrade") => upgrade::main(&args[1..]),
@@ -121,6 +123,12 @@ fn usage() -> ExitCode {
          quadra db import <dir> [path] [--url URL] [--commit-size 250000]   bulk load of <Entity>.csv files\n  \
          quadra db views export <file> | import <file> [path] [--url URL]   saved views, apps, folders and teams as JSON\n  \
          quadra change list | preview <name> | apply <name> [--approved-by login] | revert <name> [--approved-by login]   [path] [--url URL]\n  \
+         quadra erase <Entity> <id> --reason R [path] [--url URL]   empty a record's personal fields (GDPR art. 17)
+  \
+         quadra subject export <Entity> <id> [path] [--url URL]   what a record holds about its person, as JSON (art. 15, 20)
+  \
+         quadra db key [init|rotate] [path]   the key that signs the commits
+  \
          quadra serve [path] [--url URL] [--port 8080] [--web dir] [--dev-login] [--secure-cookies] [--cache-mb 256] [--prewarm-days N] [--sweep-every secs] [--editors login,…] [--job-timeout 120] [--max-rows N] [--max-list N] [--max-queue 1000] [--readers 2] [--writers 1]\n  \
          quadra token create <login> [--name n] [--read-only] [--days 90] | revoke <name>   [path] [--url URL]\n  \
          quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R   [path] [--url URL]   events emitted by `emit`\n  \
@@ -585,6 +593,84 @@ fn db_key(
             Ok(())
         }
     }
+}
+
+/// `Entity id [path]` at the start of the arguments, and the rest.
+fn record_args(args: &[String]) -> Result<(String, u64, Vec<String>), ExitCode> {
+    let (ent, rest) = take_positional(args, VALUE_FLAGS);
+    let (id, rest) = take_positional(&rest, VALUE_FLAGS);
+    match (ent, id.and_then(|i| i.trim_start_matches('#').parse().ok())) {
+        (Some(e), Some(i)) => Ok((e, i, rest)),
+        _ => Err(usage()),
+    }
+}
+
+fn erase(args: &[String]) -> ExitCode {
+    let (ent, id, rest) = match record_args(args) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    let (_root, checked, url) = match open_project(&rest) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    let model = checked.model.as_ref().unwrap();
+    finish((|| {
+        let reason = flag(&rest, "--reason")
+            .filter(|r| !r.trim().is_empty())
+            .ok_or(
+            "`erase` needs its reason: --reason \"the customer asked\" (it is kept in the history)",
+        )?;
+        let _writer = quadra_store::writer::acquire(&url)?;
+        let fields = quadra_store::ops::erase(
+            &url,
+            model,
+            &checked.report,
+            &ent,
+            id,
+            &reason,
+            now(),
+            &who(),
+        )?;
+        if fields.is_empty() {
+            println!("✓ {ent}#{id}: nothing to erase (its personal fields are empty)");
+        } else {
+            println!("✓ {ent}#{id} erased: {}", fields.join(", "));
+            println!(
+                "  their past values are out of the history; their digests keep the chain valid"
+            );
+        }
+        Ok(())
+    })())
+}
+
+fn subject(args: &[String]) -> ExitCode {
+    if args.first().map(String::as_str) != Some("export") {
+        return usage();
+    }
+    let (ent, id, rest) = match record_args(&args[1..]) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    let (_root, checked, url) = match open_project(&rest) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    let model = checked.model.as_ref().unwrap();
+    finish((|| {
+        let _writer = quadra_store::writer::acquire(&url)?;
+        let mut i = quadra_store::ops::engine(&url, model, &checked.report, now())?;
+        i.system += 1;
+        let out = quadra_api::subject_json(&mut i, model, &ent, id).map_err(|(_, m)| m)?;
+        // the export is in the chain: who exported whom, and when
+        i.with_cause(
+            format!("export: {ent}#{id} (quadra subject export by {})", who()),
+            |i| i.transaction(|_| Ok(())),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        Ok(())
+    })())
 }
 
 fn db(args: &[String]) -> ExitCode {

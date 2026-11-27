@@ -994,7 +994,10 @@ impl<'a> Lower<'a> {
 
     /// `expire 6 months after last_contact`, `retain 10 years after date[, then expire]`.
     fn retention(&mut self, m: &SyntaxNode, r: &mut Retention) {
-        let kw = tokens(m).next().map(|t| t.text().to_string()).unwrap_or_default();
+        let kw = tokens(m)
+            .next()
+            .map(|t| t.text().to_string())
+            .unwrap_or_default();
         let after = ast::child(m, PATH).map(|p| ast::path_text(&p));
         let t = self.term(m, after);
         let then_expire = tokens(m).any(|t| t.text() == "then");

@@ -18,7 +18,10 @@ fn is_time(t: &Ty) -> bool {
     match t {
         Ty::Optional(i) => is_time(i),
         Ty::Path { segments, .. } => {
-            matches!(segments.last().map(String::as_str), Some("Date" | "DateTime"))
+            matches!(
+                segments.last().map(String::as_str),
+                Some("Date" | "DateTime")
+            )
         }
         _ => false,
     }
@@ -62,7 +65,10 @@ impl<'m> Checker<'m> {
                 }
             }
             for f in &e.fields {
-                for t in [&f.retention.retain, &f.retention.expire].into_iter().flatten() {
+                for t in [&f.retention.retain, &f.retention.expire]
+                    .into_iter()
+                    .flatten()
+                {
                     self.check_term(e, t);
                 }
                 self.check_pair(&f.retention, &format!("{}.{}", e.name, f.name));
@@ -276,7 +282,9 @@ impl<'m> Checker<'m> {
             })
         });
         let personal = e.fields.iter().any(|f| f.personal)
-            || lines.into_iter().any(|l| l.fields.iter().any(|f| f.personal));
+            || lines
+                .into_iter()
+                .any(|l| l.fields.iter().any(|f| f.personal));
         if !personal {
             self.error(
                 target.span,
