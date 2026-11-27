@@ -295,7 +295,9 @@ impl Job<'_> {
         let mut s = match login {
             Ok(s) => s,
             Err((async_imap::error::Error::No(why), _))
-            | Err((async_imap::error::Error::Bad(why), _)) => return Err(Refused::Login(why)),
+            | Err((async_imap::error::Error::Bad(why), _)) => {
+                return Err(Refused::Login(said(&why)))
+            }
             Err((e, _)) => return Err(again(host, e).into()),
         };
         let r = self.work(&mut s).await;
@@ -313,8 +315,9 @@ impl Job<'_> {
         let (can_move, uidplus) = (caps.has_str("MOVE"), caps.has_str("UIDPLUS"));
         let mb = s.select(self.mailbox).await.map_err(|e| match e {
             async_imap::error::Error::No(why) => Failed::Never(format!(
-                "{host}: the mailbox `{}` cannot be opened: {why}",
-                self.mailbox
+                "{host}: the mailbox `{}` cannot be opened: {}",
+                self.mailbox,
+                said(&why)
             )),
             e => again(host, e),
         })?;
@@ -482,6 +485,14 @@ where
     let st = s.uid_store(set, what).await.map_err(|e| again(host, e))?;
     let _: Vec<_> = st.try_collect().await.map_err(|e| again(host, e))?;
     Ok(())
+}
+
+/// What the server said with a `NO` or a `BAD` (the client writes `code: …, info: Some("…")`).
+fn said(why: &str) -> String {
+    why.split_once("info: Some(\"")
+        .and_then(|(_, rest)| rest.rsplit_once("\")"))
+        .map(|(text, _)| text.replace("\\\"", "\""))
+        .unwrap_or_else(|| why.to_string())
 }
 
 /// The cursor written by a pull: (UIDVALIDITY, the last UID taken).
@@ -932,5 +943,12 @@ mod tests {
         assert_eq!(cursor("1700000000:0000000042"), Some((1700000000, 42)));
         assert_eq!(uid_set([1, 5, 9].into_iter()), "1,5,9");
         assert_eq!(quoted("<a\"b@x>"), "\"<a\\\"b@x>\"");
+        assert_eq!(
+            said(
+                "code: None, info: Some(\"[AUTHENTICATIONFAILED] Invalid credentials (Failure)\")"
+            ),
+            "[AUTHENTICATIONFAILED] Invalid credentials (Failure)"
+        );
+        assert_eq!(said("refused"), "refused");
     }
 }

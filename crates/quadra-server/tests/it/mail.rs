@@ -1304,3 +1304,29 @@ fn a_mailbox_of_gmail_or_microsoft_365_is_read_with_xoauth2_after_the_consent() 
     });
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// TLS with the system's authorities, against a real server: a login refused there means the
+/// handshake and the certificate were fine. Needs the network: `--ignored`.
+#[test]
+#[ignore]
+fn a_real_mail_server_is_reached_over_tls() {
+    let m = quadra_sema::manifest::parse("[vars]\nP = { secret = true }\n\n[connections.g]\nkind = \"imap\"\nurl = \"imaps://imap.gmail.com\"\nuser = \"quadra-tls-check@example.com\"\npassword = { var = \"P\" }\n").unwrap();
+    let job = Job::Fetch {
+        conn: Conn::of(&m, "g").unwrap(),
+        ask: Ask::Mail {
+            mailbox: "INBOX".into(),
+            settle: vec![],
+            limit: 1,
+            after: None,
+        },
+    };
+    let env = BTreeMap::from([("P".to_string(), "wrong".to_string())]);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let Outcome::Failed(e) = rt.block_on(transport::run(&job, &env, true)) else {
+        panic!()
+    };
+    assert!(e.text().contains("refused the login"), "{e:?}");
+}
