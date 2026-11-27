@@ -6,6 +6,7 @@ use quadra_sema::{Diagnostic, Severity};
 use std::collections::{HashMap, HashSet};
 
 mod documents;
+mod retention;
 
 pub fn check_model(model: &Model) -> Vec<Diagnostic> {
     analyze_model(model).diagnostics
@@ -111,6 +112,8 @@ struct Checker<'m> {
     accesses: Vec<(Span, Node)>,
     /// `rows.csv()`, `rows.fixed()` → the record of the rows (`Report::row_records`)
     row_records: HashMap<Span, String>,
+    /// checking the posting of an entity to this ledger (`post to`)
+    in_post: Option<String>,
 }
 
 /// The statements that write (an assignment, an `emit`), in a block and the blocks in it.
@@ -172,6 +175,7 @@ impl<'m> Checker<'m> {
             sum_types: HashMap::new(),
             accesses: Vec::new(),
             row_records: HashMap::new(),
+            in_post: None,
         };
         c.collect_units();
         c
@@ -307,6 +311,7 @@ impl<'m> Checker<'m> {
         self.context = String::new();
         self.check_documents();
         self.context = String::new();
+        self.check_retention();
         for r in &m.reactions {
             self.entity = None;
             self.context = match &r.trigger {
@@ -642,7 +647,9 @@ impl<'m> Checker<'m> {
             }
             self.push();
             self.bind("__ledger", T::Ent(p.ledger.clone()));
+            self.in_post = Some(p.ledger.clone());
             self.stmts(&p.body);
+            self.in_post = None;
             self.pop();
         }
         self.entity = None;
@@ -1041,6 +1048,7 @@ impl<'m> Checker<'m> {
                     self.in_fstring -= 1;
                 }
             }
+            StmtKind::Erase { target, reason } => self.check_erase(target, reason, s.span),
             StmtKind::Fail(e) | StmtKind::Expect(e) | StmtKind::Clock(e) | StmtKind::Expr(e) => {
                 self.infer(e);
             }
@@ -2809,6 +2817,7 @@ impl<'m> Checker<'m> {
             }
         }
         self.record_access(&inner, name, span);
+        self.retention_access(&inner, name, span);
         let t = self.member(&inner, bpath, name, span);
         if optional && !matches!(t, T::Opt(_)) && was_opt {
             T::opt(t)

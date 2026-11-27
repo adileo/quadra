@@ -252,6 +252,20 @@ impl ReadSet {
     }
 }
 
+/// A record's values erased in the current transaction (`erase`, a retention that ended): the
+/// commit takes their past values out of the history, keeping their digests. `whole`: the
+/// record itself is gone (its entity's `expire`), with all its fields.
+#[derive(Clone, Debug)]
+pub struct Erasure {
+    pub id: Id,
+    pub ent: Rc<str>,
+    pub fields: Vec<String>,
+    pub whole: bool,
+    /// why: `erase`'s reason, or the retention that ended
+    pub reason: String,
+    pub by: Option<Id>,
+}
+
 #[derive(Clone, Default)]
 pub struct Store {
     /// (a hash map: a record is looked up on every read of one of its fields; code that goes
@@ -278,6 +292,8 @@ pub struct Store {
     /// Ledger rows posted by records in the current transaction (not the automatic
     /// reversals): the ledger's plain `check`s hold on each of them.
     pub posted: Vec<Id>,
+    /// Values and records erased in the current transaction (crate::interp::retention)
+    pub erasures: Vec<Erasure>,
     /// The rows each (record, post) posted in the current transaction.
     pub posted_rows: HashMap<(Id, String), Vec<Id>>,
     /// `becomes` reactions already fired in this transaction, and the last known value
@@ -913,6 +929,18 @@ impl Store {
                 self.note_written(&ent, id, key, old.as_ref(), Some(&v));
             }
         }
+    }
+
+    /// A record taken away (its entity's `expire` came): gone from the working set, and never
+    /// loaded from the source again.
+    pub fn remove_record(&mut self, id: Id) {
+        if let Some(r) = self.records.remove(&id) {
+            if let Some(ids) = self.by_entity.get_mut(&*r.ent) {
+                ids.remove(&id);
+            }
+        }
+        self.dirty.remove(&id);
+        self.absent.insert(id);
     }
 
     pub fn exists(&mut self, id: Id, as_of: Option<u64>) -> bool {

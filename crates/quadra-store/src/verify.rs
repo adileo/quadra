@@ -173,6 +173,14 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
             .or_default()
             .push(json!(["a", k]).to_string());
     }
+    // erasures: a few rows per erasure, after the ledger rows of their commit
+    let mut erasures: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for r in conn.query("SELECT CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"entity\", \"fields\", CAST(\"whole\" AS TEXT), \"reason\" FROM \"_quadra_erasures\" ORDER BY \"_quadra_erasures\".\"tx\", \"_quadra_erasures\".\"n\"", &[])? {
+        let whole = matches!(r[4].as_deref(), Some("1" | "true" | "t"));
+        erasures.entry(num(&r[0])).or_default().push(
+            crate::db::erasure_entry(num(&r[1]) as u64, r[2].as_deref().unwrap_or(""), r[3].as_deref().unwrap_or(""), whole, r[5].as_deref().unwrap_or("")).to_string(),
+        );
+    }
     let mut renames: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     for r in conn.query("SELECT CAST(\"tx\" AS TEXT), \"entity\", \"old_name\", \"new_name\" FROM \"_quadra_renames\" ORDER BY \"_quadra_renames\".\"seq\"", &[])? {
         renames.entry(num(&r[0])).or_default().push(json!(["n", r[1], r[2], r[3]]).to_string());
@@ -207,6 +215,9 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
             );
             hist.feed(conn, tx, &mut h, &mut orphans)?;
             ledger.feed(conn, tx, &mut h, &mut orphans)?;
+            for e in erasures.remove(&tx).unwrap_or_default() {
+                h.entry(&e);
+            }
             // (those of earlier transactions have no commit)
             let earlier: Vec<i64> = applied
                 .range(..tx)

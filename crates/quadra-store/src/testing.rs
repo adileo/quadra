@@ -191,7 +191,7 @@ pub fn compare_working_set(ws: &Store, db: &Store) -> Vec<String> {
             continue;
         };
         if r.fields != s.fields {
-            out.push(format!("{}#{id}: fields differ", r.ent));
+            out.push(format!("{}#{id}: fields differ: {:?} vs {:?}", r.ent, r.fields, s.fields));
         }
         // a record read from its projection row has only its values since its last write
         if r.partial.is_none() && r.history.len() != s.history.len() {

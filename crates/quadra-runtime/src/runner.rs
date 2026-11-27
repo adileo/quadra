@@ -251,7 +251,13 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
                 interp.system -= 1;
                 interp.sweep = false;
                 interp.last_sweep = Some(interp.clock);
-                r.map_err(|e| format!("{at}: {}", describe(&e)))
+                r.map_err(|e| format!("{at}: {}", describe(&e)))?;
+                // and the retentions that ended: values emptied, records taken away, each in a
+                // transaction of its own (as the server's sweep does)
+                self.interp
+                    .expire_due()
+                    .map(|_| ())
+                    .map_err(|e| format!("{at}: {}", describe(&e)))
             }
             StmtKind::Expect(e) => self.expect(e, ctx),
             StmtKind::Receive {

@@ -707,6 +707,8 @@ impl<'a> Lower<'a> {
             live_decls: Vec::new(),
             flows: Vec::new(),
             posts: Vec::new(),
+            retention: Retention::default(),
+            history: None,
             span,
         }
     }
@@ -831,6 +833,14 @@ impl<'a> Lower<'a> {
                     let when = exprs(&m).first().map(|x| self.expr(x));
                     e.uniques.push(Unique { fields, when, span });
                 }
+                RETENTION => {
+                    let mut r = std::mem::take(&mut e.retention);
+                    self.retention(&m, &mut r);
+                    e.retention = r;
+                }
+                HISTORY => {
+                    e.history = Some(self.term(&m, None));
+                }
                 FROZEN => {
                     let when = exprs(&m)
                         .first()
@@ -953,6 +963,8 @@ impl<'a> Lower<'a> {
             decimals: None,
             extension,
             default_override: false,
+            retention: Retention::default(),
+            personal: false,
             span: self.span(m),
         };
         let mut parts: Vec<SyntaxNode> = m.children().collect();
@@ -976,6 +988,41 @@ impl<'a> Lower<'a> {
         };
         f.default_override = f.ty.is_none() && f.formula.is_none() && f.default.is_some();
         f
+    }
+
+    /// `expire 6 months after last_contact`, `retain 10 years after date[, then expire]`.
+    fn retention(&mut self, m: &SyntaxNode, r: &mut Retention) {
+        let kw = tokens(m).next().map(|t| t.text().to_string()).unwrap_or_default();
+        let after = ast::child(m, PATH).map(|p| ast::path_text(&p));
+        let t = self.term(m, after);
+        let then_expire = tokens(m).any(|t| t.text() == "then");
+        if kw == "retain" {
+            if then_expire {
+                r.expire = Some(t.clone());
+            }
+            r.retain = Some(t);
+        } else {
+            r.expire = Some(t);
+        }
+    }
+
+    /// The number and unit of a retention or `history` line, and the field after which.
+    fn term(&mut self, m: &SyntaxNode, after: Option<String>) -> Term {
+        let n = tokens(m)
+            .find(|t| t.kind() == NUMBER)
+            .and_then(|t| t.text().replace('_', "").parse().ok())
+            .unwrap_or(0);
+        let unit = tokens(m)
+            .skip_while(|t| t.kind() != NUMBER)
+            .find(|t| t.kind() == IDENT || t.kind() == CONTEXT_KW)
+            .map(|t| t.text().to_string())
+            .unwrap_or_default();
+        Term {
+            n,
+            unit,
+            after: after.unwrap_or_default(),
+            span: self.span(m),
+        }
     }
 
     fn modifier(&mut self, m: &SyntaxNode, f: &mut Field) {
@@ -1003,6 +1050,8 @@ impl<'a> Lower<'a> {
             }
             (_, "required") => f.required_when = exprs(m).first().map(|x| self.expr(x)),
             (_, "unique") => f.unique = true,
+            (_, "personal") => f.personal = true,
+            (_, "expire" | "retain") => self.retention(m, &mut f.retention),
             (_, "parent") => f.parent = true,
             (_, "per") => f.per_company = true,
             (_, "via") => f.via = ast::child(m, PATH).map(|p| ast::path_text(&p)),
@@ -1348,7 +1397,7 @@ impl<'a> Lower<'a> {
             ));
         }
         if verbs.iter().any(|v| v == "derived") {
-            self.model.errors.push((span, "`derived` is not a permission: use `read`, `create`, `edit`, `run`, `all`, `hide` or `show`".into()));
+            self.model.errors.push((span, "`derived` is not a permission: use `read`, `create`, `edit`, `run`, `erase`, `all`, `hide` or `show`".into()));
         }
         if let Some(vis) = verbs.iter().find(|v| *v == "hide" || *v == "show").cloned() {
             if verbs.len() > 1 {
@@ -1661,6 +1710,10 @@ impl<'a> Lower<'a> {
                         "require" => StmtKind::Require {
                             cond: first(self),
                             message: es.get(1).map(|e| self.expr(e)),
+                        },
+                        "erase" => StmtKind::Erase {
+                            target: first(self),
+                            reason: es.get(1).map(|e| self.expr(e)),
                         },
                         "fail" => StmtKind::Fail(first(self)),
                         "emit" => StmtKind::Emit(first(self)),

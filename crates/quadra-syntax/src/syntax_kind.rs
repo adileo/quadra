@@ -153,6 +153,11 @@ pub enum SyntaxKind {
     PRINT_FOR,
     /// `attach InvoicePdf to Invoice.pdf when state is Posted`
     ATTACH,
+    /// `expire 2 days after created_at`, `retain 10 years after date, then expire`: how long a
+    /// record is kept (an entity's line; on a field, a `MODIFIER`)
+    RETENTION,
+    /// `history 1 year`: how long the values an entity's records replaced are kept
+    HISTORY,
 
     // members
     MEMBER_LIST,

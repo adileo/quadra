@@ -1104,7 +1104,7 @@ fn role(p: &mut Parser) {
 }
 
 const VERBS: &[&str] = &[
-    "read", "create", "edit", "run", "all", "hide", "show", "derived", "delete",
+    "read", "create", "edit", "run", "erase", "all", "hide", "show", "derived", "delete",
 ];
 
 fn rule(p: &mut Parser) {
@@ -1215,6 +1215,22 @@ fn member(p: &mut Parser, ctx: MemberCtx) {
             "action" => return action(p),
             "post" if p.nth_at_ctx(1, "to") => return post(p),
             "load" if p.nth(1) == FROM_KW => return load(p),
+            "expire" | "retain" if p.nth(1) == NUMBER => {
+                let m = p.start();
+                retention(p);
+                end_line(p);
+                m.complete(p, RETENTION);
+                return;
+            }
+            "history" if p.nth(1) == NUMBER => {
+                let m = p.start();
+                p.bump_ctx();
+                p.bump();
+                p.expect(IDENT);
+                end_line(p);
+                m.complete(p, HISTORY);
+                return;
+            }
             // `ns cbc "urn:…"`, `ns "urn:…"`: the namespaces of a record `from xml`
             "ns" if p.nth(1) == STRING || (p.nth(1) == IDENT && p.nth(2) == STRING) => {
                 let m = p.start();
@@ -1338,8 +1354,10 @@ fn modifiers(p: &mut Parser) -> bool {
             p.bump_ctx();
             p.bump();
             expr(p);
-        } else if p.at_ctx("unique") || p.at_ctx("parent") {
+        } else if p.at_ctx("unique") || p.at_ctx("parent") || p.at_ctx("personal") {
             p.bump_ctx();
+        } else if (p.at_ctx("expire") || p.at_ctx("retain")) && p.nth(1) == NUMBER {
+            retention(p);
         } else if p.at_ctx("per") && p.nth_at_ctx(1, "company") {
             p.bump_ctx();
             p.bump_ctx();
@@ -1364,6 +1382,29 @@ fn modifiers(p: &mut Parser) -> bool {
         }
         m.complete(p, MODIFIER);
         any = true;
+    }
+}
+
+/// `expire 6 months after last_contact`, `retain 10 years after date[, then expire]`: a
+/// number, a unit of time, the field the time is counted from.
+fn retention(p: &mut Parser) {
+    p.bump_ctx();
+    p.expect(NUMBER);
+    p.expect(IDENT);
+    if p.at_ctx("after") {
+        p.bump_ctx();
+        path(p);
+    } else {
+        p.error("expected `after` and the field the time is counted from (`after created_at`)");
+    }
+    if p.at(COMMA) && p.nth_at_ctx(1, "then") {
+        p.bump();
+        p.bump_ctx();
+        if p.at_ctx("expire") {
+            p.bump_ctx();
+        } else {
+            p.error("expected `then expire`");
+        }
     }
 }
 

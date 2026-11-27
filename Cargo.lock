@@ -5071,6 +5071,7 @@ dependencies = [
 name = "quadra-ir"
 version = "0.10.0"
 dependencies = [
+ "chrono",
  "quadra-sema",
  "quadra-syntax",
  "rowan",

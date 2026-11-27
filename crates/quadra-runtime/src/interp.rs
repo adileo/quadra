@@ -20,6 +20,7 @@ pub use rollup::{
 mod documents;
 mod grouping;
 mod query;
+mod retention;
 mod scripts;
 mod viewer;
 pub use query::{Groups, KeyVal, Page, Spec};
@@ -4603,6 +4604,14 @@ impl<'m> Interp<'m> {
                     return fail(msg);
                 }
             }
+            StmtKind::Erase { target, reason } => {
+                let rec = self.eval(target, ctx)?;
+                let reason = match reason {
+                    Some(r) => self.eval(r, ctx)?.to_string(),
+                    None => String::new(),
+                };
+                self.erase(&rec, &reason)?;
+            }
             StmtKind::Fail(e) => {
                 let v = self.eval(e, ctx)?;
                 return fail(v.to_string());
@@ -6157,6 +6166,7 @@ impl<'m> Interp<'m> {
         self.store.guards.clear();
         // the events of this transaction only: the commit writes them to the outbox
         self.store.outbox.clear();
+        self.store.erasures.clear();
         let r = f(self).and_then(|v| {
             self.settle()?;
             self.thaw_records()?;

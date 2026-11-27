@@ -23,6 +23,10 @@ use std::rc::Rc;
 const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_meta\" (\"key\" TEXT PRIMARY KEY, \"value\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_commits\" (\"tx\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"user_id\" BIGINT, \"cause\" TEXT NOT NULL, \"prev_hash\" TEXT NOT NULL, \"hash\" TEXT NOT NULL, \"signature\" TEXT)",
+    // what was erased (`erase`, a retention that ended), by which commit: `["e", …]` in its hash
+    "CREATE TABLE \"_quadra_erasures\" (\"tx\" BIGINT NOT NULL, \"n\" BIGINT NOT NULL, \"record_id\" BIGINT NOT NULL, \"entity\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"whole\" BOOLEAN NOT NULL, \"reason\" TEXT NOT NULL, \"user_id\" BIGINT, PRIMARY KEY (\"tx\", \"n\"))",
+    // the records taken away when their entity's `expire` came: what is left of them
+    "CREATE TABLE \"_quadra_erased\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"created_tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"erased_tx\" BIGINT NOT NULL, \"erased_at\" TEXT NOT NULL, \"cause\" TEXT NOT NULL)",
     // the keys that sign the commits (crate::signing), each set by a commit of its own
     "CREATE TABLE \"_quadra_keys\" (\"tx\" BIGINT PRIMARY KEY, \"public\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_records\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"created_tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"frozen_tx\" BIGINT, \"cause\" TEXT NOT NULL, \"warnings\" TEXT NOT NULL, \"last_tx\" BIGINT NOT NULL DEFAULT 0, \"version_tx\" BIGINT NOT NULL DEFAULT 0, \"kinds\" TEXT)",
@@ -265,6 +269,11 @@ pub(crate) fn history_entry(
         None => value_digest(salt.unwrap_or(""), value.unwrap_or("null")),
     };
     json!(["h", record, field, d])
+}
+
+/// The entry of an erasure in its commit's hash.
+pub(crate) fn erasure_entry(id: u64, ent: &str, fields: &str, whole: bool, reason: &str) -> J {
+    json!(["e", id, ent, fields, whole, reason])
 }
 
 /// Whether the database's salts are seeded (`Database::seed_salts`).
@@ -1810,6 +1819,7 @@ impl Database {
             )?;
             self.project_row(&row)?;
         }
+        self.write_erasures(c, tx, &mut payload)?;
         for (k, rows) in &c.after.postings {
             if c.before.postings.get(k) != Some(rows) {
                 let js: Vec<J> = rows
@@ -2040,6 +2050,76 @@ impl Database {
             payload: payload.iter().map(|p| p.to_string()).collect(),
             next_id: c.after.next_id,
         })
+    }
+
+    /// The erasures of a transaction: the past values of each field erased taken out of the
+    /// history (value and salt removed, the digest kept: the chain stays valid), the records
+    /// taken away moved to `_quadra_erased` and their rows deleted, and each erasure logged
+    /// (`["e", record, entity, fields, whole, reason]` in the commit's hash).
+    fn write_erasures(&mut self, c: &Commit, tx: u64, payload: &mut Vec<J>) -> Result<(), String> {
+        let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
+        for (n, er) in c.after.erasures.iter().enumerate() {
+            let id = er.id as i64;
+            let rows = if er.whole {
+                self.conn.query(
+                    "SELECT CAST(\"seq\" AS TEXT), \"value\", \"salt\" FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"digest\" IS NULL AND \"tx\" < ?bigint",
+                    &[Sql::Int(id), Sql::Int(tx as i64)],
+                )?
+            } else {
+                let mut all = Vec::new();
+                for f in &er.fields {
+                    all.extend(self.conn.query(
+                        "SELECT CAST(\"seq\" AS TEXT), \"value\", \"salt\" FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"field\" = ?text AND \"digest\" IS NULL AND \"tx\" < ?bigint",
+                        &[Sql::Int(id), Sql::Text(f.clone()), Sql::Int(tx as i64)],
+                    )?);
+                }
+                all
+            };
+            for r in rows {
+                let digest = value_digest(r[2].as_deref().unwrap_or(""), r[1].as_deref().unwrap_or("null"));
+                self.wexec(
+                    "UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint".into(),
+                    vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],
+                )?;
+            }
+            if er.whole {
+                let ent = er.ent.to_string();
+                let traits = self
+                    .schema
+                    .tables
+                    .iter()
+                    .filter_map(|t| match &t.source {
+                        Source::Entity(e) if *e == ent => Some((t.name.clone(), "id")),
+                        Source::Join(e, _) | Source::PerCompany(e, _) if *e == ent => {
+                            Some((t.name.clone(), "owner_id"))
+                        }
+                        Source::Trait(_) => Some((t.name.clone(), "id")),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for (table, col) in traits {
+                    self.wexec(
+                        format!("DELETE FROM {} WHERE {} = ?bigint", q(&table), q(col)),
+                        vec![Sql::Int(id)],
+                    )?;
+                }
+                self.wexec(
+                    "INSERT INTO \"_quadra_erased\" (\"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", \"erased_tx\", \"erased_at\", \"cause\") SELECT \"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", ?bigint, ?text, ?text FROM \"_quadra_records\" WHERE \"id\" = ?bigint".into(),
+                    vec![Sql::Int(tx as i64), Sql::Text(at.clone()), Sql::Text(er.reason.clone()), Sql::Int(id)],
+                )?;
+                self.wexec(
+                    "DELETE FROM \"_quadra_records\" WHERE \"id\" = ?bigint".into(),
+                    vec![Sql::Int(id)],
+                )?;
+            }
+            let fields = J::from(er.fields.clone()).to_string();
+            payload.push(erasure_entry(er.id, &er.ent, &fields, er.whole, &er.reason));
+            self.wexec(
+                "INSERT INTO \"_quadra_erasures\" (\"tx\", \"n\", \"record_id\", \"entity\", \"fields\", \"whole\", \"reason\", \"user_id\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?boolean, ?text, ?bigint)".into(),
+                vec![Sql::Int(tx as i64), Sql::Int(n as i64), Sql::Int(id), Sql::Text(er.ent.to_string()), Sql::Text(fields), Sql::Bool(er.whole), Sql::Text(er.reason.clone()), er.by.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null)],
+            )?;
+        }
+        Ok(())
     }
 
     /// The events the transaction emitted, in the order of `emit`: pending until an
@@ -2398,6 +2478,10 @@ impl Database {
         }
         for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), CAST(\"id\" AS TEXT), \"ledger\", \"cols\" FROM \"_quadra_ledger_rows\" ORDER BY \"_quadra_ledger_rows\".\"id\"", &[])? {
             by_tx.entry(num(&r[0])).or_default().push(json!(["r", num(&r[1]), r[2].clone().unwrap_or_default(), r[3].clone().unwrap_or_default()]));
+        }
+        for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"entity\", \"fields\", CAST(\"whole\" AS TEXT), \"reason\" FROM \"_quadra_erasures\" ORDER BY \"_quadra_erasures\".\"tx\", \"_quadra_erasures\".\"n\"", &[])? {
+            let whole = matches!(r[4].as_deref(), Some("1" | "true" | "t"));
+            by_tx.entry(num(&r[0])).or_default().push(erasure_entry(num(&r[1]) as u64, r[2].as_deref().unwrap_or(""), r[3].as_deref().unwrap_or(""), whole, r[5].as_deref().unwrap_or("")));
         }
         let mut applied: Vec<(i64, String)> = Vec::new();
         for r in self.conn.query(

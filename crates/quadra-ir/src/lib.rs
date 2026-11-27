@@ -547,6 +547,12 @@ pub enum StmtKind {
         cond: Expr,
         message: Option<Expr>,
     },
+    /// `erase c, "the customer asked"`: the `personal` fields of a record and its lines emptied,
+    /// their past values taken out of the history (crate docs: Retention)
+    Erase {
+        target: Expr,
+        reason: Option<Expr>,
+    },
     Fail(Expr),
     Emit(Expr),
     Expect(Expr),
@@ -663,7 +669,69 @@ pub struct Field {
     pub extension: bool,
     /// Redefines only the default of an inherited (trait) field.
     pub default_override: bool,
+    /// `retain …`, `expire …`: how long its values are kept
+    pub retention: Retention,
+    /// `personal`: data about a person, emptied by `erase`
+    pub personal: bool,
     pub span: Span,
+}
+
+/// How long a value or a record is kept: at least (`retain`: it cannot be erased before) and
+/// at most (`expire`: it is erased then).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Retention {
+    pub retain: Option<Term>,
+    pub expire: Option<Term>,
+}
+
+impl Retention {
+    pub fn is_empty(&self) -> bool {
+        self.retain.is_none() && self.expire.is_none()
+    }
+}
+
+/// `10 years after date`: a number of units of time after the value of a field of the record
+/// (`created_at`, `updated_at` or a stored `Date`/`DateTime` field).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Term {
+    pub n: i64,
+    /// `hours`, `days`, `weeks`, `months` or `years` (the singular is accepted); anything else
+    /// is reported by the checker
+    pub unit: String,
+    pub after: String,
+    pub span: Span,
+}
+
+impl Term {
+    /// The unit in the plural, or None for a unit of time that is not one.
+    pub fn unit(&self) -> Option<&'static str> {
+        Some(match self.unit.as_str() {
+            "hour" | "hours" => "hours",
+            "day" | "days" => "days",
+            "week" | "weeks" => "weeks",
+            "month" | "months" => "months",
+            "year" | "years" => "years",
+            _ => return None,
+        })
+    }
+
+    /// The instant `n` units after `from`; None when it does not exist (past the calendar).
+    pub fn after(&self, from: chrono::NaiveDateTime) -> Option<chrono::NaiveDateTime> {
+        use chrono::Months;
+        let n = self.n.max(0);
+        match self.unit()? {
+            "hours" => from.checked_add_signed(chrono::Duration::hours(n)),
+            "days" => from.checked_add_signed(chrono::Duration::days(n)),
+            "weeks" => from.checked_add_signed(chrono::Duration::weeks(n)),
+            "months" => from.checked_add_months(Months::new(n as u32)),
+            _ => from.checked_add_months(Months::new((n * 12) as u32)),
+        }
+    }
+
+    /// As written: `10 years after date`.
+    pub fn text(&self) -> String {
+        format!("{} {} after {}", self.n, self.unit, self.after)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -796,6 +864,11 @@ pub struct Entity {
     pub live_decls: Vec<(String, Span)>,
     pub flows: Vec<Flow>,
     pub posts: Vec<Post>,
+    /// `retain …`, `expire …` as members: how long its records are kept
+    pub retention: Retention,
+    /// `history 1 year`: the values replaced longer ago are taken out of the history (their
+    /// digests kept); None: kept for ever
+    pub history: Option<Term>,
     pub span: Span,
 }
 

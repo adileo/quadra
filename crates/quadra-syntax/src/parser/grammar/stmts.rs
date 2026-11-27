@@ -83,7 +83,8 @@ pub(crate) fn stmt(p: &mut Parser) {
         let kw = p.nth_text(0);
         if kw_position(p) {
             match kw {
-                "require" => {
+                // `erase c, "the customer asked"`: `require`'s shape
+                "require" | "erase" => {
                     let m = p.start();
                     p.bump_ctx();
                     expr(p);
