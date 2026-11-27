@@ -49,9 +49,56 @@ url = "sqlite:data/shop.db"
 | `[database] url` | The database of the `quadra db`, `quadra change`, `quadra token` and `quadra serve` commands, when `--url` is not given. A relative `sqlite:` path is resolved from the project root. |
 | `[vars]` | The variables whose values depend on where the app runs, some of them secret: [Variables and connections](/reference/connections#variables). |
 | `[connections.<name>]` | The systems the app sends to (HTTP, SMTP): [Variables and connections](/reference/connections#connections). |
+| `[files]` | Where the files of `File` fields are kept: [Files](#files). |
 
 When neither `--url` nor `[database] url` is given, the database is
 `sqlite:<root>/.quadra/data.db`. Database URLs are described in [Storage](/reference/storage#database-urls).
+
+### Files
+
+The bytes of the files of `File` fields ([Types](/reference/types#files)) are kept outside the
+database. Without a `[files]` section they are in the folder `.quadra/files` of the project,
+and the server itself answers their signed URLs. In production they go to an S3 compatible
+bucket (AWS, Hetzner, Cloudflare R2, MinIO):
+
+```toml
+[vars]
+FILES_KEY = { secret = true }
+FILES_SECRET = { secret = true }
+CDN_TOKEN_KEY = { secret = true }
+
+[files]
+url = "s3://acme-files/prod"
+endpoint = "https://fsn1.your-objectstorage.com"
+region = "eu-central"
+key = { var = "FILES_KEY" }
+secret = { var = "FILES_SECRET" }
+cdn = "https://files.acme.example.com"
+cdn_secret = { var = "CDN_TOKEN_KEY" }
+```
+
+| Key | Meaning |
+|---|---|
+| `url` | `s3://bucket/prefix`: the bucket, and the prefix every key goes under. Or a folder of the machine: `file:/srv/acme/files`, or relative to the project (`file:data/files`). |
+| `endpoint` | The address of an S3 compatible service other than AWS (reached with paths, `https://endpoint/bucket/…`). Without it, AWS. |
+| `region` | The bucket's region (`us-east-1` when not said). |
+| `key`, `secret` | The access key and its secret: always secret variables (`{ var = "NAME" }`), never written in the file. Needed for a bucket. |
+| `cdn` | Optional: downloads go through this CDN, whose origin is the bucket. |
+| `cdn_secret` | With `cdn`: the secret variable its download tokens are signed with. |
+
+`url`, `endpoint`, `region` and `cdn` may also be variables (`{ var = "FILES_URL" }`).
+
+In the store, a file is at `files/<sha256>` (under the prefix) and never changes, so a cache
+may keep it for ever; an upload waits at `uploads/<id>` until the server checks it. The browser
+puts and gets the bytes itself, with URLs the server signs: they never pass through the server.
+For a bucket, allow the web client's origin in the bucket's CORS rules (`PUT` and `GET`).
+
+With a CDN, a download is `https://files.acme.example.com/<prefix>/files/<sha256>?expires=<unix time>&token=<hex>`,
+where `token` is the HMAC-SHA256, with the value of `cdn_secret`, of the path and the expiry
+written one after the other (`/prod/files/ab12…1767225600`). The CDN checks the token at its
+edge (as Bunny's and CloudFront's signed URLs do) and fetches the object from the bucket. A
+download forced with `?download` goes to the bucket, so that it gets the disposition asked
+for.
 
 ## Modules
 

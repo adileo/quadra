@@ -112,8 +112,8 @@ attach InvoicePdf to Invoice.pdf signed "company" when state is Posted
 ```
 
 After each commit, every invoice that is posted and has no `pdf` yet is rendered, from
-the data as it is then, and signed. The bytes are kept once in the database, by their hash,
-and the field gets `sha256:<hash>`, in a transaction of its own (`attach:InvoicePdf
+the data as it is then, and signed. The bytes are kept once in the store of files (the folder
+`.quadra/files`, or a bucket: [Files](/reference/types#files)), by their hash, and the field gets `sha256:<hash>`, in a transaction of its own (`attach:InvoicePdf
 Invoice#45`). The render runs after the commit, never inside it, so posting an invoice is not
 slowed down. If the server stops in between, nothing is lost: the next pass finds the same
 invoices.

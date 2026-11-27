@@ -10,7 +10,8 @@ can be converted exactly.
 | Type | Values | Notes |
 |---|---|---|
 | `Text` | `"Milano"` | Unicode text. |
-| `Code`, `Email`, `Phone`, `VatNumber`, `Barcode`, `File` | text | Behave exactly like `Text`; the name documents the intent and guides the user interface. No format is validated: add a `where` for that. |
+| `Code`, `Email`, `Phone`, `VatNumber`, `Barcode` | text | Behave exactly like `Text`; the name documents the intent and guides the user interface. No format is validated: add a `where` for that. |
+| `File`, `File<pdf, image>` | `sha256:<hex>` | A file uploaded or rendered by the app: its bytes are in the store of files, the field holds their SHA-256. See [Files](#files). |
 | `Int` | `42` | Whole numbers. |
 | `Decimal` | `0.92` | Exact decimal numbers (never floating point). |
 | `Percent` | `22%` | A number written as a percentage: `22%` is 0.22. |
@@ -36,6 +37,56 @@ declare.
 
 There are no anonymous unions. `x: Int | Text` is refused:
 ``anonymous unions are not allowed: use `enum(A, B)` for a set of values, or a trait for references to different entities``.
+
+## Files
+
+A `File` field holds a file: a scan, a photo, a contract. Its bytes are never in the
+database: they are in the store of files (a folder, or an S3 bucket: [`[files]`](/reference/projects-and-modules#files)),
+and the field holds `sha256:<hex>`, the SHA-256 of the bytes. The same file uploaded twice is
+kept once.
+
+```quadra
+entity Expense:
+    receipt: File<pdf, image>? max 10 MB
+    photos: [File<image>] max 2 MB
+    contract: File<word>?
+    archive: File<"application/zip">?
+    anything: File?
+```
+
+The type's arguments say which files the field takes: families, or an exact type in quotes.
+`File` without arguments takes every file.
+
+| Family | Types |
+|---|---|
+| `pdf` | PDF |
+| `image` | JPEG, PNG, WebP, GIF, HEIC (never SVG: it can run scripts) |
+| `word` | DOCX, DOC, ODT, RTF |
+| `excel` | XLSX, XLS, ODS, CSV |
+| `text` | plain text, Markdown, CSV |
+| `zip` | ZIP |
+| `video` | MP4, QuickTime, WebM, Matroska, AVI, MPEG, 3GP |
+| `audio` | MP3, WAV, Ogg, FLAC, M4A, AAC |
+
+An unknown family is an error that lists them:
+``` `pdff` is not a family of files: one of pdf, image, word, excel, text, zip, video, audio, or an exact type in quotes ("application/zip") ```.
+
+`max 10 MB` (also `B`, `KB`, `GB`, powers of 1024) is the largest file the field takes; on a
+list it is the largest of each file. Without `max`, the largest is 100 MB; `max` goes up to
+5 GB. `max` on a field that is not a `File` is an error.
+
+The server tells the type of a file from its bytes, never from its name or from what the
+browser says: a program renamed `report.pdf` is still a program, and a field that takes
+`pdf, image` refuses it
+(`report.pdf: the file is an application/x-msdownload, but Expense.receipt accepts pdf, image`).
+Office documents are told apart by what is inside their zip (`word/`, `xl/`, the `mimetype`
+of OpenDocument). Plain text cannot be told apart by its bytes: a text file is `text/csv` when
+its name ends in `.csv`, `text/markdown` with `.md`, `text/plain` otherwise; HTML and SVG are
+recognized by their content.
+
+A field of the app's own documents ([`attach`](/reference/documents#attach-kept-with-the-record))
+is a `File?` too; if it has arguments, they must take `pdf`. How files are uploaded and
+downloaded: [Files](/reference/entities#files) and the [HTTP API](/reference/http-api#files).
 
 ## Dates, times and time zones
 

@@ -29,6 +29,7 @@ mod local;
 mod params;
 mod schema;
 mod sheets;
+pub(crate) mod uploads;
 mod views;
 mod xlsx;
 
@@ -320,11 +321,26 @@ pub enum Req {
         limit: Option<usize>,
         before: Option<u64>,
     },
-    /// the file a `File` field names (a document of `attach`): its name, type and bytes
+    /// the file a `File` field names (the `n`th of a list): a signed URL of it
     File {
         entity: String,
         id: u64,
         field: String,
+        n: Option<usize>,
+        download: bool,
+    },
+    /// `POST /v1/uploads`: a signed URL to upload a file of a `File` field to
+    Upload {
+        body: J,
+    },
+    /// the uploads a transaction names whose bytes are still to be checked (engine/uploads.rs)
+    Uploads {
+        body: J,
+        key: String,
+    },
+    /// the files of uploads checked, kept before the transaction that names them
+    UploadsChecked {
+        body: J,
     },
     Search {
         entity: String,
@@ -477,6 +493,10 @@ pub enum Job {
     /// never, `Ok(Some(at))` at that instant
     NextSweep {
         reply: oneshot::Sender<Result<Option<chrono::NaiveDateTime>, ()>>,
+    },
+    /// the store of the project's files (`[files]` of quadra.toml)
+    Files {
+        reply: oneshot::Sender<Result<std::sync::Arc<quadra_blobs::Files>, String>>,
     },
     /// the documents of `attach` due, rendered and named in their records (up to `limit`):
     /// how many, and whether the model has any `attach`
@@ -680,6 +700,8 @@ pub struct Engine {
     /// the documents of an `attach` that could not be rendered (document, record): not tried
     /// again until the code changes
     attach_failed: (u64, std::collections::HashSet<(String, u64)>),
+    /// when the uploads of more than a day were last removed (engine/uploads.rs)
+    uploads_pruned_at: Option<std::time::Instant>,
     /// when each agent's visit was last written
     agents_seen: HashMap<String, std::time::Instant>,
     /// the causes of the last commits before this engine handled its first message: only a
@@ -834,6 +856,7 @@ impl Engine {
             sequencer: None,
             pruned_at: None,
             attach_failed: (0, Default::default()),
+            uploads_pruned_at: None,
             agents_seen: HashMap::new(),
             inbox_recent: None,
             statics: Vec::new(),
@@ -895,10 +918,12 @@ impl Engine {
     }
 
     /// The documents of the `attach`es due: rendered from the data as it is, their bytes kept
-    /// (`_quadra_files`, through the sequencer: in the log), then named in their records, each
-    /// in a transaction of its own. A document that cannot be rendered is said once and not
-    /// tried again until the code changes.
+    /// in the store of files and what they are in `_quadra_files` (through the sequencer: in
+    /// the log), then named in their records, each in a transaction of its own. A document that
+    /// cannot be rendered is said once and not tried again until the code changes. The uploads
+    /// of more than a day go on the way.
     fn attach(&mut self, limit: usize) -> Result<(usize, bool), String> {
+        self.prune_uploads();
         let checked = self.checked.clone();
         let Some(model) = checked.model.as_ref() else {
             return Ok((0, false));
@@ -930,9 +955,13 @@ impl Engine {
             eprintln!("attach {doc}: record {id}: {e}");
             self.attach_failed.1.insert((doc, id));
         }
-        for d in &done {
-            let file = d.file.clone();
-            self.side(move |c| quadra_store::files::put(c, &file))?;
+        if !done.is_empty() {
+            let files = self.files()?;
+            for d in &done {
+                files.keep(&d.file.hash, &d.bytes, &d.file.ctype, &d.file.name)?;
+                let file = d.file.clone();
+                self.side(move |c| quadra_store::files::put(c, &file))?;
+            }
         }
         let n = quadra_store::ops::attach_write(
             &self.url,
@@ -3141,6 +3170,9 @@ impl Engine {
                 Job::Attach { limit, reply } => {
                     let _ = reply.send(self.attach(limit));
                 }
+                Job::Files { reply } => {
+                    let _ = reply.send(self.files());
+                }
                 Job::Receive {
                     connection,
                     path,
@@ -3300,7 +3332,16 @@ impl Engine {
                 limit,
                 before,
             } => self.history(&who, &entity, id, limit, before),
-            Req::File { entity, id, field } => self.file(&who, &entity, id, &field),
+            Req::File {
+                entity,
+                id,
+                field,
+                n,
+                download,
+            } => self.file(&who, &entity, id, &field, n, download),
+            Req::Upload { body } => self.upload(&who, &body),
+            Req::Uploads { body, key } => self.uploads_due(&who, &body, &key),
+            Req::UploadsChecked { body } => self.uploads_checked(&who, &body),
             Req::Search {
                 entity,
                 q,
@@ -3864,47 +3905,6 @@ impl Engine {
         ))
     }
 
-    /// The file the field of a record names, for one who may read that field: `{name, type,
-    /// size, hash, content}` (the bytes in base64; the route sends them as they are).
-    fn file(&mut self, who: &Principal, entity: &str, id: u64, field: &str) -> Result<Reply, Fail> {
-        let checked = self.checked.clone();
-        let model = checked.model.as_ref().unwrap();
-        let mut i = self.interp(model, Some(who), None)?;
-        let actual = i
-            .store
-            .get(id)
-            .map(|r| r.ent.to_string())
-            .filter(|e| e == entity)
-            .ok_or((404, format!("{entity}#{id} not found")))?;
-        let rec = V::Ref {
-            ent: Rc::from(actual.as_str()),
-            id,
-        };
-        if !i.can("read", &actual, Some(field), Some(&rec)) {
-            return Err((
-                403,
-                format!("permission denied: cannot read {actual}.{field}"),
-            ));
-        }
-        let value = match i.store.read(id, field, None) {
-            Some(V::Text(t)) => t.to_string(),
-            _ => return Err((404, format!("{actual}#{id} has no file in `{field}` yet"))),
-        };
-        let Some(hash) = quadra_store::files::hash_of(&value) else {
-            return Err((
-                404,
-                format!("`{actual}.{field}` names no file kept by the app"),
-            ));
-        };
-        let f = quadra_store::files::get(&mut self.conn, hash)
-            .map_err(|e| (500, e))?
-            .ok_or((404, format!("the file {hash} is not kept here")))?;
-        Ok(reply(
-            200,
-            json!({"name": f.name, "type": f.ctype, "size": f.size, "hash": f.hash, "content": f.content_b64}),
-        ))
-    }
-
     fn search(
         &mut self,
         who: &Principal,
@@ -4057,12 +4057,15 @@ impl Engine {
         if ops.is_empty() || ops.len() > 200 {
             return Err((400, "1 to 200 operations per transaction".into()));
         }
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        // the uploads it names, by the hash of their files (engine/uploads.rs)
+        let (resolved, uploads) = self.resolve_uploads(who, model, ops)?;
+        let ops = &resolved;
         let base = body["base"].as_u64();
         if base.is_none() && ops.iter().any(|o| o["op"] != json!("create")) {
             return Err((400, "`base` is required to change existing records: the commit is refused if they changed since".into()));
         }
-        let checked = self.checked.clone();
-        let model = checked.model.as_ref().unwrap();
         // The client's base guards what the client decided on: the records it changes. If others
         // changed them since it read them, its change would overwrite theirs unseen: refused.
         // Everything else (totals, rollups, the records the rules read) is read now, and the
@@ -4113,10 +4116,22 @@ impl Engine {
                 })
             });
             return match r {
-                Ok(()) => Ok(reply(
-                    200,
-                    json!({ "tx": i.store.tx, "base": i.store.tx, "created": J::Object(created.into_inner()) }),
-                )),
+                Ok(()) => {
+                    let tx = i.store.tx;
+                    drop(i);
+                    if !uploads.is_empty() {
+                        let used = uploads.clone();
+                        if let Err(e) =
+                            self.side(move |c| quadra_store::files::uploads_used(c, &used))
+                        {
+                            eprintln!("uploads: not marked used: {e}");
+                        }
+                    }
+                    Ok(reply(
+                        200,
+                        json!({ "tx": tx, "base": tx, "created": J::Object(created.into_inner()) }),
+                    ))
+                }
                 Err(Flow::Conflict(_)) if attempt < 5 => continue,
                 Err(Flow::Conflict(c)) => {
                     let list: Vec<J> = c.iter().map(|x| json!({ "tx": x.tx, "at": x.at, "user": x.user, "cause": x.cause, "what": x.what })).collect();

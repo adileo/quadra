@@ -157,7 +157,7 @@ entity Invoice:
 | Rule | Detail |
 |---|---|
 | When | after each commit, each record of the entity for which `when` holds and whose field is still empty is rendered, from the data as it is then |
-| Kept | the bytes in the database once (`_quadra_files`, by their SHA-256), the field set to `sha256:<hex>` in a transaction of its own, as the system (`attach:InvoicePdf Invoice#45`) |
+| Kept | the bytes once in the store of files ([Files](/reference/types#files), by their SHA-256), what they are in `_quadra_files`, the field set to `sha256:<hex>` in a transaction of its own, as the system (`attach:InvoicePdf Invoice#45`) |
 | Frozen | the field is filled after the record is frozen: an `attach` field is an exception of `frozen when` by itself |
 | `signed "company"` | the PDF is signed (PAdES) by that signer before it is kept |
 | Once | the field, once filled, is never rendered again: the record keeps the document as it was sent, with its hash, even when the document's code changes later |

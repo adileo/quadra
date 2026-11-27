@@ -1,0 +1,17 @@
+[package]
+name = "quadra-blobs"
+description = "Where Quadra keeps the bytes of files: a folder or an S3 bucket, reached with signed URLs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quadra-sema.workspace = true
+object_store = { version = "0.14", default-features = false, features = ["aws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+getrandom = "0.4"
+bytes = "1"

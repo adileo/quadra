@@ -135,6 +135,14 @@ pub fn model_json(
                 }
             }
             o.insert("per_company".into(), json!(f.per_company));
+            // a `File` field: the families and types it takes (none: any), its largest file
+            if let Some(spec) = &f.file {
+                let accept: Vec<&str> = spec.accept.iter().map(|(a, _)| a.as_str()).collect();
+                o.insert(
+                    "file".into(),
+                    json!({ "accept": accept, "max": spec.max_bytes() }),
+                );
+            }
             fields.push(k);
         }
         let mut actions = Vec::new();

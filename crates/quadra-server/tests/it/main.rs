@@ -11,3 +11,4 @@ mod mail;
 mod orchestration;
 mod printers;
 mod signin;
+mod uploads;

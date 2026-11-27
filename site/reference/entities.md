@@ -115,6 +115,7 @@ Modifiers follow the type, in any order:
 | `per company` | One value per company. | `list_price: Price<company.currency, uom> per company` |
 | `via field` | The inverse of a collection goes through this field of the other entity. | `contacts: [Partner] via parent` |
 | `through Entity` | A many-to-many relation through a linking entity. | `vendors: {Partner} through SupplierInfo` |
+| `max size` | On a `File` field: the largest file it takes (`KB`, `MB`, `GB`); on a list, of each file. | `receipt: File<pdf, image>? max 10 MB` |
 
 A `where` condition can read the other fields of the record and the referenced records:
 `purchase_uom: Uom where u => u.category == uom.category`. Violations are reported when the
@@ -150,6 +151,44 @@ extend Product:
 
 Writing `product.list_price = …` sets the value of the current company. A missing value of
 a per-company field is not reported as missing.
+
+### Files
+
+A `File` field holds a file the users upload (or a document of the app, [`attach`](/reference/documents#attach-kept-with-the-record));
+a `[File]` holds several. Its type says which files it takes, and `max` how large
+([Types](/reference/types#files)):
+
+```quadra
+entity Expense:
+    title: Text
+    receipt: File<pdf, image>? max 10 MB
+    photos: [File<image>] max 2 MB
+```
+
+The bytes are never in the database nor in its log: they are in the store of files
+(`.quadra/files` of the project, or the bucket of [`[files]`](/reference/projects-and-modules#files)),
+and the field holds their SHA-256 (`sha256:<hex>`). A file goes in in three steps, the bytes
+going straight from the browser to the store:
+
+1. `POST /v1/uploads` with the field, the file's name and size: refused at once if the user
+   may not write the field, or if the name or the size say the field does not take it. The
+   answer is a signed URL to put the bytes to, valid 15 minutes.
+2. The browser puts the bytes to that URL.
+3. A transaction writes `upload:<id>` to the field. Before it runs, the server reads the bytes,
+   tells their type from them, checks it and the size against the field, and keeps the file
+   under its SHA-256; the field then holds `sha256:<hex>`. A file refused says why:
+   `report.pdf: the file is an application/x-msdownload, but Expense.receipt accepts pdf, image`,
+   `scan.pdf: the file is 12.4 MB, but Expense.receipt takes files up to 10 MB`.
+
+An upload is for one user and one field, and is named once. One never named is removed with
+its bytes after 24 hours. A `File` field written through the API takes an upload, or a file
+it already has (to keep the files of a list while another is added): never a `sha256:` of
+another file.
+
+Reading the file needs the right to read the field: `GET /v1/records/Expense/45/files/receipt`
+(`/files/photos/0` for the first of a list) sends who may to a signed URL, valid 5 minutes.
+PDFs and images are shown in the page; other files, and any file with `?download`, are
+downloaded. SVG and HTML are never shown in the page. See the [HTTP API](/reference/http-api#files).
 
 ## Relations
 

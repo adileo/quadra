@@ -945,6 +945,7 @@ impl<'a> Lower<'a> {
             .find(|t| t.kind() == CONTEXT_KW)
             .map(|t| t.text().to_string());
         let ty = type_node(m).map(|t| self.ty(&t));
+        let file = type_node(m).and_then(|t| self.file_spec(&t));
         let mut f = Field {
             name,
             ty,
@@ -961,6 +962,7 @@ impl<'a> Lower<'a> {
             at: None,
             pattern: None,
             decimals: None,
+            file,
             extension,
             default_override: false,
             retention: Retention::default(),
@@ -1068,6 +1070,16 @@ impl<'a> Lower<'a> {
             }
             // a number of an EBCDIC file: packed (COMP-3) or zoned, kept as its `format`
             (_, w @ ("packed" | "zoned")) => f.pattern = Some(w.to_string()),
+            (_, "max") => {
+                // `max 10 MB`: a size that cannot be read is 0, refused by the checker
+                let number = tokens(m).find(|t| t.kind() == NUMBER);
+                let unit = tokens(m).filter(|t| t.kind() == CONTEXT_KW).nth(1);
+                let bytes = match (number, unit) {
+                    (Some(n), Some(u)) => files::size_bytes(n.text(), u.text()).unwrap_or(0),
+                    _ => 0,
+                };
+                f.file.get_or_insert_with(Default::default).max = Some((bytes, self.span(m)));
+            }
             (_, "decimals") => {
                 // a number too large for one is refused as `u32::MAX` by the checker
                 f.decimals = tokens(m)
@@ -1600,6 +1612,41 @@ impl<'a> Lower<'a> {
     }
 
     // ---- types ------------------------------------------------------------------------
+
+    /// What a `File` type takes (`File<pdf, "application/zip">`, inside `?`, `[…]`, `{…}`),
+    /// if the type is one.
+    fn file_spec(&mut self, n: &SyntaxNode) -> Option<files::FileSpec> {
+        match n.kind() {
+            TYPE_OPTIONAL | TYPE_LIST | TYPE_SET | TYPE_PAREN => {
+                type_node(n).and_then(|t| self.file_spec(&t))
+            }
+            TYPE_PATH => {
+                let path = ast::child(n, PATH).map(|p| ast::path_text(&p))?;
+                if path != "File" {
+                    return None;
+                }
+                let mut spec = files::FileSpec::default();
+                if let Some(g) = ast::child(n, GENERIC_ARGS) {
+                    for el in g.children_with_tokens() {
+                        match el {
+                            rowan::NodeOrToken::Token(t) if t.kind() == STRING => spec
+                                .accept
+                                .push((t.text().to_string(), Span::new(self.file, t.text_range()))),
+                            rowan::NodeOrToken::Node(c) if TYPE_KINDS.contains(&c.kind()) => {
+                                let name = ast::child(&c, PATH)
+                                    .map(|p| ast::path_text(&p))
+                                    .unwrap_or_else(|| c.text().to_string());
+                                spec.accept.push((name, self.span(&c)));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some(spec)
+            }
+            _ => None,
+        }
+    }
 
     fn ty(&mut self, n: &SyntaxNode) -> Ty {
         let inner = |s: &mut Self| type_node(n).map(|t| s.ty(&t)).unwrap_or(Ty::Error);

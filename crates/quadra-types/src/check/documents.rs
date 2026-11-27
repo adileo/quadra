@@ -305,6 +305,17 @@ impl<'m> Checker<'m> {
                 let file = matches!(&f.ty, Some(Ty::Optional(inner)) if matches!(&**inner, Ty::Path { segments, .. } if segments.len() == 1 && segments[0] == "File"));
                 if !file {
                     self.error(a.span, format!("`{}.{}` keeps the document: it is a `File?` (empty until the document is rendered)", e.name, a.field));
+                } else if let Some(spec) = f.file.as_ref().filter(|s| !s.accepts("application/pdf"))
+                {
+                    self.error(
+                        a.span,
+                        format!(
+                            "`{}.{}` keeps a PDF document, but it takes {}",
+                            e.name,
+                            a.field,
+                            spec.accepts_text()
+                        ),
+                    );
                 }
             }
         }
