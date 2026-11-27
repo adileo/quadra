@@ -1295,6 +1295,9 @@ impl<'p> Resolver<'p> {
             {
                 return; // unit or currency: checked by the type checker (phase 3)
             }
+            if generic.as_deref() == Some("File") {
+                return; // a family of files (`pdf`, `image`): checked by the type checker
+            }
         }
         if let Some(payload) = ast::child(node, FIELD_LIST) {
             self.error(

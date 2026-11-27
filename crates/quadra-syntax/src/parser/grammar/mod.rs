@@ -1355,6 +1355,13 @@ fn modifiers(p: &mut Parser) -> bool {
             // `decimals 2`: the decimals a number is written with in a format
             p.bump_ctx();
             p.bump();
+        } else if p.at_ctx("max") && p.nth(1) == NUMBER {
+            // `max 10 MB`: the largest file a `File` field takes (KB, MB, GB)
+            p.bump_ctx();
+            p.bump();
+            if p.at(IDENT) && matches!(p.nth_text(0), "B" | "KB" | "MB" | "GB") {
+                p.bump_ctx();
+            }
         } else if p.at_ctx("packed") || p.at_ctx("zoned") {
             // a number of an EBCDIC file as packed (COMP-3) or zoned decimal
             p.bump_ctx();

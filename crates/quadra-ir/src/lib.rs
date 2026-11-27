@@ -4,6 +4,7 @@
 //! entities. It is plain data (serializable) and is consumed by the type checker, the
 //! analyses (`trace`, cycles, fingerprints) and the interpreter.
 
+pub mod files;
 pub mod formats;
 mod lower;
 pub mod print;
@@ -659,6 +660,9 @@ pub struct Field {
     /// `decimals 2`: the decimals a `Decimal` is written with (in a fixed-width line, the
     /// last digits of the number, without a separator)
     pub decimals: Option<u32>,
+    /// A `File` field (`File<pdf, image>`, `[File]`): the files it takes and `max 10 MB`
+    /// (also set by a `max` on a field of another type, which the checker refuses)
+    pub file: Option<files::FileSpec>,
     /// Declared in an `extend` block of another module.
     pub extension: bool,
     /// Redefines only the default of an inherited (trait) field.

@@ -6,6 +6,7 @@ use quadra_sema::{Diagnostic, Severity};
 use std::collections::{HashMap, HashSet};
 
 mod documents;
+mod files;
 
 pub fn check_model(model: &Model) -> Vec<Diagnostic> {
     analyze_model(model).diagnostics
@@ -464,6 +465,7 @@ impl<'m> Checker<'m> {
         self.entity = Some(e);
         let self_root = vec!["self".to_string()];
         for f in &e.fields {
+            self.check_file_field(e, f);
             let decl = f.ty.as_ref().map(|t| self.decl_ty_field(t, f.per_company));
             self.company_ctx = f.per_company;
             if let Some(d) = &f.default {

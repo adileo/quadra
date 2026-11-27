@@ -84,7 +84,10 @@ fn primary_type(p: &mut Parser) -> super::super::CompletedMarker {
                 let g = p.start();
                 p.bump();
                 loop {
-                    type_(p);
+                    // an exact type among the types of a file: `File<"application/zip">`
+                    if !p.eat(STRING) {
+                        type_(p);
+                    }
                     if !p.eat(COMMA) {
                         break;
                     }
