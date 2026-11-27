@@ -776,6 +776,8 @@ impl Drop for Pooled {
 pub(crate) struct Side {
     pub statements: Vec<(String, Vec<Sql>)>,
     pub rolled_back: bool,
+    /// savepoints open: (name, statements recorded before it)
+    savepoints: Vec<(String, usize)>,
 }
 
 thread_local! {
@@ -796,7 +798,7 @@ enum SideBatch {
 }
 
 /// A `batch` during a change outside the hash chain: transaction control folded, the rest run
-/// and recorded.
+/// and recorded; what a `ROLLBACK TO` a savepoint undoes is dropped from the record too.
 fn side_batch(sql: &str) -> SideBatch {
     SIDE.with(|s| {
         let mut s = s.borrow_mut();
@@ -804,21 +806,46 @@ fn side_batch(sql: &str) -> SideBatch {
             return SideBatch::Run(sql.to_string());
         };
         let mut rest = Vec::new();
-        for part in sql.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        for part in split_statements(sql) {
             let up = part.to_ascii_uppercase();
-            if up.starts_with("BEGIN") || up.starts_with("COMMIT") || up.starts_with("END") {
-                continue;
-            }
-            if up.starts_with("ROLLBACK") {
-                side.rolled_back = true;
-                continue;
-            }
-            if !up.starts_with("LOCK ")
-                && !up.starts_with("SAVEPOINT")
-                && !up.starts_with("RELEASE")
-                && !up.starts_with("SELECT")
-            {
-                side.statements.push((part.to_string(), Vec::new()));
+            let words: Vec<&str> = up.split_whitespace().collect();
+            let name = |w: Option<&&str>| {
+                w.map(|n| n.trim_matches('"').to_string())
+                    .unwrap_or_default()
+            };
+            match words.first().copied() {
+                Some("BEGIN" | "COMMIT" | "END") => continue,
+                Some("ROLLBACK") if words.get(1).is_some_and(|w| *w == "TO") => {
+                    // ROLLBACK TO [SAVEPOINT] name: the savepoint stays open
+                    let n = name(words.get(if words.get(2) == Some(&"SAVEPOINT") {
+                        3
+                    } else {
+                        2
+                    }));
+                    if let Some(i) = side.savepoints.iter().rposition(|(s, _)| *s == n) {
+                        side.savepoints.truncate(i + 1);
+                        side.statements.truncate(side.savepoints[i].1);
+                    }
+                }
+                Some("ROLLBACK") => {
+                    side.rolled_back = true;
+                    continue;
+                }
+                Some("SAVEPOINT") => side
+                    .savepoints
+                    .push((name(words.get(1)), side.statements.len())),
+                Some("RELEASE") => {
+                    let n = name(words.get(if words.get(1) == Some(&"SAVEPOINT") {
+                        2
+                    } else {
+                        1
+                    }));
+                    if let Some(i) = side.savepoints.iter().rposition(|(s, _)| *s == n) {
+                        side.savepoints.truncate(i);
+                    }
+                }
+                Some("LOCK" | "SELECT") => {}
+                _ => side.statements.push((part.to_string(), Vec::new())),
             }
             rest.push(part);
         }
@@ -828,6 +855,88 @@ fn side_batch(sql: &str) -> SideBatch {
             SideBatch::Run(rest.join("; "))
         }
     })
+}
+
+/// The statements of a batch, split on the `;` outside quotes and comments.
+fn split_statements(sql: &str) -> Vec<&str> {
+    let b = sql.as_bytes();
+    let (mut out, mut start, mut i) = (Vec::new(), 0, 0);
+    while i < b.len() {
+        match b[i] {
+            q @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < b.len() {
+                    if b[i] == q {
+                        // a doubled quote is the quote itself
+                        if b.get(i + 1) == Some(&q) {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b';' => {
+                out.push(&sql[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(&sql[start.min(sql.len())..]);
+    out.into_iter()
+        .map(without_leading_comments)
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// A statement without the comments before it (what decides what kind of statement it is).
+fn without_leading_comments(mut p: &str) -> &str {
+    loop {
+        p = p.trim();
+        if let Some(r) = p.strip_prefix("--") {
+            p = r.split_once('\n').map_or("", |(_, r)| r);
+        } else if let Some(r) = p.strip_prefix("/*") {
+            p = r.split_once("*/").map_or("", |(_, r)| r);
+        } else {
+            return p;
+        }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    #[test]
+    fn statements_split_outside_quotes_and_comments() {
+        assert_eq!(
+            super::split_statements(
+                "BEGIN; INSERT INTO t VALUES ('a;b', \"c;\"\"d\"); -- x; y\nCOMMIT;"
+            ),
+            vec![
+                "BEGIN",
+                "INSERT INTO t VALUES ('a;b', \"c;\"\"d\")",
+                "COMMIT"
+            ]
+        );
+        assert_eq!(
+            super::split_statements("UPDATE t SET a = 'it''s; fine' /* ; */; DELETE FROM t"),
+            vec!["UPDATE t SET a = 'it''s; fine' /* ; */", "DELETE FROM t"]
+        );
+    }
 }
 
 fn side_record(sql: &str, params: &[Sql]) {

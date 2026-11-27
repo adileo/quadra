@@ -182,10 +182,44 @@ type SideFn = Box<dyn FnOnce(&mut Conn) -> Result<Box<dyn std::any::Any + Send>,
 
 /// A file of its own for a snapshot on its way to the destinations (many tenants, and their
 /// sequencers, share a process).
-fn snapshot_file() -> std::path::PathBuf {
+/// A file for a snapshot of the database of `url`: next to it (the same disk, which has room
+/// for a copy of it; the system's temporary folder may be small or in memory), else in the
+/// temporary folder.
+fn snapshot_file(url: &str) -> std::path::PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("quadra-snapshot-{}-{n}.db", std::process::id()))
+    let dir = url
+        .strip_prefix("sqlite:")
+        .map(std::path::Path::new)
+        .and_then(|p| p.parent())
+        .filter(|d| !d.as_os_str().is_empty() && d.is_dir())
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join(format!(".quadra-snapshot-{}-{n}.db", std::process::id()))
+}
+
+/// Snapshot files a process that died left next to the database (an hour old: none of a
+/// live one, which removes them once uploaded).
+fn forget_old_snapshots(url: &str) {
+    let Some(dir) = snapshot_file(url).parent().map(|d| d.to_path_buf()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let ours = format!(".quadra-snapshot-{}-", std::process::id());
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|d| d > Duration::from_secs(3600));
+        if name.starts_with(".quadra-snapshot-") && !name.starts_with(&ours) && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// When a commit is confirmed to its client.
@@ -791,6 +825,7 @@ impl State {
         health: std::sync::Arc<HealthCell>,
     ) -> Result<State, String> {
         let lock = crate::writer::acquire(url)?;
+        forget_old_snapshots(url);
         crate::conn::set_max_bytes(options.max_bytes);
         crate::conn::set_statement_timeout(options.statement_timeout);
         let mut conn = Conn::open(url)?;
@@ -859,7 +894,7 @@ impl State {
                     if let Err(e) = answer {
                         eprintln!("sequencer: a destination cannot say what it holds ({e}): it gets a snapshot");
                     }
-                    let file = snapshot_file();
+                    let file = snapshot_file(url);
                     let r = crate::segments::snapshot(url, &file)
                         .and_then(|(b, t)| d.snapshot(b, t, &file));
                     let _ = std::fs::remove_file(&file);
@@ -1592,7 +1627,7 @@ impl State {
         self.log_bytes = 0;
         self.log_segments = 0;
         let Some(up) = &self.uploader else { return };
-        let file = snapshot_file();
+        let file = snapshot_file(&self.url);
         match crate::segments::snapshot(&self.url, &file) {
             Ok((batch, tx)) => {
                 let u = Upload {
@@ -1604,9 +1639,16 @@ impl State {
                     statements: Vec::new(),
                     replies: Vec::new(),
                 };
-                let _ = up.tx.send(u);
+                if let Err(mpsc::SendError(u)) = up.tx.send(u) {
+                    if let Some((_, _, file)) = u.snapshot {
+                        let _ = std::fs::remove_file(file);
+                    }
+                }
             }
-            Err(e) => eprintln!("sequencer: cannot take a snapshot: {e}"),
+            Err(e) => {
+                let _ = std::fs::remove_file(&file);
+                eprintln!("sequencer: cannot take a snapshot: {e}");
+            }
         }
     }
 
