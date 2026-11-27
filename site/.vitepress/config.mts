@@ -47,6 +47,7 @@ const reference = pages("reference", [
   "expressions",
   "rules",
   "flows-and-actions",
+  "connections",
   "ledgers",
   "security",
   "testing",

@@ -210,6 +210,12 @@ the statements that follow (in a test or a fixture). It is how `current.user` an
 
 See [Security](/reference/security#testing-permissions) for permission tests.
 
+## Variables
+
+Tests do not read the environment: `env.NAME` is the variable's `test` value in `quadra.toml`,
+else its default, and the events with an `outbound` are not sent
+([Variables and connections](/reference/connections#in-tests)).
+
 ## Running tests
 
 ```bash

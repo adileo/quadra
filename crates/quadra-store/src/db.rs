@@ -32,7 +32,7 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_idempotency\" (\"user_id\" BIGINT NOT NULL, \"key\" TEXT NOT NULL, \"request_hash\" TEXT NOT NULL, \"response\" TEXT NOT NULL, \"tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, PRIMARY KEY (\"user_id\", \"key\"))",
     "CREATE TABLE \"_quadra_applied\" (\"key\" TEXT PRIMARY KEY, \"tx\" BIGINT NOT NULL)",
     "CREATE TABLE \"_quadra_renames\" (\"seq\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"entity\" TEXT NOT NULL, \"old_name\" TEXT NOT NULL, \"new_name\" TEXT NOT NULL)",
-    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT)",
+    "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT)",
     // what users make in the web client (crate::views): saved views and boards, shared with
     // users, teams, roles or everyone; teams; each user's favourites, defaults and order; and
     // the log of every change (who, when, what), by object and version
@@ -97,7 +97,9 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// interface files (`interfaces/**/*.qdi`), by their path there.
 /// 9: `_quadra_login_codes`, the codes of the sign-in by email (crate::auth).
 /// 10: `_quadra_batches`, the batches of the sequencer (crate::sequencer).
-const SYSTEM_VERSION: &str = "10";
+/// 11: `_quadra_outbox.attempts`, `next_at`, `error`, `failed_at`: the deliveries of the events
+/// with an `outbound` (crate::deliveries).
+const SYSTEM_VERSION: &str = "11";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
@@ -139,6 +141,12 @@ pub struct OutboxEvent {
     pub fields: J,
     pub created_at: String,
     pub delivered_at: Option<String>,
+    /// delivery attempts made (`outbound`), the time of the next, the last error, and when it
+    /// failed for good (crate::deliveries)
+    pub attempts: u64,
+    pub next_at: Option<String>,
+    pub error: Option<String>,
+    pub failed_at: Option<String>,
 }
 
 pub struct Database {
@@ -331,6 +339,26 @@ impl Database {
                 .batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"origin\" TEXT")?;
             self.conn
                 .batch("ALTER TABLE \"_quadra_views\" ADD COLUMN \"path\" TEXT")?;
+        }
+        // the deliveries of the events with an `outbound` (crate::deliveries)
+        if self.conn.table_exists("_quadra_outbox")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"attempts\" FROM \"_quadra_outbox\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            self.conn.batch(
+                "ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"attempts\" BIGINT NOT NULL DEFAULT 0",
+            )?;
+            self.conn
+                .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"next_at\" TEXT")?;
+            self.conn
+                .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"error\" TEXT")?;
+            self.conn
+                .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"failed_at\" TEXT")?;
         }
         for s in system_ddl(self.dialect()) {
             let name = s.split('"').nth(1).unwrap_or("").to_string();
@@ -1830,13 +1858,13 @@ impl Database {
     /// The events of the outbox, oldest first (only those not delivered yet: `pending`).
     pub fn outbox(&mut self, pending: bool) -> Result<Vec<OutboxEvent>, String> {
         let filter = if pending {
-            " WHERE \"delivered_at\" IS NULL"
+            " WHERE \"delivered_at\" IS NULL AND \"failed_at\" IS NULL"
         } else {
             ""
         };
         let rows = self
             .conn
-            .query(&format!("SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"event\", \"fields\", \"created_at\", \"delivered_at\" FROM \"_quadra_outbox\"{filter} ORDER BY \"_quadra_outbox\".\"id\""), &[])?;
+            .query(&format!("SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"event\", \"fields\", \"created_at\", \"delivered_at\", CAST(\"attempts\" AS TEXT), \"next_at\", \"error\", \"failed_at\" FROM \"_quadra_outbox\"{filter} ORDER BY \"_quadra_outbox\".\"id\""), &[])?;
         Ok(rows
             .into_iter()
             .map(|r| OutboxEvent {
@@ -1849,6 +1877,10 @@ impl Database {
                     .unwrap_or(J::Null),
                 created_at: r[4].clone().unwrap_or_default(),
                 delivered_at: r[5].clone(),
+                attempts: num(&r[6]) as u64,
+                next_at: r[7].clone(),
+                error: r[8].clone(),
+                failed_at: r[9].clone(),
             })
             .collect())
     }

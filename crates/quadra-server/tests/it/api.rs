@@ -100,6 +100,7 @@ fn the_api_is_authenticated_idempotent_and_refuses_stale_writes() {
 
     let port = 18000 + (std::process::id() % 1000) as u16;
     let cfg = quadra_server::Config {
+        outside: Default::default(),
         root: root.clone(),
         url: url.clone(),
         port,
@@ -445,6 +446,7 @@ fn the_code_editor_commits_and_deploys() {
 
     let port = 19000 + (std::process::id() % 1000) as u16;
     let cfg = quadra_server::Config {
+        outside: Default::default(),
         root: root.clone(),
         url: url.clone(),
         port,
@@ -1003,6 +1005,7 @@ fn the_dev_server_applies_saved_files() {
 
     let port = 20000 + (std::process::id() % 1000) as u16;
     let cfg = quadra_server::Config {
+        outside: Default::default(),
         root: root.clone(),
         url: url.clone(),
         port,

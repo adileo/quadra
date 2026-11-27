@@ -761,6 +761,17 @@ pub struct Event {
     pub span: Span,
 }
 
+/// `outbound Event via connection [path "/…"]`: the events of that kind are delivered by the
+/// connection of quadra.toml after their transaction commits (HTTP: a signed JSON webhook to
+/// the connection's url and `path`; SMTP: an email made of the event's `to`, `subject`, `body`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Outbound {
+    pub event: String,
+    pub connection: String,
+    pub path: Option<String>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Trigger {
     Enters(String),
@@ -851,6 +862,7 @@ pub struct Model {
     pub fns: Vec<FnDef>,
     pub consts: Vec<Const>,
     pub events: Vec<Event>,
+    pub outbounds: Vec<Outbound>,
     pub reactions: Vec<Reaction>,
     pub roles: Vec<Role>,
     /// Top-level `deny` / `allow` rules.
@@ -862,6 +874,13 @@ pub struct Model {
     pub migrations: Vec<Block>,
     /// `change` blocks: data scripts with reason, requester and approval
     pub changes: Vec<Block>,
+    /// the variables and connections of quadra.toml
+    #[serde(skip)]
+    pub manifest: quadra_sema::manifest::Manifest,
+    /// the values of the variables where the model runs (the environment's, not the code's):
+    /// set by the engine that runs it; `env.NAME` reads them, the default when absent
+    #[serde(skip)]
+    pub env: std::collections::BTreeMap<String, String>,
     #[serde(skip)]
     index: rustc_hash::FxHashMap<String, usize>,
     /// variant name → where `variant` finds it first: (0: an enum, 1: an inline enum of a

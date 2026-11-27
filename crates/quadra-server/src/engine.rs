@@ -57,6 +57,30 @@ pub struct Config {
     pub limits: Limits,
     /// how many engines serve the project at once
     pub engines: Engines,
+    /// the values of quadra.toml's variables here, and whether events go out
+    pub outside: Outside,
+}
+
+/// A checked project, its model given the values of the variables where it runs.
+pub(crate) fn with_env(
+    mut checked: Checked,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Checked {
+    if let Some(m) = checked.model.as_mut() {
+        m.env = env.clone();
+    }
+    checked
+}
+
+/// Where the project meets the outside: the values of the variables of quadra.toml in this
+/// place (`env.NAME`, the connections' credentials), and whether the events with an
+/// `outbound` are delivered (`deliver`: `quadra serve` and `quadra dev`, a production
+/// environment). Without it they stay in the outbox: tests, previews and forks, which must
+/// never send with production's connections.
+#[derive(Clone, Debug, Default)]
+pub struct Outside {
+    pub env: std::collections::BTreeMap<String, String>,
+    pub deliver: bool,
 }
 
 /// The engines of a project. One engine serves one request at a time; more engines serve
@@ -346,6 +370,20 @@ pub enum Job {
     NextSweep {
         reply: oneshot::Sender<Result<Option<chrono::NaiveDateTime>, ()>>,
     },
+    /// the host's deliveries (`crate::deliver`): the plans of up to `limit` due events of the
+    /// outbox, and when the next pending one is due after them (`None`: none pending)
+    Deliveries {
+        limit: usize,
+        reply: oneshot::Sender<
+            Result<(Vec<crate::deliver::Plan>, Option<chrono::NaiveDateTime>), String>,
+        >,
+    },
+    /// what came of the delivery of event `id`, written through the sequencer
+    Delivered {
+        id: u64,
+        outcome: quadra_store::deliveries::Outcome,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     People {
         reply: oneshot::Sender<Reply>,
     },
@@ -408,6 +446,8 @@ pub struct Engine {
     root: PathBuf,
     files: Vec<(PathBuf, String)>,
     checked: Rc<Checked>,
+    /// the values of quadra.toml's variables here (`Outside::env`): every model it checks gets them
+    env: std::collections::BTreeMap<String, String>,
     url: String,
     schema: Rc<quadra_store::schema::Schema>,
     cache: Rc<RefCell<Cache>>,
@@ -503,10 +543,15 @@ impl Engine {
                 )
             })
             .collect();
-        let checked = quadra_analysis::check(&project);
+        let checked = with_env(quadra_analysis::check(&project), &cfg.outside.env);
         let Some(model) = &checked.model else {
             return Err("the project has errors: run `quadra check`".into());
         };
+        // where events go out, every variable has its value: a missing credential would only
+        // show at the first delivery
+        if cfg.outside.deliver {
+            model.manifest.check_values(&cfg.outside.env)?;
+        }
         // the interface files are part of a version: one that does not check is not served
         let interface_errors = checked
             .diagnostics
@@ -560,6 +605,7 @@ impl Engine {
         }
         let seen = files.clone();
         let mut engine = Engine {
+            env: cfg.outside.env.clone(),
             root: cfg.root.clone(),
             files,
             checked: Rc::new(checked),
@@ -644,6 +690,45 @@ impl Engine {
             Some(s) => s.side(f),
             None => f(&mut self.conn),
         }
+    }
+
+    /// The plans of up to `limit` due events with an `outbound`, and when the next pending one
+    /// is due (`crate::deliver`).
+    fn deliveries(
+        &mut self,
+        limit: usize,
+    ) -> Result<(Vec<crate::deliver::Plan>, Option<chrono::NaiveDateTime>), String> {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return Ok((Vec::new(), None));
+        };
+        if model.outbounds.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let events: Vec<String> = model.outbounds.iter().map(|o| o.event.clone()).collect();
+        let at = now();
+        let due = quadra_store::deliveries::due(
+            &mut self.conn,
+            &events,
+            &at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            limit,
+        )?;
+        let plans: Vec<crate::deliver::Plan> = due
+            .into_iter()
+            .filter_map(|d| {
+                let o = model.outbounds.iter().find(|o| o.event == d.event)?;
+                Some(crate::deliver::plan(
+                    &model.manifest,
+                    &self.env,
+                    d,
+                    &o.connection,
+                    o.path.as_deref(),
+                ))
+            })
+            .collect();
+        let next = quadra_store::deliveries::next_at(&mut self.conn, &events)?
+            .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S").unwrap_or(at));
+        Ok((plans, next))
     }
 
     /// Where an interpreter's commits go: the tenant's sequencer, or the database directly.
@@ -850,6 +935,15 @@ impl Engine {
                 Job::Stop { .. } => unreachable!("handled by `run`"),
                 Job::NextSweep { reply } => {
                     let _ = reply.send(self.next_sweep());
+                }
+                Job::Deliveries { limit, reply } => {
+                    let _ = reply.send(self.deliveries(limit));
+                }
+                Job::Delivered { id, outcome, reply } => {
+                    let at = now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                    let _ = reply.send(
+                        self.side(move |c| quadra_store::deliveries::record(c, id, &at, &outcome)),
+                    );
                 }
                 Job::Sweep { reply } => {
                     let checked = self.checked.clone();
@@ -1399,7 +1493,7 @@ impl Engine {
         let path = self.root.join("tests/__api__.qd");
         sources.push((path.clone(), src));
         let project = Project::from_sources(&self.root, sources);
-        let checked = quadra_analysis::check(&project);
+        let checked = with_env(quadra_analysis::check(&project), &self.env);
         let errors: Vec<String> = checked
             .diagnostics
             .iter()
@@ -1864,6 +1958,7 @@ mod limit_tests {
         )
         .unwrap();
         let cfg = Config {
+            outside: Default::default(),
             root: dir.clone(),
             url,
             port: 0,

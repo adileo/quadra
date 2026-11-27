@@ -125,6 +125,7 @@ pub enum SyntaxKind {
     FIXTURE,
     TEST,
     EVENT,
+    OUTBOUND,
 
     // members
     MEMBER_LIST,

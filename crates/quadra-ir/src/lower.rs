@@ -13,6 +13,7 @@ pub fn lower(project: &Project, analysis: &Analysis) -> Model {
         patches: Vec::new(),
     };
     l.model.timezone = project.timezone.clone();
+    l.model.manifest = project.manifest.clone();
     for f in project.files() {
         let i = f.id.0 as usize;
         if l.model.sources.len() <= i {
@@ -273,6 +274,23 @@ impl<'a> Lower<'a> {
                     .map(|l| self.tuple_fields(&l))
                     .unwrap_or_default();
                 self.model.events.push(Event { name, fields, span });
+            }
+            OUTBOUND => {
+                let mut names =
+                    ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());
+                let event = names.next().unwrap_or_default();
+                let connection = names.next().unwrap_or_default();
+                let path = item
+                    .children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()));
+                self.model.outbounds.push(Outbound {
+                    event,
+                    connection,
+                    path,
+                    span,
+                });
             }
             REACTION => self.reaction(item),
             ROLE => {

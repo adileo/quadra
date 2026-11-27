@@ -5,6 +5,7 @@
 //! `migrations/` are *scripts*: they see every declaration of the project without imports.
 
 pub mod ide;
+pub mod manifest;
 mod resolve;
 
 use quadra_syntax::{Parse, TextRange};
@@ -75,6 +76,8 @@ pub struct Project {
     /// the project's time zone (`timezone` in quadra.toml, an IANA name; default `UTC`): where
     /// `today()`, `.date`, `.hour` and a date-time made from a date and a time are read
     pub timezone: String,
+    /// the variables and connections of quadra.toml (`manifest`)
+    pub manifest: manifest::Manifest,
     files: Vec<SourceFile>,
 }
 
@@ -167,6 +170,8 @@ impl Project {
     ) -> std::io::Result<Project> {
         read_edition(root).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         read_timezone(root).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        manifest::read(root)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let mut paths = Vec::new();
         collect_qd(root, &mut paths)?;
         let interfaces = root.join(INTERFACES_DIR);
@@ -246,10 +251,12 @@ impl Project {
         // read again here (it was checked by `load`): projects built from sources keep it too
         let edition = read_edition(root).unwrap_or_else(|_| DEFAULT_EDITION.to_string());
         let timezone = read_timezone(root).unwrap_or_else(|_| "UTC".to_string());
+        let manifest = manifest::read(root).unwrap_or_default();
         Project {
             root: root.to_path_buf(),
             edition,
             timezone,
+            manifest,
             files,
         }
     }

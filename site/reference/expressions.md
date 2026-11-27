@@ -44,6 +44,7 @@ A bare name is looked up in this order:
 | a constant, a function, a metric | `STANDARD_VAT`, `price_for(…)`, `revenue(…)` |
 | a currency or unit code | the `Currency` or `Uom` record: `EUR`, `kg` |
 | a role | `Admin` |
+| `env` | the variables of `quadra.toml`: `env.SHOP_NAME`, in actions, reactions and scripts only ([Variables and connections](/reference/connections#env-name)) |
 
 Names always refer to locals or fields of the current record; there is no implicit scope.
 Inside a lambda, use the parameter: `lines.where(l => l.qty > 0 pcs)`. A bare name in the

@@ -47,6 +47,7 @@ fn project(dir: &Path, code: &str) -> (Config, String) {
     )
     .unwrap();
     let cfg = Config {
+        outside: Default::default(),
         root: dir.to_path_buf(),
         url,
         port: 0,

@@ -494,3 +494,167 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+/// The value of a variable typed without showing it (a terminal), or read from what is piped in.
+fn read_value(name: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal};
+    let tty = std::io::stdin().is_terminal();
+    let stty = |arg: &str| {
+        let _ = std::process::Command::new("stty")
+            .arg(arg)
+            .stdin(std::process::Stdio::inherit())
+            .status();
+    };
+    if tty {
+        eprint!("{name}: ");
+        let _ = std::io::stderr().flush();
+        stty("-echo");
+    }
+    let mut line = String::new();
+    let r = std::io::stdin().lock().read_line(&mut line);
+    if tty {
+        stty("echo");
+        eprintln!();
+    }
+    r.map_err(|e| Failure::Message(e.to_string()))?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+}
+
+/// `env list | set <NAME> [value] | unset <NAME> | pull [--environment label] [--project p]`:
+/// the values of the variables of quadra.toml in an environment of the cloud (production unless
+/// `--environment` names a preview or a fork).
+pub fn env_cmd(args: &[String]) -> Result<()> {
+    let t = token()?;
+    let with_value = ["--project", "--environment"];
+    let which = flag(args, "--environment")
+        .map(|e| format!("?environment={e}"))
+        .unwrap_or_default();
+    let positional: Vec<&String> = {
+        let mut out = Vec::new();
+        let mut skip = false;
+        for a in args.iter().skip(1) {
+            if skip {
+                skip = false;
+            } else if with_value.contains(&a.as_str()) {
+                skip = true;
+            } else if !a.starts_with('-') {
+                out.push(a);
+            }
+        }
+        out
+    };
+    // `set` and `unset` take no folder: the project here, or `--project`
+    let only_project: Vec<String> = flag(args, "--project")
+        .map(|p| vec!["--project".to_string(), p])
+        .unwrap_or_default();
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let name = project_arg(&args[1..], &with_value)?;
+            let v = call("GET", &format!("/v1/projects/{name}/env{which}"), Some(&t), None)?
+                .map_err(refusal)?;
+            let set: Vec<&str> = v["vars"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x["name"].as_str())
+                .collect();
+            println!(
+                "{} ({}{})",
+                v["environment"].as_str().unwrap_or(""),
+                v["kind"].as_str().unwrap_or(""),
+                if v["delivers"] == true {
+                    ", delivers its events"
+                } else {
+                    ", keeps its events in the outbox"
+                }
+            );
+            for x in v["vars"].as_array().into_iter().flatten() {
+                println!(
+                    "  {:<24} set {}{}",
+                    x["name"].as_str().unwrap_or(""),
+                    x["updated_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
+                    x["updated_by"]
+                        .as_str()
+                        .map(|b| format!(" by {b}"))
+                        .unwrap_or_default()
+                );
+            }
+            // what the project here declares and the environment does not have
+            if let Ok(root) = root(&folder(&args[1..], &with_value)) {
+                if let Ok(m) = quadra_sema::manifest::read(&root) {
+                    for var in m.vars.iter().filter(|v| !set.contains(&v.name.as_str())) {
+                        println!(
+                            "  {:<24} {}",
+                            var.name,
+                            match &var.default {
+                                Some(d) => format!("not set: the default `{d}`"),
+                                None => "NOT SET (no default)".to_string(),
+                            }
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some("set") => {
+            let var = positional
+                .first()
+                .ok_or("usage: quadra cloud env set <NAME> [value] [--environment label]")?;
+            let value = match positional.get(1) {
+                Some(v) => v.to_string(),
+                None => read_value(var)?,
+            };
+            let name = project_arg(&only_project, &with_value)?;
+            let v = call(
+                "PUT",
+                &format!("/v1/projects/{name}/env/{var}{which}"),
+                Some(&t),
+                Some(&json!({ "value": value })),
+            )?
+            .map_err(refusal)?;
+            eprintln!(
+                "✓ {var} set in {}: the app takes it at its next start (now, if it was running)",
+                v["environment"].as_str().unwrap_or("")
+            );
+            Ok(())
+        }
+        Some("unset") => {
+            let var = positional
+                .first()
+                .ok_or("usage: quadra cloud env unset <NAME> [--environment label]")?;
+            let name = project_arg(&only_project, &with_value)?;
+            let v = call(
+                "DELETE",
+                &format!("/v1/projects/{name}/env/{var}{which}"),
+                Some(&t),
+                None,
+            )?
+            .map_err(refusal)?;
+            eprintln!(
+                "✓ {var} removed from {}",
+                v["environment"].as_str().unwrap_or("")
+            );
+            Ok(())
+        }
+        Some("pull") => {
+            let name = project_arg(&args[1..], &with_value)?;
+            let v = call(
+                "GET",
+                &format!("/v1/projects/{name}/env/values{which}"),
+                Some(&t),
+                None,
+            )?
+            .map_err(refusal)?;
+            eprintln!(
+                "# the values of {} (secrets included): keep this file out of the repository",
+                v["environment"].as_str().unwrap_or("")
+            );
+            for (k, val) in v["values"].as_object().into_iter().flatten() {
+                let s = val.as_str().unwrap_or("");
+                println!("{k}={}", serde_json::to_string(s).unwrap_or_default());
+            }
+            Ok(())
+        }
+        _ => Err("usage: quadra cloud env list | set <NAME> [value] | unset <NAME> | pull   [--environment label] [--project name]".into()),
+    }
+}

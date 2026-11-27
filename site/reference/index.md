@@ -18,6 +18,7 @@ need the exact syntax of something, the full list of methods, or what an error m
 | [Expressions](/reference/expressions) | Operators, `?.` and `??`, `if … else`, `when:`, `match`, lambdas, statements, every collection, text, date and amount method, the built-in functions |
 | [Rules](/reference/rules) | `check`, `warn`, `unique`, `required when`, `where`, `frozen when … except … live …`, defaults versus formulas |
 | [Flows and actions](/reference/flows-and-actions) | State machines, actions, `require`, `fail`, events, `emit` and the outbox, reactions (`on … enters`, `on … becomes`, `on … created`, `on … changes`, `before …`) |
+| [Variables and connections](/reference/connections) | `[vars]` and `[connections]` in `quadra.toml`, secrets, `env.NAME`, `outbound`: signed webhooks and emails delivered after the commit, attempts and failures |
 | [Ledgers](/reference/ledgers) | Append-only ledgers, `key` / `measure` / `attr`, `post to`, automatic reversal, per-group checks, queries |
 | [Security](/reference/security) | Roles, permission rules, row conditions, hidden fields, separation of duties |
 

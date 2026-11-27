@@ -2,5 +2,6 @@
 //! `cargo test -p quadra-server --test it [filter]`.
 
 mod api;
+mod deliver;
 mod host;
 mod signin;

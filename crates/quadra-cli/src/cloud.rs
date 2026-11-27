@@ -26,6 +26,8 @@ const USAGE: &str = "usage: quadra cloud <command>
   rollback [number] [path]   the deploy before (or #number) online again
   projects               the projects of your teams
   token create <name> | list | revoke <id> [path]   tokens for CI (QUADRA_TOKEN)
+  env list | set <NAME> [value] | unset <NAME> | pull   the values of the variables of quadra.toml
+                         (production, or --environment <label>; `set` without a value reads it hidden)
 
 Environment: QUADRA_CLOUD_API (default https://api.quadra.run), QUADRA_TOKEN (CI)";
 
@@ -42,6 +44,7 @@ pub fn main(args: &[String]) -> ExitCode {
         Some("rollback") => crate::deploy::rollback(&args[1..]),
         Some("projects") => crate::deploy::projects(&args[1..]),
         Some("token") => crate::deploy::token_cmd(&args[1..]),
+        Some("env") => crate::deploy::env_cmd(&args[1..]),
         Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;

@@ -112,6 +112,26 @@
     "declarations": {
       "patterns": [
         {
+          "match": "^\\s*(outbound)\\s+([A-Za-z_]\\w*)\\s+(via)\\s+([a-z_]\\w*)(?:\\s+(path)\\b)?",
+          "captures": {
+            "1": {
+              "name": "storage.type.quadra"
+            },
+            "2": {
+              "name": "entity.name.type.event.quadra"
+            },
+            "3": {
+              "name": "keyword.other.quadra"
+            },
+            "4": {
+              "name": "variable.other.connection.quadra"
+            },
+            "5": {
+              "name": "keyword.other.quadra"
+            }
+          }
+        },
+        {
           "match": "^\\s*(event)\\s+([A-Za-z_]\\w*)",
           "captures": {
             "1": {

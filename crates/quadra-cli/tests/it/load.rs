@@ -199,6 +199,7 @@ fn run(world: &Arc<World>, url: &str, readers: usize, writers: usize) {
     let writes = env("QUADRA_LOAD_WRITES", 0.10f64).clamp(0.0, 0.10);
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stress");
     let config = Config {
+        outside: Default::default(),
         root,
         url: url.to_string(),
         port: 0,
@@ -608,6 +609,7 @@ fn writers_at_full_speed() {
         {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stress");
             let config = Config {
+                outside: Default::default(),
                 root,
                 url: url.clone(),
                 port: 0,

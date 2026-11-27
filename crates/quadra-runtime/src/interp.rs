@@ -69,6 +69,50 @@ pub enum CommitError {
 
 pub type R<T> = Result<T, Flow>;
 
+impl<'m> Interp<'m> {
+    /// `env.NAME`: the value of a variable where the model runs (its default when the
+    /// environment has none), as its declared type.
+    fn env_value(&self, name: &str) -> R<V> {
+        use quadra_sema::manifest::VarType;
+        let Some(var) = self.m.manifest.var(name) else {
+            return fail(format!("quadra.toml declares no variable {name}"));
+        };
+        let Some(raw) = self.m.manifest.value(&self.m.env, name) else {
+            return fail(format!(
+                "the variable {name} is not set where the app runs (quadra.toml, [vars])"
+            ));
+        };
+        let raw = raw.trim();
+        let bad = || {
+            fail(format!(
+                "the value of {name} is not {} {}",
+                if var.ty == VarType::Integer {
+                    "an"
+                } else {
+                    "a"
+                },
+                var.ty.name()
+            ))
+        };
+        Ok(match var.ty {
+            VarType::Text => text(raw),
+            VarType::Integer => match raw.parse() {
+                Ok(i) => V::Int(i),
+                Err(_) => return bad(),
+            },
+            VarType::Decimal => match raw.parse() {
+                Ok(d) => V::Dec(d),
+                Err(_) => return bad(),
+            },
+            VarType::Boolean => match raw {
+                "true" => V::Bool(true),
+                "false" => V::Bool(false),
+                _ => return bad(),
+            },
+        })
+    }
+}
+
 fn fail<T>(msg: impl Into<String>) -> R<T> {
     Err(Flow::Fail(msg.into()))
 }
@@ -2142,6 +2186,13 @@ impl<'m> Interp<'m> {
             }
             ExprKind::Name(n) => self.name(n, ctx),
             ExprKind::SelfRef => Ok(ctx.this.clone().unwrap_or(V::None)),
+            ExprKind::Field { base, name, .. }
+                if matches!(&base.kind, ExprKind::Name(b) if b == "env")
+                    && ctx.local("env").is_none()
+                    && self.m.manifest.var(name).is_some() =>
+            {
+                self.env_value(name)
+            }
             ExprKind::Field {
                 base,
                 name,

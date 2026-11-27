@@ -72,7 +72,9 @@ The project on your machine, for development: the web app and the code editor on
 - **At start**: a new database is created and loaded with the `demo` fixture (or `--fixture
   name`); an existing one gets what changed while the server was off (migrations, new
   defaults, checks); a user `dev` (or `--user login`) is created if there is none, with the
-  `Admin` role if the model has one. Code that does not compile, or data that does not fit it,
+  `Admin` role if the model has one. The variables of `quadra.toml` are read from the
+  environment and `.env`; with one missing it says so and the events with an `outbound` wait
+  in the outbox ([Variables and connections](/reference/connections)). Code that does not compile, or data that does not fit it,
   is printed and `quadra dev` waits for a fix.
 - **On every save** (in your editor or in the browser): the project is checked and applied to
   the database in one transaction — new tables and fields, defaults on existing rows, pending
@@ -444,6 +446,11 @@ quadra serve . --web web/dist --editors admin,marco
 Serves the [HTTP API](/reference/http-api) of one project and its database on
 `127.0.0.1`, and optionally the web client.
 
+The values of the variables of `quadra.toml` come from the process's environment, then from a
+`.env` file at the project root; a variable without a default and without a value stops it
+from starting. The events with an [`outbound`](/reference/connections#outbound) are delivered
+after their commit ([Variables and connections](/reference/connections)).
+
 | Flag | Default | Effect |
 |---|---|---|
 | `--url URL` | see above | the database |
@@ -508,27 +515,31 @@ Only a SHA-256 hash of the token is stored in the database.
 ## Events: `quadra outbox`
 
 The events emitted with [`emit`](/reference/flows-and-actions#the-outbox) are written to the
-database's outbox with the commit of their transaction. Quadra does not deliver them: an
-integration reads them, hands them on and marks them delivered.
+database's outbox with the commit of their transaction. Those with an
+[`outbound`](/reference/connections#outbound) are delivered by the server (`quadra serve`,
+`quadra dev`); the others wait for an integration that reads them, hands them on and marks
+them delivered.
 
 ```bash
 quadra outbox list --pending
 quadra outbox list --pending --json
 quadra outbox delivered 1 2
+quadra outbox retry 7
 ```
 
 ```text
 #1     tx 2      2026-11-22T09:00:00  SendEmail  {"document":{"ent":"SalesOrder","ref":22},"template":"quotation","to":"anna@example.com"}  (pending)
-{"created_at":"2026-11-22T09:00:00","delivered_at":null,"event":"SendEmail","fields":{…},"id":1,"tx":2}
+{"attempts":0,"created_at":"2026-11-22T09:00:00","delivered_at":null,"error":null,"event":"SendEmail","failed_at":null,"fields":{…},"id":1,"next_at":null,"tx":2}
 ✓ 2 event(s) marked delivered
 ```
 
 | Command / flag | Effect |
 |---|---|
-| `outbox list` | every event, oldest first, with `pending` or `delivered <time>` |
-| `--pending` | only the events not delivered yet |
-| `--json` | one JSON object per line: `id`, `tx`, `event`, `fields`, `created_at`, `delivered_at` |
+| `outbox list` | every event, oldest first, with `pending` (and its attempts, the time of the next and the last error), `delivered <time>` or `failed <time>: <error>` |
+| `--pending` | only the events neither delivered nor failed |
+| `--json` | one JSON object per line: `id`, `tx`, `event`, `fields`, `created_at`, `delivered_at`, `attempts`, `next_at`, `error`, `failed_at` |
 | `outbox delivered <id…>` | marks the events delivered (those already delivered are left as they are): `✓ N event(s) marked delivered` |
+| `outbox retry <id…>` | makes events that failed for good pending again: the server tries them at its next round |
 
 Delivery is at least once: if the integration stops after handing an event on and before
 marking it, it sends it again, so receivers should ignore an `id` they have already seen.

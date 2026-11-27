@@ -45,6 +45,7 @@ pub(crate) fn at_item(p: &Parser) -> bool {
                 | "change" | "fixture" => n1 == IDENT,
                 "test" => n1 == STRING,
                 "event" => n1 == IDENT && p.nth(2) == L_PAREN,
+                "outbound" => n1 == IDENT && p.nth(2) == IDENT,
                 "seed" => n1 == COLON,
                 "on" | "before" => n1 == IDENT && matches!(p.nth(2), DOT | IDENT),
                 "deny" | "allow" => n1 == IDENT,
@@ -90,6 +91,7 @@ pub(crate) fn item(p: &mut Parser) {
             "fixture" => fixture(p),
             "test" => test(p),
             "event" => event(p),
+            "outbound" => outbound(p),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -430,6 +432,27 @@ fn event(p: &mut Parser) {
     types::field_list(p);
     end_line(p);
     m.complete(p, EVENT);
+}
+
+/// `outbound OrderShipped via shop path "/hooks/orders"`, `outbound SendEmail via mail`
+fn outbound(p: &mut Parser) {
+    let m = p.start();
+    p.bump_ctx();
+    name(p);
+    if p.at_ctx("via") {
+        p.bump_ctx();
+        name(p);
+    } else {
+        p.error(
+            "expected `via` and the connection of quadra.toml: `outbound OrderShipped via shop`",
+        );
+    }
+    if p.at_ctx("path") {
+        p.bump_ctx();
+        p.expect(STRING);
+    }
+    end_line(p);
+    m.complete(p, OUTBOUND);
 }
 
 fn fixture(p: &mut Parser) {

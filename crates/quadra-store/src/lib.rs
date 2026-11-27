@@ -9,6 +9,7 @@ pub mod bulk;
 pub mod codec;
 pub mod conn;
 pub mod db;
+pub mod deliveries;
 pub mod deploy;
 pub mod hints;
 pub mod schema;

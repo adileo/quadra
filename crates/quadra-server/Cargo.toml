@@ -24,6 +24,12 @@ serde_json = "1"
 chrono = "0.4"
 rust_decimal = "1"
 rust_xlsxwriter = { version = "0.104.0", features = ["chrono"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
 
 [dev-dependencies]
 calamine = "0.38.0"

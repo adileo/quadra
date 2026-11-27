@@ -265,12 +265,15 @@ impl<'m> Checker<'m> {
             self.check_fn(f);
         }
         for c in &m.consts {
+            self.context = format!("const {}", c.name);
             let t = self.infer(&c.value);
             if let Some(ty) = &c.ty {
                 let d = self.decl_ty(ty, &["self".into()]);
                 self.assign(&d, &t, c.value.span, "constant");
             }
         }
+        self.context = String::new();
+        self.check_outbounds();
         for r in &m.reactions {
             self.entity = None;
             self.context = match &r.trigger {
@@ -1481,6 +1484,13 @@ impl<'m> Checker<'m> {
         if let Some(l) = self.local(n) {
             return l.ty.clone();
         }
+        if n == "env" && self.is_env(n) {
+            self.error(
+                span,
+                "`env` is read one variable at a time: `env.NAME`, a variable of quadra.toml ([vars])",
+            );
+            return T::Unknown;
+        }
         match n {
             "me" => return T::Ent("User".into()),
             "current" => return T::Current,
@@ -1711,7 +1721,114 @@ impl<'m> Checker<'m> {
         map_units(t, &re)
     }
 
+    /// Whether the name `env` is the environment here (not a local or a field called `env`).
+    fn is_env(&self, n: &str) -> bool {
+        self.local(n).is_none()
+            && self
+                .entity
+                .is_none_or(|en| self.m.find_field(en, n).is_none())
+    }
+
+    /// `env.NAME`: a variable of quadra.toml, read where its value may differ from one place
+    /// the app runs to another (actions, reactions, scripts), never where a value must be the
+    /// same every time (formulas, checks, functions, constants), and never if it is a secret.
+    fn env_var(&mut self, name: &str, span: Span) -> T {
+        let Some(v) = self.m.manifest.var(name) else {
+            self.error(
+                span,
+                format!("`env.{name}`: quadra.toml declares no variable {name} ([vars])"),
+            );
+            return T::Unknown;
+        };
+        if v.secret {
+            self.error(span, format!("{name} is a secret: the code cannot read it (a connection of quadra.toml uses it for its credentials)"));
+            return T::Unknown;
+        }
+        if self.in_formula || self.context.starts_with("fn ") || self.context.starts_with("const ")
+        {
+            self.error(span, format!("`env.{name}` is not allowed here: its value depends on where the app runs, and formulas, checks, functions and constants must give the same result everywhere (read it in an action or a reaction)"));
+        }
+        match v.ty {
+            quadra_sema::manifest::VarType::Text => T::text(),
+            quadra_sema::manifest::VarType::Integer => T::Num(Num::Int),
+            quadra_sema::manifest::VarType::Decimal => T::Num(Num::Decimal),
+            quadra_sema::manifest::VarType::Boolean => T::Bool,
+        }
+    }
+
+    /// `outbound Event via connection`: the event and the connection exist, one outbound per
+    /// event, and an email event has what an email needs.
+    fn check_outbounds(&mut self) {
+        let m = self.m;
+        let mut seen: HashSet<&str> = HashSet::new();
+        for o in &m.outbounds {
+            let Some(ev) = m.events.iter().find(|e| e.name == o.event) else {
+                self.error(
+                    o.span,
+                    format!(
+                        "no event `{}` (declare it with `event {}(…)`)",
+                        o.event, o.event
+                    ),
+                );
+                continue;
+            };
+            if !seen.insert(o.event.as_str()) {
+                self.error(
+                    o.span,
+                    format!(
+                        "`{}` already has an outbound: an event goes out by one connection",
+                        o.event
+                    ),
+                );
+            }
+            let Some(c) = m.manifest.connection(&o.connection) else {
+                self.error(
+                    o.span,
+                    format!(
+                        "no connection `{}` in quadra.toml ([connections.{}])",
+                        o.connection, o.connection
+                    ),
+                );
+                continue;
+            };
+            match &c.kind {
+                quadra_sema::manifest::ConnectionKind::Http { .. } => {
+                    if let Some(p) = &o.path {
+                        if !p.starts_with('/')
+                            || p.contains("..")
+                            || p.contains("://")
+                            || p.chars().any(|c| c.is_whitespace())
+                        {
+                            self.error(o.span, format!("the path `{p}` is a path of the connection's url: from `/`, no spaces, no `..`"));
+                        }
+                    }
+                }
+                quadra_sema::manifest::ConnectionKind::Smtp { .. } => {
+                    if o.path.is_some() {
+                        self.error(
+                            o.span,
+                            "an email has no path: `outbound SendEmail via mail`",
+                        );
+                    }
+                    let text = |t: &Ty| matches!(t, Ty::Path { segments, .. } if segments.len() == 1 && ["Text", "Email"].contains(&segments[0].as_str()));
+                    for need in ["to", "subject", "body"] {
+                        match ev.fields.iter().find(|(n, _)| n == need) {
+                            None => self.error(o.span, format!("an email event has `to`, `subject` and `body`: `{}` has no `{need}`", ev.name)),
+                            Some((_, t)) if !text(t) => self.error(o.span, format!("`{}.{need}` is text (Text or Email) to go in an email", ev.name)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn field_access(&mut self, base: &Expr, name: &str, optional: bool, span: Span) -> T {
+        if let ExprKind::Name(b) = &base.kind {
+            if b == "env" && self.is_env(b) {
+                return self.env_var(name, span);
+            }
+        }
         let bt = self.infer(base);
         let bpath = self
             .path(base)

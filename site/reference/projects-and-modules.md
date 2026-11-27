@@ -47,6 +47,8 @@ url = "sqlite:data/shop.db"
 | `[project] name` | The name of the project. The tools do not read it yet: the file's presence is what marks the root. |
 | `[project] edition` | The edition of the language the project is written in. Today there is one, `2026`, also the default when the key is missing. An edition this version of Quadra does not know stops every command with an error, rather than reading the code differently. |
 | `[database] url` | The database of the `quadra db`, `quadra change`, `quadra token` and `quadra serve` commands, when `--url` is not given. A relative `sqlite:` path is resolved from the project root. |
+| `[vars]` | The variables whose values depend on where the app runs, some of them secret: [Variables and connections](/reference/connections#variables). |
+| `[connections.<name>]` | The systems the app sends to (HTTP, SMTP): [Variables and connections](/reference/connections#connections). |
 
 When neither `--url` nor `[database] url` is given, the database is
 `sqlite:<root>/.quadra/data.db`. Database URLs are described in [Storage](/reference/storage#database-urls).

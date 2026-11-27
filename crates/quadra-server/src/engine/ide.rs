@@ -99,6 +99,7 @@ const TOP_KEYWORDS: &[&str] = &[
     "extend",
     "ledger",
     "event",
+    "outbound",
     "fn",
     "const",
     "role",
@@ -470,34 +471,48 @@ impl Engine {
                 start = i;
             }
             let chain = recv_text[start..].trim_end_matches('?');
-            match self.chain_kind(
-                types,
-                owner.as_deref(),
-                &before[..line_start + start],
-                chain,
-                0,
-            ) {
-                Some(Kind::Ent(e)) => fields_of(&e, &mut items),
-                Some(Kind::Coll(e)) => {
-                    items.extend(
-                        COLL.iter()
+            // `env.`: the variables of quadra.toml the code may read (not the secrets)
+            let manifest = (chain == "env")
+                .then(|| quadra_sema::manifest::read(&self.root).ok())
+                .flatten();
+            if let Some(m) = manifest {
+                for v in m.vars.iter().filter(|v| !v.secret) {
+                    let detail = match &v.description {
+                        Some(d) => format!("{} · {d}", v.ty.name()),
+                        None => v.ty.name().to_string(),
+                    };
+                    items.push((v.name.clone(), "variable", detail));
+                }
+            } else {
+                match self.chain_kind(
+                    types,
+                    owner.as_deref(),
+                    &before[..line_start + start],
+                    chain,
+                    0,
+                ) {
+                    Some(Kind::Ent(e)) => fields_of(&e, &mut items),
+                    Some(Kind::Coll(e)) => {
+                        items.extend(
+                            COLL.iter()
+                                .map(|(n, d)| (n.to_string(), "method", d.to_string())),
+                        );
+                        // a field of the elements: their values together
+                        fields_of(&e, &mut items);
+                    }
+                    Some(Kind::Static(e)) if e == "current" => {
+                        items.push(("user".into(), "field", "User".into()));
+                        items.push(("company".into(), "field", "Company".into()));
+                    }
+                    Some(Kind::Static(_)) => items.extend(
+                        STATIC
+                            .iter()
                             .map(|(n, d)| (n.to_string(), "method", d.to_string())),
-                    );
-                    // a field of the elements: their values together
-                    fields_of(&e, &mut items);
-                }
-                Some(Kind::Static(e)) if e == "current" => {
-                    items.push(("user".into(), "field", "User".into()));
-                    items.push(("company".into(), "field", "Company".into()));
-                }
-                Some(Kind::Static(_)) => items.extend(
-                    STATIC
-                        .iter()
-                        .map(|(n, d)| (n.to_string(), "method", d.to_string())),
-                ),
-                Some(Kind::Value(t)) => {
-                    let list: &[(&str, &str)] =
-                        if t.starts_with("Text") || t.starts_with("Code") || t.starts_with("Email")
+                    ),
+                    Some(Kind::Value(t)) => {
+                        let list: &[(&str, &str)] = if t.starts_with("Text")
+                            || t.starts_with("Code")
+                            || t.starts_with("Email")
                         {
                             TEXT
                         } else if t.starts_with("Date") {
@@ -515,12 +530,13 @@ impl Engine {
                         } else {
                             &[]
                         };
-                    items.extend(
-                        list.iter()
-                            .map(|(n, d)| (n.to_string(), "method", d.to_string())),
-                    );
+                        items.extend(
+                            list.iter()
+                                .map(|(n, d)| (n.to_string(), "method", d.to_string())),
+                        );
+                    }
+                    None => {}
                 }
-                None => {}
             }
         } else if rest.trim().is_empty() && owner.is_none() {
             items.extend(

@@ -13,9 +13,10 @@
 
 mod engine;
 
+pub mod deliver;
 pub use engine::{
     app_params, bind_for, open_requests, unhex, AppRequest, Config, Engines, Limits, Local,
-    ENGINE_STACK,
+    Outside, ENGINE_STACK,
 };
 use engine::{Engine, Job, Reply, Req};
 
@@ -548,6 +549,15 @@ struct App {
     used: Mutex<HashMap<String, Usage>>,
     /// clients told apart by `X-Forwarded-For`
     forwarded_for: bool,
+    /// how the events with an `outbound` go out (`crate::deliver`)
+    egress: Arc<Egress>,
+}
+
+/// The way out of a host's deliveries: one HTTP client for all its tenants, and whether only
+/// public addresses may be reached.
+struct Egress {
+    client: reqwest::Client,
+    public_only: bool,
 }
 
 type Shared = Arc<App>;
@@ -669,7 +679,7 @@ impl App {
                 Some(_) => t.halt(),
             }
         }
-        let t = start(spec, self.durability.clone());
+        let t = start(spec, self.durability.clone(), self.egress.clone());
         running.insert(t.id.clone(), t.clone());
         Ok(t)
     }
@@ -1703,7 +1713,11 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
 
 /// A tenant's engine on a thread of its own, and its background tasks: live events from new
 /// commits, the periodic sweep, and with `watch` the files of the project.
-fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenant> {
+fn start(
+    spec: TenantSpec,
+    durability: Option<Arc<dyn Durability>>,
+    egress: Arc<Egress>,
+) -> Arc<Tenant> {
     use std::sync::atomic::AtomicBool;
     let (events, _) = broadcast::channel::<J>(256);
     let cfg = Config {
@@ -1864,7 +1878,104 @@ fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenan
             }
         });
     }
+    if cfg.outside.deliver {
+        tokio::spawn(deliveries(t.clone(), egress));
+    }
     t
+}
+
+/// A tenant's deliveries (`crate::deliver`): the due events of the outbox sent, a few at a time,
+/// and their outcomes written; then a wait until the next one is due or a commit may have
+/// brought new ones (looked at every second, at most a minute apart).
+async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
+    const BATCH: usize = 16;
+    const AT_ONCE: usize = 4;
+    let mut seen = None;
+    loop {
+        let (plans, next) = match t
+            .ask(|reply| Job::Deliveries {
+                limit: BATCH,
+                reply,
+            })
+            .await
+        {
+            Some(Ok(x)) => x,
+            Some(Err(e)) => {
+                eprintln!("{}: deliveries: {e}", t.id);
+                (Vec::new(), None)
+            }
+            None => (Vec::new(), None),
+        };
+        let busy = !plans.is_empty();
+        let mut set = tokio::task::JoinSet::new();
+        let mut plans = plans.into_iter();
+        loop {
+            while set.len() < AT_ONCE {
+                let Some(p) = plans.next() else { break };
+                let e = egress.clone();
+                set.spawn(async move {
+                    let outcome = deliver::run(&p, &e.client, e.public_only).await;
+                    (p, outcome)
+                });
+            }
+            let Some(done) = set.join_next().await else {
+                break;
+            };
+            let Ok((p, outcome)) = done else { continue };
+            if let quadra_store::deliveries::Outcome::Retry { error, .. }
+            | quadra_store::deliveries::Outcome::Failed { error } = &outcome
+            {
+                eprintln!("{}: {} #{}: {error}", t.id, p.event, p.id);
+            }
+            match t
+                .ask(|reply| Job::Delivered {
+                    id: p.id,
+                    outcome,
+                    reply,
+                })
+                .await
+            {
+                Some(Ok(())) => {}
+                Some(Err(e)) => eprintln!(
+                    "{}: {} #{}: the outcome was not written: {e}",
+                    t.id, p.event, p.id
+                ),
+                None => return,
+            }
+        }
+        if busy {
+            if t.stopped() {
+                return;
+            }
+            continue;
+        }
+        let until = next.map(|at| {
+            (at - chrono::Utc::now().naive_utc())
+                .to_std()
+                .unwrap_or_default()
+        });
+        let deadline = Instant::now()
+            + until
+                .unwrap_or(Duration::from_secs(60))
+                .min(Duration::from_secs(60));
+        loop {
+            if !t
+                .pause(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_secs(1)),
+                )
+                .await
+            {
+                return;
+            }
+            let w = t.written();
+            if Instant::now() >= deadline || (w != seen && w.is_some()) {
+                seen = w;
+                break;
+            }
+        }
+    }
 }
 
 /// What a host serves, besides its tenants.
@@ -1885,6 +1996,9 @@ pub struct HostOptions {
     /// what clients send (the cloud's router). Failed sign-ins are then counted per client, so
     /// that one client trying wrong credentials does not lock out everybody else.
     pub forwarded_for: bool,
+    /// the events with an `outbound` reach only public addresses: never the host's own
+    /// network, loopback or a cloud's metadata (Quadra Cloud)
+    pub public_egress_only: bool,
 }
 
 /// A running tenant, as its host sees it.
@@ -1921,6 +2035,10 @@ impl Host {
             durability: options.durability.clone(),
             used: Mutex::new(HashMap::new()),
             forwarded_for: options.forwarded_for,
+            egress: Arc::new(Egress {
+                client: deliver::http_client(options.public_egress_only),
+                public_only: options.public_egress_only,
+            }),
         });
         Host {
             app,
@@ -2126,14 +2244,28 @@ impl Host {
                 (*t.last_sweep.lock().unwrap() + every).saturating_duration_since(Instant::now())
             })
         };
-        match t.ask(|reply| Job::NextSweep { reply }).await {
+        let until = |at: chrono::NaiveDateTime| {
+            (at - chrono::Utc::now().naive_utc())
+                .to_std()
+                .unwrap_or_default()
+        };
+        let sweep = match t.ask(|reply| Job::NextSweep { reply }).await {
             Some(Ok(None)) => None,
-            Some(Ok(Some(at))) => Some(
-                (at - chrono::Utc::now().naive_utc())
-                    .to_std()
-                    .unwrap_or_default(),
-            ),
+            Some(Ok(Some(at))) => Some(until(at)),
             Some(Err(())) | None => periodic(),
+        };
+        // an event waiting to be tried again wakes it too
+        let delivery = if t.config.outside.deliver {
+            match t.ask(|reply| Job::Deliveries { limit: 0, reply }).await {
+                Some(Ok((_, next))) => next.map(until),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match (sweep, delivery) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
@@ -2266,6 +2398,7 @@ pub fn serve_with(cfg: Config, log_dir: Option<std::path::PathBuf>) -> Result<()
             requests_per_second: None,
             durability,
             forwarded_for: false,
+            public_egress_only: false,
         };
         let host = Host::new(
             options,

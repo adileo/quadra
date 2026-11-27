@@ -71,7 +71,9 @@ pub fn run_tests_with(
     {
         return Err(checked.diagnostics);
     }
-    let model = checked.model.expect("model");
+    let mut model = checked.model.expect("model");
+    // the tests do not read the environment: the variables' `test` values, else defaults
+    model.env = model.manifest.test_values();
     let report = checked.report;
     let mut results = Vec::new();
     for (index, test) in model.tests.iter().enumerate() {

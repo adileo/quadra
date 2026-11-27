@@ -739,7 +739,7 @@ impl Engine {
                 )
             })
             .collect();
-        self.checked = Rc::new(checked);
+        self.checked = Rc::new(super::with_env(checked, &self.env));
         self.overlays.clear();
         self.overlay_order.clear();
         self.dev_generation += 1;

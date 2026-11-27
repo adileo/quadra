@@ -59,6 +59,7 @@ fn project(dir: &Path) -> Config {
     )
     .unwrap();
     Config {
+        outside: Default::default(),
         root: dir.to_path_buf(),
         url,
         port: 0,

@@ -166,7 +166,8 @@ action send:
 ```
 
 `event Name(field: Type, …)` declares a typed message; `emit Name(field=value, …)` queues
-one. Arguments are named; an unknown one is an error: `` event `SendEmail` has no field `subject` ``.
+one, its content computed there, in the transaction. Where it goes is a separate
+declaration, [`outbound`](/reference/connections#how-an-event-goes-out). Arguments are named; an unknown one is an error: `` event `SendEmail` has no field `subject` ``.
 
 ### The outbox
 
@@ -183,10 +184,18 @@ committed.
 | `event` | the event's name (`SendEmail`) |
 | `fields` | its fields as a JSON object, values encoded as in the history (`{"to": "anna@example.com", "document": {"ent": "SalesOrder", "ref": 71}}`) |
 | `created_at` | the clock of the transaction |
-| `delivered`, `delivered_at` | `false` / empty until an integration marks it delivered |
+| `delivered`, `delivered_at` | `false` / empty until it is delivered |
+| `attempts`, `next_at`, `error`, `failed_at` | the delivery attempts of an event with an `outbound`, the time of the next, the last error, and when it failed for good |
 
-Quadra does not send the events itself: delivery (an email service, a webhook, a message
-broker) is the job of an integration outside Quadra, which reads the pending events, hands
+An event with an [`outbound`](/reference/connections#outbound) is delivered by the server
+through a connection of `quadra.toml`: a signed webhook or an email, tried again when the
+receiver is unavailable:
+
+```quadra
+outbound SendEmail via mail
+```
+
+The others are left to an integration outside Quadra, which reads the pending events, hands
 them on and marks them delivered:
 
 ```bash

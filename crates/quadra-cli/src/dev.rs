@@ -362,7 +362,31 @@ pub fn dev(args: &[String]) -> ExitCode {
         "  \x1b[2mwatching {}: save a file (here or in the browser) and the app updates\x1b[0m\n",
         root.display()
     );
+    // the variables of quadra.toml, from the environment or `.env`; with one missing the app
+    // runs, and its events wait in the outbox
+    let outside = match quadra_sema::manifest::read(&root) {
+        Ok(m) => {
+            let env = quadra_sema::manifest::values_from_env(&root, &m);
+            let deliver = match m.check_values(&env) {
+                Ok(()) => true,
+                Err(e) => {
+                    if m.connections.is_empty() {
+                        eprintln!(
+                            "  \x1b[33m{e}\x1b[0m (in the environment or {})\n",
+                            root.join(".env").display()
+                        );
+                    } else {
+                        eprintln!("  \x1b[33m{e}\x1b[0m (in the environment or {}): the events wait in the outbox\n", root.join(".env").display());
+                    }
+                    false
+                }
+            };
+            quadra_server::Outside { env, deliver }
+        }
+        Err(_) => Default::default(),
+    };
     let cfg = quadra_server::Config {
+        outside,
         url,
         port,
         dev_login: true,

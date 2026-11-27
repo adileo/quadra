@@ -13,7 +13,7 @@
 //!     quadra change list | preview <name> | apply <name> | revert <name> [--approved-by login]
 //!     quadra serve [path] [--url URL] [--port 8080] [--dev-login] [--secure-cookies] …
 //!     quadra token create <login> … | revoke <name>
-//!     quadra outbox list [--pending] [--json] | delivered <id…> [path] [--url URL]
+//!     quadra outbox list [--pending] [--json] | delivered <id…> | retry <id…> [path] [--url URL]
 //!     quadra bench gen|run …           the stress benchmark of examples/stress
 //!     quadra parse <file>              print the syntax tree of a file
 //!     quadra lsp                       start the language server on stdin/stdout
@@ -118,7 +118,7 @@ fn usage() -> ExitCode {
          quadra change list | preview <name> | apply <name> [--approved-by login] | revert <name> [--approved-by login]   [path] [--url URL]\n  \
          quadra serve [path] [--url URL] [--port 8080] [--web dir] [--dev-login] [--secure-cookies] [--cache-mb 256] [--prewarm-days N] [--sweep-every secs] [--editors login,…] [--job-timeout 120] [--max-rows N] [--max-list N] [--max-queue 1000] [--readers 2] [--writers 1]\n  \
          quadra token create <login> [--name n] [--read-only] [--days 90] | revoke <name>   [path] [--url URL]\n  \
-         quadra outbox list [--pending] [--json] | delivered <id…>   [path] [--url URL]   events emitted by `emit`\n  \
+         quadra outbox list [--pending] [--json] | delivered <id…> | retry <id…>   [path] [--url URL]   events emitted by `emit`\n  \
          quadra bench gen --scale tiny|small|medium|large --out DIR [--seed N]   stress data as CSV\n  \
          quadra bench run [path] --url URL --scale … [--json file] [--timeout 60] [--reps 5] [--only a,b] [--skip a,b]   the stress benchmark\n  \
          quadra parse <file>                  print the syntax tree of a file\n  \
@@ -687,7 +687,7 @@ fn outbox(args: &[String]) -> ExitCode {
     };
     let mut rest = args[1..].to_vec();
     let mut ids: Vec<u64> = Vec::new();
-    if cmd == "delivered" {
+    if cmd == "delivered" || cmd == "retry" {
         // the ids (`12` or `#12`) are the positional arguments before the path
         while let (Some(word), others) = take_positional(&rest, VALUE_FLAGS) {
             let Ok(id) = word.trim_start_matches('#').parse::<u64>() else {
@@ -697,7 +697,7 @@ fn outbox(args: &[String]) -> ExitCode {
             rest = others;
         }
         if ids.is_empty() {
-            eprintln!("usage: quadra outbox delivered <id…> [path] [--url URL]");
+            eprintln!("usage: quadra outbox {cmd} <id…> [path] [--url URL]");
             return ExitCode::from(2);
         }
     }
@@ -718,6 +718,8 @@ fn outbox(args: &[String]) -> ExitCode {
                     let line = serde_json::json!({
                         "id": e.id, "tx": e.tx, "event": e.event, "fields": e.fields,
                         "created_at": e.created_at, "delivered_at": e.delivered_at,
+                        "attempts": e.attempts, "next_at": e.next_at, "error": e.error,
+                        "failed_at": e.failed_at,
                     });
                     println!("{line}");
                 }
@@ -734,9 +736,18 @@ fn outbox(args: &[String]) -> ExitCode {
                 );
             }
             for e in &events {
-                let state = match &e.delivered_at {
-                    Some(at) => format!("delivered {at}"),
-                    None => "pending".into(),
+                let state = match (&e.delivered_at, &e.failed_at) {
+                    (Some(at), _) => format!("delivered {at}"),
+                    (None, Some(at)) => {
+                        format!("failed {at}: {}", e.error.as_deref().unwrap_or(""))
+                    }
+                    (None, None) if e.attempts > 0 => format!(
+                        "pending, {} attempt(s), next {}: {}",
+                        e.attempts,
+                        e.next_at.as_deref().unwrap_or("now"),
+                        e.error.as_deref().unwrap_or("")
+                    ),
+                    (None, None) => "pending".into(),
                 };
                 println!(
                     "#{:<5} tx {:<6} {}  {}  {}  ({state})",
@@ -750,7 +761,14 @@ fn outbox(args: &[String]) -> ExitCode {
             println!("✓ {n} event(s) marked delivered");
             Ok(())
         }
-        _ => Err(format!("unknown outbox command `{cmd}` (list, delivered)")),
+        "retry" => {
+            let n = ops::outbox_retry(&url, model, report, &ids)?;
+            println!("✓ {n} failed event(s) pending again: tried at the next round");
+            Ok(())
+        }
+        _ => Err(format!(
+            "unknown outbox command `{cmd}` (list, delivered, retry)"
+        )),
     })())
 }
 
@@ -799,7 +817,25 @@ fn serve(args: &[String]) -> ExitCode {
     };
     let url = database_url(&root, args);
     let num = |f: &str, d: u64| flag(args, f).and_then(|v| v.parse().ok()).unwrap_or(d);
+    // the variables of quadra.toml, from the environment or `.env`: all of them, or it does
+    // not start (a missing credential would only show at the first delivery)
+    let manifest = match quadra_sema::manifest::read(&root) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let env = quadra_sema::manifest::values_from_env(&root, &manifest);
+    if let Err(e) = manifest.check_values(&env) {
+        eprintln!(
+            "error: {e}; set them in the environment or in {}",
+            root.join(".env").display()
+        );
+        return ExitCode::FAILURE;
+    }
     let cfg = quadra_server::Config {
+        outside: quadra_server::Outside { env, deliver: true },
         url,
         port: num("--port", 8080) as u16,
         dev_login: args.iter().any(|a| a == "--dev-login"),

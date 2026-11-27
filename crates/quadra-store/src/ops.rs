@@ -102,6 +102,20 @@ pub fn outbox_delivered(
     db.mark_delivered(ids, time)
 }
 
+/// Events that failed for good made pending again (`quadra outbox retry`); returns how many.
+pub fn outbox_retry(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    ids: &[u64],
+) -> Result<usize, String> {
+    let mut db = Database::open(url, model, report)?;
+    if !db.status()?.initialized {
+        return Err("the database is not initialized (run `quadra db init`)".into());
+    }
+    crate::deliveries::retry(&mut db.conn, ids)
+}
+
 /// Hash chain and tables against the history, a page at a time (`crate::verify`). Returns
 /// the problems and the record count.
 pub fn verify(

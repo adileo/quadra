@@ -32,6 +32,7 @@ impl Local {
     /// a record cache of `cache_mb` megabytes as `quadra serve` has.
     pub fn open(root: &std::path::Path, url: &str, cache_mb: usize) -> Result<Local, String> {
         let cfg = Config {
+            outside: Default::default(),
             root: root.to_path_buf(),
             url: url.to_string(),
             port: 0,
@@ -54,6 +55,7 @@ impl Local {
     /// The same as `quadra dev` serves it: the apps of interface files are written back.
     pub fn open_dev(root: &std::path::Path, url: &str, cache_mb: usize) -> Result<Local, String> {
         let cfg = Config {
+            outside: Default::default(),
             root: root.to_path_buf(),
             url: url.to_string(),
             port: 0,
