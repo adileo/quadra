@@ -1200,3 +1200,78 @@ fn a_signed_message_comes_in_once_and_a_bad_one_never_touches_the_data() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const ANSWERING: &str = "entity Product:\n    sku: Text\n    price: Decimal\n\nentity Sale:\n    uuid: Text\n    sku: Text\n\nrecord PriceQuery from json:\n    sku: Text\n\nrecord PosPrice from json:\n    sku: Text\n    price: Decimal\n\nrecord PosSale from json:\n    uuid: Text\n    sku: Text\n\nrecord PosAck from json:\n    sales: Int\n\nendpoint GET \"/price\" via hooks as q: PriceQuery -> PosPrice:\n    let p = Product.where(x => x.sku == q.sku).first() ?? fail \"unknown sku\"\n    PosPrice(sku=p.sku, price=p.price)\n\nendpoint POST \"/sales\" via hooks as s: PosSale -> PosAck:\n    key s.uuid\n    let sale = Sale(uuid=s.uuid, sku=s.sku)\n    PosAck(sales=Sale.where(x => x.sku == s.sku).count())\n";
+
+fn pos(port: u16, method: &str, path: &str, body: &str) -> (u16, J) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    s.write_all(format!("{method} {path} HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\nAuthorization: Bearer s3cret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    let (head, rest) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (status, serde_json::from_str(rest).unwrap_or(J::Null))
+}
+
+#[test]
+fn an_endpoint_answers_at_once_and_the_same_key_gets_the_same_answer() {
+    let dir = temp("endpoint");
+    let (cfg, token) = project_full(
+        &dir,
+        9,
+        ANSWERING,
+        "inbound_signature = \"token\"\ninbound_secret = { var = \"HOOK_SECRET\" }\n",
+    );
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/tx",
+        Some(
+            json!({ "ops": [{ "op": "create", "entity": "Product", "values": { "sku": "A-1", "price": "9.90" } }] }),
+        ),
+    );
+    assert_eq!(s, 200, "{v}");
+    // a GET reads
+    let (s, v) = pos(port, "GET", "/in/hooks/price?sku=A-1", "");
+    assert_eq!(
+        (s, v.clone()),
+        (200, json!({ "sku": "A-1", "price": 9.9 })),
+        "{v}"
+    );
+    let (s, v) = pos(port, "GET", "/in/hooks/price?sku=NOPE", "");
+    assert_eq!(s, 422, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or("").contains("unknown sku"),
+        "{v}"
+    );
+    // a POST writes once per key: the same request, the same answer
+    let sale = "{\"uuid\": \"u-1\", \"sku\": \"A-1\"}";
+    let (s, first) = pos(port, "POST", "/in/hooks/sales", sale);
+    assert_eq!((s, first.clone()), (200, json!({ "sales": 1 })), "{first}");
+    let (s, again) = pos(port, "POST", "/in/hooks/sales", sale);
+    assert_eq!((s, again), (200, first));
+    let n: String = Conn::open(&cfg.url)
+        .unwrap()
+        .query("SELECT CAST(COUNT(*) AS TEXT) FROM \"sale\"", &[])
+        .unwrap()[0][0]
+        .clone()
+        .unwrap();
+    assert_eq!(n, "1");
+    // without the token: refused
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.write_all(
+        b"GET /in/hooks/price?sku=A-1 HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\n\r\n",
+    )
+    .unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

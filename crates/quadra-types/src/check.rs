@@ -105,6 +105,25 @@ struct Checker<'m> {
     accesses: Vec<(Span, Node)>,
 }
 
+/// The statements that write (an assignment, an `emit`), in a block and the blocks in it.
+fn writes(stmts: &[Stmt], out: &mut Vec<Span>) {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Assign { .. } | StmtKind::Emit(_) => out.push(s.span),
+            StmtKind::If {
+                then, otherwise, ..
+            } => {
+                writes(then, out);
+                if let Some(e) = otherwise {
+                    writes(e, out);
+                }
+            }
+            StmtKind::For { body, .. } => writes(body, out),
+            _ => {}
+        }
+    }
+}
+
 const TEXT_TYPES: &[&str] = &[
     "Text",
     "Code",
@@ -275,6 +294,7 @@ impl<'m> Checker<'m> {
         self.context = String::new();
         self.check_outbounds();
         self.check_inbounds();
+        self.check_endpoints();
         self.context = String::new();
         for r in &m.reactions {
             self.entity = None;
@@ -1897,23 +1917,6 @@ impl<'m> Checker<'m> {
             return;
         };
         // no write: the block only builds what is sent
-        fn writes(stmts: &[Stmt], out: &mut Vec<Span>) {
-            for s in stmts {
-                match &s.kind {
-                    StmtKind::Assign { .. } | StmtKind::Emit(_) => out.push(s.span),
-                    StmtKind::If {
-                        then, otherwise, ..
-                    } => {
-                        writes(then, out);
-                        if let Some(e) = otherwise {
-                            writes(e, out);
-                        }
-                    }
-                    StmtKind::For { body, .. } => writes(body, out),
-                    _ => {}
-                }
-            }
-        }
         let mut w = Vec::new();
         writes(stmts, &mut w);
         for span in w {
@@ -2011,6 +2014,100 @@ impl<'m> Checker<'m> {
             }
             self.stmts(&i.body);
             self.pop();
+        }
+    }
+
+    /// `endpoint GET|POST "/path" via c as q: Query -> Answer:`: records `from json`, an HTTP
+    /// connection that signs, one per method and path; the block ends with the answer; a `GET`
+    /// writes nothing.
+    fn check_endpoints(&mut self) {
+        let m = self.m;
+        let mut seen: HashSet<(String, String, String)> = HashSet::new();
+        for ep in &m.endpoints {
+            if !["GET", "POST"].contains(&ep.method.as_str()) {
+                self.error(
+                    ep.span,
+                    format!(
+                        "`{}`: an endpoint answers a GET (it reads) or a POST (it writes)",
+                        ep.method
+                    ),
+                );
+            }
+            if !ep.path.starts_with('/')
+                || ep.path.contains("..")
+                || ep.path.chars().any(|c| c.is_whitespace())
+            {
+                self.error(
+                    ep.span,
+                    format!("the path `{}`: from `/`, no spaces, no `..`", ep.path),
+                );
+            }
+            if !seen.insert((ep.connection.clone(), ep.method.clone(), ep.path.clone())) {
+                self.error(
+                    ep.span,
+                    format!(
+                        "another endpoint already answers {} {} of `{}`",
+                        ep.method, ep.path, ep.connection
+                    ),
+                );
+            }
+            if ep.method == "POST"
+                && m.inbounds.iter().any(|i| {
+                    i.connection == ep.connection && i.path.as_deref().unwrap_or("") == ep.path
+                })
+            {
+                self.error(
+                    ep.span,
+                    format!(
+                        "an inbound already takes the messages of `{}` at {}",
+                        ep.connection, ep.path
+                    ),
+                );
+            }
+            match m.manifest.connection(&ep.connection) {
+                None => self.error(ep.span, format!("no connection `{}` in quadra.toml ([connections.{}])", ep.connection, ep.connection)),
+                Some(c) if c.kind_name() != "http" => self.error(ep.span, format!("`{}` is not an HTTP connection", ep.connection)),
+                Some(c) if c.inbound.is_none() => self.error(ep.span, format!("`{}` does not say how its requests are signed (`inbound_signature` and `inbound_secret` in quadra.toml): without it anyone could call it", ep.connection)),
+                _ => {}
+            }
+            for t in [&ep.query, &ep.answer] {
+                if !m.entity(t).is_some_and(|e| e.format.is_some()) {
+                    self.error(
+                        ep.span,
+                        format!("`{t}`: a request and an answer are records `from json`"),
+                    );
+                }
+            }
+            self.entity = None;
+            self.context = format!("endpoint {} {}", ep.method, ep.path);
+            self.push();
+            self.bind(&ep.binding, T::Ent(ep.query.clone()));
+            if let Some(k) = &ep.key {
+                self.infer(k);
+            }
+            let t = self.infer(&ep.body);
+            self.pop();
+            if !matches!(t.unopt(), T::Unknown) && t.unopt() != &T::Ent(ep.answer.clone()) {
+                self.error(
+                    ep.span,
+                    format!(
+                        "the block of the endpoint ends with its answer, a `{}`",
+                        ep.answer
+                    ),
+                );
+            }
+            if ep.method == "GET" {
+                if let ExprKind::Block(stmts) = &ep.body.kind {
+                    let mut w = Vec::new();
+                    writes(stmts, &mut w);
+                    for span in w {
+                        self.error(
+                            span,
+                            "a GET endpoint only reads: a write goes in a POST (or an `inbound`)",
+                        );
+                    }
+                }
+            }
         }
     }
 

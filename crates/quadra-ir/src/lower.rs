@@ -275,6 +275,39 @@ impl<'a> Lower<'a> {
                     .unwrap_or_default();
                 self.model.events.push(Event { name, fields, span });
             }
+            ENDPOINT => {
+                let mut names =
+                    ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());
+                let method = names.next().unwrap_or_default().to_uppercase();
+                let connection = names.next().unwrap_or_default();
+                let binding = names.next().unwrap_or_default();
+                let path = item
+                    .children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()))
+                    .unwrap_or_default();
+                let mut types = ast::children(item, PATH).map(|p| ast::path_text(&p));
+                let query = types.next().unwrap_or_default();
+                let answer = types.next().unwrap_or_default();
+                let key = ast::children(item, OUTBOUND_CLAUSE)
+                    .find(|c| ctx_words(c).first().map(String::as_str) == Some("key"))
+                    .and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                let body = ast::child(item, BLOCK_EXPR)
+                    .map(|b| self.expr(&b))
+                    .unwrap_or_else(|| self.error_expr(item));
+                self.model.endpoints.push(Endpoint {
+                    method,
+                    path,
+                    connection,
+                    binding,
+                    query,
+                    answer,
+                    key,
+                    body,
+                    span,
+                });
+            }
             INBOUND => {
                 let mut names =
                     ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());

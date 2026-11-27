@@ -921,6 +921,28 @@ fn inbox_name(conn: &mut Conn, id: u64) -> Result<String, String> {
         .unwrap_or_default())
 }
 
+/// The answer already given to a request of an endpoint with this key (`POST`): the same
+/// request sent again gets the same answer, and is not handled twice.
+pub fn answered(conn: &mut Conn, name: &str, key: &str) -> Result<Option<String>, String> {
+    Ok(conn
+        .query(
+            "SELECT \"response\" FROM \"_quadra_inbox\" WHERE \"inbound\" = ?text AND \"key\" = ?text AND \"state\" = 'done' ORDER BY \"id\" LIMIT 1",
+            &[Sql::Text(name.to_string()), Sql::Text(key.to_string())],
+        )?
+        .into_iter()
+        .next()
+        .and_then(|r| r[0].clone()))
+}
+
+/// The answer of a request handled at once (an endpoint's `POST`), kept with it.
+pub fn respond(conn: &mut Conn, id: u64, response: &str) -> Result<(), String> {
+    conn.exec(
+        "UPDATE \"_quadra_inbox\" SET \"response\" = ?text WHERE \"id\" = ?bigint",
+        &[Sql::Text(response.to_string()), Sql::Int(id as i64)],
+    )?;
+    Ok(())
+}
+
 /// The transaction that already handled message `id` (`inbound:Name#id`), if one did: a
 /// message is handled once even if the server stopped between the transaction and writing it.
 pub fn handled_by(conn: &mut Conn, name: &str, id: u64) -> Result<Option<u64>, String> {

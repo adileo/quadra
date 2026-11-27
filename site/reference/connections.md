@@ -465,6 +465,45 @@ quadra inbox retry 12                     # handled again by the code deployed n
 quadra inbox skip 13 --reason "a test order from the shop"
 ```
 
+## `endpoint`: answered at once
+
+Some systems ask and wait for the answer: a cash register asks for a price, a checkout for the
+stock. An `endpoint` answers them from the data, at `/in/<connection><path>`:
+
+```quadra
+record PriceQuery from json:
+    sku: Text
+
+record PosPrice from json:
+    sku: Text
+    price: Decimal
+
+endpoint GET "/price" via pos as q: PriceQuery -> PosPrice:
+    let p = Product.where(x => x.sku == q.sku).first() ?? fail "unknown sku"
+    PosPrice(sku=p.sku, price=p.price)
+
+record PosSale from json:
+    uuid: Text
+    sku: Text
+
+record PosAck from json:
+    sales: Int
+
+endpoint POST "/sales" via pos as s: PosSale -> PosAck:
+    key s.uuid
+    let sale = Sale(uuid=s.uuid, sku=s.sku)
+    PosAck(sales=Sale.where(x => x.sku == s.sku).count())
+```
+
+| Rule | Detail |
+|---|---|
+| Who | the caller is checked by the connection's `inbound_signature`, as for an `inbound` (for a cash register, `token`) |
+| The request | `GET`: its query (`?sku=A-1`) read as the record; `POST`: its body |
+| The answer | the block's last expression, a record `from json`, sent as JSON with `200`; a `fail` (or a broken rule) answers `422` with the message |
+| `GET` | reads only: a write there is refused by the compiler |
+| `POST` | a transaction of its own (cause `inbound:POST /sales#id handled`), kept in the inbox like a message; with `key`, the same request sent again (a register that did not hear the answer) gets the same answer and is not handled twice |
+| No I/O | nothing goes out from the block; to tell another system, `emit` |
+
 ## Formats: `record … from json`
 
 The documents of another system (a shop's order, a carrier's label, the answer of an API) are

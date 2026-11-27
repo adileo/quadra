@@ -803,6 +803,23 @@ pub struct Inbound {
     pub span: Span,
 }
 
+/// `endpoint GET "/price" via pos as q: PriceQuery -> PosPrice:`: a request of a connection to
+/// `/in/<connection><path>` answered at once by the code (its last expression, a record `from
+/// json`). A `GET` only reads; a `POST` writes in a transaction, kept in the inbox like a
+/// message, and answers the same to the same `key`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Endpoint {
+    pub method: String,
+    pub path: String,
+    pub connection: String,
+    pub binding: String,
+    pub query: String,
+    pub answer: String,
+    pub key: Option<Expr>,
+    pub body: Expr,
+    pub span: Span,
+}
+
 /// How an outbound delivers (`outbound … as e:`, its first lines). The durations are fixed
 /// (`3 days`); `unless`, `key`, `ordered by` and `latest by` are read for each event.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -926,6 +943,7 @@ pub struct Model {
     pub events: Vec<Event>,
     pub outbounds: Vec<Outbound>,
     pub inbounds: Vec<Inbound>,
+    pub endpoints: Vec<Endpoint>,
     pub reactions: Vec<Reaction>,
     pub roles: Vec<Role>,
     /// Top-level `deny` / `allow` rules.

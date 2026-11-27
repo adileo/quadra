@@ -402,6 +402,16 @@ pub enum Job {
         body: Vec<u8>,
         reply: oneshot::Sender<(u16, J)>,
     },
+    /// a request to an `endpoint` (`/in/<connection><path>`), answered at once
+    Endpoint {
+        connection: String,
+        method: String,
+        path: String,
+        query: HashMap<String, String>,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        reply: oneshot::Sender<Option<(u16, J)>>,
+    },
     /// the host's inbox: up to `limit` messages received handled; how many, and whether the
     /// model has any `inbound`
     Inbox {
@@ -1227,6 +1237,186 @@ impl Engine {
         }
     }
 
+    /// The answer of an `endpoint` to a request (`None`: no endpoint there, perhaps an
+    /// inbound). The sender is checked as for an inbound. A `GET` reads its request from the
+    /// query, and only reads; a `POST` reads it from the body, is kept in the inbox like a
+    /// message, runs in a transaction of its own, and the same `key` gets the same answer.
+    fn endpoint(
+        &mut self,
+        connection: &str,
+        method: &str,
+        path: &str,
+        query: &HashMap<String, String>,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Option<(u16, J)> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref()?;
+        let ep = model
+            .endpoints
+            .iter()
+            .find(|e| e.connection == connection && e.method == method && e.path == path)?;
+        let at = now();
+        let stamp = at.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let name = format!("{method} {path}");
+        let answer = |v: &quadra_runtime::V| -> (u16, J) {
+            match quadra_runtime::formats::render_json(model, v) {
+                Ok(t) => (200, serde_json::from_str(&t).unwrap_or(J::Null)),
+                Err(e) => (
+                    500,
+                    json!({ "error": format!("the answer cannot be written: {e}") }),
+                ),
+            }
+        };
+        // who sent it
+        let Some(auth) = model
+            .manifest
+            .connection(connection)
+            .and_then(|c| c.inbound.clone())
+        else {
+            return Some((
+                401,
+                json!({ "error": format!("`{connection}` does not say how its requests are signed") }),
+            ));
+        };
+        if body.len() > auth.max_bytes {
+            return Some((413, json!({ "error": "the request is too large" })));
+        }
+        let secrets: Vec<String> = std::iter::once(&auth.secret)
+            .chain(auth.previous.iter())
+            .filter_map(|v| model.manifest.value(&self.env, v).map(|s| s.to_string()))
+            .collect();
+        let refs: Vec<&str> = secrets.iter().map(|s| s.as_str()).collect();
+        if let Err(e) = crate::inbound::verify(
+            &auth.preset,
+            &refs,
+            headers,
+            body,
+            chrono::Utc::now().timestamp(),
+        ) {
+            let (n, c, t, w) = (
+                name.clone(),
+                connection.to_string(),
+                stamp.clone(),
+                e.clone(),
+            );
+            let _ = self.side(move |cn| quadra_store::deliveries::refuse(cn, &n, &c, &t, &w));
+            return Some((401, json!({ "error": e })));
+        }
+        // the request, as its record
+        let text = if method == "GET" {
+            let o: serde_json::Map<String, J> = query
+                .iter()
+                .map(|(k, v)| (k.clone(), J::String(v.clone())))
+                .collect();
+            J::Object(o).to_string()
+        } else {
+            match std::str::from_utf8(body) {
+                Ok(t) => t.to_string(),
+                Err(_) => {
+                    return Some((400, json!({ "error": "the request is not text (UTF-8)" })))
+                }
+            }
+        };
+        let q = match quadra_runtime::formats::parse_json(model, &ep.query, &text) {
+            Ok(q) => q,
+            Err(e) => return Some((422, json!({ "error": format!("{}: {e}", ep.query) }))),
+        };
+        if method == "GET" {
+            return Some(
+                match quadra_store::ops::run_endpoint(
+                    &self.url,
+                    model,
+                    &checked.report,
+                    at,
+                    self.sequencer.as_ref(),
+                    ep,
+                    q,
+                    None,
+                ) {
+                    Ok((v, _)) => answer(&v),
+                    Err(e) => (422, json!({ "error": e })),
+                },
+            );
+        }
+        // a POST: the same key, the same answer
+        let hash = crate::inbound::hash(body);
+        let key = match &ep.key {
+            Some(k) => {
+                let mut interp = quadra_runtime::Interp::new(model);
+                let mut ctx = quadra_runtime::Ctx::default();
+                ctx.bind(&ep.binding, q.clone());
+                match interp.eval(k, &mut ctx) {
+                    Ok(quadra_runtime::V::Text(t)) => t.to_string(),
+                    Ok(v) => v.to_string(),
+                    Err(_) => hash.clone(),
+                }
+            }
+            None => hash.clone(),
+        };
+        if let Ok(Some(r)) = quadra_store::deliveries::answered(&mut self.conn, &name, &key) {
+            return Some((200, serde_json::from_str(&r).unwrap_or(J::Null)));
+        }
+        let (n, c, t, k, h, b) = (
+            name.clone(),
+            connection.to_string(),
+            stamp.clone(),
+            key.clone(),
+            hash.clone(),
+            text.clone(),
+        );
+        let id = match self
+            .side(move |cn| quadra_store::deliveries::receive(cn, &n, &c, &k, &h, &b, &t, None))
+        {
+            Ok(quadra_store::deliveries::Received::New(id)) => id,
+            Ok(_) => {
+                return Some((
+                    409,
+                    json!({ "error": "this request is being handled: send it again in a moment" }),
+                ))
+            }
+            Err(e) => {
+                return Some((
+                    503,
+                    json!({ "error": format!("the request could not be kept: {e}") }),
+                ))
+            }
+        };
+        let r = quadra_store::ops::run_endpoint(
+            &self.url,
+            model,
+            &checked.report,
+            at,
+            self.sequencer.as_ref(),
+            ep,
+            q,
+            Some(format!("inbound:{name}#{id} handled")),
+        );
+        let (status, body, result): (u16, J, Result<u64, String>) = match r {
+            Ok((v, tx)) => {
+                let (s, b) = answer(&v);
+                (s, b, Ok(tx.unwrap_or(0)))
+            }
+            Err(e) => (422, json!({ "error": e.clone() }), Err(e)),
+        };
+        let (n, t, resp) = (name.clone(), stamp.clone(), body.to_string());
+        let ok = status == 200;
+        let _ = self.side(move |cn| {
+            quadra_store::deliveries::handled(
+                cn,
+                id,
+                &n,
+                &t,
+                result.as_ref().map(|t| *t).map_err(|e| e.as_str()),
+            )?;
+            if ok {
+                quadra_store::deliveries::respond(cn, id, &resp)?;
+            }
+            Ok(())
+        });
+        Some((status, body))
+    }
+
     /// Up to `limit` messages of the inbox handled, oldest first, each in a transaction of its
     /// own with the cause `inbound:Name#id handled`; one that fails is `rejected` with the
     /// error. Returns how many, and whether the model has any inbound.
@@ -1618,6 +1808,24 @@ impl Engine {
                     reply,
                 } => {
                     let _ = reply.send(self.receive(&connection, &path, &headers, &body));
+                }
+                Job::Endpoint {
+                    connection,
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                    reply,
+                } => {
+                    let _ = reply.send(self.endpoint(
+                        &connection,
+                        &method,
+                        &path,
+                        &query,
+                        &headers,
+                        &body,
+                    ));
                 }
                 Job::Inbox { limit, reply } => {
                     let _ = reply.send(self.handle_inbox(limit));

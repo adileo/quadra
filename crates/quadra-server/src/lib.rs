@@ -1962,7 +1962,9 @@ async fn inbox(t: Arc<Tenant>) {
 /// it is by the signature of its connection.
 async fn inbound_api(
     Ten(t): Ten,
+    method: Method,
     Path(params): Path<HashMap<String, String>>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -1976,6 +1978,39 @@ async fn inbound_api(
         .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
         .collect();
     let body = body.to_vec();
+    // an endpoint answers at once; else (a POST) a message for an inbound
+    let (c, p, h, b) = (
+        connection.clone(),
+        path.clone(),
+        headers.clone(),
+        body.clone(),
+    );
+    let m = method.to_string();
+    match t
+        .ask(|reply| Job::Endpoint {
+            connection: c,
+            method: m,
+            path: p,
+            query,
+            headers: h,
+            body: b,
+            reply,
+        })
+        .await
+    {
+        Some(Some((status, answer))) => {
+            return (
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(answer),
+            )
+                .into_response()
+        }
+        Some(None) if method != Method::POST => {
+            return fail(404, "no endpoint answers there");
+        }
+        Some(None) => {}
+        None => return fail(503, "the engine is not available"),
+    }
     let Some((status, answer)) = t
         .ask(|reply| Job::Receive {
             connection,
@@ -2303,11 +2338,15 @@ impl Host {
             .route("/v1/teams", get(views_api).post(views_api))
             .route(
                 "/in/{connection}",
-                post(inbound_api).layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
+                post(inbound_api)
+                    .get(inbound_api)
+                    .layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
             )
             .route(
                 "/in/{connection}/{*rest}",
-                post(inbound_api).layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
+                post(inbound_api)
+                    .get(inbound_api)
+                    .layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
             )
             .route("/v1/outbox", get(outbox_api))
             .route("/v1/outbox/ack", post(outbox_api))

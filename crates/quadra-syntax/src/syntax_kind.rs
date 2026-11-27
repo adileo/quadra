@@ -132,6 +132,8 @@ pub enum SyntaxKind {
     OUTBOUND_CLAUSE,
     /// `inbound ShopOrder via shop path "/orders" as m: ShopOrderDoc:` and its handler
     INBOUND,
+    /// `endpoint GET "/price" via pos as q: PriceQuery -> PosPrice:` and its block
+    ENDPOINT,
 
     // members
     MEMBER_LIST,

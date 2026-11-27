@@ -47,6 +47,7 @@ pub(crate) fn at_item(p: &Parser) -> bool {
                 "event" => n1 == IDENT && p.nth(2) == L_PAREN,
                 "outbound" => n1 == IDENT && p.nth(2) == IDENT,
                 "inbound" => n1 == IDENT && p.nth(2) == IDENT,
+                "endpoint" => n1 == IDENT && p.nth(2) == STRING,
                 "seed" => n1 == COLON,
                 "on" | "before" => n1 == IDENT && matches!(p.nth(2), DOT | IDENT),
                 "deny" | "allow" => n1 == IDENT,
@@ -94,6 +95,7 @@ pub(crate) fn item(p: &mut Parser) {
             "event" => event(p),
             "outbound" => outbound(p),
             "inbound" => inbound(p),
+            "endpoint" => endpoint(p),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -500,6 +502,64 @@ fn inbound(p: &mut Parser) {
         p.error("expected an indented block: what to do with the message");
     }
     m.complete(p, INBOUND);
+}
+
+/// `endpoint GET "/price" via pos as q: PriceQuery -> PosPrice:`: a policy line (`key …`), then
+/// the code whose last expression is the answer
+fn endpoint(p: &mut Parser) {
+    let m = p.start();
+    p.bump_ctx();
+    name(p);
+    p.expect(STRING);
+    if p.at_ctx("via") {
+        p.bump_ctx();
+        name(p);
+    } else {
+        p.error(
+            "expected `via` and the connection of quadra.toml: `endpoint GET \"/price\" via pos`",
+        );
+    }
+    p.expect(AS_KW);
+    name(p);
+    p.expect(COLON);
+    path(p);
+    p.expect(ARROW);
+    path(p);
+    p.expect(COLON);
+    if p.at(NEWLINE) && p.nth(1) == INDENT {
+        p.bump();
+        p.bump();
+        while p.eat(NEWLINE) {}
+        loop {
+            let c = p.start();
+            if p.at_ctx("key") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
+                p.bump_ctx();
+                expr(p);
+            } else {
+                c.abandon(p);
+                break;
+            }
+            end_line(p);
+            c.complete(p, OUTBOUND_CLAUSE);
+            while p.eat(NEWLINE) {}
+        }
+        let b = p.start();
+        let blk = p.start();
+        while !p.at(DEDENT) && !p.at_eof() {
+            if p.eat(NEWLINE) {
+                continue;
+            }
+            let before = p.position();
+            stmts::stmt(p);
+            ensure_progress(p, before);
+        }
+        blk.complete(p, BLOCK);
+        b.complete(p, BLOCK_EXPR);
+        p.eat(DEDENT);
+    } else {
+        p.error("expected an indented block: the answer");
+    }
+    m.complete(p, ENDPOINT);
 }
 
 /// `outbound OrderShipped via shop path "/hooks/orders"`, `outbound SendEmail via mail`

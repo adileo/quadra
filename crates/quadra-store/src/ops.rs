@@ -943,6 +943,60 @@ pub fn handle_inbound(
     Ok((interp.store.tx > before && !interp.store.dirty.is_empty()).then_some(interp.store.tx))
 }
 
+/// The answer of an endpoint to a request (`q`, its record): the code of its block run as the
+/// system; with `cause` (a `POST`) in a transaction of its own, else (a `GET`) reading only.
+/// Returns the answer and the transaction it committed, if any.
+#[allow(clippy::too_many_arguments)]
+pub fn run_endpoint(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+    endpoint: &quadra_ir::Endpoint,
+    q: V,
+    cause: Option<String>,
+) -> Result<(V, Option<u64>), String> {
+    let db = Database::open(url, model, report)?;
+    let schema = db.schema.clone();
+    let src = crate::source::DbSource::open(url, schema, None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.system += 1;
+    let what = format!("endpoint {} {}", endpoint.method, endpoint.path);
+    let Some(cause) = cause else {
+        let mut ctx = Ctx::default();
+        ctx.bind(&endpoint.binding, q);
+        let v = interp
+            .eval(&endpoint.body, &mut ctx)
+            .map_err(|e| flow(&what, e))?;
+        return Ok((v, None));
+    };
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(match sequencer {
+        Some(s) => Box::new(crate::SequencedSink {
+            db,
+            model,
+            sequencer: s.clone(),
+            tickets: None,
+        }),
+        None => Box::new(Sink { db, model }),
+    });
+    let before = interp.store.tx;
+    let v = interp
+        .with_cause(cause, |i| {
+            i.transaction(|i| {
+                let mut ctx = Ctx::default();
+                ctx.bind(&endpoint.binding, q.clone());
+                i.eval(&endpoint.body, &mut ctx)
+            })
+        })
+        .map_err(|e| flow(&what, e))?;
+    Ok((v, (interp.store.tx > before).then_some(interp.store.tx)))
+}
+
 /// A fixed value of a policy (`3 days`): evaluated without data.
 pub fn eval_fixed(model: &Model, expr: &quadra_ir::Expr) -> Result<V, String> {
     let mut interp = Interp::new(model);
