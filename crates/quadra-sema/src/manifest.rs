@@ -104,6 +104,31 @@ pub enum HttpAuth {
         user: Setting,
         password: String,
     },
+    /// OAuth2 client credentials: a token asked of `token_url` (kept until it expires), sent
+    /// as `Authorization: Bearer …`
+    OAuth2 {
+        token_url: Setting,
+        client_id: Setting,
+        client_secret: String,
+        scope: Option<String>,
+        /// the client's id and secret in the form (`client_auth = "body"`) rather than as
+        /// basic authentication
+        in_body: bool,
+    },
+}
+
+/// How the signature of a request (`signing_secret`) is written. Without `header`, Quadra's
+/// own: `Quadra-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Signature {
+    pub header: Option<String>,
+    /// base64 rather than hex
+    pub base64: bool,
+    /// written before the signature (`sha256=`)
+    pub prefix: String,
+    /// the header that carries the unix seconds signed with the body (`"<t>.<body>"`); none:
+    /// the body alone is signed
+    pub timestamp_header: Option<String>,
 }
 
 /// What a connection talks to.
@@ -115,6 +140,13 @@ pub enum ConnectionKind {
         auth: HttpAuth,
         /// the secret variable whose value signs each request (HMAC-SHA256)
         signing_secret: Option<String>,
+        /// how the signature is written
+        signature: Signature,
+        /// the secret variable with the client's certificate and private key, PEM (mutual TLS)
+        client_certificate: Option<String>,
+        /// the variable with the certificate (PEM) of the authority the server's certificate is
+        /// signed by, when it is a private one; then only it is trusted
+        server_ca: Option<String>,
         timeout_s: u64,
         insecure: bool,
     },
@@ -211,6 +243,8 @@ impl Connection {
                 url,
                 auth,
                 signing_secret,
+                client_certificate,
+                server_ca,
                 ..
             } => {
                 setting(url, &mut out);
@@ -222,9 +256,25 @@ impl Connection {
                         setting(user, &mut out);
                         out.push(password);
                     }
+                    HttpAuth::OAuth2 {
+                        token_url,
+                        client_id,
+                        client_secret,
+                        ..
+                    } => {
+                        setting(token_url, &mut out);
+                        setting(client_id, &mut out);
+                        out.push(client_secret);
+                    }
                 }
                 if let Some(s) = signing_secret {
                     out.push(s);
+                }
+                if let Some(c) = client_certificate {
+                    out.push(c);
+                }
+                if let Some(c) = server_ca {
+                    out.push(c);
                 }
                 if let Some(i) = &self.inbound {
                     out.push(&i.secret);
@@ -523,6 +573,17 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             "user",
             "password",
             "signing_secret",
+            "signature_header",
+            "signature_encoding",
+            "signature_prefix",
+            "signature_timestamp_header",
+            "oauth2_token_url",
+            "client_id",
+            "client_secret",
+            "scope",
+            "client_auth",
+            "client_certificate",
+            "server_ca",
             "timeout",
             "insecure",
             "rate",
@@ -618,7 +679,72 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
                 .ok_or(format!("{at}: api_key_header is the name of a header"))?
                 .to_string(),
         };
+        let oauth = match t.get("oauth2_token_url") {
+            None => {
+                for k in ["client_id", "client_secret", "scope", "client_auth"] {
+                    if t.contains_key(k) {
+                        return Err(format!("{at}: {k} is for OAuth2: with oauth2_token_url"));
+                    }
+                }
+                None
+            }
+            Some(u) => {
+                let token_url = setting(m, &at, "oauth2_token_url", u)?;
+                if let Setting::Literal(u) = &token_url {
+                    if !(u.starts_with("https://") || insecure && u.starts_with("http://")) {
+                        return Err(format!("{at}: oauth2_token_url starts with https://"));
+                    }
+                }
+                let client_id = setting(
+                    m,
+                    &at,
+                    "client_id",
+                    t.get("client_id")
+                        .ok_or(format!("{at}: OAuth2 needs client_id"))?,
+                )?;
+                let client_secret = credential(
+                    m,
+                    &at,
+                    "client_secret",
+                    t.get("client_secret")
+                        .ok_or(format!("{at}: OAuth2 needs client_secret"))?,
+                )?;
+                let scope = match t.get("scope") {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_str()
+                            .ok_or(format!(
+                                "{at}: scope is text (\"orders.read orders.write\")"
+                            ))?
+                            .to_string(),
+                    ),
+                };
+                let in_body = match t.get("client_auth").map(|v| v.as_str()) {
+                    None | Some(Some("basic")) => false,
+                    Some(Some("body")) => true,
+                    _ => {
+                        return Err(format!(
+                            "{at}: client_auth is \"basic\" (the default) or \"body\""
+                        ))
+                    }
+                };
+                Some(HttpAuth::OAuth2 {
+                    token_url,
+                    client_id,
+                    client_secret,
+                    scope,
+                    in_body,
+                })
+            }
+        };
+        let others = bearer.is_some() || api_key.is_some() || user.is_some() || password.is_some();
         let auth = match (bearer, api_key, user, password) {
+            _ if oauth.is_some() && others => {
+                return Err(format!(
+                    "{at}: one authentication only: bearer, api_key, user and password, or OAuth2"
+                ))
+            }
+            _ if oauth.is_some() => oauth.expect("checked"),
             (None, None, None, None) => HttpAuth::None,
             (Some(b), None, None, None) => HttpAuth::Bearer(b),
             (None, Some(k), None, None) => HttpAuth::ApiKey { header, key: k },
@@ -641,6 +767,72 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             .get("signing_secret")
             .map(|v| credential(m, &at, "signing_secret", v))
             .transpose()?;
+        let header_name = |k: &str| -> Result<Option<String>, String> {
+            match t.get(k) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_str()
+                    .filter(|h| {
+                        !h.is_empty()
+                            && h.bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    })
+                    .map(|h| Some(h.to_string()))
+                    .ok_or(format!("{at}: {k} is the name of a header")),
+            }
+        };
+        let signature = Signature {
+            header: header_name("signature_header")?,
+            base64: match t.get("signature_encoding").map(|v| v.as_str()) {
+                None | Some(Some("hex")) => false,
+                Some(Some("base64")) => true,
+                _ => {
+                    return Err(format!(
+                        "{at}: signature_encoding is \"hex\" (the default) or \"base64\""
+                    ))
+                }
+            },
+            prefix: match t.get("signature_prefix") {
+                None => String::new(),
+                Some(v) => v
+                    .as_str()
+                    .filter(|p| p.len() <= 40 && !p.chars().any(|c| c.is_control()))
+                    .ok_or(format!(
+                        "{at}: signature_prefix is short text (\"sha256=\")"
+                    ))?
+                    .to_string(),
+            },
+            timestamp_header: header_name("signature_timestamp_header")?,
+        };
+        if signing_secret.is_none() && t.keys().any(|k| k.starts_with("signature_")) {
+            return Err(format!(
+                "{at}: the signature_… settings say how signing_secret signs: it is needed"
+            ));
+        }
+        if signature.header.is_none()
+            && (signature.base64
+                || !signature.prefix.is_empty()
+                || signature.timestamp_header.is_some())
+        {
+            return Err(format!(
+                "{at}: a signature of your own has a signature_header (without it, Quadra-Signature as Quadra writes it)"
+            ));
+        }
+        let client_certificate = t
+            .get("client_certificate")
+            .map(|v| credential(m, &at, "client_certificate", v))
+            .transpose()?;
+        let server_ca = match t.get("server_ca") {
+            None => None,
+            Some(v) => match setting(m, &at, "server_ca", v)? {
+                Setting::Var(name) => Some(name),
+                Setting::Literal(_) => {
+                    return Err(format!(
+                        "{at}: server_ca is `{{ var = \"NAME\" }}`, a variable with the certificate (PEM)"
+                    ))
+                }
+            },
+        };
         let timeout_s = match t.get("timeout") {
             None => 10,
             Some(v) => v
@@ -655,6 +847,9 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             url,
             auth,
             signing_secret,
+            signature,
+            client_certificate,
+            server_ca,
             timeout_s,
             insecure,
         }
@@ -838,6 +1033,52 @@ from = "Acme <noreply@acme.example.com>"
 "#;
 
     #[test]
+    fn oauth2_certificates_and_signatures_are_read_and_checked() {
+        let vars = "[vars]\nID = {}\nSECRET = { secret = true }\nPEM = { secret = true }\nCA = {}\nHOOK = { secret = true }\n\n";
+        let m = parse(&format!("{vars}[connections.erp]\nkind = \"http\"\nurl = \"https://erp.example.com\"\noauth2_token_url = \"https://login.example.com/token\"\nclient_id = {{ var = \"ID\" }}\nclient_secret = {{ var = \"SECRET\" }}\nscope = \"orders\"\nclient_auth = \"body\"\nclient_certificate = {{ var = \"PEM\" }}\nserver_ca = {{ var = \"CA\" }}\nsigning_secret = {{ var = \"HOOK\" }}\nsignature_header = \"X-Sig\"\nsignature_encoding = \"base64\"\n")).unwrap();
+        let ConnectionKind::Http {
+            auth,
+            signature,
+            client_certificate,
+            server_ca,
+            ..
+        } = &m.connection("erp").unwrap().kind
+        else {
+            panic!()
+        };
+        assert_eq!(
+            auth,
+            &HttpAuth::OAuth2 {
+                token_url: Setting::Literal("https://login.example.com/token".into()),
+                client_id: Setting::Var("ID".into()),
+                client_secret: "SECRET".into(),
+                scope: Some("orders".into()),
+                in_body: true,
+            }
+        );
+        assert_eq!(signature.header.as_deref(), Some("X-Sig"));
+        assert!(signature.base64);
+        assert_eq!(client_certificate.as_deref(), Some("PEM"));
+        assert_eq!(server_ca.as_deref(), Some("CA"));
+        let mut used = m.connection("erp").unwrap().vars();
+        used.sort();
+        assert_eq!(used, ["CA", "HOOK", "ID", "PEM", "SECRET"]);
+        let bad = |extra: &str| {
+            parse(&format!("{vars}[connections.erp]\nkind = \"http\"\nurl = \"https://erp.example.com\"\n{extra}")).unwrap_err()
+        };
+        assert!(bad("client_id = \"x\"\n").contains("for OAuth2"));
+        assert!(bad("oauth2_token_url = \"https://l/t\"\nclient_id = \"x\"\nclient_secret = { var = \"SECRET\" }\nbearer = { var = \"SECRET\" }\n").contains("one authentication only"));
+        assert!(bad("oauth2_token_url = \"https://l/t\"\nclient_id = \"x\"\nclient_secret = { var = \"ID\" }\n").contains("secret = true"));
+        assert!(bad("signature_header = \"X-Sig\"\n").contains("signing_secret"));
+        assert!(
+            bad("signing_secret = { var = \"HOOK\" }\nsignature_prefix = \"v1=\"\n")
+                .contains("signature_header")
+        );
+        assert!(bad("client_certificate = \"-----BEGIN\"\n").contains("credential"));
+        assert!(bad("server_ca = \"-----BEGIN\"\n").contains("server_ca"));
+    }
+
+    #[test]
     fn variables_and_connections_are_read() {
         let m = parse(OK).unwrap();
         assert_eq!(m.vars.len(), 5);
@@ -850,6 +1091,9 @@ from = "Acme <noreply@acme.example.com>"
                 url: Setting::Literal("https://acme.example.com/api".into()),
                 auth: HttpAuth::Bearer("SHOP_TOKEN".into()),
                 signing_secret: Some("HOOK_SECRET".into()),
+                signature: Signature::default(),
+                client_certificate: None,
+                server_ca: None,
                 timeout_s: 5,
                 insecure: false,
             }

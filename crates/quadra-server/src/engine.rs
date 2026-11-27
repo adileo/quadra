@@ -1554,7 +1554,7 @@ impl Engine {
                 continue;
             }
             match crate::deliver::connection_request(&model.manifest, &self.env, &i.connection) {
-                Ok((base, headers, timeout)) => {
+                Ok((base, headers, creds, timeout)) => {
                     let path = p
                         .path
                         .replace("{cursor}", &encode(cursor.as_deref().unwrap_or("")));
@@ -1562,6 +1562,7 @@ impl Engine {
                         inbound: i.name.clone(),
                         url: format!("{base}{path}"),
                         headers,
+                        creds,
                         timeout,
                     })
                 }

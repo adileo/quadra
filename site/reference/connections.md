@@ -126,7 +126,8 @@ of the repository.
 
 `[connections.<name>]`, the name in lower case letters, digits and `_`. Each setting is
 written as text or taken from a variable with `{ var = "NAME" }`; a credential (`bearer`,
-`api_key`, `password`, `signing_secret`) must come from a **secret** variable:
+`api_key`, `password`, `client_secret`, `signing_secret`, `client_certificate`) must come from
+a **secret** variable:
 
 ```text
 quadra.toml, [connections.shop]: bearer is a credential: not written in quadra.toml (it is in the repository) but `{ var = "NAME" }`, a secret variable
@@ -140,9 +141,44 @@ quadra.toml, [connections.shop]: bearer is a credential: not written in quadra.t
 | `bearer` | sends `Authorization: Bearer <value>` |
 | `api_key`, `api_key_header` | sends the key in a header (`X-Api-Key` when not given) |
 | `user`, `password` | HTTP basic authentication |
-| `signing_secret` | signs every request (see [Webhooks](#webhooks)) |
+| `oauth2_token_url`, `client_id`, `client_secret`, `scope`, `client_auth` | OAuth2 client credentials (below) |
+| `signing_secret` | signs every request (see [Webhooks](#webhooks)); `signature_…` say how (below) |
+| `client_certificate` | the client's certificate and its private key, PEM, for servers that ask for one (mutual TLS) |
+| `server_ca` | the certificate (PEM) of the authority that signed the server's, when it is a private one (an ERP of the company's network): then only it is trusted |
 | `timeout` | from `"1s"` to `"120s"`; `"10s"` when not given |
 | `insecure` | `true` allows `http://`: for a test receiver on your machine |
+
+One authentication at most: `bearer`, `api_key`, `user` and `password`, or OAuth2. A
+certificate and a signature go with any of them.
+
+**OAuth2.** With `oauth2_token_url`, Quadra asks the token itself (the *client credentials*
+grant: `grant_type=client_credentials`, with `scope` when given), keeps it until a minute
+before it expires (`expires_in`, an hour when not said), and sends it as
+`Authorization: Bearer <token>`. The client's id and secret go as basic authentication, or in
+the form with `client_auth = "body"`. A request refused with 401 gets a new token and is sent
+again once, in the same attempt; refused again, it is a failed attempt like any other.
+
+```toml
+[connections.erp]
+kind = "http"
+url = "https://erp.example.com/api"
+oauth2_token_url = "https://login.example.com/oauth2/token"
+client_id = { var = "ERP_CLIENT_ID" }
+client_secret = { var = "ERP_CLIENT_SECRET" }
+scope = "orders.write"
+client_certificate = { var = "ERP_CLIENT_PEM" }    # if the ERP asks for one
+```
+
+**A signature in the receiver's format.** Without `signature_header`, `signing_secret` writes
+Quadra's own `Quadra-Signature` ([Webhooks](#webhooks)). A receiver that checks a signature of
+its own says how it wants it:
+
+| Key | Meaning |
+|---|---|
+| `signature_header` | the header with the HMAC-SHA256 (`X-Signature`) |
+| `signature_encoding` | `"hex"` (when not given) or `"base64"` |
+| `signature_prefix` | text before it (`"sha256="`) |
+| `signature_timestamp_header` | a header with the unix seconds, signed with the body as `"<seconds>.<body>"` (without it the body alone is signed) |
 
 ### Limits of the other side
 

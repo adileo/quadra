@@ -124,11 +124,16 @@ fn project_with(dir: &Path, port: u16, code: &str) -> (Config, String) {
 
 /// The same, with more settings of the connection (`rate = "2/s"`).
 fn project_full(dir: &Path, port: u16, code: &str, settings: &str) -> (Config, String) {
+    project_at(dir, &format!("http://127.0.0.1:{port}"), code, settings)
+}
+
+/// The same, with the connection's url.
+fn project_at(dir: &Path, url: &str, code: &str, settings: &str) -> (Config, String) {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
         dir.join("quadra.toml"),
-        format!("[project]\nname = \"d\"\n\n[vars]\nHOOK_SECRET = {{ secret = true }}\n\n[connections.hooks]\nkind = \"http\"\nurl = \"http://127.0.0.1:{port}\"\ninsecure = true\nsigning_secret = {{ var = \"HOOK_SECRET\" }}\ntimeout = \"3s\"\n{settings}"),
+        format!("[project]\nname = \"d\"\n\n[vars]\nHOOK_SECRET = {{ secret = true }}\n\n[connections.hooks]\nkind = \"http\"\nurl = \"{url}\"\ninsecure = true\nsigning_secret = {{ var = \"HOOK_SECRET\" }}\ntimeout = \"3s\"\n{settings}"),
     )
     .unwrap();
     std::fs::write(dir.join("main.qd"), code).unwrap();
@@ -1563,5 +1568,208 @@ fn publish_sends_the_latest_state_of_a_record_and_never_echoes_what_came_from_th
         (got[1].0[":method"].as_str(), got[1].0[":path"].as_str()),
         ("PUT", "/products/TRK-42")
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A request as a test server reads it: the headers (lower case, with `:method` and `:path`)
+/// and the body.
+fn read_request(s: &mut impl Read) -> (HashMap<String, String>, String) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = s.read(&mut chunk).unwrap_or(0);
+        if n == 0 {
+            return (HashMap::new(), String::new());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        let text = String::from_utf8_lossy(&buf).to_string();
+        if let Some((h, b)) = text.split_once("\r\n\r\n") {
+            let mut headers: HashMap<String, String> = h
+                .lines()
+                .skip(1)
+                .filter_map(|l| l.split_once(':'))
+                .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                .collect();
+            let len: usize = headers
+                .get("content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if b.len() >= len {
+                let mut first = h.lines().next().unwrap_or("").split_whitespace();
+                headers.insert(":method".into(), first.next().unwrap_or("").to_string());
+                headers.insert(":path".into(), first.next().unwrap_or("").to_string());
+                return (headers, b[..len].to_string());
+            }
+        }
+    }
+}
+
+fn answer(s: &mut impl Write, status: u16, body: &str) {
+    let _ = s.write_all(
+        format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes(),
+    );
+}
+
+const PLACING: &str = "entity Order:\n    number: Text\n\nevent OrderPlaced(order: Order)\n\non Order created as o:\n    emit OrderPlaced(order=o)\n\noutbound OrderPlaced via hooks as e:\n    backoff 1 seconds .. 1 seconds\n    post(\"/orders\", e.order.number)\n";
+
+#[test]
+fn an_oauth2_token_is_asked_kept_and_asked_again_when_refused() {
+    // the token url and the API: the first token is refused once it is used
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let seen: Got = Arc::default();
+    let g = seen.clone();
+    std::thread::spawn(move || {
+        let mut tokens = 0;
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let (h, b) = read_request(&mut s);
+            g.lock().unwrap().push((h.clone(), b));
+            if h[":path"] == "/oauth/token" {
+                tokens += 1;
+                answer(&mut s, 200, &format!("{{\"access_token\":\"tok-{tokens}\",\"token_type\":\"Bearer\",\"expires_in\":3600}}"));
+            } else if h.get("authorization").map(String::as_str) == Some("Bearer tok-1") {
+                answer(&mut s, 401, "{}");
+            } else {
+                answer(&mut s, 200, "{}");
+            }
+        }
+    });
+    let dir = temp("oauth");
+    let (mut cfg, token) = project_full(
+        &dir,
+        port,
+        PLACING,
+        &format!("oauth2_token_url = \"http://127.0.0.1:{port}/oauth/token\"\nclient_id = \"quadra-app\"\nclient_secret = {{ var = \"ERP_SECRET\" }}\nscope = \"orders.write\"\nsignature_header = \"X-Erp-Signature\"\nsignature_encoding = \"base64\"\nsignature_prefix = \"sha256=\"\nsignature_timestamp_header = \"X-Erp-Time\"\n\n[vars.ERP_SECRET]\nsecret = true\n"),
+    );
+    cfg.outside.env.insert("ERP_SECRET".into(), "s3kr!t".into());
+    let (_host, _rt, hport) = serve(HostOptions::default(), cfg.clone());
+    place_order(hport, &token, "A1");
+    outbox_row(&cfg, |r| r[1].is_some());
+    let seen = seen.lock().unwrap().clone();
+    let what: Vec<String> = seen
+        .iter()
+        .map(|(h, _)| {
+            format!(
+                "{} {}",
+                h[":path"],
+                h.get("authorization").cloned().unwrap_or_default()
+            )
+        })
+        .collect();
+    use base64::Engine;
+    let basic = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("quadra-app:s3kr%21t")
+    );
+    assert_eq!(
+        what,
+        [
+            format!("/oauth/token {basic}"),
+            "/orders Bearer tok-1".to_string(),
+            format!("/oauth/token {basic}"),
+            "/orders Bearer tok-2".to_string(),
+        ]
+    );
+    assert_eq!(
+        seen[0].1,
+        "grant_type=client_credentials&scope=orders.write"
+    );
+    // the signature as the receiver wants it: base64 of the HMAC of "<t>.<body>", prefixed
+    let (h, body) = &seen[3];
+    let t = &h["x-erp-time"];
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"s3cret").unwrap();
+    mac.update(format!("{t}.{body}").as_bytes());
+    let want = format!(
+        "sha256={}",
+        base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    );
+    assert_eq!(h["x-erp-signature"], want);
+    assert!(!h.contains_key("quadra-signature"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_client_certificate_is_shown_to_a_server_of_a_private_authority() {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let tls = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/it/tls");
+    let read = |f: &str| std::fs::read_to_string(tls.join(f)).unwrap();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    for c in CertificateDer::pem_file_iter(tls.join("ca.pem")).unwrap() {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(
+            CertificateDer::pem_file_iter(tls.join("server.pem"))
+                .unwrap()
+                .map(|c| c.unwrap())
+                .collect(),
+            PrivateKeyDer::from_pem_file(tls.join("server.key")).unwrap(),
+        )
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let l = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let port = l.local_addr().unwrap().port();
+    let clients: Arc<Mutex<Vec<String>>> = Arc::default();
+    let c = clients.clone();
+    rt.spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((s, _)) = l.accept().await else {
+                continue;
+            };
+            let Ok(mut s) = acceptor.accept(s).await else {
+                c.lock().unwrap().push("refused".into());
+                continue;
+            };
+            let who = s
+                .get_ref()
+                .1
+                .peer_certificates()
+                .map(|p| format!("{} certificate", p.len()))
+                .unwrap_or_default();
+            c.lock().unwrap().push(who);
+            let mut buf = vec![0u8; 65536];
+            let _ = s.read(&mut buf).await;
+            let _ = s
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await;
+            let _ = s.shutdown().await;
+        }
+    });
+    let dir = temp("mtls");
+    let (mut cfg, token) = project_at(
+        &dir,
+        &format!("https://127.0.0.1:{port}"),
+        PLACING,
+        "client_certificate = { var = \"CLIENT_PEM\" }\nserver_ca = { var = \"SERVER_CA\" }\n\n[vars.CLIENT_PEM]\nsecret = true\n\n[vars.SERVER_CA]\n",
+    );
+    cfg.outside
+        .env
+        .insert("CLIENT_PEM".into(), read("client.pem"));
+    cfg.outside.env.insert("SERVER_CA".into(), read("ca.pem"));
+    let (_host, _hrt, hport) = serve(HostOptions::default(), cfg.clone());
+    place_order(hport, &token, "M1");
+    let row = outbox_row(&cfg, |r| r[1].is_some() || r[3].is_some());
+    assert!(row[1].is_some(), "{row:?}");
+    assert_eq!(clients.lock().unwrap().clone(), ["1 certificate"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

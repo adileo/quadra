@@ -1,0 +1,2 @@
+Certificates for the tests of mutual TLS only (made with openssl, valid 100 years): a
+CA, the server's certificate for 127.0.0.1 and a client's certificate with its key.

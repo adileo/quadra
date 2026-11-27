@@ -24,7 +24,7 @@
 //! resolves to a private, loopback, link-local or metadata address (`169.254.169.254`) is
 //! refused, checked after the resolution, and the address checked is the one connected to.
 
-use quadra_sema::manifest::{ConnectionKind, HttpAuth, Manifest, Setting};
+use quadra_sema::manifest::{ConnectionKind, HttpAuth, Manifest, Setting, Signature};
 use quadra_store::deliveries::{Attempt, Due, Outcome};
 use serde_json::{json, Value as J};
 use std::collections::BTreeMap;
@@ -95,8 +95,8 @@ pub enum Send {
         url: String,
         headers: Vec<(String, String)>,
         body: String,
-        /// the value that signs it (`signing_secret`)
-        sign: Option<String>,
+        /// what proves who sends it beyond its headers: a token, a certificate, a signature
+        creds: Credentials,
         timeout: Duration,
     },
     Smtp {
@@ -244,15 +244,44 @@ pub struct Pull {
     pub inbound: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    pub creds: Credentials,
     pub timeout: Duration,
 }
 
-/// The base url, the headers of authentication and the timeout of an HTTP connection.
-pub fn connection_request(
+/// What proves who sends a request, beyond its headers: an OAuth2 token asked for it, the
+/// client's certificate (mutual TLS), the authority its server's certificate is signed by, a
+/// signature of its body.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Credentials {
+    pub oauth: Option<OAuth>,
+    /// the client's certificate and private key, PEM
+    pub identity: Option<String>,
+    /// a private authority, PEM: then the only one trusted
+    pub ca: Option<String>,
+    /// the secret and how the signature is written
+    pub sign: Option<(String, Signature)>,
+}
+
+/// OAuth2 client credentials, as a connection says them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OAuth {
+    pub token_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scope: Option<String>,
+    pub in_body: bool,
+}
+
+/// The base url, the headers of authentication, the credentials and the timeout of an HTTP
+/// connection.
+pub type Parts = (String, Vec<(String, String)>, Credentials, Duration);
+
+/// The parts of an HTTP connection, with the values where the app runs.
+fn http_parts(
     manifest: &Manifest,
     env: &BTreeMap<String, String>,
     connection: &str,
-) -> Result<(String, Vec<(String, String)>, Duration), String> {
+) -> Result<Parts, String> {
     let value = |name: &str| -> Result<String, String> {
         manifest
             .value(env, name)
@@ -271,16 +300,18 @@ pub fn connection_request(
     let ConnectionKind::Http {
         url,
         auth,
+        signing_secret,
+        signature,
+        client_certificate,
+        server_ca,
         timeout_s,
         ..
     } = &conn.kind
     else {
         return Err(format!("`{connection}` is not an HTTP connection"));
     };
-    let mut headers = vec![
-        ("User-Agent".to_string(), "Quadra".to_string()),
-        ("Accept".to_string(), "application/json".to_string()),
-    ];
+    let mut headers = Vec::new();
+    let mut creds = Credentials::default();
     match auth {
         HttpAuth::None => {}
         HttpAuth::Bearer(v) => {
@@ -296,12 +327,49 @@ pub fn connection_request(
             ));
             headers.push(("Authorization".into(), format!("Basic {token}")));
         }
+        HttpAuth::OAuth2 {
+            token_url,
+            client_id,
+            client_secret,
+            scope,
+            in_body,
+        } => {
+            creds.oauth = Some(OAuth {
+                token_url: setting(token_url)?,
+                client_id: setting(client_id)?,
+                client_secret: value(client_secret)?,
+                scope: scope.clone(),
+                in_body: *in_body,
+            })
+        }
     }
+    if let Some(s) = signing_secret {
+        creds.sign = Some((value(s)?, signature.clone()));
+    }
+    creds.identity = client_certificate.as_deref().map(value).transpose()?;
+    creds.ca = server_ca.as_deref().map(value).transpose()?;
     Ok((
         setting(url)?.trim_end_matches('/').to_string(),
         headers,
+        creds,
         Duration::from_secs(*timeout_s),
     ))
+}
+
+/// The base url, the headers of authentication, the credentials and the timeout of an HTTP
+/// connection: what a pull sends.
+pub fn connection_request(
+    manifest: &Manifest,
+    env: &BTreeMap<String, String>,
+    connection: &str,
+) -> Result<Parts, String> {
+    let (base, auth, creds, timeout) = http_parts(manifest, env, connection)?;
+    let mut headers = vec![
+        ("User-Agent".to_string(), "Quadra".to_string()),
+        ("Accept".to_string(), "application/json".to_string()),
+    ];
+    headers.extend(auth);
+    Ok((base, headers, creds, timeout))
 }
 
 /// What came of a pull: the status, the body (up to 16 MB), `Retry-After` in seconds.
@@ -323,9 +391,16 @@ pub async fn fetch(
             }
         }
     }
+    let client = client_for(client, &pull.creds, public_only)?;
     let mut req = client.get(parsed).timeout(pull.timeout);
     for (k, v) in &pull.headers {
         req = req.header(k, v);
+    }
+    if let Some(o) = &pull.creds.oauth {
+        let t = token(&client, o, public_only, pull.timeout)
+            .await
+            .map_err(|f| f.text())?;
+        req = req.header("Authorization", format!("Bearer {t}"));
     }
     let resp = req
         .send()
@@ -427,13 +502,8 @@ pub fn plan(
     };
     let send = (|| -> Result<Send, String> {
         match &conn.kind {
-            ConnectionKind::Http {
-                url,
-                auth,
-                signing_secret,
-                timeout_s,
-                ..
-            } => {
+            ConnectionKind::Http { .. } => {
+                let (base, auth, creds, timeout) = http_parts(manifest, env, connection)?;
                 // the request its block built, or the envelope of the event
                 let (method, path, body, content_type) = match &built {
                     Some(Built::Http {
@@ -472,7 +542,7 @@ pub fn plan(
                 {
                     return Err(format!("the path `{path}` is not a path of the connection's url (from `/`, no spaces, no `..`)"));
                 }
-                let url = format!("{}{}", setting(url)?.trim_end_matches('/'), path);
+                let url = format!("{base}{path}");
                 let mut headers = vec![
                     (
                         "Content-Type".to_string(),
@@ -483,30 +553,14 @@ pub fn plan(
                     ("Quadra-Delivery".to_string(), due.id.to_string()),
                     ("Idempotency-Key".to_string(), idempotency_key(&due)),
                 ];
-                match auth {
-                    HttpAuth::None => {}
-                    HttpAuth::Bearer(v) => {
-                        headers.push(("Authorization".into(), format!("Bearer {}", value(v)?)))
-                    }
-                    HttpAuth::ApiKey { header, key } => headers.push((header.clone(), value(key)?)),
-                    HttpAuth::Basic { user, password } => {
-                        use base64::Engine;
-                        let token = base64::engine::general_purpose::STANDARD.encode(format!(
-                            "{}:{}",
-                            setting(user)?,
-                            value(password)?
-                        ));
-                        headers.push(("Authorization".into(), format!("Basic {token}")));
-                    }
-                }
-                let sign = signing_secret.as_deref().map(value).transpose()?;
+                headers.extend(auth);
                 Ok(Send::Http {
                     method,
                     url,
                     headers,
                     body,
-                    sign,
-                    timeout: Duration::from_secs(*timeout_s),
+                    creds,
+                    timeout,
                 })
             }
             ConnectionKind::Smtp {
@@ -620,6 +674,180 @@ pub fn sign(key: &str, message: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// The headers that sign `body` with `key` at `t` (unix seconds), written as `how` says:
+/// Quadra's own `Quadra-Signature: t=…,v1=…`, or a header of the receiver's (hex or base64,
+/// with a prefix, the timestamp in a header of its own and signed with the body).
+pub fn signature(key: &str, how: &Signature, body: &str, t: i64) -> Vec<(String, String)> {
+    use hmac::{Hmac, Mac};
+    let Some(header) = &how.header else {
+        return vec![(
+            "Quadra-Signature".into(),
+            format!("t={t},v1={}", sign(key, &format!("{t}.{body}"))),
+        )];
+    };
+    let message = match how.timestamp_header {
+        Some(_) => format!("{t}.{body}"),
+        None => body.to_string(),
+    };
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()).expect("any key length");
+    mac.update(message.as_bytes());
+    let bytes = mac.finalize().into_bytes();
+    let text = if how.base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    } else {
+        hex::encode(bytes)
+    };
+    let mut out = vec![(header.clone(), format!("{}{text}", how.prefix))];
+    if let Some(h) = &how.timestamp_header {
+        out.push((h.clone(), t.to_string()));
+    }
+    out
+}
+
+/// The client for these credentials: the shared one, or (a certificate of the client, a
+/// private authority) one of its own, kept for the next requests.
+fn client_for(
+    shared: &reqwest::Client,
+    creds: &Credentials,
+    public_only: bool,
+) -> Result<reqwest::Client, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    if creds.identity.is_none() && creds.ca.is_none() {
+        return Ok(shared.clone());
+    }
+    type Clients = Mutex<HashMap<(Option<String>, Option<String>, bool), reqwest::Client>>;
+    static CLIENTS: OnceLock<Clients> = OnceLock::new();
+    let key = (creds.identity.clone(), creds.ca.clone(), public_only);
+    let clients = CLIENTS.get_or_init(Default::default);
+    if let Some(c) = clients.lock().unwrap().get(&key) {
+        return Ok(c.clone());
+    }
+    let mut b = builder(public_only);
+    if let Some(pem) = &creds.identity {
+        let id = reqwest::Identity::from_pem(pem.as_bytes()).map_err(|e| {
+            format!("client_certificate is not a certificate with its private key, PEM: {e}")
+        })?;
+        b = b.identity(id);
+    }
+    if let Some(pem) = &creds.ca {
+        let ca = reqwest::Certificate::from_pem(pem.as_bytes())
+            .map_err(|e| format!("server_ca is not a certificate, PEM: {e}"))?;
+        b = b.tls_certs_only([ca]);
+    }
+    let c = b
+        .build()
+        .map_err(|e| format!("the TLS settings of the connection: {e}"))?;
+    let mut all = clients.lock().unwrap();
+    // a value changed: the clients of the old one go
+    if all.len() > 64 {
+        all.clear();
+    }
+    all.insert(key, c.clone());
+    Ok(c)
+}
+
+type Tokens = std::sync::Mutex<std::collections::HashMap<OAuth, (String, std::time::Instant)>>;
+
+fn tokens() -> &'static Tokens {
+    static TOKENS: std::sync::OnceLock<Tokens> = std::sync::OnceLock::new();
+    TOKENS.get_or_init(Default::default)
+}
+
+fn forget_token(o: &OAuth) {
+    tokens().lock().unwrap().remove(o);
+}
+
+/// A token of OAuth2 client credentials: the one kept while it holds (a minute before it
+/// expires), else one asked of the token url.
+async fn token(
+    client: &reqwest::Client,
+    o: &OAuth,
+    public_only: bool,
+    timeout: Duration,
+) -> Result<String, Failure> {
+    if let Some((t, until)) = tokens().lock().unwrap().get(o) {
+        if *until > std::time::Instant::now() {
+            return Ok(t.clone());
+        }
+    }
+    let parsed = reqwest::Url::parse(&o.token_url)
+        .map_err(|e| Failure::Waiting(format!("oauth2_token_url {}: {e}", o.token_url)))?;
+    if public_only {
+        if let Some(host) = parsed.host_str() {
+            if host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .is_ok()
+            {
+                addresses(host, 0, true).await.map_err(Failure::Never)?;
+            }
+        }
+    }
+    let enc = |s: &str| -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    let mut form = vec!["grant_type=client_credentials".to_string()];
+    if let Some(s) = &o.scope {
+        form.push(format!("scope={}", enc(s)));
+    }
+    let mut req = client
+        .post(parsed)
+        .timeout(timeout)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .header("User-Agent", "Quadra");
+    if o.in_body {
+        form.push(format!("client_id={}", enc(&o.client_id)));
+        form.push(format!("client_secret={}", enc(&o.client_secret)));
+    } else {
+        use base64::Engine;
+        let b = base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            enc(&o.client_id),
+            enc(&o.client_secret)
+        ));
+        req = req.header("Authorization", format!("Basic {b}"));
+    }
+    let host = host_of(&o.token_url);
+    let resp = req
+        .body(form.join("&"))
+        .send()
+        .await
+        .map_err(|e| Failure::Again(format!("the token of {host}: {}", root_cause(&e))))?;
+    let status = resp.status();
+    let text = read_up_to(resp, 64 << 10).await;
+    if !status.is_success() {
+        let said: String = text.chars().take(200).collect();
+        return Err(Failure::Again(format!(
+            "{host} refused the token ({}): {said}",
+            status.as_u16()
+        )));
+    }
+    let j: J = serde_json::from_str(&text)
+        .map_err(|_| Failure::Again(format!("{host} answered the token with no JSON")))?;
+    let t = j["access_token"]
+        .as_str()
+        .ok_or_else(|| Failure::Again(format!("{host} answered the token with no access_token")))?
+        .to_string();
+    let lasts = j["expires_in"].as_u64().unwrap_or(3600);
+    let until = std::time::Instant::now() + Duration::from_secs(lasts.saturating_sub(60).max(30));
+    tokens()
+        .lock()
+        .unwrap()
+        .insert(o.clone(), (t.clone(), until));
+    Ok(t)
+}
+
 /// Whether an address is on the public internet: not private, loopback, link-local (the
 /// clouds' metadata, `169.254.169.254`), shared (100.64/10), multicast, documentation or
 /// reserved.
@@ -698,6 +926,10 @@ impl reqwest::dns::Resolve for PublicResolver {
 /// The client every HTTP delivery of a host goes through: no redirects, no proxy from the
 /// environment, and with `public_only` only public addresses.
 pub fn http_client(public_only: bool) -> reqwest::Client {
+    builder(public_only).build().expect("an HTTP client")
+}
+
+fn builder(public_only: bool) -> reqwest::ClientBuilder {
     let mut b = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -705,7 +937,15 @@ pub fn http_client(public_only: bool) -> reqwest::Client {
     if public_only {
         b = b.dns_resolver(std::sync::Arc::new(PublicResolver));
     }
-    b.build().expect("an HTTP client")
+    b
+}
+
+impl Failure {
+    fn text(self) -> String {
+        match self {
+            Failure::Again(e) | Failure::Later(e, _) | Failure::Never(e) | Failure::Waiting(e) => e,
+        }
+    }
 }
 
 /// What failed, and whether it may work later.
@@ -738,23 +978,71 @@ pub async fn run(
             url,
             headers,
             body,
-            sign: key,
+            creds,
             timeout,
-        } => {
-            http(
-                client,
-                method,
-                url,
-                headers,
-                body,
-                key.as_deref(),
-                *timeout,
-                public_only,
-                &mut seen,
-                &mut answer,
-            )
-            .await
-        }
+        } => match client_for(client, creds, public_only) {
+            Err(e) => Err(Failure::Waiting(e)),
+            Ok(client) => {
+                let mut headers = headers.clone();
+                let first = match &creds.oauth {
+                    Some(o) => token(&client, o, public_only, *timeout).await.map(Some),
+                    None => Ok(None),
+                };
+                match first {
+                    Err(f) => Err(f),
+                    Ok(t) => {
+                        let base = headers.len();
+                        if let Some(t) = t {
+                            headers.push(("Authorization".into(), format!("Bearer {t}")));
+                        }
+                        let mut r = http(
+                            &client,
+                            method,
+                            url,
+                            &headers,
+                            body,
+                            creds.sign.as_ref(),
+                            *timeout,
+                            public_only,
+                            &mut seen,
+                            &mut answer,
+                        )
+                        .await;
+                        // the token refused (it expired early, it was revoked): a new one, and
+                        // the request sent again once
+                        if let (Some(o), Some(401)) = (&creds.oauth, seen.status) {
+                            forget_token(o);
+                            match token(&client, o, public_only, *timeout).await {
+                                Ok(t) => {
+                                    headers.truncate(base);
+                                    headers.push(("Authorization".into(), format!("Bearer {t}")));
+                                    seen.status = None;
+                                    seen.excerpt = None;
+                                    r = http(
+                                        &client,
+                                        method,
+                                        url,
+                                        &headers,
+                                        body,
+                                        creds.sign.as_ref(),
+                                        *timeout,
+                                        public_only,
+                                        &mut seen,
+                                        &mut answer,
+                                    )
+                                    .await;
+                                    if seen.status == Some(401) {
+                                        forget_token(o);
+                                    }
+                                }
+                                Err(f) => r = Err(f),
+                            }
+                        }
+                        r
+                    }
+                }
+            }
+        },
         Send::Smtp {
             url,
             login,
@@ -835,13 +1123,14 @@ fn outcome(plan: &Plan, result: Result<(), Failure>) -> Outcome {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn http(
     client: &reqwest::Client,
     method: &str,
     url: &str,
     headers: &[(String, String)],
     body: &str,
-    key: Option<&str>,
+    signed: Option<&(String, Signature)>,
     timeout: Duration,
     public_only: bool,
     seen: &mut Attempt,
@@ -870,12 +1159,10 @@ async fn http(
     for (k, v) in headers {
         req = req.header(k, v);
     }
-    if let Some(key) = key {
-        let t = chrono::Utc::now().timestamp();
-        req = req.header(
-            "Quadra-Signature",
-            format!("t={t},v1={}", sign(key, &format!("{t}.{body}"))),
-        );
+    if let Some((key, how)) = signed {
+        for (k, v) in signature(key, how, body, chrono::Utc::now().timestamp()) {
+            req = req.header(k, v);
+        }
     }
     let resp = req.send().await.map_err(|e| {
         let msg = if e.is_timeout() {
@@ -1225,7 +1512,7 @@ mod tests {
             url,
             headers,
             body,
-            sign,
+            creds,
             ..
         } = plan(&m, &env, due, "shop", Some("/hooks"), None).send
         else {
@@ -1234,7 +1521,7 @@ mod tests {
         assert_eq!(url, "https://shop.example.com/api/hooks");
         assert!(headers.contains(&("Authorization".into(), "Bearer t0k".into())));
         assert!(headers.contains(&("Idempotency-Key".into(), "quadra-0123456789abcdef-7".into())));
-        assert_eq!(sign.as_deref(), Some("k3y"));
+        assert_eq!(creds.sign.map(|s| s.0).as_deref(), Some("k3y"));
         let b: J = serde_json::from_str(&body).unwrap();
         assert_eq!(b["data"]["number"], "A1");
         assert_eq!(b["event"], "OrderShipped");

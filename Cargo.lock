@@ -1826,9 +1826,11 @@ dependencies = [
  "reqwest",
  "rust_decimal",
  "rust_xlsxwriter",
+ "rustls",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-rustls",
  "tower-http",
 ]
 
