@@ -3080,7 +3080,7 @@ fn signature(root: &std::path::Path) -> Vec<(std::path::PathBuf, std::time::Syst
                 todo.push(p);
             } else if matches!(
                 p.extension().and_then(|x| x.to_str()),
-                Some("qd" | "csv" | "toml" | "lock")
+                Some("qd" | "qdp" | "csv" | "toml" | "lock")
             ) {
                 if let Ok(m) = e.metadata() {
                     out.push((p, m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));

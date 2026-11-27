@@ -41,7 +41,11 @@ fn pdftotext_reads_it() {
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("a.pdf");
     std::fs::write(&f, &a.bytes).unwrap();
-    let out = std::process::Command::new("pdftotext").arg(&f).arg("-").output().unwrap();
+    let out = std::process::Command::new("pdftotext")
+        .arg(&f)
+        .arg("-")
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("House blend 79"), "{text}");
     assert!(text.contains("Page 2 of 2"), "{text}");

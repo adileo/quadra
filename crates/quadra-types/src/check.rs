@@ -5,6 +5,8 @@ use quadra_ir::*;
 use quadra_sema::{Diagnostic, Severity};
 use std::collections::{HashMap, HashSet};
 
+mod documents;
+
 pub fn check_model(model: &Model) -> Vec<Diagnostic> {
     analyze_model(model).diagnostics
 }
@@ -302,6 +304,8 @@ impl<'m> Checker<'m> {
         self.check_outbounds();
         self.check_inbounds();
         self.check_endpoints();
+        self.context = String::new();
+        self.check_documents();
         self.context = String::new();
         for r in &m.reactions {
             self.entity = None;
@@ -3326,6 +3330,10 @@ impl<'m> Checker<'m> {
             return self.call_fn(&f, args);
         }
         match n {
+            // a document of a `.qdp` file, rendered
+            "render" | "zpl" if !self.m.fns.iter().any(|f| f.name == n) => {
+                return self.check_render(n, args, span);
+            }
             // the request of an `outbound … as e:` block (`check_outbounds`)
             // a file to a folder of an sftp or ftp connection: `write("out/a.csv", rows.csv())`;
             // a row to an exchange table of a database: `insert("EXCHANGE", ErpOrder(…))`

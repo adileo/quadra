@@ -179,7 +179,7 @@ impl Project {
             collect_qdi(&interfaces, &mut paths)?;
         }
         for p in overlays.keys() {
-            let code = p.extension().map_or(false, |e| e == "qd");
+            let code = p.extension().map_or(false, |e| e == "qd" || e == "qdp");
             let interface =
                 p.extension().map_or(false, |e| e == "qdi") && p.starts_with(&interfaces);
             if p.starts_with(root) && (code || interface) && !paths.contains(p) {
@@ -325,7 +325,7 @@ fn collect_qd(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
                 continue;
             }
             collect_qd(&path, out)?;
-        } else if path.extension().map_or(false, |e| e == "qd") {
+        } else if path.extension().map_or(false, |e| e == "qd" || e == "qdp") {
             out.push(path);
         }
     }

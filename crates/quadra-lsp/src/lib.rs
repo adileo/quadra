@@ -557,7 +557,7 @@ fn to_lsp_symbol(s: &ide::Symbol, index: &LineIndex) -> DocumentSymbol {
             D::Fn => SymbolKind::FUNCTION,
             D::Const => SymbolKind::CONSTANT,
             D::Role | D::Fixture | D::Migration | D::Change => SymbolKind::NAMESPACE,
-            D::View | D::Report => SymbolKind::OBJECT,
+            D::View | D::Report | D::Document => SymbolKind::OBJECT,
             D::Metric | D::Control => SymbolKind::KEY,
             D::Event => SymbolKind::EVENT,
         },

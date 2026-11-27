@@ -34,7 +34,7 @@ fn project(files: &str) -> Result<Project, String> {
     };
     let sources = map
         .into_iter()
-        .filter(|(p, _)| p.ends_with(".qd"))
+        .filter(|(p, _)| p.ends_with(".qd") || p.ends_with(".qdp"))
         .map(|(p, t)| (root.join(p), t.as_str().unwrap_or("").to_string()))
         .collect();
     let mut project = Project::from_sources(root, sources);

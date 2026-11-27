@@ -198,7 +198,7 @@ fn stamp(root: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
                 todo.push(p);
             } else if matches!(
                 p.extension().and_then(|x| x.to_str()),
-                Some("qd" | "csv" | "toml")
+                Some("qd" | "qdp" | "csv" | "toml")
             ) {
                 out.push((
                     p,

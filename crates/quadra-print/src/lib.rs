@@ -4,6 +4,13 @@
 //! Typst compiler embedded as a library (no browser, no external program), with the fonts
 //! in the binary. The same tree always gives the same bytes.
 
+pub mod doc;
 pub mod typst;
 
+pub use crate::doc::{Align, Block, Column, Doc, Style};
 pub use crate::typst::Pdf;
+
+/// Render a document: its Typst source compiled with the files it uses (images, barcodes).
+pub fn render(doc: &Doc, files: &[(String, Vec<u8>)], ident: &str) -> Result<Pdf, String> {
+    typst::pdf(&doc::to_typst(doc), files, ident)
+}

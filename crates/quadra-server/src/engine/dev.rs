@@ -11,8 +11,8 @@ use super::*;
 use std::path::{Component, Path};
 use std::process::Command;
 
-const EDITABLE: &[&str] = &["qd", "csv", "md"];
-const READABLE: &[&str] = &["qd", "csv", "md", "toml", "lock", "expected"];
+const EDITABLE: &[&str] = &["qd", "qdp", "csv", "md"];
+const READABLE: &[&str] = &["qd", "qdp", "csv", "md", "toml", "lock", "expected"];
 const MAX_FILE: usize = 1 << 20;
 
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {

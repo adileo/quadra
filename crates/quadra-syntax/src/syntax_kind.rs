@@ -140,6 +140,19 @@ pub enum SyntaxKind {
     PUBLISH,
     /// in a test: `receive OrderIn "…"`, `deliver OrderPlaced reply …`, `expect sent …`
     TEST_STMT,
+    /// `document InvoicePdf(inv: Invoice):` or `label ParcelLabel(p: Parcel) width 100 …:`
+    /// (`.qdp` files) and its elements
+    DOCUMENT,
+    /// an element of a document or a label: `text inv.number size 14 bold`, `table … as l:`
+    PRINT_ITEM,
+    /// an option of an element: `size 14`, `bold`, `align right`
+    PRINT_OPT,
+    /// `let`, `if … else`, `for … in` among the elements of a document
+    PRINT_LET,
+    PRINT_IF,
+    PRINT_FOR,
+    /// `attach InvoicePdf to Invoice.pdf when state is Posted`
+    ATTACH,
 
     // members
     MEMBER_LIST,

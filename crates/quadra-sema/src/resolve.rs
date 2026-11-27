@@ -26,6 +26,8 @@ pub enum DeclKind {
     Migration,
     Change,
     Event,
+    /// a `document` or a `label` of a `.qdp` file
+    Document,
 }
 
 impl DeclKind {
@@ -66,6 +68,7 @@ impl DeclKind {
             DeclKind::Migration => "migration",
             DeclKind::Change => "change",
             DeclKind::Event => "event",
+            DeclKind::Document => "document",
         }
     }
 }
@@ -409,6 +412,7 @@ impl<'p> Resolver<'p> {
                     MIGRATION => DeclKind::Migration,
                     CHANGE => DeclKind::Change,
                     EVENT => DeclKind::Event,
+                    DOCUMENT => DeclKind::Document,
                     PUBLISH => {
                         // the event it declares, named after the record and the connection
                         let Some((name, range)) = ast::publish_event(&item) else {

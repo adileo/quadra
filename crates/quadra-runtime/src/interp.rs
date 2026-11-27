@@ -17,6 +17,7 @@ mod rollup;
 pub use rollup::{
     COMPUTED as FORMULAS_COMPUTED, DELTAS as FORMULAS_BY_DELTA, STORED as FORMULAS_STORED,
 };
+mod documents;
 mod grouping;
 mod query;
 mod scripts;
@@ -3423,6 +3424,30 @@ impl<'m> Interp<'m> {
         if let Some(f) = ctx.local(n).cloned() {
             let (pos, _) = self.eval_args(args, ctx)?;
             return self.apply(&f, pos);
+        }
+        // `render(InvoicePdf(inv))`, `zpl(ParcelLabel(p))`: a document of a `.qdp` file
+        if matches!(n, "render" | "zpl") && !self.m.fns.iter().any(|f| f.name == n) {
+            if let [Arg {
+                value:
+                    Expr {
+                        kind:
+                            ExprKind::Call {
+                                callee,
+                                args: dargs,
+                            },
+                        ..
+                    },
+                ..
+            }] = args
+            {
+                if let ExprKind::Name(d) = &callee.kind {
+                    let (pos, _) = self.eval_args(dargs, ctx)?;
+                    return self.render_document(d, pos, n == "zpl");
+                }
+            }
+            return fail(format!(
+                "`{n}` takes a document with its arguments: `{n}(InvoicePdf(inv))`"
+            ));
         }
         // the request an `outbound … as e:` block ends with
         if self.building_request

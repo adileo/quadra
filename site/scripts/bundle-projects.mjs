@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const site = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const out = path.join(site, "public/projects");
-const TEXT = /\.(qd|toml|md|csv|lock|expected)$/;
+const TEXT = /\.(qd|qdp|toml|md|csv|lock|expected)$/;
 
 function read(root) {
   const files = {};

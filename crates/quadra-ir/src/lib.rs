@@ -1056,6 +1056,76 @@ pub enum UnitRef {
     Path(Vec<String>),
 }
 
+/// `document InvoicePdf(inv: Invoice):` or `label ParcelLabel(p: Parcel) width 100 …:` of a
+/// `.qdp` file: a function of its parameters to a page layout, rendered by `render(…)` (a PDF)
+/// or, for a label, also `zpl(…)`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Document {
+    pub name: String,
+    pub label: bool,
+    pub params: Vec<Param>,
+    /// the options of its first line (a label's `width`, `height`, `dpi`)
+    pub opts: Vec<PrintOpt>,
+    pub items: Vec<PrintItem>,
+    pub span: Span,
+}
+
+/// An option of an element: `size 14`, `bold` (no value), `align right`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PrintOpt {
+    pub name: String,
+    pub value: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PrintItem {
+    pub kind: PrintKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum PrintKind {
+    /// `text inv.number size 14 bold`, `table inv.lines as l:` and its children,
+    /// `column "Qty" align right: l.qty` (`body` is what follows the `:`)
+    Element {
+        element: String,
+        value: Option<Expr>,
+        opts: Vec<PrintOpt>,
+        binding: Option<String>,
+        body: Option<Expr>,
+        children: Vec<PrintItem>,
+    },
+    Let {
+        name: String,
+        value: Expr,
+    },
+    /// `if cond:`, or `if let name = value:` (the branch when the value is not none)
+    If {
+        bind: Option<String>,
+        cond: Expr,
+        then: Vec<PrintItem>,
+        otherwise: Vec<PrintItem>,
+    },
+    For {
+        name: String,
+        iter: Expr,
+        body: Vec<PrintItem>,
+    },
+}
+
+/// `attach InvoicePdf to Invoice.pdf when state is Posted`: after a commit, each record of
+/// the entity for which `when` holds and whose field is empty gets the document rendered
+/// from it (with the data of that commit), kept with its hash in the field.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Attach {
+    pub document: String,
+    pub entity: String,
+    pub field: String,
+    pub when: Option<Expr>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Model {
     /// the project's time zone (IANA name; empty: UTC)
@@ -1068,6 +1138,12 @@ pub struct Model {
     pub outbounds: Vec<Outbound>,
     pub inbounds: Vec<Inbound>,
     pub endpoints: Vec<Endpoint>,
+    pub documents: Vec<Document>,
+    pub attaches: Vec<Attach>,
+    /// the files of the project the documents show (`image "assets/logo.png"`), read when the
+    /// project is loaded, by their path
+    #[serde(skip)]
+    pub assets: std::collections::BTreeMap<String, Vec<u8>>,
     pub reactions: Vec<Reaction>,
     pub roles: Vec<Role>,
     /// Top-level `deny` / `allow` rules.

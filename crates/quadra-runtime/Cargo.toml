@@ -19,3 +19,7 @@ serde_json = "1"
 quick-xml = "0.42"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
+# documents of `.qdp` files, rendered to PDF by an embedded Typst
+quadra-print = { path = "../quadra-print" }
+base64 = "0.22"
+sha2 = "0.10"

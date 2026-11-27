@@ -28,11 +28,67 @@ pub fn lower(project: &Project, analysis: &Analysis) -> Model {
         // tests and migrations are scripts; their declarations are lowered like the others
         let _ = f.kind == FileKind::Script;
         l.file = f.id;
+        // a `.qdp` file holds documents and labels, and they are written nowhere else
+        let print = f.path.extension().is_some_and(|e| e == "qdp");
         for item in f.parse.syntax().children() {
+            let k = item.kind();
+            if print && !matches!(k, DOCUMENT | IMPORT | CONST | ERROR) {
+                let span = l.span(&item);
+                l.model.errors.push((span, "a `.qdp` file holds documents and labels (and their imports and constants): this goes in a `.qd` file".to_string()));
+                continue;
+            }
+            if !print && k == DOCUMENT {
+                let span = l.span(&item);
+                l.model.errors.push((span, "a document or a label is written in a `.qdp` file (`documents/invoice.qdp`), beside the code".to_string()));
+            }
             l.item(&item);
         }
     }
     l.model.reindex();
+    // the images of the documents: read from the project (where it is on a disk)
+    let mut paths = Vec::new();
+    fn images(items: &[PrintItem], out: &mut Vec<String>) {
+        for it in items {
+            match &it.kind {
+                PrintKind::Element {
+                    element,
+                    value,
+                    children,
+                    ..
+                } => {
+                    if element == "image" {
+                        if let Some(Expr {
+                            kind: ExprKind::Lit(Lit::Str(p)),
+                            ..
+                        }) = value
+                        {
+                            out.push(p.clone());
+                        }
+                    }
+                    images(children, out);
+                }
+                PrintKind::If {
+                    then, otherwise, ..
+                } => {
+                    images(then, out);
+                    images(otherwise, out);
+                }
+                PrintKind::For { body, .. } => images(body, out),
+                PrintKind::Let { .. } => {}
+            }
+        }
+    }
+    for d in &l.model.documents {
+        images(&d.items, &mut paths);
+    }
+    for p in paths {
+        if p.starts_with('/') || p.contains("..") {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(project.root.join(&p)) {
+            l.model.assets.insert(p, bytes);
+        }
+    }
     for ext in std::mem::take(&mut l.pending) {
         let Some(i) = l.model.entities.iter().position(|e| e.name == ext.name) else {
             continue;
@@ -284,6 +340,38 @@ impl<'a> Lower<'a> {
                 self.model.events.push(Event { name, fields, span });
             }
             PUBLISH => self.publish(item, span),
+            DOCUMENT => {
+                let label = ctx_words(item).first().map(String::as_str) == Some("label");
+                let name = ast::name_text(item).unwrap_or_default();
+                let params = ast::child(item, PARAM_LIST)
+                    .map(|p| self.params(&p))
+                    .unwrap_or_default();
+                let opts = self.print_opts(item);
+                let items = self.print_items(item);
+                self.model.documents.push(Document {
+                    name,
+                    label,
+                    params,
+                    opts,
+                    items,
+                    span,
+                });
+            }
+            ATTACH => {
+                let document = names_of_refs(item).into_iter().next().unwrap_or_default();
+                let path = ast::child(item, PATH)
+                    .map(|p| ast::path_text(&p))
+                    .unwrap_or_default();
+                let (entity, field) = path.split_once('.').unwrap_or((path.as_str(), ""));
+                let when = exprs(item).first().map(|e| self.expr(e));
+                self.model.attaches.push(Attach {
+                    document,
+                    entity: entity.to_string(),
+                    field: field.to_string(),
+                    when,
+                    span,
+                });
+            }
             ENDPOINT => {
                 let mut names =
                     ast::children(item, NAME).map(|n| n.text().to_string().trim().to_string());
@@ -1261,6 +1349,126 @@ impl<'a> Lower<'a> {
             condition,
             span,
         }
+    }
+
+    fn print_opts(&mut self, n: &SyntaxNode) -> Vec<PrintOpt> {
+        ast::children(n, PRINT_OPT)
+            .map(|o| PrintOpt {
+                name: ctx_words(&o).into_iter().next().unwrap_or_default(),
+                value: exprs(&o)
+                    .first()
+                    .map(|e| self.expr(e))
+                    .or_else(|| self.word(&o)),
+                span: self.span(&o),
+            })
+            .collect()
+    }
+
+    /// A word of an element (`page A4`, `align right`): a NAME, read as a name expression.
+    fn word(&mut self, n: &SyntaxNode) -> Option<Expr> {
+        let w = ast::child(n, NAME)?;
+        Some(Expr {
+            kind: ExprKind::Name(w.text().to_string().trim().to_string()),
+            span: self.span(&w),
+        })
+    }
+
+    /// The elements among a node's children (all of them, or those before/after `else`).
+    fn print_items(&mut self, n: &SyntaxNode) -> Vec<PrintItem> {
+        n.children()
+            .filter(|c| matches!(c.kind(), PRINT_ITEM | PRINT_LET | PRINT_IF | PRINT_FOR))
+            .map(|c| self.print_item(&c))
+            .collect()
+    }
+
+    fn print_item(&mut self, n: &SyntaxNode) -> PrintItem {
+        let span = self.span(n);
+        let kind = match n.kind() {
+            PRINT_LET => PrintKind::Let {
+                name: ast::name_text(n).unwrap_or_default(),
+                value: exprs(n)
+                    .first()
+                    .map(|e| self.expr(e))
+                    .unwrap_or_else(|| self.error_expr(n)),
+            },
+            PRINT_FOR => PrintKind::For {
+                name: ast::name_text(n).unwrap_or_default(),
+                iter: exprs(n)
+                    .first()
+                    .map(|e| self.expr(e))
+                    .unwrap_or_else(|| self.error_expr(n)),
+                body: self.print_items(n),
+            },
+            PRINT_IF => {
+                let cond = exprs(n)
+                    .first()
+                    .map(|e| self.expr(e))
+                    .unwrap_or_else(|| self.error_expr(n));
+                let mut then = Vec::new();
+                let mut otherwise = Vec::new();
+                let mut after_else = false;
+                for c in n.children_with_tokens() {
+                    match c {
+                        rowan::NodeOrToken::Token(t) if t.kind() == ELSE_KW => after_else = true,
+                        rowan::NodeOrToken::Node(c)
+                            if matches!(
+                                c.kind(),
+                                PRINT_ITEM | PRINT_LET | PRINT_IF | PRINT_FOR
+                            ) =>
+                        {
+                            let it = self.print_item(&c);
+                            if after_else {
+                                otherwise.push(it)
+                            } else {
+                                then.push(it)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                PrintKind::If {
+                    bind: ast::name_text(n),
+                    cond,
+                    then,
+                    otherwise,
+                }
+            }
+            _ => {
+                let element = ctx_words(n).into_iter().next().unwrap_or_default();
+                // the value is the expression before the `:`, the body the one after it
+                let mut value = None;
+                let mut body = None;
+                let mut after_colon = false;
+                for c in n.children_with_tokens() {
+                    match c {
+                        rowan::NodeOrToken::Token(t) if t.kind() == COLON => after_colon = true,
+                        rowan::NodeOrToken::Node(c) if is_expr(&c) => {
+                            let e = self.expr(&c);
+                            if after_colon {
+                                body = Some(e)
+                            } else {
+                                value = Some(e)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let (value, binding) = if element == "page" && value.is_none() {
+                    (self.word(n), None)
+                } else {
+                    (value, ast::name_text(n))
+                };
+                PrintKind::Element {
+                    element,
+                    value,
+                    opts: self.print_opts(n),
+                    binding,
+                    body,
+                    children: self.print_items(n),
+                }
+            }
+        };
+        PrintItem { kind, span }
     }
 
     fn fn_def(&mut self, n: &SyntaxNode) -> FnDef {

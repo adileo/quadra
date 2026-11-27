@@ -49,6 +49,8 @@ pub(crate) fn at_item(p: &Parser) -> bool {
                 "inbound" => n1 == IDENT && p.nth(2) == IDENT,
                 "endpoint" => n1 == IDENT && p.nth(2) == STRING,
                 "publish" => n1 == IDENT && p.nth_at_ctx(2, "to"),
+                "document" | "label" => n1 == IDENT && p.nth(2) == L_PAREN,
+                "attach" => n1 == IDENT && p.nth_at_ctx(2, "to"),
                 "seed" => n1 == COLON,
                 "on" | "before" => n1 == IDENT && matches!(p.nth(2), DOT | IDENT),
                 "deny" | "allow" => n1 == IDENT,
@@ -98,6 +100,8 @@ pub(crate) fn item(p: &mut Parser) {
             "inbound" => inbound(p),
             "endpoint" => endpoint(p),
             "publish" => publish(p),
+            "document" | "label" => document(p),
+            "attach" => attach(p),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -804,6 +808,184 @@ fn outbound(p: &mut Parser) {
         end_line(p);
     }
     m.complete(p, OUTBOUND);
+}
+
+// ---- documents and labels (`.qdp`) -----------------------------------------------------
+
+/// The options of the elements: a name and a value (`size 14`), or a flag alone (`bold`).
+pub(crate) const PRINT_OPTIONS: &[&str] = &[
+    "size",
+    "bold",
+    "italic",
+    "align",
+    "color",
+    "level",
+    "width",
+    "height",
+    "widths",
+    "margin",
+    "landscape",
+    "x",
+    "y",
+    "x2",
+    "y2",
+    "thickness",
+    "type",
+    "human",
+    "dpi",
+    "gap",
+    "fill",
+    "header",
+    "font",
+    "format",
+    "valign",
+];
+/// The options that take no value.
+pub(crate) const PRINT_FLAGS: &[&str] = &["bold", "italic", "landscape", "human"];
+/// The options whose value is a word, not a name of the code (`align right`, `type qr`).
+const PRINT_WORDS: &[&str] = &["align", "valign", "type"];
+
+/// Is the line at an option? A flag always; a name with a value when something follows it
+/// (`text x` is the value `x`, `box x 2` the option `x`).
+fn at_print_opt(p: &Parser) -> bool {
+    if !p.at(IDENT) || !PRINT_OPTIONS.contains(&p.nth_text(0)) {
+        return false;
+    }
+    PRINT_FLAGS.contains(&p.nth_text(0)) || !matches!(p.nth(1), NEWLINE | COLON | DEDENT | AS_KW)
+}
+
+/// The value of an option: a number alone when an option follows it (`size 14 bold`: not the
+/// quantity `14 bold`), else an expression.
+fn print_value(p: &mut Parser) {
+    if p.at(NUMBER) && p.nth(1) == IDENT && PRINT_OPTIONS.contains(&p.nth_text(1)) {
+        let m = p.start();
+        p.bump();
+        m.complete(p, LITERAL);
+    } else {
+        expr(p);
+    }
+}
+
+fn print_opts(p: &mut Parser) {
+    while at_print_opt(p) {
+        let o = p.start();
+        let flag = PRINT_FLAGS.contains(&p.nth_text(0));
+        let word = PRINT_WORDS.contains(&p.nth_text(0));
+        p.bump_ctx();
+        if word && p.at(IDENT) {
+            name(p);
+        } else if !flag {
+            print_value(p);
+        }
+        o.complete(p, PRINT_OPT);
+    }
+}
+
+/// `document InvoicePdf(inv: Invoice):` and its elements; `label … width 100 height 150:`
+fn document(p: &mut Parser) {
+    let m = p.start();
+    p.bump_ctx();
+    name(p);
+    param_list(p);
+    print_opts(p);
+    p.expect(COLON);
+    print_block(p);
+    m.complete(p, DOCUMENT);
+}
+
+fn print_block(p: &mut Parser) {
+    indented(p, print_item);
+}
+
+fn print_item(p: &mut Parser) {
+    let m = p.start();
+    match p.current() {
+        LET_KW => {
+            p.bump();
+            name(p);
+            p.expect(EQ);
+            expr(p);
+            end_line(p);
+            m.complete(p, PRINT_LET);
+        }
+        IF_KW => {
+            p.bump();
+            // `if let a = inv.customer.address:`: the value, when there is one, named
+            if p.eat(LET_KW) {
+                name(p);
+                p.expect(EQ);
+            }
+            expr(p);
+            p.expect(COLON);
+            print_block(p);
+            while p.eat(NEWLINE) {}
+            if p.eat(ELSE_KW) {
+                p.expect(COLON);
+                print_block(p);
+            }
+            m.complete(p, PRINT_IF);
+        }
+        FOR_KW => {
+            p.bump();
+            name(p);
+            p.expect(IN_KW);
+            expr(p);
+            p.expect(COLON);
+            print_block(p);
+            m.complete(p, PRINT_FOR);
+        }
+        IDENT => {
+            let page = p.at_ctx("page");
+            p.bump_ctx();
+            // the value, unless the line goes on with an option, a block or nothing
+            if page && p.at(IDENT) && !at_print_opt(p) {
+                // `page A4`: the size, a word
+                name(p);
+            } else if !at_print_opt(p)
+                && !p.at(COLON)
+                && !p.at(NEWLINE)
+                && !p.at(AS_KW)
+                && !p.at_eof()
+                && !p.at(DEDENT)
+            {
+                print_value(p);
+            }
+            print_opts(p);
+            if p.eat(AS_KW) {
+                name(p);
+            }
+            if p.eat(COLON) {
+                if p.at(NEWLINE) && p.nth(1) == INDENT {
+                    print_block(p);
+                } else {
+                    expr(p);
+                    end_line(p);
+                }
+            } else {
+                end_line(p);
+            }
+            m.complete(p, PRINT_ITEM);
+        }
+        _ => {
+            p.error("expected an element of the document: `text`, `table`, `row`, `image`, `if`, `for`, `let`…");
+            recover_line(p);
+            m.complete(p, ERROR);
+        }
+    }
+}
+
+/// `attach InvoicePdf to Invoice.pdf when state is Posted`
+fn attach(p: &mut Parser) {
+    let m = p.start();
+    p.bump_ctx();
+    name_ref(p);
+    p.bump_ctx(); // `to`
+    path(p);
+    if p.eat(WHEN_KW) {
+        expr(p);
+    }
+    end_line(p);
+    m.complete(p, ATTACH);
 }
 
 fn fixture(p: &mut Parser) {

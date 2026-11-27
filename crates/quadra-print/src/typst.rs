@@ -89,11 +89,18 @@ pub fn pdf(source: &str, files: &[(String, Vec<u8>)], ident: &str) -> Result<Pdf
     let main_id = id("/main.typ").expect("a valid path");
     let mut map = HashMap::new();
     for (path, bytes) in files {
-        let p = if path.starts_with('/') { path.clone() } else { format!("/{path}") };
+        let p = if path.starts_with('/') {
+            path.clone()
+        } else {
+            format!("/{path}")
+        };
         let fid = id(&p).ok_or_else(|| format!("`{path}` is not a path a document can read"))?;
         map.insert(fid, Bytes::new(bytes.clone()));
     }
-    let world = Mem { main: Source::new(main_id, source.to_string()), files: map };
+    let world = Mem {
+        main: Source::new(main_id, source.to_string()),
+        files: map,
+    };
     let warned = typst::compile::<PagedDocument>(&world);
     let doc = warned.output.map_err(|errs| describe(&errs))?;
     let options = typst_pdf::PdfOptions {
@@ -107,7 +114,11 @@ pub fn pdf(source: &str, files: &[(String, Vec<u8>)], ident: &str) -> Result<Pdf
     for page in doc.pages() {
         collect(&page.frame, &mut text);
     }
-    Ok(Pdf { bytes, pages: doc.pages().len(), text })
+    Ok(Pdf {
+        bytes,
+        pages: doc.pages().len(),
+        text,
+    })
 }
 
 fn collect(frame: &Frame, out: &mut String) {
