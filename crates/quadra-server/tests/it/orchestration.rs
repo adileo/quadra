@@ -2,7 +2,7 @@
 //! fires through the sweep its host runs when `next_sweep` says, many clients racing on the
 //! inputs of one `becomes` make it fire once, and one transaction may touch many records.
 
-use super::host::{http, project, serve, temp};
+use super::host::{http, project, serve, temp, MEMORY};
 use quadra_server::TenantSpec;
 use quadra_store::Conn;
 use serde_json::{json, Value as J};
@@ -275,6 +275,7 @@ fn write_from_base(
 /// once per order: one Shipment, one event in the outbox.
 #[test]
 fn many_clients_racing_on_one_becomes_fire_it_once() {
+    let _alone = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     const PICKERS: u64 = 8;
     const PICKS: u64 = 10;
     const LINERS: u64 = 8;
@@ -542,6 +543,7 @@ fn total(port: u16, host: &str, token: &str, entity: &str, field: &str, refs: J)
 /// (`QUADRA_FANOUT=50000 cargo test --release … fan_out -- --nocapture` for other sizes).
 #[test]
 fn a_fan_out_of_ten_thousand_records_in_one_transaction() {
+    let _alone = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     let n: u64 = std::env::var("QUADRA_FANOUT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -623,6 +625,7 @@ fn a_fan_out_of_ten_thousand_records_in_one_transaction() {
 /// nothing of it is written, and the tenant goes on serving.
 #[test]
 fn a_fan_out_past_the_time_limit_writes_nothing() {
+    let _alone = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     let (cfg, token) = project(&temp("orch-fanout-limit"), FANOUT);
     let cfg = quadra_server::Config {
         limits: quadra_server::Limits {

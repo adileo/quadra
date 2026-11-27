@@ -75,7 +75,14 @@ impl TenantResolver for Map {
 
 static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) fn http(port: u16, host: &str, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
+pub(crate) fn http(
+    port: u16,
+    host: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<J>,
+) -> (u16, J) {
     http_from(port, host, token, method, path, body, "")
 }
 
@@ -287,6 +294,10 @@ fn two_tenants_in_one_process_are_isolated() {
     assert!(host.running().iter().any(|t| t.id == "a"));
 }
 
+/// The test that measures the memory of the process, and the tests that take much of it, run
+/// one at a time (the tests of the binary share one process).
+pub(crate) static MEMORY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn open_files() -> usize {
     std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0)
 }
@@ -305,6 +316,7 @@ fn rss_mb() -> f64 {
 
 #[test]
 fn starting_and_stopping_a_tenant_a_thousand_times_leaks_nothing() {
+    let _alone = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     let (cfg, _) = project(&temp("cycles"), ITEMS);
     let host = Host::new(
         HostOptions::default(),
