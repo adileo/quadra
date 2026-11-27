@@ -545,6 +545,7 @@ impl Engine {
             return;
         }
         self.uploads_pruned_at = Some(std::time::Instant::now());
+        self.prune_files();
         let before = stamp(now() - chrono::Duration::hours(UPLOAD_KEPT_HOURS));
         let old = match kept::old_uploads(&mut self.conn, &before, 1000) {
             Ok(o) if !o.is_empty() => o,
@@ -570,6 +571,62 @@ impl Engine {
         }
         if let Err(e) = self.side(move |c| kept::remove_uploads(c, &gone)) {
             eprintln!("uploads: the old ones were not removed: {e}");
+        }
+    }
+
+    /// The files no value names any more (their values erased, or replaced and taken out of
+    /// the history): removed from the store and from `_quadra_files`. A file kept less than an
+    /// hour ago is left alone (its record may not be committed yet).
+    pub(super) fn prune_files(&mut self) {
+        let before = stamp(now() - chrono::Duration::hours(1));
+        let rows = match self.conn.query(
+            "SELECT \"hash\" FROM \"_quadra_files\" WHERE \"created_at\" < ?text",
+            &[quadra_store::conn::Sql::Text(before)],
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("files: not read: {e}");
+                return;
+            }
+        };
+        let mut unused = Vec::new();
+        for r in rows {
+            let Some(h) = r[0].clone() else { continue };
+            let named = self.conn.query(
+                "SELECT 1 FROM \"_quadra_history\" WHERE \"value\" LIKE ?text LIMIT 1",
+                &[quadra_store::conn::Sql::Text(format!("%sha256:{h}%"))],
+            );
+            if matches!(named, Ok(ref v) if v.is_empty()) {
+                unused.push(h);
+            }
+        }
+        if unused.is_empty() {
+            return;
+        }
+        let files = match self.files() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("files: {e}");
+                return;
+            }
+        };
+        let mut gone = Vec::new();
+        for h in unused {
+            match files.blobs.delete(&quadra_blobs::file_key(&h)) {
+                Ok(()) => gone.push(h),
+                Err(e) => eprintln!("files: sha256:{h} not removed: {e}"),
+            }
+        }
+        if let Err(e) = self.side(move |c| {
+            for h in &gone {
+                c.exec(
+                    "DELETE FROM \"_quadra_files\" WHERE \"hash\" = ?text",
+                    &[quadra_store::conn::Sql::Text(h.clone())],
+                )?;
+            }
+            Ok(())
+        }) {
+            eprintln!("files: not removed from the table: {e}");
         }
     }
 }
