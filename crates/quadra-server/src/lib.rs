@@ -2348,6 +2348,8 @@ impl Host {
                     .get(inbound_api)
                     .layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
             )
+            .route("/v1/integrations", get(outbox_api))
+            .route("/v1/integrations/{*rest}", get(outbox_api).post(outbox_api))
             .route("/v1/outbox", get(outbox_api))
             .route("/v1/outbox/ack", post(outbox_api))
             .route("/v1/outbox/nack", post(outbox_api))

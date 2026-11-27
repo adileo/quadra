@@ -21,6 +21,7 @@ quadra serve examples/extended --url sqlite:/tmp/demo.db --port 8091 --dev-login
 | `GET /v1/stream` | live events, one per committed transaction |
 | `POST /in/<connection>[/<path>]` | a message for an `inbound`, signed by the sender ([Variables and connections](/reference/connections#inbound-messages-in)) |
 | `GET`/`POST /in/<connection>/<path>` | an `endpoint`, answered at once ([Variables and connections](/reference/connections#endpoint-answered-at-once)) |
+| `GET /v1/integrations`, `/v1/integrations/outbox[/{id}]`, `/v1/integrations/inbox[/{id}]`, `POST …/{id}/retry`, `POST …/{id}/skip {"reason"}` | what went out and came in, by outbound and inbound (counts per state, the oldest waiting), each message with its log, retried or skipped with who and why: the studio's page "Integrations". For those who may edit `User.roles` |
 | `GET /v1/outbox`, `POST /v1/outbox/ack`, `POST /v1/outbox/nack` | the events no `outbound` delivers, taken with a lease and settled by an integration ([Variables and connections](/reference/connections#without-outbound-an-integration-takes-them)) |
 | `POST /v1/auth/dev-login`, `POST /v1/auth/logout` | development sessions |
 | `/v1/dev/…` | the code of the project, for the browser editor |

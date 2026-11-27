@@ -1275,3 +1275,75 @@ fn an_endpoint_answers_at_once_and_the_same_key_gets_the_same_answer() {
     assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_integrations_api_shows_and_settles_what_came_in() {
+    let dir = temp("integrations");
+    let (cfg, token) = project_full(
+        &dir,
+        9,
+        RECEIVING,
+        "inbound_signature = \"hmac\"\ninbound_secret = { var = \"HOOK_SECRET\" }\n",
+    );
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    call(port, &token, "GET", "/v1/me", None);
+    send_in(
+        port,
+        "{\"id\": 1, \"name\": \"#1\", \"total_price\": \"5\"}",
+        Some("s3cret"),
+    );
+    send_in(
+        port,
+        "{\"id\": 2, \"name\": \"#2\", \"total_price\": \"-1\"}",
+        Some("s3cret"),
+    );
+    let start = Instant::now();
+    while inbox_states(&cfg).iter().any(|s| s == "received")
+        && start.elapsed() < Duration::from_secs(15)
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (s, v) = call(port, &token, "GET", "/v1/integrations", None);
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["inbounds"][0]["inbound"], "OrderIn");
+    assert_eq!(
+        v["inbounds"][0]["states"],
+        json!({ "done": 1, "rejected": 1 })
+    );
+    let (_, v) = call(
+        port,
+        &token,
+        "GET",
+        "/v1/integrations/inbox?state=rejected",
+        None,
+    );
+    assert_eq!(v["messages"].as_array().unwrap().len(), 1);
+    let (_, v) = call(port, &token, "GET", "/v1/integrations/inbox/2", None);
+    assert!(v["body"].as_str().unwrap().contains("-1"));
+    assert!(
+        v["log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["outcome"] == "rejected"),
+        "{v}"
+    );
+    let (s, _) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/integrations/inbox/2/skip",
+        Some(json!({ "reason": "a test order" })),
+    );
+    assert_eq!(s, 200);
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/integrations/inbox/2/skip",
+        Some(json!({ "reason": "again" })),
+    );
+    assert_eq!(s, 409, "{v}");
+    assert_eq!(inbox_states(&cfg), ["done", "skipped"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -968,6 +968,9 @@ impl Engine {
         query: &HashMap<String, String>,
         body: &J,
     ) -> Result<Reply, Fail> {
+        if path.starts_with("/v1/integrations") {
+            return self.integrations_api(who, path, query, body);
+        }
         if !self.who(who)?.admin {
             return Err((
                 403,
@@ -1590,6 +1593,224 @@ impl Engine {
             let _ =
                 self.side(move |c| quadra_store::deliveries::log_reaction(c, id, &ev, &stamp, &e));
         }
+    }
+
+    /// `/v1/integrations`: what came in and went out, for the studio's page "Integrations".
+    /// Only those who may edit `User.roles`.
+    ///
+    /// - `GET /v1/integrations`: each outbound and inbound with its connection, how many
+    ///   messages are in each state, and the time of the oldest still waiting
+    /// - `GET /v1/integrations/outbox?state=&event=&limit=` and `…/inbox?state=&inbound=&limit=`:
+    ///   the newest first
+    /// - `GET /v1/integrations/outbox/{id}`, `…/inbox/{id}`: one, with its log (and its body)
+    /// - `POST /v1/integrations/outbox/{id}/retry`, `…/skip {"reason"}` (and the same for the
+    ///   inbox): with who and why in the log
+    fn integrations_api(
+        &mut self,
+        who: &Principal,
+        path: &str,
+        query: &HashMap<String, String>,
+        body: &J,
+    ) -> Result<Reply, Fail> {
+        if !self.who(who)?.admin {
+            return Err((
+                403,
+                "only who may edit `User.roles` sees the integrations".into(),
+            ));
+        }
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let by = format!("user:{}", who.user_id);
+        let at = now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let parts: Vec<&str> = path
+            .trim_start_matches("/v1/integrations")
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .collect();
+        let step = |s: &quadra_store::deliveries::Step| {
+            json!({ "at": format!("{}Z", s.at), "step": s.step, "outcome": s.outcome, "connection": s.connection,
+                    "status": s.status, "duration_ms": s.duration_ms, "error": s.error, "excerpt": s.excerpt,
+                    "by": s.by, "reason": s.reason })
+        };
+        let limit = query
+            .get("limit")
+            .and_then(|l| l.parse::<usize>().ok())
+            .unwrap_or(100)
+            .clamp(1, 1000);
+        let e500 = |e: String| (500, e);
+        match parts.as_slice() {
+            [] => {
+                let events = self.outbox_rows().map_err(e500)?;
+                let messages =
+                    quadra_store::deliveries::inbox(&mut self.conn, None).map_err(e500)?;
+                let summary = |states: Vec<(&str, &str)>| {
+                    let mut by_state: std::collections::BTreeMap<String, u64> = Default::default();
+                    let mut oldest: Option<String> = None;
+                    for (s, at) in states {
+                        *by_state.entry(s.to_string()).or_default() += 1;
+                        if matches!(s, "pending" | "received")
+                            && oldest.as_deref().is_none_or(|o| at < o)
+                        {
+                            oldest = Some(at.to_string());
+                        }
+                    }
+                    json!({ "states": by_state, "oldest_waiting": oldest.map(|o| format!("{o}Z")) })
+                };
+                let outbounds: Vec<J> = model
+                    .outbounds
+                    .iter()
+                    .map(|o| {
+                        let mine: Vec<(&str, &str)> = events
+                            .iter()
+                            .filter(|e| e.event == o.event)
+                            .map(|e| (e.state.as_str(), e.created_at.as_str()))
+                            .collect();
+                        let mut j = summary(mine);
+                        j["event"] = json!(o.event);
+                        j["connection"] = json!(o.connection);
+                        j
+                    })
+                    .collect();
+                let inbounds: Vec<J> = model
+                    .inbounds
+                    .iter()
+                    .map(|i| {
+                        let mine: Vec<(&str, &str)> = messages
+                            .iter()
+                            .filter(|m| m.inbound == i.name)
+                            .map(|m| (m.state.as_str(), m.received_at.as_str()))
+                            .collect();
+                        let mut j = summary(mine);
+                        j["inbound"] = json!(i.name);
+                        j["connection"] = json!(i.connection);
+                        j["path"] = json!(format!(
+                            "/in/{}{}",
+                            i.connection,
+                            i.path.as_deref().unwrap_or("")
+                        ));
+                        j
+                    })
+                    .collect();
+                let endpoints: Vec<J> = model.endpoints.iter().map(|e| json!({ "method": e.method, "path": format!("/in/{}{}", e.connection, e.path), "connection": e.connection })).collect();
+                Ok(self::reply(
+                    200,
+                    json!({ "outbounds": outbounds, "inbounds": inbounds, "endpoints": endpoints }),
+                ))
+            }
+            ["outbox"] => {
+                let mut events = self.outbox_rows().map_err(e500)?;
+                events.retain(|e| {
+                    query.get("state").is_none_or(|s| &e.state == s)
+                        && query.get("event").is_none_or(|n| &e.event == n)
+                });
+                events.reverse();
+                events.truncate(limit);
+                let list: Vec<J> = events.iter().map(|e| json!({
+                    "id": e.id, "event": e.event, "tx": e.tx, "state": e.state, "created_at": format!("{}Z", e.created_at),
+                    "attempts": e.attempts, "next_at": e.next_at.as_ref().map(|n| format!("{n}Z")), "error": e.error,
+                    "delivered_at": e.delivered_at.as_ref().map(|n| format!("{n}Z")), "data": crate::deliver::plain_fields(&e.fields),
+                })).collect();
+                Ok(self::reply(200, json!({ "events": list })))
+            }
+            ["outbox", id] => {
+                let id: u64 = id.parse().map_err(|_| (404, "no such event".to_string()))?;
+                let e = self
+                    .outbox_rows()
+                    .map_err(e500)?
+                    .into_iter()
+                    .find(|e| e.id == id)
+                    .ok_or((404, "no such event".to_string()))?;
+                let log: Vec<J> = quadra_store::deliveries::log(&mut self.conn, id)
+                    .map_err(e500)?
+                    .iter()
+                    .map(step)
+                    .collect();
+                Ok(self::reply(
+                    200,
+                    json!({
+                        "id": e.id, "event": e.event, "tx": e.tx, "state": e.state, "created_at": format!("{}Z", e.created_at),
+                        "attempts": e.attempts, "next_at": e.next_at.as_ref().map(|n| format!("{n}Z")), "error": e.error,
+                        "data": crate::deliver::plain_fields(&e.fields), "log": log,
+                    }),
+                ))
+            }
+            ["outbox", id, action] | ["inbox", id, action]
+                if matches!(*action, "retry" | "skip") =>
+            {
+                let id: u64 = id
+                    .parse()
+                    .map_err(|_| (404, "no such message".to_string()))?;
+                let reason = body["reason"].as_str().unwrap_or("").to_string();
+                let out = parts[0] == "outbox";
+                let act = action.to_string();
+                let n = self
+                    .side(move |c| match (out, act.as_str()) {
+                        (true, "retry") => quadra_store::deliveries::retry(c, &[id], &at, &by),
+                        (true, _) => quadra_store::deliveries::skip(c, &[id], &at, &by, &reason),
+                        (false, "retry") => {
+                            quadra_store::deliveries::inbox_retry(c, &[id], &at, &by)
+                        }
+                        (false, _) => {
+                            quadra_store::deliveries::inbox_skip(c, &[id], &at, &by, &reason)
+                        }
+                    })
+                    .map_err(|e| (400, e))?;
+                if n == 0 {
+                    return Err((
+                        409,
+                        format!("{} {id} is not in a state that allows `{action}`", parts[0]),
+                    ));
+                }
+                Ok(self::reply(200, json!({ "id": id, "done": action })))
+            }
+            ["inbox"] => {
+                let mut messages = quadra_store::deliveries::inbox(
+                    &mut self.conn,
+                    query.get("state").map(|s| s.as_str()),
+                )
+                .map_err(e500)?;
+                messages.retain(|m| query.get("inbound").is_none_or(|n| &m.inbound == n));
+                messages.reverse();
+                messages.truncate(limit);
+                let list: Vec<J> = messages.iter().map(|m| json!({
+                    "id": m.id, "inbound": m.inbound, "connection": m.connection, "key": m.key, "state": m.state,
+                    "received_at": format!("{}Z", m.received_at), "attempts": m.attempts, "error": m.error, "tx": m.tx,
+                })).collect();
+                Ok(self::reply(200, json!({ "messages": list })))
+            }
+            ["inbox", id] => {
+                let id: u64 = id
+                    .parse()
+                    .map_err(|_| (404, "no such message".to_string()))?;
+                let m = quadra_store::deliveries::inbox(&mut self.conn, None)
+                    .map_err(e500)?
+                    .into_iter()
+                    .find(|m| m.id == id)
+                    .ok_or((404, "no such message".to_string()))?;
+                let log: Vec<J> = quadra_store::deliveries::inbox_log(&mut self.conn, id)
+                    .map_err(e500)?
+                    .iter()
+                    .map(step)
+                    .collect();
+                Ok(self::reply(
+                    200,
+                    json!({
+                        "id": m.id, "inbound": m.inbound, "connection": m.connection, "key": m.key, "hash": m.hash, "state": m.state,
+                        "received_at": format!("{}Z", m.received_at), "attempts": m.attempts, "error": m.error, "tx": m.tx,
+                        "body": m.body, "log": log,
+                    }),
+                ))
+            }
+            _ => Err((404, "no such path".into())),
+        }
+    }
+
+    /// The events of the outbox, oldest first, on this engine's connection.
+    fn outbox_rows(&mut self) -> Result<Vec<quadra_store::OutboxEvent>, String> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut db = Database::open(&self.url, model, &checked.report)?;
+        db.outbox(false)
     }
 
     /// Where an interpreter's commits go: the tenant's sequencer, or the database directly.
