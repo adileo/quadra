@@ -60,3 +60,10 @@ fn timeouts_escalate_and_cancel() {
 fn a_cancellation_stops_what_was_waiting() {
     run("cancel");
 }
+
+/// A `clock` past a threshold fires the rule there, as the server's sweep would, not at the
+/// next statement.
+#[test]
+fn the_clock_alone_fires_what_was_due() {
+    run("clock");
+}
