@@ -32,6 +32,13 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 chrono-tz = "0.10"
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-platform-verifier = "0.7"
+aws-lc-rs = "1"
+quick-xml = "0.42"
 
 [dev-dependencies]
 rustls = "0.23"

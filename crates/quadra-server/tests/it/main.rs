@@ -4,5 +4,6 @@
 mod api;
 mod deliver;
 mod host;
+mod mail;
 mod orchestration;
 mod signin;

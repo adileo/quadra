@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 
 mod apps;
 mod complete;
+mod consent;
 mod dev;
 mod ide;
 mod interfaces;
@@ -536,6 +537,11 @@ pub enum Job {
     /// `quadra dev`: the data changed while the saved code did not fit it: try it again
     DevRetry {
         reply: oneshot::Sender<Option<J>>,
+    },
+    /// OAuth2 with a user's consent: a step of the provider's callback (`crate::oauth`)
+    Consent {
+        step: crate::oauth::Step,
+        reply: oneshot::Sender<Result<crate::oauth::Next, String>>,
     },
     /// the host stops the tenant: the database is closed when the answer comes
     Stop {
@@ -1144,6 +1150,14 @@ impl Engine {
             (Some(a), Some(b)) => Some(a.min(b).max(at)),
             (a, b) => a.or(b),
         };
+        // the tokens of the connections with consent
+        for p in plans.iter_mut() {
+            if let crate::deliver::Send::Http { creds, .. } = &mut p.send {
+                if let Some(u) = creds.consent.as_mut() {
+                    self.fill_consent(u);
+                }
+            }
+        }
         Ok((plans, next, true))
     }
 
@@ -1162,6 +1176,9 @@ impl Engine {
     ) -> Result<Reply, Fail> {
         if path.starts_with("/v1/integrations") {
             return self.integrations_api(who, path, query, body);
+        }
+        if path.starts_with("/v1/connections") {
+            return self.connections_api(who, path, query);
         }
         if !self.who(who)?.admin {
             return Err((
@@ -1659,6 +1676,7 @@ impl Engine {
                         mailbox: p.path.clone(),
                         settle: self.settle_of(&i.name),
                         limit: 100,
+                        after: cursor.clone(),
                     },
                     _ => crate::transport::Ask::Rows {
                         table: p.path.clone(),
@@ -1667,6 +1685,7 @@ impl Engine {
                         limit: 1000,
                     },
                 };
+                let consent = self.consent_of(&i.connection);
                 match crate::transport::Conn::of(&model.manifest, &i.connection) {
                     Ok(conn) => out.push(crate::deliver::Pull {
                         inbound: i.name.clone(),
@@ -1674,6 +1693,7 @@ impl Engine {
                             job: crate::transport::Job::Fetch { conn, ask },
                             agent: c.agent.clone(),
                             env: self.env.clone(),
+                            consent,
                         }),
                         url: String::new(),
                         headers: Vec::new(),
@@ -1685,7 +1705,10 @@ impl Engine {
                 continue;
             }
             match crate::deliver::connection_request(&model.manifest, &self.env, &i.connection) {
-                Ok((base, headers, creds, timeout)) => {
+                Ok((base, headers, mut creds, timeout)) => {
+                    if let Some(u) = creds.consent.as_mut() {
+                        self.fill_consent(u);
+                    }
                     let path = p
                         .path
                         .replace("{cursor}", &encode(cursor.as_deref().unwrap_or("")));
@@ -2382,9 +2405,10 @@ impl Engine {
                     })
                     .collect();
                 let endpoints: Vec<J> = model.endpoints.iter().map(|e| json!({ "method": e.method, "path": format!("/in/{}{}", e.connection, e.path), "connection": e.connection })).collect();
+                let connections = self.connections_status();
                 Ok(self::reply(
                     200,
-                    json!({ "outbounds": outbounds, "inbounds": inbounds, "endpoints": endpoints }),
+                    json!({ "outbounds": outbounds, "inbounds": inbounds, "endpoints": endpoints, "connections": connections }),
                 ))
             }
             ["outbox"] => {
@@ -2746,7 +2770,11 @@ impl Engine {
                     result,
                     reply,
                 } => {
+                    self.save_consents();
                     let _ = reply.send(self.pulled(&inbound, result));
+                }
+                Job::Consent { step, reply } => {
+                    let _ = reply.send(self.consent_step(step));
                 }
                 Job::Inbox { limit, reply } => {
                     let _ = reply.send(self.handle_inbox(limit));
@@ -2766,6 +2794,7 @@ impl Engine {
                     answer,
                     reply,
                 } => {
+                    self.save_consents();
                     let at = now().format("%Y-%m-%dT%H:%M:%S").to_string();
                     let (ev, o, a) = (event.clone(), outcome.clone(), attempt.clone());
                     let r = self

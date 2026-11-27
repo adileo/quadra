@@ -291,6 +291,8 @@ pub struct JobPull {
     pub job: crate::transport::Job,
     pub agent: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// the tokens of its OAuth2 consent (a mailbox of Gmail, Microsoft 365): the server's only
+    pub consent: Option<crate::oauth::Use>,
 }
 
 /// What a pull brought: an HTTP answer (status, body, `Retry-After`), or what a job fetched.
@@ -310,7 +312,9 @@ pub async fn pull(
     match &p.job {
         None => PullResult::Http(fetch(client, p, public_only).await),
         Some(j) => PullResult::Job(match (&j.agent, agents) {
-            (None, _) => crate::transport::run(&j.job, &j.env, public_only).await,
+            (None, _) => {
+                crate::transport::run_with(&j.job, &j.env, public_only, j.consent.as_ref()).await
+            }
             (Some(a), Some(q)) => q.run(a, &j.job).await,
             (Some(a), None) => {
                 crate::transport::Outcome::Failed(crate::transport::Failed::Waiting(format!(
@@ -333,6 +337,8 @@ pub struct Credentials {
     pub ca: Option<String>,
     /// the secret and how the signature is written
     pub sign: Option<(String, Signature)>,
+    /// OAuth2 with a user's consent: the tokens kept for the connection (`crate::oauth`)
+    pub consent: Option<Box<crate::oauth::Use>>,
 }
 
 /// OAuth2 client credentials, as a connection says them.
@@ -415,6 +421,19 @@ fn http_parts(
                 in_body: *in_body,
             })
         }
+        HttpAuth::Consent(c) => {
+            // the tokens themselves are the engine's to add (`Engine::consents`)
+            creds.consent = Some(Box::new(crate::oauth::Use {
+                key: String::new(),
+                connection: connection.to_string(),
+                token_url: setting(&c.token_url)?,
+                client_id: setting(&c.client_id)?,
+                client_secret: value(&c.client_secret)?,
+                in_body: c.in_body,
+                stored: None,
+                problem: None,
+            }))
+        }
     }
     if let Some(s) = signing_secret {
         creds.sign = Some((value(s)?, signature.clone()));
@@ -475,10 +494,32 @@ pub async fn fetch(
             .map_err(|f| f.text())?;
         req = req.header("Authorization", format!("Bearer {t}"));
     }
-    let resp = req
+    let mut bearer = None;
+    if let Some(u) = &pull.creds.consent {
+        let t = crate::oauth::bearer(u, &client, public_only, pull.timeout)
+            .await
+            .map_err(|f| f.text().to_string())?;
+        req = req.header("Authorization", format!("Bearer {t}"));
+        bearer = Some(t);
+    }
+    let again = req.try_clone();
+    let mut resp = req
         .send()
         .await
         .map_err(|e| format!("{}: {}", host_of(&pull.url), root_cause(&e)))?;
+    // the token refused: refreshed, and asked again once
+    if let (Some(u), Some(t), Some(again), 401) =
+        (&pull.creds.consent, &bearer, again, resp.status().as_u16())
+    {
+        let t = crate::oauth::refused(u, t, &client, public_only, pull.timeout)
+            .await
+            .map_err(|f| f.text().to_string())?;
+        resp = again
+            .header("Authorization", format!("Bearer {t}"))
+            .send()
+            .await
+            .map_err(|e| format!("{}: {}", host_of(&pull.url), root_cause(&e)))?;
+    }
     let status = resp.status().as_u16();
     let retry_after = resp
         .headers()
@@ -1011,7 +1052,11 @@ pub fn is_public(ip: IpAddr) -> bool {
 }
 
 /// The addresses of `host` that may be connected to (all of them, or only public ones).
-async fn addresses(host: &str, port: u16, public_only: bool) -> Result<Vec<SocketAddr>, String> {
+pub(crate) async fn addresses(
+    host: &str,
+    port: u16,
+    public_only: bool,
+) -> Result<Vec<SocketAddr>, String> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let all: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
@@ -1072,6 +1117,16 @@ impl Failure {
     }
 }
 
+impl From<crate::transport::Failed> for Failure {
+    fn from(f: crate::transport::Failed) -> Failure {
+        match f {
+            crate::transport::Failed::Again(e) => Failure::Again(e),
+            crate::transport::Failed::Never(e) => Failure::Never(e),
+            crate::transport::Failed::Waiting(e) => Failure::Waiting(e),
+        }
+    }
+}
+
 /// What failed, and whether it may work later.
 enum Failure {
     Again(String),
@@ -1128,14 +1183,19 @@ pub async fn run(
             Err(e) => Err(Failure::Waiting(e)),
             Ok(client) => {
                 let mut headers = headers.clone();
-                let first = match &creds.oauth {
-                    Some(o) => token(&client, o, public_only, *timeout).await.map(Some),
-                    None => Ok(None),
+                let first = match (&creds.oauth, &creds.consent) {
+                    (Some(o), _) => token(&client, o, public_only, *timeout).await.map(Some),
+                    (None, Some(u)) => crate::oauth::bearer(u, &client, public_only, *timeout)
+                        .await
+                        .map(Some)
+                        .map_err(Failure::from),
+                    (None, None) => Ok(None),
                 };
                 match first {
                     Err(f) => Err(f),
                     Ok(t) => {
                         let base = headers.len();
+                        let t_used = t.clone();
                         if let Some(t) = t {
                             headers.push(("Authorization".into(), format!("Bearer {t}")));
                         }
@@ -1152,6 +1212,36 @@ pub async fn run(
                             &mut answer,
                         )
                         .await;
+                        // a token of the user's consent refused: refreshed, and the request sent
+                        // again once
+                        if let (Some(u), Some(401), Some(old)) =
+                            (&creds.consent, seen.status, t_used.as_deref())
+                        {
+                            match crate::oauth::refused(u, old, &client, public_only, *timeout)
+                                .await
+                            {
+                                Ok(t) => {
+                                    headers.truncate(base);
+                                    headers.push(("Authorization".into(), format!("Bearer {t}")));
+                                    seen.status = None;
+                                    seen.excerpt = None;
+                                    r = http(
+                                        &client,
+                                        method,
+                                        url,
+                                        &headers,
+                                        body,
+                                        creds.sign.as_ref(),
+                                        *timeout,
+                                        public_only,
+                                        &mut seen,
+                                        &mut answer,
+                                    )
+                                    .await;
+                                }
+                                Err(f) => r = Err(Failure::from(f)),
+                            }
+                        }
                         // the token refused (it expired early, it was revoked): a new one, and
                         // the request sent again once
                         if let (Some(o), Some(401)) = (&creds.oauth, seen.status) {
