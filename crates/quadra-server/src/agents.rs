@@ -17,6 +17,9 @@ use tokio::sync::{oneshot, Notify};
 const ALIVE: Duration = Duration::from_secs(60);
 /// How long a job waits for its answer.
 const ANSWER: Duration = Duration::from_secs(600);
+/// How long a job waits for an agent not connected now (its tenant just woke: the agent asks
+/// again within the time the router told it, 20 s).
+const ARRIVE: Duration = Duration::from_secs(45);
 
 #[derive(Default)]
 struct State {
@@ -37,6 +40,8 @@ pub struct Agents {
     state: Mutex<State>,
     /// one per agent: a job for it, or it was revoked
     bell: Mutex<HashMap<String, std::sync::Arc<Notify>>>,
+    /// one per agent: it asked for its jobs
+    arrived: Mutex<HashMap<String, std::sync::Arc<Notify>>>,
 }
 
 /// An agent as the studio shows it.
@@ -58,8 +63,41 @@ impl Agents {
             .clone()
     }
 
-    /// Runs `job` on the agent `name`: queued for it, and its answer awaited.
+    fn alive(&self, name: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .seen
+            .get(name)
+            .is_some_and(|(at, _)| at.elapsed() < ALIVE)
+    }
+
+    /// Runs `job` on the agent `name`: queued for it, and its answer awaited. An agent not
+    /// connected now is waited for a little (it may be on its way: the tenant just woke).
     pub async fn run(&self, name: &str, job: &Job) -> Outcome {
+        if self.state.lock().unwrap().revoked.iter().any(|r| r == name) {
+            return Outcome::Failed(Failed::Waiting(format!(
+                "the agent `{name}` was revoked: register another one (`quadra agent add {name}`)"
+            )));
+        }
+        if !self.alive(name) {
+            let arrived = self
+                .arrived
+                .lock()
+                .unwrap()
+                .entry(name.to_string())
+                .or_default()
+                .clone();
+            let until = tokio::time::Instant::now() + ARRIVE;
+            while !self.alive(name) {
+                let left = until.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                let _ = tokio::time::timeout(left.min(Duration::from_secs(1)), arrived.notified())
+                    .await;
+            }
+        }
         let (tx, rx) = oneshot::channel();
         let id = {
             let mut s = self.state.lock().unwrap();
@@ -119,6 +157,9 @@ impl Agents {
                 }
                 s.seen
                     .insert(name.to_string(), (Instant::now(), version.to_string()));
+                if let Some(a) = self.arrived.lock().unwrap().get(name) {
+                    a.notify_waiters();
+                }
                 if let Some(q) = s.queued.get_mut(name) {
                     if !q.is_empty() {
                         return Some(q.drain(..).collect());
@@ -214,14 +255,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_job_goes_to_its_agent_and_its_answer_comes_back() {
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_not_connected_is_waited_for_a_little_then_the_job_is_tried_again() {
         let a = Arc::new(Agents::default());
-        // not connected: tried again later
         assert!(matches!(
             a.run("milano", &job()).await,
             Outcome::Failed(Failed::Again(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_job_goes_to_its_agent_and_its_answer_comes_back() {
+        let a = Arc::new(Agents::default());
         // connected (it asked once): the job reaches it, its answer comes back
         assert_eq!(a.take("milano", "0.1", Duration::ZERO).await, Some(vec![]));
         let a2 = a.clone();

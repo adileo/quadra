@@ -614,7 +614,12 @@ impl axum::extract::FromRequestParts<Shared> for Ten {
             .and_then(|v| v.to_str().ok())
             .or_else(|| parts.uri.host())
             .unwrap_or("");
-        let t = app.tenant(host)?;
+        // an agent asking for its jobs does not keep its tenant awake: it would never sleep
+        let t = if parts.uri.path().starts_with("/v1/agent/") {
+            app.tenant_quietly(host)?
+        } else {
+            app.tenant(host)?
+        };
         // a backlog the request would only wait in: refused now, to be tried again shortly
         if t.full() {
             let mut r = fail(
@@ -717,6 +722,27 @@ impl App {
         }
         let t = start(spec, self.durability.clone(), self.egress.clone());
         running.insert(t.id.clone(), t.clone());
+        Ok(t)
+    }
+
+    /// The tenant of an address, without counting the request as a use (an agent's polls).
+    fn tenant_quietly(&self, host: &str) -> Result<Arc<Tenant>, Response> {
+        let before = {
+            let h = host.split(':').next().unwrap_or("");
+            self.resolver.resolve(h).and_then(|spec| {
+                self.running
+                    .lock()
+                    .unwrap()
+                    .get(&spec.id)
+                    .map(|t| (t.clone(), *t.last_used.lock().unwrap()))
+            })
+        };
+        let t = self.tenant(host)?;
+        if let Some((was, at)) = before {
+            if Arc::ptr_eq(&was, &t) {
+                *t.last_used.lock().unwrap() = at;
+            }
+        }
         Ok(t)
     }
 
