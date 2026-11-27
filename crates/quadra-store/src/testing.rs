@@ -109,6 +109,7 @@ impl TestBackend for DbBackend {
         self.index = index;
         let mut db = Database::open(&self.url(index), model, report)?;
         db.init()?;
+        db.seed_salts()?;
         interp.materialize = materialized_formulas(&db.schema);
         self.schema = Some(db.schema.clone());
         interp.sink = Some(Box::new(Sink { db, model }));

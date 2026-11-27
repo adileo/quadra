@@ -24,7 +24,9 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_meta\" (\"key\" TEXT PRIMARY KEY, \"value\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_commits\" (\"tx\" BIGINT PRIMARY KEY, \"at\" TEXT NOT NULL, \"user_id\" BIGINT, \"cause\" TEXT NOT NULL, \"prev_hash\" TEXT NOT NULL, \"hash\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_records\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"created_tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"frozen_tx\" BIGINT, \"cause\" TEXT NOT NULL, \"warnings\" TEXT NOT NULL, \"last_tx\" BIGINT NOT NULL DEFAULT 0, \"version_tx\" BIGINT NOT NULL DEFAULT 0, \"kinds\" TEXT)",
-    "CREATE TABLE \"_quadra_history\" (\"seq\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"record_id\" BIGINT NOT NULL, \"field\" TEXT NOT NULL, \"value\" TEXT NOT NULL)",
+    // each value with its salt; the commit hash covers `sha256(salt | value)` (`value_digest`):
+    // an erased value loses its value and salt and keeps that digest
+    "CREATE TABLE \"_quadra_history\" (\"seq\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"record_id\" BIGINT NOT NULL, \"field\" TEXT NOT NULL, \"value\" TEXT, \"salt\" TEXT, \"digest\" TEXT, \"erased_tx\" BIGINT)",
     "CREATE TABLE \"_quadra_ledger_rows\" (\"id\" BIGINT PRIMARY KEY, \"ledger\" TEXT NOT NULL, \"tx\" BIGINT NOT NULL, \"date\" TEXT NOT NULL, \"source\" TEXT NOT NULL, \"cols\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_postings\" (\"record_id\" BIGINT NOT NULL, \"ledger_key\" TEXT NOT NULL, \"rows\" TEXT NOT NULL, PRIMARY KEY (\"record_id\", \"ledger_key\"))",
     "CREATE TABLE \"_quadra_counters\" (\"key\" TEXT PRIMARY KEY, \"n\" BIGINT NOT NULL)",
@@ -131,7 +133,7 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// delivery.
 /// 13: `_quadra_oauth`, the tokens of OAuth2 with a user's consent (crate::grants).
 /// 14: `_quadra_files`, the documents rendered by `attach` (crate::files).
-const SYSTEM_VERSION: &str = "14";
+const SYSTEM_VERSION: &str = "15";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
@@ -203,6 +205,9 @@ pub struct Database {
     delta_ops: Vec<crate::sequencer::DeltaOp>,
     /// the URL it was opened with (`open`), for the helper connections of a bulk import
     pub(crate) url: Option<String>,
+    /// the salts of the values are derived from their position instead of random, so the same
+    /// tests give the same chain byte for byte (`seed_salts`, read from `_quadra_meta` once)
+    seeded_salts: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -228,8 +233,63 @@ pub fn materialized_formulas(schema: &Schema) -> Vec<(String, String)> {
     out
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The digest of a value in the chain: `sha256(salt | value)`, the value as the JSON text the
+/// history keeps. The salt makes the digest of an erased value useless for guessing it.
+pub(crate) fn value_digest(salt: &str, value: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(salt.as_bytes());
+    h.update(b"|");
+    h.update(value.as_bytes());
+    hex(&h.finalize())
+}
+
+/// The entry of a history value in its commit's hash: `["h", record, field, digest]`, the digest
+/// kept when the value was erased, computed from the value and its salt otherwise.
+pub(crate) fn history_entry(
+    record: J,
+    field: &str,
+    value: Option<&str>,
+    salt: Option<&str>,
+    digest: Option<&str>,
+) -> J {
+    let d = match digest {
+        Some(d) => d.to_string(),
+        None => value_digest(salt.unwrap_or(""), value.unwrap_or("null")),
+    };
+    json!(["h", record, field, d])
+}
+
+/// Whether the database's salts are seeded (`Database::seed_salts`).
+pub(crate) fn salts_seeded(conn: &mut Conn) -> Result<bool, String> {
+    let r = conn.query(
+        "SELECT \"value\" FROM \"_quadra_meta\" WHERE \"key\" = 'salts'",
+        &[],
+    )?;
+    Ok(r.first().and_then(|r| r[0].as_deref()) == Some("seeded"))
+}
+
+/// Every database of this process seeds its salts (`Database::seed_salts`): for tests that
+/// compare databases written by different paths. Never for real data.
+pub fn seed_all_salts() {
+    SEED_ALL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+static SEED_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A new salt: 16 random bytes, or (seeded) derived from the value's position in the history.
+pub(crate) fn new_salt(seeded: bool, seq: i64) -> String {
+    if seeded || SEED_ALL.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut h = Sha256::new();
+        h.update(format!("quadra-salt|{seq}").as_bytes());
+        return hex(&h.finalize()[..16]);
+    }
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("the system's random numbers");
+    hex(&b)
 }
 
 /// SQLite: the triggers keeping the FTS5 table of a table (`Database::sync_search` builds the
@@ -254,6 +314,23 @@ fn num(s: &Option<String>) -> i64 {
 }
 
 impl Database {
+    /// Salts derived from the position of each value from now on, for tests: the same tests
+    /// give the same chain on every run and every database. Never for real data.
+    pub fn seed_salts(&mut self) -> Result<(), String> {
+        self.set_meta("salts", "seeded")?;
+        self.seeded_salts = Some(true);
+        Ok(())
+    }
+
+    pub(crate) fn salts_seeded(&mut self) -> Result<bool, String> {
+        if let Some(s) = self.seeded_salts {
+            return Ok(s);
+        }
+        let s = salts_seeded(&mut self.conn)?;
+        self.seeded_salts = Some(s);
+        Ok(s)
+    }
+
     pub fn open(url: &str, model: &Model, report: &Report) -> Result<Database, String> {
         let conn = Pooled::own(Conn::open(url)?);
         let mut db = Database::with(conn, Rc::new(schema::build(model, report)));
@@ -290,6 +367,7 @@ impl Database {
             prev_hash: "0".repeat(64),
             deferred: None,
             recording: None,
+            seeded_salts: None,
             delta_ops: Vec::new(),
             url: None,
         }
@@ -310,6 +388,22 @@ impl Database {
                 return Ok(())
             }
             Ok(_) => {}
+        }
+        // before version 15 the chain hashed the values themselves: it cannot become a chain of
+        // digests without rewriting every commit
+        if self
+            .conn
+            .query(
+                "SELECT t.\"salt\" FROM \"_quadra_history\" t WHERE 1 = 0",
+                &[],
+            )
+            .is_err()
+        {
+            return Err("this database was created by an older version of Quadra: its hash \
+                        chain covers the values themselves, and since version 15 it covers \
+                        their digests, so that values can be erased. Start from a new database \
+                        (`quadra db init`) and load the data again"
+                .into());
         }
         if self
             .conn
@@ -1490,13 +1584,15 @@ impl Database {
         for (id, f, v) in &entries {
             self.seq += 1;
             let value = to_json(v).to_string();
-            payload.push(json!(["h", id, f, value]));
+            let salt = new_salt(self.salts_seeded()?, self.seq);
+            payload.push(history_entry(json!(id), f, Some(&value), Some(&salt), None));
             hist.push(vec![
                 Sql::Int(self.seq),
                 Sql::Int(tx as i64),
                 Sql::Int(*id as i64),
                 Sql::Text(f.clone()),
                 Sql::Text(value),
+                Sql::Text(salt),
             ]);
             touched.insert(*id);
         }
@@ -1506,6 +1602,7 @@ impl Database {
             ("record_id", ColType::BigInt),
             ("field", ColType::Text),
             ("value", ColType::Text),
+            ("salt", ColType::Text),
         ]
         .iter()
         .map(|(n, t)| (n.to_string(), *t))
@@ -2173,10 +2270,11 @@ impl Database {
                 if *t == tx {
                     self.seq += 1;
                     let value = to_json(v).to_string();
-                    payload.push(json!(["h", r.id, f, value]));
+                    let salt = new_salt(self.salts_seeded()?, self.seq);
+                    payload.push(history_entry(json!(r.id), f, Some(&value), Some(&salt), None));
                     self.conn.exec(
-                        "INSERT INTO \"_quadra_history\" (\"seq\", \"tx\", \"record_id\", \"field\", \"value\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text)",
-                        &[Sql::Int(self.seq), Sql::Int(tx as i64), Sql::Int(r.id as i64), Sql::Text(f.clone()), Sql::Text(value)],
+                        "INSERT INTO \"_quadra_history\" (\"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?text)",
+                        &[Sql::Int(self.seq), Sql::Int(tx as i64), Sql::Int(r.id as i64), Sql::Text(f.clone()), Sql::Text(value), Sql::Text(salt)],
                     )?;
                 }
             }
@@ -2203,8 +2301,9 @@ impl Database {
         let mut problems = Vec::new();
         // 1. hash chain
         let mut by_tx: HashMap<i64, Vec<J>> = HashMap::new();
-        for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\" FROM \"_quadra_history\" ORDER BY \"_quadra_history\".\"seq\"", &[])? {
-            by_tx.entry(num(&r[0])).or_default().push(json!(["h", num(&r[1]), r[2].clone().unwrap_or_default(), r[3].clone().unwrap_or_default()]));
+        for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" ORDER BY \"_quadra_history\".\"seq\"", &[])? {
+            let e = history_entry(json!(num(&r[1])), r[2].as_deref().unwrap_or(""), r[3].as_deref(), r[4].as_deref(), r[5].as_deref());
+            by_tx.entry(num(&r[0])).or_default().push(e);
         }
         for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), CAST(\"id\" AS TEXT), \"ledger\", \"cols\" FROM \"_quadra_ledger_rows\" ORDER BY \"_quadra_ledger_rows\".\"id\"", &[])? {
             by_tx.entry(num(&r[0])).or_default().push(json!(["r", num(&r[1]), r[2].clone().unwrap_or_default(), r[3].clone().unwrap_or_default()]));

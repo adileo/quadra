@@ -21,7 +21,7 @@
 //!   ids, whichever worker found them.
 
 use crate::conn::{Conn, Pooled, Sql};
-use crate::db::{encode, materialized_formulas, same, CommitHasher, Database};
+use crate::db::{encode, history_entry, materialized_formulas, same, CommitHasher, Database};
 use crate::schema::{Source as TableSource, Table};
 use crate::source::{head, load_renames, DbSource};
 use chrono::NaiveDateTime;
@@ -143,11 +143,11 @@ impl Stream {
 fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
     let mut hist = Stream {
-        sql: "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\" FROM \"_quadra_history\" WHERE \"seq\" > ?bigint ORDER BY \"_quadra_history\".\"seq\" LIMIT ?bigint",
+        sql: "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" WHERE \"seq\" > ?bigint ORDER BY \"_quadra_history\".\"seq\" LIMIT ?bigint",
         after: i64::MIN,
         buf: VecDeque::new(),
         done: false,
-        row: |r| (num(&r[0]), num(&r[1]), json!(["h", num(&r[2]), r[3].clone().unwrap_or_default(), r[4].clone().unwrap_or_default()]).to_string()),
+        row: |r| (num(&r[0]), num(&r[1]), history_entry(json!(num(&r[2])), r[3].as_deref().unwrap_or(""), r[4].as_deref(), r[5].as_deref(), r[6].as_deref()).to_string()),
     };
     let mut ledger = Stream {
         sql: "SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"ledger\", \"cols\" FROM \"_quadra_ledger_rows\" WHERE \"id\" > ?bigint ORDER BY \"_quadra_ledger_rows\".\"id\" LIMIT ?bigint",

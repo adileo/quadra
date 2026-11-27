@@ -24,6 +24,8 @@ fn project() -> Project {
 /// A fresh database: SQLite, or a schema of its own on PostgreSQL when `QUADRA_SEQ_PG` holds
 /// a url (`scripts/pg.sh start` prints one).
 fn fresh(name: &str) -> String {
+    // the databases are compared, chains included: the same salts
+    quadra_store::db::seed_all_salts();
     if let Ok(pg) = std::env::var("QUADRA_SEQ_PG") {
         let schema = format!("seq_{name}_{}", std::process::id());
         let _ = quadra_store::Conn::open(&pg)
@@ -1114,7 +1116,9 @@ fn the_log_is_compacted_by_its_snapshots() {
     let s = Sequencer::start(&url, options).unwrap();
     let checked = quadra_analysis::check(&p);
     let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
-    for n in 0..300 {
+    // (the database grows by about two thirds of what the log does: its history, its search
+    // index; it starts larger than a few hundred transactions of log)
+    for n in 0..500 {
         let mut i = engine(&url, m, r, Some(&s));
         let c = first(&mut i, "Customer");
         let long = format!("{n} {}", "x".repeat(2000));

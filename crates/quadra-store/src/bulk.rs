@@ -1706,6 +1706,8 @@ struct HistoryIn<'a> {
     /// per record, in order: whether its row reads back exactly; its kinds, by position
     exact: Vec<bool>,
     kinds: HashMap<usize, String>,
+    /// the database's salts are seeded (tests: `Database::seed_salts`)
+    seeded: bool,
 }
 
 impl HistoryIn<'_> {
@@ -1742,8 +1744,9 @@ fn json_str(out: &mut String, s: &str) {
 }
 
 impl HistoryIn<'_> {
-    /// The next entry, numbered and hashed: (seq, tx, record, field, value); None at the end.
-    fn next_entry(&mut self) -> Option<(i64, u64, i64, Arc<str>, String)> {
+    /// The next entry, numbered and hashed: (seq, tx, record, field, value, salt); None at the
+    /// end.
+    fn next_entry(&mut self) -> Option<(i64, u64, i64, Arc<str>, String, String)> {
         loop {
             if let Some(item) = self.buf.next() {
                 self.pending.fetch_sub(1, Ordering::Relaxed);
@@ -1763,19 +1766,19 @@ impl HistoryIn<'_> {
                         ));
                     }
                     HItem::Entry(id, field, value) => {
-                        // `["h",id,"field","value"]`, as `commit_hash` has it
+                        // `["h",id,"field","digest"]`, as `history_entry` has it
                         use std::fmt::Write as _;
+                        self.seq += 1;
+                        let salt = crate::db::new_salt(self.seeded, self.seq);
+                        let digest = crate::db::value_digest(&salt, &value);
                         self.entry.clear();
                         let _ = write!(self.entry, "[\"h\",{id},");
                         json_str(&mut self.entry, &field);
-                        self.entry.push(',');
-                        json_str(&mut self.entry, &value);
-                        self.entry.push(']');
+                        let _ = write!(self.entry, ",\"{digest}\"]");
                         if let Some((_, h)) = self.hasher.as_mut() {
                             h.entry(&self.entry);
                         }
-                        self.seq += 1;
-                        return Some((self.seq, self.tx, id, field, value));
+                        return Some((self.seq, self.tx, id, field, value, salt));
                     }
                 }
                 continue;
@@ -1797,14 +1800,14 @@ impl HistoryIn<'_> {
     /// The next entry as a line of COPY text; false at the end.
     fn next_text(&mut self, buf: &mut String) -> bool {
         use std::fmt::Write as _;
-        let Some((seq, tx, id, field, value)) = self.next_entry() else {
+        let Some((seq, tx, id, field, value, salt)) = self.next_entry() else {
             return false;
         };
         let _ = write!(buf, "{seq}\t{tx}\t{id}\t");
         crate::conn::copy_escape(buf, &field);
         buf.push('\t');
         crate::conn::copy_escape(buf, &value);
-        buf.push('\n');
+        let _ = write!(buf, "\t{salt}\n");
         true
     }
 }
@@ -1813,13 +1816,14 @@ impl Iterator for HistoryIn<'_> {
     type Item = Vec<Sql>;
 
     fn next(&mut self) -> Option<Vec<Sql>> {
-        let (seq, tx, id, field, value) = self.next_entry()?;
+        let (seq, tx, id, field, value, salt) = self.next_entry()?;
         Some(vec![
             Sql::Int(seq),
             Sql::Int(tx as i64),
             Sql::Int(id),
             Sql::Text(field.to_string()),
             Sql::Text(value),
+            Sql::Text(salt),
         ])
     }
 }
@@ -1894,6 +1898,7 @@ fn writer(
         stats(db, table)
     };
     let r = (|| -> Result<Written, String> {
+        let seeded = db.salts_seeded()?;
         let mut hist = HistoryIn {
             jobs: &jobs,
             buf: Vec::new().into_iter(),
@@ -1910,13 +1915,14 @@ fn writer(
             entry: String::new(),
             exact: Vec::new(),
             kinds: HashMap::new(),
+            seeded,
         };
         let n = if pg {
             // COPY text written straight from the entries
             let mut n = 0u64;
             db.conn.copy_text(
                 "_quadra_history",
-                &["seq", "tx", "record_id", "field", "value"],
+                &["seq", "tx", "record_id", "field", "value", "salt"],
                 &mut |buf| {
                     for _ in 0..1000 {
                         if !hist.next_text(buf) {
@@ -1931,7 +1937,7 @@ fn writer(
         } else {
             db.conn.bulk_insert(
                 "_quadra_history",
-                &["seq", "tx", "record_id", "field", "value"],
+                &["seq", "tx", "record_id", "field", "value", "salt"],
                 &mut hist,
             )?
         };

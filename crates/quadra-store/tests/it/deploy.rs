@@ -275,6 +275,8 @@ fn versions(url: &str) -> BTreeMap<String, i64> {
 }
 
 fn fresh(target: &str, name: &str) -> String {
+    // the databases are compared, chains included: the same salts
+    quadra_store::db::seed_all_salts();
     if target == "sqlite" {
         let file =
             std::env::temp_dir().join(format!("quadra-deploy-{}-{name}.db", std::process::id()));

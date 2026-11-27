@@ -2009,6 +2009,7 @@ impl<'m> Run<'m> {
     fn commit(&mut self, cause: &str, time: NaiveDateTime) -> Result<(), String> {
         let tx = self.tx;
         let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let seeded;
         let (mut seq, prev) = {
             let mut src = self.src.borrow_mut();
             let conn = src.conn();
@@ -2022,6 +2023,7 @@ impl<'m> Run<'m> {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             let last = conn.query("SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1", &[])?;
+            seeded = crate::db::salts_seeded(conn)?;
             (
                 seq,
                 last.first()
@@ -2052,19 +2054,22 @@ impl<'m> Run<'m> {
                 last_id = id;
                 let field = r[2].clone().unwrap_or_default();
                 let value = r[3].clone().unwrap_or_default();
-                hasher.entry(&json!(["h", id, field, value]).to_string());
                 seq += 1;
+                let salt = crate::db::new_salt(seeded, seq);
+                let e = crate::db::history_entry(json!(id), &field, Some(&value), Some(&salt), None);
+                hasher.entry(&e.to_string());
                 out.push(vec![
                     Sql::Int(seq),
                     Sql::Int(tx as i64),
                     Sql::Int(id),
                     Sql::Text(field),
                     Sql::Text(value),
+                    Sql::Text(salt),
                 ]);
             }
             conn.bulk_insert(
                 "_quadra_history",
-                &["seq", "tx", "record_id", "field", "value"],
+                &["seq", "tx", "record_id", "field", "value", "salt"],
                 &mut out.into_iter(),
             )?;
         }
