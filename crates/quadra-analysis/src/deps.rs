@@ -64,7 +64,12 @@ type Env = Vec<HashMap<String, Val>>;
 
 /// Dependencies of expressions and statements evaluated on a record of `root`.
 pub fn analyze(m: &Model, root: &str, exprs: &[&Expr], stmts: &[&[Stmt]]) -> Deps {
-    let mut a = An { m, deps: Deps::default(), depth: 0, stack: Vec::new() };
+    let mut a = An {
+        m,
+        deps: Deps::default(),
+        depth: 0,
+        stack: Vec::new(),
+    };
     let this = Val::Path(Vec::new(), root.to_string());
     for e in exprs {
         let mut env: Env = vec![HashMap::new()];
@@ -87,9 +92,18 @@ const IMMUTABLE_MEMBERS: &[&str] = &["id", "created_at", "created_by"];
 /// formula reading itself further along a tree is followed one step, not inlined (where
 /// `analyze` gives up and makes it opaque).
 pub fn analyze_formula(m: &Model, ent: &str, field: &str) -> Deps {
-    let Some(f) = m.entity(ent).and_then(|e| m.find_field(e, field)) else { return Deps::default() };
-    let Some(formula) = &f.formula else { return Deps::default() };
-    let mut a = An { m, deps: Deps::default(), depth: 0, stack: vec![(ent.to_string(), field.to_string())] };
+    let Some(f) = m.entity(ent).and_then(|e| m.find_field(e, field)) else {
+        return Deps::default();
+    };
+    let Some(formula) = &f.formula else {
+        return Deps::default();
+    };
+    let mut a = An {
+        m,
+        deps: Deps::default(),
+        depth: 0,
+        stack: vec![(ent.to_string(), field.to_string())],
+    };
     let this = Val::Path(Vec::new(), ent.to_string());
     let mut env: Env = vec![HashMap::new()];
     a.expr(formula, &mut env, &this);
@@ -99,8 +113,16 @@ pub fn analyze_formula(m: &Model, ent: &str, field: &str) -> Deps {
 /// Dependencies of a lambda's body evaluated on a record of `root` bound to `param` (the
 /// contribution of one child to a rollup: `o => o.total` over a customer's orders).
 pub fn analyze_lambda(m: &Model, root: &str, param: &str, body: &Expr) -> Deps {
-    let mut a = An { m, deps: Deps::default(), depth: 0, stack: Vec::new() };
-    let mut env: Env = vec![HashMap::from([(param.to_string(), Val::Path(Vec::new(), root.to_string()))])];
+    let mut a = An {
+        m,
+        deps: Deps::default(),
+        depth: 0,
+        stack: Vec::new(),
+    };
+    let mut env: Env = vec![HashMap::from([(
+        param.to_string(),
+        Val::Path(Vec::new(), root.to_string()),
+    )])];
     a.expr(body, &mut env, &Val::Other);
     a.deps
 }
@@ -141,7 +163,11 @@ pub fn incremental(m: &Model, ent: &str, field: &str) -> Result<(), String> {
     }
     for (path, e, _) in &d.reads {
         let ledger = |n: &str| m.entity(n).map_or(false, |x| x.is_ledger);
-        if ledger(e) || path.iter().any(|s| matches!(s, Step::Inv { child, .. } if ledger(child))) {
+        if ledger(e)
+            || path
+                .iter()
+                .any(|s| matches!(s, Step::Inv { child, .. } if ledger(child)))
+        {
             return Err(format!("it reads the ledger {e}"));
         }
     }
@@ -177,14 +203,25 @@ pub fn ledger_rollup<'m>(m: &'m Model, ent: &str, field: &str) -> Option<LedgerR
         return None;
     }
     let e = f.formula.as_ref()?;
-    let ExprKind::Call { callee, args } = &e.kind else { return None };
-    let ExprKind::Field { base, name, optional: false } = &callee.kind else { return None };
+    let ExprKind::Call { callee, args } = &e.kind else {
+        return None;
+    };
+    let ExprKind::Field {
+        base,
+        name,
+        optional: false,
+    } = &callee.kind
+    else {
+        return None;
+    };
     let lambda = |a: &'m quadra_ir::Arg| -> Option<(&'m str, &'m Expr)> {
         if a.name.is_some() || a.spread {
             return None;
         }
         match &a.value.kind {
-            ExprKind::Lambda { params, body } if params.len() == 1 => Some((params[0].as_str(), body.as_ref())),
+            ExprKind::Lambda { params, body } if params.len() == 1 => {
+                Some((params[0].as_str(), body.as_ref()))
+            }
             _ => None,
         }
     };
@@ -202,7 +239,14 @@ pub fn ledger_rollup<'m>(m: &'m Model, ent: &str, field: &str) -> Option<LedgerR
     let ledger = loop {
         match &b.kind {
             ExprKind::Call { callee, args } => {
-                let ExprKind::Field { base, name, optional: false } = &callee.kind else { return None };
+                let ExprKind::Field {
+                    base,
+                    name,
+                    optional: false,
+                } = &callee.kind
+                else {
+                    return None;
+                };
                 let [a] = args.as_slice() else { return None };
                 if name != "where" {
                     return None;
@@ -219,10 +263,19 @@ pub fn ledger_rollup<'m>(m: &'m Model, ent: &str, field: &str) -> Option<LedgerR
     let mut key: Option<String> = None;
     for (p, body) in &filters {
         for c in conjuncts(body) {
-            if let ExprKind::Binary { op: BinOp::Eq, lhs, rhs } = &c.kind {
+            if let ExprKind::Binary {
+                op: BinOp::Eq,
+                lhs,
+                rhs,
+            } = &c.kind
+            {
                 let side = |x: &Expr, y: &Expr| -> Option<String> {
-                    let ExprKind::Field { base, name, .. } = &x.kind else { return None };
-                    (matches!(&base.kind, ExprKind::Name(n) if n == p) && matches!(y.kind, ExprKind::SelfRef)).then(|| name.clone())
+                    let ExprKind::Field { base, name, .. } = &x.kind else {
+                        return None;
+                    };
+                    (matches!(&base.kind, ExprKind::Name(n) if n == p)
+                        && matches!(y.kind, ExprKind::SelfRef))
+                    .then(|| name.clone())
                 };
                 if let Some(k) = side(lhs, rhs).or_else(|| side(rhs, lhs)) {
                     let kf = l.fields.iter().find(|x| x.name == k)?;
@@ -248,29 +301,60 @@ pub fn ledger_rollup<'m>(m: &'m Model, ent: &str, field: &str) -> Option<LedgerR
             return None;
         }
     }
-    Some(LedgerRollup { ledger, key, filters, sum, span: e.span })
+    Some(LedgerRollup {
+        ledger,
+        key,
+        filters,
+        sum,
+        span: e.span,
+    })
 }
-
 
 /// Whether `e` reads only columns of the ledger row bound to `p` (`p.col`), stored fields of
 /// the record (`company`), constants and `self` compared with a row column (`anchor`).
-fn row_local(m: &Model, owner: &quadra_ir::Entity, l: &quadra_ir::Entity, p: &str, e: &Expr, anchor: bool) -> bool {
+fn row_local(
+    m: &Model,
+    owner: &quadra_ir::Entity,
+    l: &quadra_ir::Entity,
+    p: &str,
+    e: &Expr,
+    anchor: bool,
+) -> bool {
     let rec = |x: &Expr| row_local(m, owner, l, p, x, anchor);
     match &e.kind {
         ExprKind::Lit(_) | ExprKind::Quantity { .. } => true,
         ExprKind::Name(n) if n == p => false,
         ExprKind::Name(n) => match m.find_field(owner, n) {
-            Some(f) => f.formula.is_none() && !f.per_company && f.kind == quadra_ir::FieldKind::Stored,
+            Some(f) => {
+                f.formula.is_none() && !f.per_company && f.kind == quadra_ir::FieldKind::Stored
+            }
             None => m.variant(n).is_some_and(|v| v.fields.is_empty()),
         },
-        ExprKind::Field { base, name, .. } => matches!(&base.kind, ExprKind::Name(n) if n == p) && l.fields.iter().any(|f| f.name == *name),
-        ExprKind::Binary { op: BinOp::Eq | BinOp::Ne, lhs, rhs } if anchor && (matches!(lhs.kind, ExprKind::SelfRef) || matches!(rhs.kind, ExprKind::SelfRef)) => {
-            let other = if matches!(lhs.kind, ExprKind::SelfRef) { rhs } else { lhs };
+        ExprKind::Field { base, name, .. } => {
+            matches!(&base.kind, ExprKind::Name(n) if n == p)
+                && l.fields.iter().any(|f| f.name == *name)
+        }
+        ExprKind::Binary {
+            op: BinOp::Eq | BinOp::Ne,
+            lhs,
+            rhs,
+        } if anchor
+            && (matches!(lhs.kind, ExprKind::SelfRef) || matches!(rhs.kind, ExprKind::SelfRef)) =>
+        {
+            let other = if matches!(lhs.kind, ExprKind::SelfRef) {
+                rhs
+            } else {
+                lhs
+            };
             matches!(&other.kind, ExprKind::Field { base, name, .. } if matches!(&base.kind, ExprKind::Name(n) if n == p) && l.fields.iter().any(|f| f.name == *name))
         }
         ExprKind::Binary { lhs, rhs, .. } => rec(lhs) && rec(rhs),
         ExprKind::Unary { expr, .. } => rec(expr),
-        ExprKind::If { cond, then, otherwise } => rec(cond) && rec(then) && rec(otherwise),
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => rec(cond) && rec(then) && rec(otherwise),
         ExprKind::Set(items) => items.iter().all(rec),
         ExprKind::List(items) => items.iter().all(|a| !a.spread && rec(&a.value)),
         _ => false,
@@ -305,7 +389,12 @@ impl<'m> An<'m> {
                     let v = self.expr(value, env, this);
                     env.last_mut().unwrap().insert(name.clone(), v);
                 }
-                StmtKind::If { binding, cond, then, otherwise } => {
+                StmtKind::If {
+                    binding,
+                    cond,
+                    then,
+                    otherwise,
+                } => {
                     let c = self.expr(cond, env, this);
                     env.push(HashMap::new());
                     if let Some(b) = binding {
@@ -326,7 +415,11 @@ impl<'m> An<'m> {
                     self.stmts(body, env, this);
                     env.pop();
                 }
-                StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Emit(e) | StmtKind::Expect(e) => {
+                StmtKind::Return(Some(e))
+                | StmtKind::Expr(e)
+                | StmtKind::Fail(e)
+                | StmtKind::Emit(e)
+                | StmtKind::Expect(e) => {
                     last = self.expr(e, env, this);
                 }
                 StmtKind::Require { cond, message } => {
@@ -378,7 +471,11 @@ impl<'m> An<'m> {
                     return Val::Other;
                 }
                 if let Some(t) = self.entity_of(this) {
-                    if self.m.entity(&t).map_or(false, |e| self.m.find_field(e, n).is_some()) {
+                    if self
+                        .m
+                        .entity(&t)
+                        .map_or(false, |e| self.m.find_field(e, n).is_some())
+                    {
                         return self.access(this.clone(), n);
                     }
                     if VOLATILE_MEMBERS.contains(&n.as_str()) {
@@ -427,7 +524,11 @@ impl<'m> An<'m> {
                     _ => Val::Other,
                 }
             }
-            ExprKind::If { cond, then, otherwise } => {
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 self.expr(cond, env, this);
                 let a = self.expr(then, env, this);
                 let b = self.expr(otherwise, env, this);
@@ -440,7 +541,10 @@ impl<'m> An<'m> {
                 Val::Other
             }
             ExprKind::Tuple(items) => {
-                let fields: Vec<(Option<String>, Val)> = items.iter().map(|(n, x)| (n.clone(), self.expr(x, env, this))).collect();
+                let fields: Vec<(Option<String>, Val)> = items
+                    .iter()
+                    .map(|(n, x)| (n.clone(), self.expr(x, env, this)))
+                    .collect();
                 if fields.iter().all(|(_, v)| *v == Val::Other) {
                     Val::Other
                 } else {
@@ -448,7 +552,10 @@ impl<'m> An<'m> {
                 }
             }
             ExprKind::List(items) => {
-                let vs: Vec<Val> = items.iter().map(|a| self.expr(&a.value, env, this)).collect();
+                let vs: Vec<Val> = items
+                    .iter()
+                    .map(|a| self.expr(&a.value, env, this))
+                    .collect();
                 merge(self, vs)
             }
             ExprKind::Set(items) => {
@@ -496,8 +603,16 @@ impl<'m> An<'m> {
         let (path, t, global) = match base {
             // a named field, or a positional one (`t.0`)
             Val::Tuple(fields) => {
-                let named = fields.iter().find(|(n, _)| n.as_deref() == Some(name)).map(|(_, v)| v.clone());
-                let positional = || name.parse::<usize>().ok().and_then(|i| fields.get(i)).map(|(_, v)| v.clone());
+                let named = fields
+                    .iter()
+                    .find(|(n, _)| n.as_deref() == Some(name))
+                    .map(|(_, v)| v.clone());
+                let positional = || {
+                    name.parse::<usize>()
+                        .ok()
+                        .and_then(|i| fields.get(i))
+                        .map(|(_, v)| v.clone())
+                };
                 return named.or_else(positional).unwrap_or(Val::Other);
             }
             Val::Path(p, t) => (p, t, false),
@@ -508,7 +623,9 @@ impl<'m> An<'m> {
             }
             Val::Other => return Val::Other,
         };
-        let Some(e) = self.m.entity(&t) else { return Val::Other };
+        let Some(e) = self.m.entity(&t) else {
+            return Val::Other;
+        };
         let Some(f) = self.m.find_field(e, name) else {
             if VOLATILE_MEMBERS.contains(&name) {
                 self.volatile(format!("reads `{name}`"));
@@ -521,14 +638,24 @@ impl<'m> An<'m> {
         if global {
             self.deps.globals.insert(t.clone());
         }
-        let mk = |p: Vec<Step>, ent: String| if global { Val::Global(ent) } else { Val::Path(p, ent) };
+        let mk = |p: Vec<Step>, ent: String| {
+            if global {
+                Val::Global(ent)
+            } else {
+                Val::Path(p, ent)
+            }
+        };
         if let Some(formula) = &f.formula {
             let key = (t.clone(), name.to_string());
             if self.stack.contains(&key) {
                 // the root formula read again further along the tree: a recursive step, when
                 // its value is a plain value (what is read through a record it returns could
                 // not be followed); anything else the analysis cannot follow
-                let plain = f.ty.as_ref().is_some_and(|ty| ty_names(Some(ty)).map_or(!matches!(ty, Ty::List(_) | Ty::Set(_)), |n| self.m.entity(&n).is_none()));
+                let plain = f.ty.as_ref().is_some_and(|ty| {
+                    ty_names(Some(ty)).map_or(!matches!(ty, Ty::List(_) | Ty::Set(_)), |n| {
+                        self.m.entity(&n).is_none()
+                    })
+                });
                 if self.stack.first() == Some(&key) && !global && plain {
                     self.deps.recursive.insert(path);
                 } else {
@@ -548,30 +675,76 @@ impl<'m> An<'m> {
             Some(Ty::List(i)) | Some(Ty::Set(i)) => ty_names(Some(i)).map(|n| (n, true)),
             other => ty_names(other.as_ref()).map(|n| (n, false)),
         };
-        let target = target.filter(|(n, _)| self.m.entity(n).map_or(false, |x| x.kind != EntityKind::Record));
+        let target = target.filter(|(n, _)| {
+            self.m
+                .entity(n)
+                .map_or(false, |x| x.kind != EntityKind::Record)
+        });
         match target {
             Some((child, true)) if f.kind == FieldKind::Stored && self.is_inverse(e, f, &child) => {
                 if let Some(through) = &f.through {
-                    let Some(te) = self.m.entity(through) else { return Val::Other };
-                    let back = te.fields.iter().find(|x| ty_names(x.ty.as_ref()).as_deref() == Some(t.as_str())).map(|x| x.name.clone());
-                    let fwd = te.fields.iter().find(|x| ty_names(x.ty.as_ref()).as_deref() == Some(child.as_str())).map(|x| x.name.clone());
-                    let (Some(back), Some(fwd)) = (back, fwd) else { return Val::Other };
-                    let p1 = push(&path, Step::Inv { child: through.clone(), back: back.clone() });
+                    let Some(te) = self.m.entity(through) else {
+                        return Val::Other;
+                    };
+                    let back = te
+                        .fields
+                        .iter()
+                        .find(|x| ty_names(x.ty.as_ref()).as_deref() == Some(t.as_str()))
+                        .map(|x| x.name.clone());
+                    let fwd = te
+                        .fields
+                        .iter()
+                        .find(|x| ty_names(x.ty.as_ref()).as_deref() == Some(child.as_str()))
+                        .map(|x| x.name.clone());
+                    let (Some(back), Some(fwd)) = (back, fwd) else {
+                        return Val::Other;
+                    };
+                    let p1 = push(
+                        &path,
+                        Step::Inv {
+                            child: through.clone(),
+                            back: back.clone(),
+                        },
+                    );
                     self.read(&p1, through, &back, global);
                     self.read(&p1, through, &fwd, global);
-                    return mk(push(&p1, Step::Ref { ent: through.clone(), field: fwd }), child);
+                    return mk(
+                        push(
+                            &p1,
+                            Step::Ref {
+                                ent: through.clone(),
+                                field: fwd,
+                            },
+                        ),
+                        child,
+                    );
                 }
                 let Some(back) = self.back_field(e, f, &child) else {
                     self.deps.globals.insert(child.clone());
                     return Val::Global(child);
                 };
-                let p1 = push(&path, Step::Inv { child: child.clone(), back: back.clone() });
+                let p1 = push(
+                    &path,
+                    Step::Inv {
+                        child: child.clone(),
+                        back: back.clone(),
+                    },
+                );
                 self.read(&p1, &child, &back, global);
                 mk(p1, child)
             }
             Some((u, _)) => {
                 self.read(&path, &t, name, global);
-                mk(push(&path, Step::Ref { ent: t.clone(), field: name.to_string() }), u)
+                mk(
+                    push(
+                        &path,
+                        Step::Ref {
+                            ent: t.clone(),
+                            field: name.to_string(),
+                        },
+                    ),
+                    u,
+                )
             }
             None => {
                 self.read(&path, &t, name, global);
@@ -588,7 +761,9 @@ impl<'m> An<'m> {
         if global {
             self.deps.globals.insert(ent.to_string());
         } else {
-            self.deps.reads.insert((path.to_vec(), ent.to_string(), field.to_string()));
+            self.deps
+                .reads
+                .insert((path.to_vec(), ent.to_string(), field.to_string()));
         }
     }
 
@@ -607,7 +782,8 @@ impl<'m> An<'m> {
                         Some(Ty::Set(i)) | Some(Ty::List(i)) => ty_names(Some(i)),
                         other => ty_names(other.as_ref()),
                     };
-                    n.as_deref() == Some(owner.name.as_str()) || n.map_or(false, |n| owner.traits.contains(&n))
+                    n.as_deref() == Some(owner.name.as_str())
+                        || n.map_or(false, |n| owner.traits.contains(&n))
                 })
                 .map(|x| x.name.clone())
         })
@@ -636,7 +812,10 @@ impl<'m> An<'m> {
                 if self.m.entity(n).is_some() {
                     self.volatile(format!("creates a {n}"));
                 }
-                let vals: Vec<Val> = args.iter().map(|a| self.expr(&a.value, env, this)).collect();
+                let vals: Vec<Val> = args
+                    .iter()
+                    .map(|a| self.expr(&a.value, env, this))
+                    .collect();
                 if self.m.metrics.iter().any(|x| &x.name == n) {
                     self.deps.opaque = true;
                     return Val::Other;
@@ -652,8 +831,14 @@ impl<'m> An<'m> {
                     };
                     let mut scope = HashMap::new();
                     for (i, p) in f.params.iter().enumerate() {
-                        let named = args.iter().position(|a| a.name.as_deref() == Some(p.name.as_str()));
-                        let v = named.and_then(|j| vals.get(j).cloned()).or_else(|| args.iter().position(|a| a.name.is_none()).and(vals.get(i).cloned()));
+                        let named = args
+                            .iter()
+                            .position(|a| a.name.as_deref() == Some(p.name.as_str()));
+                        let v = named.and_then(|j| vals.get(j).cloned()).or_else(|| {
+                            args.iter()
+                                .position(|a| a.name.is_none())
+                                .and(vals.get(i).cloned())
+                        });
                         let v = match (v, &p.default) {
                             (Some(v), _) => v,
                             (None, Some(d)) => self.expr(d, env, this),
@@ -664,7 +849,11 @@ impl<'m> An<'m> {
                     let mut fenv: Env = vec![scope];
                     self.stmts(body, &mut fenv, &Val::Other);
                     // a function returning a record: anything about it is global
-                    if let Some(rt) = ty_names(f.ret.as_ref()).filter(|n| self.m.entity(n).map_or(false, |e| e.kind != EntityKind::Record)) {
+                    if let Some(rt) = ty_names(f.ret.as_ref()).filter(|n| {
+                        self.m
+                            .entity(n)
+                            .map_or(false, |e| e.kind != EntityKind::Record)
+                    }) {
                         self.deps.globals.insert(rt.clone());
                         return Val::Global(rt);
                     }
@@ -714,7 +903,12 @@ impl<'m> An<'m> {
         }
         // methods defined on the entity
         if let Some(t) = self.entity_of(&elem) {
-            if let Some(me) = self.m.entity(&t).and_then(|e| e.methods.iter().find(|x| x.name == name)).cloned() {
+            if let Some(me) = self
+                .m
+                .entity(&t)
+                .and_then(|e| e.methods.iter().find(|x| x.name == name))
+                .cloned()
+            {
                 if let Some(body) = &me.body {
                     let mut fenv: Env = vec![HashMap::new()];
                     for p in &me.params {
@@ -725,15 +919,19 @@ impl<'m> An<'m> {
             }
         }
         match name {
-            "where" | "filter" | "sort_by" | "sorted" | "first" | "last" | "last_by" | "find" | "single" | "min_by" | "max_by" | "distinct" | "all"
-            | "take" | "skip" | "reverse" | "unique" => match elem {
+            "where" | "filter" | "sort_by" | "sorted" | "first" | "last" | "last_by" | "find"
+            | "single" | "min_by" | "max_by" | "distinct" | "all" | "take" | "skip" | "reverse"
+            | "unique" => match elem {
                 Val::Other => Val::Other,
                 v => v,
             },
             // the groups: `key` is what the lambda returns, `items` the elements
             "group_by" => match (&key_val, &elem) {
                 (Val::Other, Val::Other) => Val::Other,
-                _ => Val::Tuple(vec![(Some("key".into()), key_val), (Some("items".into()), elem)]),
+                _ => Val::Tuple(vec![
+                    (Some("key".into()), key_val),
+                    (Some("items".into()), elem),
+                ]),
             },
             "map" | "flat_map" | "max" | "min" => body_val,
             _ => Val::Other,
@@ -742,19 +940,47 @@ impl<'m> An<'m> {
 
     /// `Table.where(x => x.col == <path>)`: the rows reached from the root through `col`.
     fn table_element(&mut self, t: &str, args: &[Arg], env: &mut Env, this: &Val) -> Val {
-        if let Some(Arg { value: Expr { kind: ExprKind::Lambda { params, body }, .. }, .. }) = args.first() {
+        if let Some(Arg {
+            value:
+                Expr {
+                    kind: ExprKind::Lambda { params, body },
+                    ..
+                },
+            ..
+        }) = args.first()
+        {
             if let Some(p) = params.first() {
                 for conj in conjuncts(body) {
-                    let ExprKind::Binary { op: BinOp::Eq, lhs, rhs } = &conj.kind else { continue };
+                    let ExprKind::Binary {
+                        op: BinOp::Eq,
+                        lhs,
+                        rhs,
+                    } = &conj.kind
+                    else {
+                        continue;
+                    };
                     for (side, other) in [(lhs, rhs), (rhs, lhs)] {
-                        let ExprKind::Field { base, name: col, .. } = &side.kind else { continue };
+                        let ExprKind::Field {
+                            base, name: col, ..
+                        } = &side.kind
+                        else {
+                            continue;
+                        };
                         if !matches!(&base.kind, ExprKind::Name(n) if n == p) {
                             continue;
                         }
                         let ov = self.expr(other, env, this);
                         if let Val::Path(q, _) = ov {
-                            let p1 = push(&q, Step::Inv { child: t.to_string(), back: col.clone() });
-                            self.deps.reads.insert((p1.clone(), t.to_string(), col.clone()));
+                            let p1 = push(
+                                &q,
+                                Step::Inv {
+                                    child: t.to_string(),
+                                    back: col.clone(),
+                                },
+                            );
+                            self.deps
+                                .reads
+                                .insert((p1.clone(), t.to_string(), col.clone()));
                             return Val::Path(p1, t.to_string());
                         }
                     }
@@ -768,7 +994,11 @@ impl<'m> An<'m> {
 
 fn conjuncts(e: &Expr) -> Vec<&Expr> {
     match &e.kind {
-        ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+        ExprKind::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        } => {
             let mut v = conjuncts(lhs);
             v.extend(conjuncts(rhs));
             v
@@ -785,7 +1015,9 @@ fn bind_pattern(m: &Model, p: &Pattern, v: &Val, scope: &mut HashMap<String, Val
         }
         Pattern::Ctor { name, args } => {
             // `PurchaseLine(pl)`: a type test on a reference; `pl` is the subject itself
-            let entity = m.entity(name).map_or(false, |e| e.kind != EntityKind::Record);
+            let entity = m
+                .entity(name)
+                .map_or(false, |e| e.kind != EntityKind::Record);
             for a in args {
                 let inner = match (entity, v) {
                     (true, Val::Path(p, _)) => Val::Path(p.clone(), name.clone()),
@@ -810,9 +1042,15 @@ fn merge(a: &mut An, vs: Vec<Val>) -> Val {
             (Some(prev), v) if *prev == v => {}
             // tuples of the same shape: field by field
             (Some(Val::Tuple(a_fields)), Val::Tuple(b_fields))
-                if a_fields.len() == b_fields.len() && a_fields.iter().zip(&b_fields).all(|(x, y)| x.0 == y.0) =>
+                if a_fields.len() == b_fields.len()
+                    && a_fields.iter().zip(&b_fields).all(|(x, y)| x.0 == y.0) =>
             {
-                let fields = a_fields.clone().into_iter().zip(b_fields).map(|((n, x), (_, y))| (n, merge(a, vec![x, y]))).collect();
+                let fields = a_fields
+                    .clone()
+                    .into_iter()
+                    .zip(b_fields)
+                    .map(|((n, x), (_, y))| (n, merge(a, vec![x, y])))
+                    .collect();
                 out = Some(Val::Tuple(fields));
             }
             // a tuple and something else: the analysis cannot follow it

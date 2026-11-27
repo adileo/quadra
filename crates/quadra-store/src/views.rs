@@ -121,11 +121,16 @@ pub struct ViewChange {
 pub struct Stale(pub Vec<LogEntry>);
 
 fn num(s: &Option<String>) -> u64 {
-    s.as_deref().and_then(|x| x.parse::<i64>().ok()).unwrap_or(0).max(0) as u64
+    s.as_deref()
+        .and_then(|x| x.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0) as u64
 }
 
 fn opt_num(s: &Option<String>) -> Option<u64> {
-    s.as_deref().and_then(|x| x.parse::<i64>().ok()).map(|v| v.max(0) as u64)
+    s.as_deref()
+        .and_then(|x| x.parse::<i64>().ok())
+        .map(|v| v.max(0) as u64)
 }
 
 /// A boolean as both databases print it (`1`/`0`, `true`/`false`).
@@ -144,10 +149,15 @@ fn opt_int(v: Option<u64>) -> Sql {
 /// One transaction of these tables: serialized with the other writers of views and teams
 /// (`BEGIN IMMEDIATE` on SQLite, a table lock on PostgreSQL), so that new ids and versions
 /// never collide, across processes too.
-pub fn write<T>(conn: &mut Conn, f: impl FnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
+pub fn write<T>(
+    conn: &mut Conn,
+    f: impl FnOnce(&mut Conn) -> Result<T, String>,
+) -> Result<T, String> {
     match conn.dialect() {
         Dialect::Sqlite => conn.batch("BEGIN IMMEDIATE")?,
-        Dialect::Postgres => conn.batch("BEGIN; LOCK TABLE \"_quadra_views\", \"_quadra_teams\" IN SHARE ROW EXCLUSIVE MODE")?,
+        Dialect::Postgres => conn.batch(
+            "BEGIN; LOCK TABLE \"_quadra_views\", \"_quadra_teams\" IN SHARE ROW EXCLUSIVE MODE",
+        )?,
     }
     match f(conn) {
         Ok(v) => {
@@ -191,7 +201,11 @@ fn view_of(r: &[Option<String>]) -> ViewRow {
 }
 
 /// The views that are not deleted, of a kind and an entity when given, by id.
-pub fn views(conn: &mut Conn, kind: Option<&str>, entity: Option<&str>) -> Result<Vec<ViewRow>, String> {
+pub fn views(
+    conn: &mut Conn,
+    kind: Option<&str>,
+    entity: Option<&str>,
+) -> Result<Vec<ViewRow>, String> {
     let mut sql = format!("SELECT {VIEW_COLS} FROM \"_quadra_views\" WHERE \"deleted_at\" IS NULL");
     let mut params = Vec::new();
     if let Some(k) = kind {
@@ -203,12 +217,22 @@ pub fn views(conn: &mut Conn, kind: Option<&str>, entity: Option<&str>) -> Resul
         params.push(Sql::Text(e.into()));
     }
     sql.push_str(" ORDER BY \"_quadra_views\".\"id\"");
-    Ok(conn.query(&sql, &params)?.iter().map(|r| view_of(r)).collect())
+    Ok(conn
+        .query(&sql, &params)?
+        .iter()
+        .map(|r| view_of(r))
+        .collect())
 }
 
 /// A view, deleted or not.
 pub fn view(conn: &mut Conn, id: u64) -> Result<Option<ViewRow>, String> {
-    Ok(conn.query(&format!("SELECT {VIEW_COLS} FROM \"_quadra_views\" WHERE \"id\" = ?bigint"), &[Sql::Int(id as i64)])?.first().map(|r| view_of(r)))
+    Ok(conn
+        .query(
+            &format!("SELECT {VIEW_COLS} FROM \"_quadra_views\" WHERE \"id\" = ?bigint"),
+            &[Sql::Int(id as i64)],
+        )?
+        .first()
+        .map(|r| view_of(r)))
 }
 
 /// The shares of views (all of them when `ids` is `None`), by view, in a stable order.
@@ -218,11 +242,20 @@ pub fn shares(conn: &mut Conn, ids: Option<&[u64]>) -> Result<HashMap<u64, Vec<S
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        sql.push_str(&format!(" WHERE \"view_id\" IN ({})", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")));
+        sql.push_str(&format!(
+            " WHERE \"view_id\" IN ({})",
+            ids.iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     let mut out: HashMap<u64, Vec<Share>> = HashMap::new();
     for r in conn.query(&sql, &[])? {
-        out.entry(num(&r[0])).or_default().push(Share { target: text(&r[1]), edit: truth(&r[2]) });
+        out.entry(num(&r[0])).or_default().push(Share {
+            target: text(&r[1]),
+            edit: truth(&r[2]),
+        });
     }
     for v in out.values_mut() {
         v.sort();
@@ -236,15 +269,40 @@ pub fn prefs(conn: &mut Conn, user: u64) -> Result<HashMap<u64, Pref>, String> {
         "SELECT CAST(\"view_id\" AS TEXT), CAST(\"favourite\" AS TEXT), CAST(\"position\" AS TEXT), CAST(\"is_default\" AS TEXT), \"state\" FROM \"_quadra_view_prefs\" WHERE \"user_id\" = ?bigint",
         &[Sql::Int(user as i64)],
     )?;
-    Ok(rows.iter().map(|r| (num(&r[0]), Pref { favourite: truth(&r[1]), position: r[2].as_deref().and_then(|p| p.parse().ok()), default: truth(&r[3]), state: r[4].as_deref().and_then(|s| serde_json::from_str(s).ok()) })).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                num(&r[0]),
+                Pref {
+                    favourite: truth(&r[1]),
+                    position: r[2].as_deref().and_then(|p| p.parse().ok()),
+                    default: truth(&r[3]),
+                    state: r[4].as_deref().and_then(|s| serde_json::from_str(s).ok()),
+                },
+            )
+        })
+        .collect())
 }
 
 fn next_id(conn: &mut Conn, table: &str) -> Result<u64, String> {
-    let r = conn.query(&format!("SELECT CAST(COALESCE(MAX(\"id\"), 0) + 1 AS TEXT) FROM \"{table}\""), &[])?;
+    let r = conn.query(
+        &format!("SELECT CAST(COALESCE(MAX(\"id\"), 0) + 1 AS TEXT) FROM \"{table}\""),
+        &[],
+    )?;
     Ok(r.first().map(|r| num(&r[0])).unwrap_or(1).max(1))
 }
 
-fn log(conn: &mut Conn, object: &str, id: u64, version: u64, at: &str, user: Option<u64>, action: &str, detail: &J) -> Result<(), String> {
+fn log(
+    conn: &mut Conn,
+    object: &str,
+    id: u64,
+    version: u64,
+    at: &str,
+    user: Option<u64>,
+    action: &str,
+    detail: &J,
+) -> Result<(), String> {
     conn.exec(
         "INSERT INTO \"_quadra_view_log\" (\"object\", \"object_id\", \"version\", \"at\", \"user_id\", \"action\", \"detail\") VALUES (?text, ?bigint, ?bigint, ?text, ?bigint, ?text, ?text)",
         &[Sql::Text(object.into()), Sql::Int(id as i64), Sql::Int(version as i64), Sql::Text(at.into()), opt_int(user), Sql::Text(action.into()), Sql::Text(detail.to_string())],
@@ -253,7 +311,10 @@ fn log(conn: &mut Conn, object: &str, id: u64, version: u64, at: &str, user: Opt
 }
 
 fn set_shares(conn: &mut Conn, id: u64, shares: &[Share]) -> Result<(), String> {
-    conn.exec("DELETE FROM \"_quadra_view_shares\" WHERE \"view_id\" = ?bigint", &[Sql::Int(id as i64)])?;
+    conn.exec(
+        "DELETE FROM \"_quadra_view_shares\" WHERE \"view_id\" = ?bigint",
+        &[Sql::Int(id as i64)],
+    )?;
     let mut seen = std::collections::HashSet::new();
     for s in shares {
         if !seen.insert(s.target.clone()) {
@@ -274,12 +335,26 @@ pub fn view_state(v: &ViewRow, shares: &[Share]) -> J {
 }
 
 /// A new view (version 1); its id. `action` is what the log says (`create`, `import`…).
-pub fn create_view(conn: &mut Conn, v: &ViewRow, shares: &[Share], at: &str, user: Option<u64>, action: &str) -> Result<u64, String> {
+pub fn create_view(
+    conn: &mut Conn,
+    v: &ViewRow,
+    shares: &[Share],
+    at: &str,
+    user: Option<u64>,
+    action: &str,
+) -> Result<u64, String> {
     write(conn, |conn| insert_view(conn, v, shares, at, user, action))
 }
 
 /// `create_view` inside a transaction of the caller's (`write`).
-pub fn insert_view(conn: &mut Conn, v: &ViewRow, shares: &[Share], at: &str, user: Option<u64>, action: &str) -> Result<u64, String> {
+pub fn insert_view(
+    conn: &mut Conn,
+    v: &ViewRow,
+    shares: &[Share],
+    at: &str,
+    user: Option<u64>,
+    action: &str,
+) -> Result<u64, String> {
     {
         let id = next_id(conn, "_quadra_views")?;
         conn.exec(
@@ -314,18 +389,42 @@ pub fn insert_view(conn: &mut Conn, v: &ViewRow, shares: &[Share], at: &str, use
 }
 
 /// The log of an object after a version, oldest first.
-pub fn log_after(conn: &mut Conn, object: &str, id: u64, after: u64) -> Result<Vec<LogEntry>, String> {
+pub fn log_after(
+    conn: &mut Conn,
+    object: &str,
+    id: u64,
+    after: u64,
+) -> Result<Vec<LogEntry>, String> {
     let rows = conn.query(
         "SELECT CAST(\"version\" AS TEXT), \"at\", CAST(\"user_id\" AS TEXT), \"action\", \"detail\" FROM \"_quadra_view_log\" WHERE \"object\" = ?text AND \"object_id\" = ?bigint AND \"version\" > ?bigint ORDER BY \"version\"",
         &[Sql::Text(object.into()), Sql::Int(id as i64), Sql::Int(after as i64)],
     )?;
-    Ok(rows.iter().map(|r| LogEntry { version: num(&r[0]), at: text(&r[1]), user: opt_num(&r[2]), action: text(&r[3]), detail: serde_json::from_str(r[4].as_deref().unwrap_or("{}")).unwrap_or(J::Null) }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| LogEntry {
+            version: num(&r[0]),
+            at: text(&r[1]),
+            user: opt_num(&r[2]),
+            action: text(&r[3]),
+            detail: serde_json::from_str(r[4].as_deref().unwrap_or("{}")).unwrap_or(J::Null),
+        })
+        .collect())
 }
 
 /// What differs between two states of a view: `name`, `config.where`, `shares`…
 fn view_diff(before: &J, after: &J) -> Vec<String> {
     let mut out = Vec::new();
-    for k in ["name", "description", "type", "owner", "shares", "deleted", "broken", "entity", "parent"] {
+    for k in [
+        "name",
+        "description",
+        "type",
+        "owner",
+        "shares",
+        "deleted",
+        "broken",
+        "entity",
+        "parent",
+    ] {
         if before[k] != after[k] {
             out.push(k.to_string());
         }
@@ -348,12 +447,30 @@ fn view_diff(before: &J, after: &J) -> Vec<String> {
 
 /// Change a view read at version `base` (`None`: whatever its version, for the system: a
 /// deploy). Returns the new version, or `Stale` with the changes made since `base`.
-pub fn update_view(conn: &mut Conn, id: u64, base: Option<u64>, change: &ViewChange, at: &str, user: Option<u64>, action: &str) -> Result<Result<u64, Stale>, String> {
-    write(conn, |conn| change_view(conn, id, base, change, at, user, action))
+pub fn update_view(
+    conn: &mut Conn,
+    id: u64,
+    base: Option<u64>,
+    change: &ViewChange,
+    at: &str,
+    user: Option<u64>,
+    action: &str,
+) -> Result<Result<u64, Stale>, String> {
+    write(conn, |conn| {
+        change_view(conn, id, base, change, at, user, action)
+    })
 }
 
 /// `update_view` inside a transaction of the caller's (`write`).
-pub fn change_view(conn: &mut Conn, id: u64, base: Option<u64>, change: &ViewChange, at: &str, user: Option<u64>, action: &str) -> Result<Result<u64, Stale>, String> {
+pub fn change_view(
+    conn: &mut Conn,
+    id: u64,
+    base: Option<u64>,
+    change: &ViewChange,
+    at: &str,
+    user: Option<u64>,
+    action: &str,
+) -> Result<Result<u64, Stale>, String> {
     {
         let Some(mut v) = view(conn, id)? else {
             return Err(format!("view {id} not found"));
@@ -384,7 +501,13 @@ pub fn change_view(conn: &mut Conn, id: u64, base: Option<u64>, change: &ViewCha
                     set.push("type");
                 }
                 let apart = |k: &str| k == "parent" && !set.contains(&k);
-                let independent = !since.is_empty() && !change.delete && since.iter().all(|e| e.detail["changed"].as_array().is_some_and(|c| c.iter().all(|k| k.as_str().is_some_and(apart))));
+                let independent = !since.is_empty()
+                    && !change.delete
+                    && since.iter().all(|e| {
+                        e.detail["changed"]
+                            .as_array()
+                            .is_some_and(|c| c.iter().all(|k| k.as_str().is_some_and(apart)))
+                    });
                 if !independent {
                     return Ok(Err(Stale(since)));
                 }
@@ -467,7 +590,13 @@ pub fn change_view(conn: &mut Conn, id: u64, base: Option<u64>, change: &ViewCha
 /// aside, whoever may see them) moves to the folder it was in, each a new version of its own
 /// (`move`, recorded in its history). One transaction. Returns the folder's new version and
 /// what moved, or `Stale`.
-pub fn delete_folder(conn: &mut Conn, id: u64, base: u64, at: &str, user: Option<u64>) -> Result<Result<(u64, Vec<u64>), Stale>, String> {
+pub fn delete_folder(
+    conn: &mut Conn,
+    id: u64,
+    base: u64,
+    at: &str,
+    user: Option<u64>,
+) -> Result<Result<(u64, Vec<u64>), Stale>, String> {
     write(conn, |conn| {
         let Some(f) = view(conn, id)? else {
             return Err(format!("folder {id} not found"));
@@ -477,11 +606,25 @@ pub fn delete_folder(conn: &mut Conn, id: u64, base: u64, at: &str, user: Option
         }
         let moved: Vec<u64> = children(conn, id)?.iter().map(|c| c.id).collect();
         for c in &moved {
-            let change = ViewChange { parent: Some(f.parent), ..Default::default() };
+            let change = ViewChange {
+                parent: Some(f.parent),
+                ..Default::default()
+            };
             // no base: never stale
-            let _ = change_view(conn, *c, None, &change, at, user, "move: its folder was deleted")?;
+            let _ = change_view(
+                conn,
+                *c,
+                None,
+                &change,
+                at,
+                user,
+                "move: its folder was deleted",
+            )?;
         }
-        let change = ViewChange { delete: true, ..Default::default() };
+        let change = ViewChange {
+            delete: true,
+            ..Default::default()
+        };
         match change_view(conn, id, Some(base), &change, at, user, "delete")? {
             Ok(v) => Ok(Ok((v, moved))),
             Err(s) => Ok(Err(s)),
@@ -500,12 +643,27 @@ pub fn children(conn: &mut Conn, id: u64) -> Result<Vec<ViewRow>, String> {
 
 /// A user's favourite and default (the default of an entity is one view: the others of the
 /// same entity stop being it).
-pub fn set_pref(conn: &mut Conn, user: u64, id: u64, entity: Option<&str>, favourite: Option<bool>, default: Option<bool>) -> Result<(), String> {
+pub fn set_pref(
+    conn: &mut Conn,
+    user: u64,
+    id: u64,
+    entity: Option<&str>,
+    favourite: Option<bool>,
+    default: Option<bool>,
+) -> Result<(), String> {
     set_pref_state(conn, user, id, entity, favourite, default, None)
 }
 
 /// `set_pref`, and the user's own state of the view (`Some(None)`: forget it).
-pub fn set_pref_state(conn: &mut Conn, user: u64, id: u64, entity: Option<&str>, favourite: Option<bool>, default: Option<bool>, state: Option<Option<J>>) -> Result<(), String> {
+pub fn set_pref_state(
+    conn: &mut Conn,
+    user: u64,
+    id: u64,
+    entity: Option<&str>,
+    favourite: Option<bool>,
+    default: Option<bool>,
+    state: Option<Option<J>>,
+) -> Result<(), String> {
     write(conn, |conn| {
         let mut p = prefs(conn, user)?.remove(&id).unwrap_or_default();
         if let Some(s) = state {
@@ -567,7 +725,9 @@ fn members_of(conn: &mut Conn, ids: &[u64]) -> Result<HashMap<u64, Vec<(u64, boo
     )?;
     let mut out: HashMap<u64, Vec<(u64, bool)>> = HashMap::new();
     for r in rows {
-        out.entry(num(&r[0])).or_default().push((num(&r[1]), truth(&r[2])));
+        out.entry(num(&r[0]))
+            .or_default()
+            .push((num(&r[1]), truth(&r[2])));
     }
     Ok(out)
 }
@@ -600,7 +760,14 @@ pub fn teams(conn: &mut Conn) -> Result<Vec<TeamRow>, String> {
 
 /// A team, deleted or not.
 pub fn team(conn: &mut Conn, id: u64) -> Result<Option<TeamRow>, String> {
-    let Some(mut t) = conn.query(&format!("SELECT {TEAM_COLS} FROM \"_quadra_teams\" WHERE \"id\" = ?bigint"), &[Sql::Int(id as i64)])?.first().map(|r| team_of(r)) else {
+    let Some(mut t) = conn
+        .query(
+            &format!("SELECT {TEAM_COLS} FROM \"_quadra_teams\" WHERE \"id\" = ?bigint"),
+            &[Sql::Int(id as i64)],
+        )?
+        .first()
+        .map(|r| team_of(r))
+    else {
         return Ok(None);
     };
     t.members = members_of(conn, &[id])?.remove(&id).unwrap_or_default();
@@ -624,7 +791,10 @@ pub fn team_state(t: &TeamRow) -> J {
 }
 
 fn set_members(conn: &mut Conn, id: u64, members: &[(u64, bool)]) -> Result<(), String> {
-    conn.exec("DELETE FROM \"_quadra_team_members\" WHERE \"team_id\" = ?bigint", &[Sql::Int(id as i64)])?;
+    conn.exec(
+        "DELETE FROM \"_quadra_team_members\" WHERE \"team_id\" = ?bigint",
+        &[Sql::Int(id as i64)],
+    )?;
     let mut seen = std::collections::HashSet::new();
     for (u, o) in members {
         if !seen.insert(*u) {
@@ -636,12 +806,30 @@ fn set_members(conn: &mut Conn, id: u64, members: &[(u64, bool)]) -> Result<(), 
 }
 
 /// A new team (version 1); its id.
-pub fn create_team(conn: &mut Conn, name: &str, description: &str, members: &[(u64, bool)], at: &str, user: Option<u64>, action: &str) -> Result<u64, String> {
-    write(conn, |conn| insert_team(conn, name, description, members, at, user, action))
+pub fn create_team(
+    conn: &mut Conn,
+    name: &str,
+    description: &str,
+    members: &[(u64, bool)],
+    at: &str,
+    user: Option<u64>,
+    action: &str,
+) -> Result<u64, String> {
+    write(conn, |conn| {
+        insert_team(conn, name, description, members, at, user, action)
+    })
 }
 
 /// `create_team` inside a transaction of the caller's (`write`).
-pub fn insert_team(conn: &mut Conn, name: &str, description: &str, members: &[(u64, bool)], at: &str, user: Option<u64>, action: &str) -> Result<u64, String> {
+pub fn insert_team(
+    conn: &mut Conn,
+    name: &str,
+    description: &str,
+    members: &[(u64, bool)],
+    at: &str,
+    user: Option<u64>,
+    action: &str,
+) -> Result<u64, String> {
     {
         let id = next_id(conn, "_quadra_teams")?;
         conn.exec(
@@ -649,7 +837,18 @@ pub fn insert_team(conn: &mut Conn, name: &str, description: &str, members: &[(u
             &[Sql::Int(id as i64), Sql::Text(name.into()), Sql::Text(description.into()), Sql::Text(at.into()), opt_int(user), Sql::Text(at.into()), opt_int(user)],
         )?;
         set_members(conn, id, members)?;
-        let t = TeamRow { id, name: name.into(), description: description.into(), version: 1, created_at: at.into(), created_by: user, updated_at: at.into(), updated_by: user, deleted: false, members: members.to_vec() };
+        let t = TeamRow {
+            id,
+            name: name.into(),
+            description: description.into(),
+            version: 1,
+            created_at: at.into(),
+            created_by: user,
+            updated_at: at.into(),
+            updated_by: user,
+            deleted: false,
+            members: members.to_vec(),
+        };
         let mut state = team_state(&t);
         state["changed"] = json!(["created"]);
         log(conn, "team", id, 1, at, user, action, &state)?;
@@ -659,7 +858,17 @@ pub fn insert_team(conn: &mut Conn, name: &str, description: &str, members: &[(u
 
 /// Change a team read at version `base`: its name, description, members, or delete it.
 #[allow(clippy::too_many_arguments)]
-pub fn update_team(conn: &mut Conn, id: u64, base: u64, name: Option<&str>, description: Option<&str>, members: Option<&[(u64, bool)]>, delete: bool, at: &str, user: Option<u64>) -> Result<Result<u64, Stale>, String> {
+pub fn update_team(
+    conn: &mut Conn,
+    id: u64,
+    base: u64,
+    name: Option<&str>,
+    description: Option<&str>,
+    members: Option<&[(u64, bool)]>,
+    delete: bool,
+    at: &str,
+    user: Option<u64>,
+) -> Result<Result<u64, Stale>, String> {
     write(conn, |conn| {
         let Some(mut t) = team(conn, id)? else {
             return Err(format!("team {id} not found"));
@@ -683,7 +892,10 @@ pub fn update_team(conn: &mut Conn, id: u64, base: u64, name: Option<&str>, desc
             t.deleted = true;
         }
         let mut after = team_state(&t);
-        let changed: Vec<&str> = ["name", "description", "members", "deleted"].into_iter().filter(|k| before[*k] != after[*k]).collect();
+        let changed: Vec<&str> = ["name", "description", "members", "deleted"]
+            .into_iter()
+            .filter(|k| before[*k] != after[*k])
+            .collect();
         if changed.is_empty() {
             return Ok(Ok(t.version));
         }
@@ -705,7 +917,16 @@ pub fn update_team(conn: &mut Conn, id: u64, base: u64, name: Option<&str>, desc
             set_members(conn, id, &t.members)?;
         }
         after["changed"] = json!(changed);
-        log(conn, "team", id, version, at, user, if delete { "delete" } else { "update" }, &after)?;
+        log(
+            conn,
+            "team",
+            id,
+            version,
+            at,
+            user,
+            if delete { "delete" } else { "update" },
+            &after,
+        )?;
         Ok(Ok(version))
     })
 }
@@ -761,8 +982,14 @@ fn file_shares(def: &J) -> Vec<Share> {
         .filter_map(|s| {
             let edit = s["edit"].as_bool().unwrap_or(false);
             match s["type"].as_str() {
-                Some("role") => s["name"].as_str().map(|n| Share { target: format!("role:{n}"), edit }),
-                Some("everyone") => Some(Share { target: "everyone".into(), edit }),
+                Some("role") => s["name"].as_str().map(|n| Share {
+                    target: format!("role:{n}"),
+                    edit,
+                }),
+                Some("everyone") => Some(Share {
+                    target: "everyone".into(),
+                    edit,
+                }),
                 _ => None,
             }
         })
@@ -783,12 +1010,22 @@ pub fn file_of(path: &str) -> &str {
 /// deleted (its history stays). The folders of apps are the directories of their files: an
 /// existing folder of that name in that place is used, else one is made. The shares with
 /// users and teams added in the client stay; those with roles and everyone are the file's.
-pub fn install_files(conn: &mut Conn, items: &[FileItem], at: &str, checked: Option<&str>) -> Result<Installed, String> {
+pub fn install_files(
+    conn: &mut Conn,
+    items: &[FileItem],
+    at: &str,
+    checked: Option<&str>,
+) -> Result<Installed, String> {
     write(conn, |conn| {
         let mut done = Installed::default();
         let all = views(conn, None, None)?;
-        let mut folders: Vec<ViewRow> = all.iter().filter(|v| v.kind == "folder").cloned().collect();
-        let mut from_files: HashMap<String, ViewRow> = all.iter().filter(|v| v.origin.as_deref() == Some("file") && v.kind != "folder").filter_map(|v| Some((v.path.clone()?, v.clone()))).collect();
+        let mut folders: Vec<ViewRow> =
+            all.iter().filter(|v| v.kind == "folder").cloned().collect();
+        let mut from_files: HashMap<String, ViewRow> = all
+            .iter()
+            .filter(|v| v.origin.as_deref() == Some("file") && v.kind != "folder")
+            .filter_map(|v| Some((v.path.clone()?, v.clone())))
+            .collect();
         let mut used_folders: Vec<u64> = Vec::new();
         let empty = ViewRow {
             id: 0,
@@ -820,14 +1057,35 @@ pub fn install_files(conn: &mut Conn, items: &[FileItem], at: &str, checked: Opt
             if kind == "app" {
                 let mut chain = String::new();
                 for dir in &it.dirs {
-                    chain = if chain.is_empty() { dir.clone() } else { format!("{chain}/{dir}") };
+                    chain = if chain.is_empty() {
+                        dir.clone()
+                    } else {
+                        format!("{chain}/{dir}")
+                    };
                     let lower = dir.to_lowercase();
-                    let found = folders.iter().find(|f| f.parent == parent && f.name.to_lowercase() == lower).map(|f| f.id);
+                    let found = folders
+                        .iter()
+                        .find(|f| f.parent == parent && f.name.to_lowercase() == lower)
+                        .map(|f| f.id);
                     let id = match found {
                         Some(id) => id,
                         None => {
-                            let row = ViewRow { kind: "folder".into(), vtype: "folder".into(), name: dir.clone(), parent, path: Some(chain.clone()), ..empty.clone() };
-                            let id = insert_view(conn, &row, &[], at, None, &format!("deploy: interfaces/{chain}"))?;
+                            let row = ViewRow {
+                                kind: "folder".into(),
+                                vtype: "folder".into(),
+                                name: dir.clone(),
+                                parent,
+                                path: Some(chain.clone()),
+                                ..empty.clone()
+                            };
+                            let id = insert_view(
+                                conn,
+                                &row,
+                                &[],
+                                at,
+                                None,
+                                &format!("deploy: interfaces/{chain}"),
+                            )?;
                             folders.push(ViewRow { id, ..row });
                             id
                         }
@@ -837,11 +1095,19 @@ pub fn install_files(conn: &mut Conn, items: &[FileItem], at: &str, checked: Opt
                 }
             }
             let shares = file_shares(d);
-            let config = if d["config"].is_object() { d["config"].clone() } else { json!({}) };
+            let config = if d["config"].is_object() {
+                d["config"].clone()
+            } else {
+                json!({})
+            };
             let action = format!("deploy: interfaces/{}.qdi", file_of(&it.path));
             match from_files.remove(&it.path) {
                 Some(row) if row.kind == kind && row.entity.as_deref() == d["entity"].as_str() => {
-                    let kept: Vec<Share> = shares_of(conn, row.id)?.into_iter().filter(|s| s.target.starts_with("user:") || s.target.starts_with("team:")).chain(shares.iter().cloned()).collect();
+                    let kept: Vec<Share> = shares_of(conn, row.id)?
+                        .into_iter()
+                        .filter(|s| s.target.starts_with("user:") || s.target.starts_with("team:"))
+                        .chain(shares.iter().cloned())
+                        .collect();
                     let mut kept = kept;
                     kept.sort();
                     kept.dedup();
@@ -864,13 +1130,19 @@ pub fn install_files(conn: &mut Conn, items: &[FileItem], at: &str, checked: Opt
                 }
                 other => {
                     if let Some(old) = other {
-                        let del = ViewChange { delete: true, ..Default::default() };
+                        let del = ViewChange {
+                            delete: true,
+                            ..Default::default()
+                        };
                         let _ = change_view(conn, old.id, None, &del, at, None, &action)?;
                     }
                     let row = ViewRow {
                         kind: kind.clone(),
                         entity: d["entity"].as_str().map(str::to_string),
-                        vtype: d["type"].as_str().unwrap_or(if kind == "app" { "app" } else { "grid" }).to_string(),
+                        vtype: d["type"]
+                            .as_str()
+                            .unwrap_or(if kind == "app" { "app" } else { "grid" })
+                            .to_string(),
                         name: d["name"].as_str().unwrap_or("").to_string(),
                         description: d["description"].as_str().unwrap_or("").to_string(),
                         config,
@@ -885,16 +1157,43 @@ pub fn install_files(conn: &mut Conn, items: &[FileItem], at: &str, checked: Opt
         }
         // what is no longer in the files
         for (path, row) in from_files {
-            let del = ViewChange { delete: true, ..Default::default() };
-            change_view(conn, row.id, None, &del, at, None, &format!("deploy: no longer in interfaces/{}.qdi", file_of(&path)))?.ok();
+            let del = ViewChange {
+                delete: true,
+                ..Default::default()
+            };
+            change_view(
+                conn,
+                row.id,
+                None,
+                &del,
+                at,
+                None,
+                &format!("deploy: no longer in interfaces/{}.qdi", file_of(&path)),
+            )?
+            .ok();
             done.removed += 1;
         }
         // the folders made for files that hold nothing any more
         let left = views(conn, None, None)?;
-        for f in folders.iter().filter(|f| f.origin.as_deref() == Some("file") && !used_folders.contains(&f.id)) {
+        for f in folders
+            .iter()
+            .filter(|f| f.origin.as_deref() == Some("file") && !used_folders.contains(&f.id))
+        {
             if !left.iter().any(|v| v.parent == Some(f.id)) {
-                let del = ViewChange { delete: true, ..Default::default() };
-                change_view(conn, f.id, None, &del, at, None, "deploy: no longer a directory of interfaces/")?.ok();
+                let del = ViewChange {
+                    delete: true,
+                    ..Default::default()
+                };
+                change_view(
+                    conn,
+                    f.id,
+                    None,
+                    &del,
+                    at,
+                    None,
+                    "deploy: no longer a directory of interfaces/",
+                )?
+                .ok();
             }
         }
         Ok(done)
@@ -907,7 +1206,14 @@ fn shares_of(conn: &mut Conn, id: u64) -> Result<Vec<Share>, String> {
 
 /// The rows installed from one interface file (`sales/cockpit`): its app and its views.
 pub fn file_rows(conn: &mut Conn, file: &str) -> Result<Vec<ViewRow>, String> {
-    Ok(views(conn, None, None)?.into_iter().filter(|v| v.origin.as_deref() == Some("file") && v.kind != "folder" && v.path.as_deref().is_some_and(|p| file_of(p) == file)).collect())
+    Ok(views(conn, None, None)?
+        .into_iter()
+        .filter(|v| {
+            v.origin.as_deref() == Some("file")
+                && v.kind != "folder"
+                && v.path.as_deref().is_some_and(|p| file_of(p) == file)
+        })
+        .collect())
 }
 
 /// The rows of an interface file moved to another file (`sales/cockpit` → `archive/cockpit`).
@@ -915,7 +1221,10 @@ pub fn move_file(conn: &mut Conn, from: &str, to: &str) -> Result<(), String> {
     for r in file_rows(conn, from)? {
         let p = r.path.unwrap_or_default();
         let new = format!("{to}{}", &p[from.len()..]);
-        conn.exec("UPDATE \"_quadra_views\" SET \"path\" = ?text WHERE \"id\" = ?bigint", &[Sql::Text(new), Sql::Int(r.id as i64)])?;
+        conn.exec(
+            "UPDATE \"_quadra_views\" SET \"path\" = ?text WHERE \"id\" = ?bigint",
+            &[Sql::Text(new), Sql::Int(r.id as i64)],
+        )?;
     }
     Ok(())
 }

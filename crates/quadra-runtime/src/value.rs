@@ -93,9 +93,19 @@ impl V {
         match self {
             V::Dec(d) => V::Dec(d.normalize()),
             V::Pct(d) => V::Pct(d.normalize()),
-            V::Money { amt, cur } => V::Money { amt: amt.normalize(), cur },
-            V::Price { amt, cur, per } => V::Price { amt: amt.normalize(), cur, per },
-            V::Qty { v, unit } => V::Qty { v: v.normalize(), unit },
+            V::Money { amt, cur } => V::Money {
+                amt: amt.normalize(),
+                cur,
+            },
+            V::Price { amt, cur, per } => V::Price {
+                amt: amt.normalize(),
+                cur,
+                per,
+            },
+            V::Qty { v, unit } => V::Qty {
+                v: v.normalize(),
+                unit,
+            },
             other => other,
         }
     }
@@ -149,13 +159,26 @@ impl PartialEq for V {
             (Money { amt, .. }, Int(0)) | (Int(0), Money { amt, .. }) => amt.is_zero(),
             (Qty { v, .. }, Int(0)) | (Int(0), Qty { v, .. }) => v.is_zero(),
             (Price { amt, .. }, Int(0)) | (Int(0), Price { amt, .. }) => amt.is_zero(),
-            (Price { amt: a, cur: c, per: p }, Price { amt: b, cur: d, per: q }) => a == b && c == d && p == q,
+            (
+                Price {
+                    amt: a,
+                    cur: c,
+                    per: p,
+                },
+                Price {
+                    amt: b,
+                    cur: d,
+                    per: q,
+                },
+            ) => a == b && c == d && p == q,
             (Qty { v: a, unit: u }, Qty { v: b, unit: w }) => a == b && u == w,
             (Ref { id: a, .. }, Ref { id: b, .. }) => a == b,
             (Rec { fields: a, .. }, Rec { fields: b, .. }) => a == b,
             (Variant { name: a, fields: f }, Variant { name: b, fields: g }) => a == b && f == g,
             (List(a), List(b)) | (Set(a), Set(b)) | (List(a), Set(b)) | (Set(a), List(b)) => a == b,
-            (Tuple(a), Tuple(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|((_, x), (_, y))| x == y),
+            (Tuple(a), Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|((_, x), (_, y))| x == y)
+            }
             (Role(a), Role(b)) | (Table(a), Table(b)) => a == b,
             (a, b) => match (a.num(), b.num()) {
                 (Some(x), Some(y)) => x == y,
@@ -200,10 +223,25 @@ impl fmt::Display for V {
                 if fields.is_empty() {
                     write!(f, "{name}")
                 } else {
-                    write!(f, "{name}({})", fields.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "))
+                    write!(
+                        f,
+                        "{name}({})",
+                        fields
+                            .iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 }
             }
-            V::List(v) | V::Set(v) => write!(f, "[{}]", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")),
+            V::List(v) | V::Set(v) => write!(
+                f,
+                "[{}]",
+                v.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             V::Tuple(v) => write!(
                 f,
                 "({})",

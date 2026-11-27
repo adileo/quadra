@@ -117,14 +117,27 @@ impl W {
 
     fn raw(&mut self, indent: usize, r: &Raw) {
         let path: Vec<String> = r.path.iter().map(|s| key(s)).collect();
-        self.line(indent, &format!("{} {}: {}", if r.meta { "meta" } else { "config" }, path.join("."), data(&r.value)));
+        self.line(
+            indent,
+            &format!(
+                "{} {}: {}",
+                if r.meta { "meta" } else { "config" },
+                path.join("."),
+                data(&r.value)
+            ),
+        );
     }
 
     // ---- apps ----------------------------------------------------------------------------------
 
     fn app(&mut self, a: &App) {
         self.comment(0, &a.comment);
-        let empty = a.description.is_none() && a.shares.is_empty() && a.filters.is_empty() && a.lets.is_empty() && a.pages.is_empty() && a.raws.is_empty();
+        let empty = a.description.is_none()
+            && a.shares.is_empty()
+            && a.filters.is_empty()
+            && a.lets.is_empty()
+            && a.pages.is_empty()
+            && a.raws.is_empty();
         if empty {
             self.line(0, &format!("app {}", quote(&a.name)));
             return;
@@ -155,7 +168,10 @@ impl W {
                     s.push(' ');
                     s.push_str(&quote(l));
                 }
-                s.push_str(&format!(": {} {}.{}", f.widget.text, f.entity.text, f.field.text));
+                s.push_str(&format!(
+                    ": {} {}.{}",
+                    f.widget.text, f.entity.text, f.field.text
+                ));
                 if let Some(d) = &f.default {
                     s.push_str(" default ");
                     s.push_str(&data(d));
@@ -290,13 +306,26 @@ impl W {
     fn body_line(&mut self, indent: usize, kind: &str, l: &Line) {
         match l {
             Line::Opt { key, value, .. } => {
-                let vt = if kind.is_empty() { options::find_saved(&key.text).map(|o| o.vt) } else { options::find(kind, &key.text).map(|(o, _)| o.vt) };
+                let vt = if kind.is_empty() {
+                    options::find_saved(&key.text).map(|o| o.vt)
+                } else {
+                    options::find(kind, &key.text).map(|(o, _)| o.vt)
+                };
                 let prefix = format!("{}: ", key.text);
                 let v = value_text(indent + prefix.len(), indent, value, vt);
                 self.line(indent, &format!("{prefix}{v}"));
             }
             Line::Apply { entity, binds, .. } => {
-                let bs: Vec<String> = binds.iter().map(|(n, p)| format!("{} -> {}", n.text, p.as_ref().map_or("none".to_string(), |p| p.text.clone()))).collect();
+                let bs: Vec<String> = binds
+                    .iter()
+                    .map(|(n, p)| {
+                        format!(
+                            "{} -> {}",
+                            n.text,
+                            p.as_ref().map_or("none".to_string(), |p| p.text.clone())
+                        )
+                    })
+                    .collect();
                 self.line(indent, &format!("apply {}: {}", entity.text, bs.join(", ")));
             }
             Line::ApplyAuto(b, _) => self.line(indent, &format!("apply auto: {b}")),
@@ -310,7 +339,10 @@ impl W {
                 let e = expr_text(indent + prefix.len(), indent, expr);
                 self.line(indent, &format!("{prefix}{e}"));
             }
-            Line::Default { field, source, .. } => self.line(indent, &format!("default {}: {}", field.text, source_text(source))),
+            Line::Default { field, source, .. } => self.line(
+                indent,
+                &format!("default {}: {}", field.text, source_text(source)),
+            ),
             Line::Section { title, fields, .. } => {
                 let mut s = "section".to_string();
                 if let Some(t) = title {
@@ -402,7 +434,9 @@ impl W {
         let i = indent + 4;
         for l in &t.lines {
             match l {
-                TabLine::Cell { addr, style, value, .. } => {
+                TabLine::Cell {
+                    addr, style, value, ..
+                } => {
                     let mut s = addr.clone();
                     for st in style {
                         s.push(' ');
@@ -446,7 +480,12 @@ fn style_text(s: &StyleItem) -> String {
         StyleItem::Flag(f) => f.clone(),
         StyleItem::Color(k, c) => format!("{k} {}", quote(c)),
         StyleItem::Align(k, a) => format!("{k} {a}"),
-        StyleItem::Format { kind, dec, thousands, date } => {
+        StyleItem::Format {
+            kind,
+            dec,
+            thousands,
+            date,
+        } => {
             let mut s = format!("fmt {kind}");
             if let Some(d) = dec {
                 s.push_str(&format!(" dec {d}"));
@@ -478,7 +517,10 @@ pub fn shares(s: &[Share]) -> String {
 }
 
 fn pairs(p: &[(String, serde_json::Value)]) -> String {
-    p.iter().map(|(k, v)| format!("{} {}", pair_key(k), data(v))).collect::<Vec<_>>().join(", ")
+    p.iter()
+        .map(|(k, v)| format!("{} {}", pair_key(k), data(v)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn source_text(s: &Source) -> String {
@@ -509,10 +551,16 @@ fn value_text(prefix: usize, indent: usize, v: &Value, _vt: Option<Vt>) -> Strin
         Value::Pairs(p) => pairs(p),
         Value::Data(d) => data(d),
         Value::Source(DataSource::Expr(e)) => expr_text(prefix, indent, e),
-        Value::Source(DataSource::Cell { component, cell }) => format!("cell {component} {}", quote(cell)),
-        Value::Source(DataSource::Range { component, range }) => format!("range {component} {}", quote(range)),
+        Value::Source(DataSource::Cell { component, cell }) => {
+            format!("cell {component} {}", quote(cell))
+        }
+        Value::Source(DataSource::Range { component, range }) => {
+            format!("range {component} {}", quote(range))
+        }
         Value::Compare(Compare::Previous(f)) => format!("previous @{f}"),
-        Value::Compare(Compare::Target(e)) => format!("target {}", expr_text(prefix + 7, indent, e)),
+        Value::Compare(Compare::Target(e)) => {
+            format!("target {}", expr_text(prefix + 7, indent, e))
+        }
         Value::Run(r) => {
             let target = match &r.target {
                 Target::Param(n) => format!("@{n}"),
@@ -525,15 +573,27 @@ fn value_text(prefix: usize, indent: usize, v: &Value, _vt: Option<Vt>) -> Strin
                     format!("{e}[{inner}]")
                 }
             };
-            let args: Vec<String> = r.args.iter().map(|(n, s)| format!("{n}={}", source_text(s))).collect();
+            let args: Vec<String> = r
+                .args
+                .iter()
+                .map(|(n, s)| format!("{n}={}", source_text(s)))
+                .collect();
             format!("{target}.{}({})", r.action, args.join(", "))
         }
         Value::From(s) => source_text(s),
-        Value::Sort(s) => s.iter().map(|(f, d)| if *d { format!("{f} desc") } else { f.clone() }).collect::<Vec<_>>().join(", "),
-        Value::Group(g) => g.iter().map(|(f, b)| match b {
-            Some(b) => format!("{f} by {b}"),
-            None => f.clone(),
-        }).collect::<Vec<_>>().join(", "),
+        Value::Sort(s) => s
+            .iter()
+            .map(|(f, d)| if *d { format!("{f} desc") } else { f.clone() })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Value::Group(g) => g
+            .iter()
+            .map(|(f, b)| match b {
+                Some(b) => format!("{f} by {b}"),
+                None => f.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
         Value::Order(by, desc) => {
             if *desc {
                 format!("{} desc", word(by))

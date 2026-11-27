@@ -19,7 +19,9 @@
 use crate::ast::*;
 use crate::Diag;
 use quadra_ir::{EntityKind, Model, Ty};
-use quadra_sema::{Analysis, Diagnostic, FileId, Project, Reference, Severity, Target as SemaTarget};
+use quadra_sema::{
+    Analysis, Diagnostic, FileId, Project, Reference, Severity, Target as SemaTarget,
+};
 use quadra_syntax::{SyntaxKind as K, TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -50,7 +52,9 @@ impl Interfaces {
 
 /// Where generated scripts are put (scripts see every declaration; they are never served).
 pub fn generated_path(root: &std::path::Path, rel: &str) -> PathBuf {
-    root.join("tests").join("__qdi__").join(format!("{}.qd", rel.trim_end_matches(".qdi")))
+    root.join("tests")
+        .join("__qdi__")
+        .join(format!("{}.qd", rel.trim_end_matches(".qdi")))
 }
 
 // ---- generated text, with where it comes from -------------------------------------------------
@@ -70,12 +74,14 @@ impl Gen {
     }
 
     fn copy(&mut self, s: &str, file: u32) {
-        self.segs.push((self.text.len() as u32, s.len() as u32, file, true));
+        self.segs
+            .push((self.text.len() as u32, s.len() as u32, file, true));
         self.text.push_str(s);
     }
 
     fn point(&mut self, s: &str, file: u32) {
-        self.segs.push((self.text.len() as u32, s.len() as u32, file, false));
+        self.segs
+            .push((self.text.len() as u32, s.len() as u32, file, false));
         self.text.push_str(s);
     }
 
@@ -85,8 +91,10 @@ impl Gen {
 
     fn append(&mut self, o: Gen) {
         let shift = self.text.len() as u32;
-        self.segs.extend(o.segs.into_iter().map(|(g, l, f, i)| (g + shift, l, f, i)));
-        self.ctxs.extend(o.ctxs.into_iter().map(|(g, s)| (g + shift, s)));
+        self.segs
+            .extend(o.segs.into_iter().map(|(g, l, f, i)| (g + shift, l, f, i)));
+        self.ctxs
+            .extend(o.ctxs.into_iter().map(|(g, s)| (g + shift, s)));
         self.text.push_str(&o.text);
     }
 
@@ -118,7 +126,14 @@ impl Gen {
 // ---- the model ---------------------------------------------------------------------------------
 
 /// Fields every entity has without declaring them, with their types.
-const IMPLICIT: &[(&str, &str)] = &[("id", "Int"), ("created_at", "DateTime"), ("updated_at", "DateTime"), ("version", "Int"), ("created_by", "User?"), ("updated_by", "User?")];
+const IMPLICIT: &[(&str, &str)] = &[
+    ("id", "Int"),
+    ("created_at", "DateTime"),
+    ("updated_at", "DateTime"),
+    ("version", "Int"),
+    ("created_by", "User?"),
+    ("updated_by", "User?"),
+];
 
 fn named(t: &Ty) -> Option<String> {
     match t {
@@ -138,7 +153,12 @@ fn unopt(t: &Ty) -> &Ty {
 /// How the language writes a type, when a parameter can be declared with it.
 fn type_text(t: &Ty) -> Option<String> {
     let t = unopt(t);
-    if quadra_ir::inline_enum(t).is_some() || matches!(t, Ty::List(_) | Ty::Set(_) | Ty::Tuple(_) | Ty::Union(_) | Ty::Error) {
+    if quadra_ir::inline_enum(t).is_some()
+        || matches!(
+            t,
+            Ty::List(_) | Ty::Set(_) | Ty::Tuple(_) | Ty::Union(_) | Ty::Error
+        )
+    {
         return None;
     }
     Some(quadra_ir::print::ty(t))
@@ -148,20 +168,33 @@ fn type_text(t: &Ty) -> Option<String> {
 /// the type at its end (none for an implicit field); or the index of the segment that fails
 /// and why.
 #[allow(clippy::type_complexity)]
-fn walk(model: &Model, entity: &str, path: &str) -> Result<(Vec<(String, String)>, Option<Ty>), (usize, String)> {
+fn walk(
+    model: &Model,
+    entity: &str,
+    path: &str,
+) -> Result<(Vec<(String, String)>, Option<Ty>), (usize, String)> {
     let segs: Vec<&str> = path.split('.').collect();
     let mut ent = entity.to_string();
     let mut steps = Vec::new();
     let mut last = None;
     for (k, seg) in segs.iter().enumerate() {
-        let e = model.entity(&ent).ok_or((k, format!("`{ent}` is not an entity")))?;
+        let e = model
+            .entity(&ent)
+            .ok_or((k, format!("`{ent}` is not an entity")))?;
         let ty = match model.find_field(e, seg) {
             Some(f) => f.ty.clone(),
             None => match IMPLICIT.iter().find(|(n, _)| n == seg) {
                 Some(_) => None,
                 None => {
                     let hint = closest(seg, e.fields.iter().map(|f| f.name.as_str()));
-                    return Err((k, format!("`{ent}` has no field `{seg}`{}", hint.map(|h| format!(": did you mean `{h}`?")).unwrap_or_default())));
+                    return Err((
+                        k,
+                        format!(
+                            "`{ent}` has no field `{seg}`{}",
+                            hint.map(|h| format!(": did you mean `{h}`?"))
+                                .unwrap_or_default()
+                        ),
+                    ));
                 }
             },
         };
@@ -170,8 +203,18 @@ fn walk(model: &Model, entity: &str, path: &str) -> Result<(Vec<(String, String)
             let target = ty
                 .as_ref()
                 .and_then(named)
-                .filter(|n| model.entity(n).is_some_and(|x| x.kind == EntityKind::Entity))
-                .ok_or((k, format!("`{ent}.{seg}` is not a reference: `{}` cannot follow it", segs[k + 1])))?;
+                .filter(|n| {
+                    model
+                        .entity(n)
+                        .is_some_and(|x| x.kind == EntityKind::Entity)
+                })
+                .ok_or((
+                    k,
+                    format!(
+                        "`{ent}.{seg}` is not a reference: `{}` cannot follow it",
+                        segs[k + 1]
+                    ),
+                ))?;
             ent = target;
         }
         last = ty;
@@ -185,7 +228,10 @@ fn closest<'a>(name: &str, options: impl Iterator<Item = &'a str>) -> Option<Str
     for o in options {
         let d = distance(name, o);
         // a renamed name often keeps the old one: `total` → `amount_total`
-        let contains = name.len() >= 3 && o != name && (o.contains(name) || name.contains(o)) && o.len().min(name.len()) >= 3;
+        let contains = name.len() >= 3
+            && o != name
+            && (o.contains(name) || name.contains(o))
+            && o.len().min(name.len()) >= 3;
         let d = if contains { d.min(2) } else { d };
         if d <= 2.max(name.len() / 3) && best.map_or(true, |b| d < b.0) {
             best = Some((d, o));
@@ -201,7 +247,9 @@ fn distance(a: &str, b: &str) -> usize {
     for i in 1..=a.len() {
         let mut cur = vec![i; b.len() + 1];
         for j in 1..=b.len() {
-            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + usize::from(a[i - 1] != b[j - 1]));
+            cur[j] = (prev[j] + 1)
+                .min(cur[j - 1] + 1)
+                .min(prev[j - 1] + usize::from(a[i - 1] != b[j - 1]));
         }
         prev = cur;
     }
@@ -248,12 +296,29 @@ impl<'a> Ctx<'a> {
             }
             Some(_) => {
                 self.refs.push((span, Pending::Entity(name.to_string())));
-                self.err(format!("`{name}` is not an entity (a record or a trait has no rows)"), span);
+                self.err(
+                    format!("`{name}` is not an entity (a record or a trait has no rows)"),
+                    span,
+                );
                 false
             }
             None => {
-                let hint = closest(name, self.model.entities.iter().filter(|e| e.kind == EntityKind::Entity).map(|e| e.name.as_str()));
-                self.err(format!("unknown entity `{name}`{}", hint.map(|h| format!(": did you mean `{h}`?")).unwrap_or_default()), span);
+                let hint = closest(
+                    name,
+                    self.model
+                        .entities
+                        .iter()
+                        .filter(|e| e.kind == EntityKind::Entity)
+                        .map(|e| e.name.as_str()),
+                );
+                self.err(
+                    format!(
+                        "unknown entity `{name}`{}",
+                        hint.map(|h| format!(": did you mean `{h}`?"))
+                            .unwrap_or_default()
+                    ),
+                    span,
+                );
                 false
             }
         }
@@ -273,7 +338,13 @@ impl<'a> Ctx<'a> {
         match walk(self.model, entity, path) {
             Ok((steps, ty)) => {
                 for (k, (ent, seg)) in steps.into_iter().enumerate() {
-                    if IMPLICIT.iter().any(|(n, _)| *n == seg) && self.model.entity(&ent).and_then(|e| self.model.find_field(e, &seg)).is_none() {
+                    if IMPLICIT.iter().any(|(n, _)| *n == seg)
+                        && self
+                            .model
+                            .entity(&ent)
+                            .and_then(|e| self.model.find_field(e, &seg))
+                            .is_none()
+                    {
                         continue;
                     }
                     self.refs.push((seg_span(k), Pending::Member(ent, seg)));
@@ -282,7 +353,11 @@ impl<'a> Ctx<'a> {
             }
             Err((k, msg)) => {
                 // the segments before the one that fails are references
-                if let Ok((steps, _)) = walk(self.model, entity, &path.split('.').take(k).collect::<Vec<_>>().join(".")) {
+                if let Ok((steps, _)) = walk(
+                    self.model,
+                    entity,
+                    &path.split('.').take(k).collect::<Vec<_>>().join("."),
+                ) {
                     for (j, (ent, seg)) in steps.into_iter().enumerate() {
                         self.refs.push((seg_span(j), Pending::Member(ent, seg)));
                     }
@@ -304,11 +379,22 @@ impl<'a> Ctx<'a> {
         g.ctx(e.span);
         if e.raw {
             g.put("none");
-            self.err("not an expression (written `raw \"…\"`): write it as an expression", e.span);
+            self.err(
+                "not an expression (written `raw \"…\"`): write it as an expression",
+                e.span,
+            );
             return;
         }
         let (toks, _) = quadra_syntax::lexer::tokenize(&e.text);
-        let toks: Vec<_> = toks.into_iter().filter(|t| !matches!(t.kind, K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT)).collect();
+        let toks: Vec<_> = toks
+            .into_iter()
+            .filter(|t| {
+                !matches!(
+                    t.kind,
+                    K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT
+                )
+            })
+            .collect();
         if toks.len() != e.map.len() {
             g.copy(&e.text, e.span.start);
             return;
@@ -351,7 +437,12 @@ fn name_span(names: &[Name], text: &str, taken: &mut HashSet<usize>) -> Span {
 
 fn opt<'l>(lines: &'l [Line], key: &str) -> Option<(&'l Value, &'l [Name], Span)> {
     lines.iter().find_map(|l| match l {
-        Line::Opt { key: k, value, names, span } if k.text == key => Some((value, names.as_slice(), *span)),
+        Line::Opt {
+            key: k,
+            value,
+            names,
+            span,
+        } if k.text == key => Some((value, names.as_slice(), *span)),
         _ => None,
     })
 }
@@ -359,7 +450,10 @@ fn opt<'l>(lines: &'l [Line], key: &str) -> Option<(&'l Value, &'l [Name], Span)
 fn word<'l>(lines: &'l [Line], key: &str) -> Option<(&'l str, Span)> {
     let (v, names, span) = opt(lines, key)?;
     match v {
-        Value::Word(w) => Some((w.as_str(), names.iter().find(|n| &n.text == w).map_or(span, |n| n.span))),
+        Value::Word(w) => Some((
+            w.as_str(),
+            names.iter().find(|n| &n.text == w).map_or(span, |n| n.span),
+        )),
         _ => None,
     }
 }
@@ -377,7 +471,10 @@ fn visit<'a>(blocks: &'a [Block], f: &mut impl FnMut(&'a Component)) {
 
 fn is_addr(w: &str) -> bool {
     let letters = w.chars().take_while(|c| c.is_ascii_uppercase()).count();
-    (1..=3).contains(&letters) && w.len() > letters && w[letters..].chars().all(|c| c.is_ascii_digit()) && !w[letters..].starts_with('0')
+    (1..=3).contains(&letters)
+        && w.len() > letters
+        && w[letters..].chars().all(|c| c.is_ascii_digit())
+        && !w[letters..].starts_with('0')
 }
 
 /// Does a formula refer to cells (checked by the spreadsheet, not here)?
@@ -386,41 +483,93 @@ fn has_cell_refs(f: &str) -> bool {
         return true;
     }
     let (toks, _) = quadra_syntax::lexer::tokenize(f);
-    let sig: Vec<_> = toks.iter().filter(|t| !matches!(t.kind, K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT)).collect();
-    let column = |w: &str| !w.is_empty() && w.len() <= 3 && w.chars().all(|c| c.is_ascii_uppercase());
+    let sig: Vec<_> = toks
+        .iter()
+        .filter(|t| {
+            !matches!(
+                t.kind,
+                K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT
+            )
+        })
+        .collect();
+    let column =
+        |w: &str| !w.is_empty() && w.len() <= 3 && w.chars().all(|c| c.is_ascii_uppercase());
     sig.iter().enumerate().any(|(k, t)| {
         let w = &f[t.range];
         (t.kind == K::IDENT && is_addr(w))
-            || (t.kind == K::COLON && k > 0 && sig.get(k + 1).is_some_and(|n| {
-                let (a, b) = (&f[sig[k - 1].range], &f[n.range]);
-                (is_addr(a) || column(a)) && (is_addr(b) || column(b))
-            }))
+            || (t.kind == K::COLON
+                && k > 0
+                && sig.get(k + 1).is_some_and(|n| {
+                    let (a, b) = (&f[sig[k - 1].range], &f[n.range]);
+                    (is_addr(a) || column(a)) && (is_addr(b) || column(b))
+                }))
     })
 }
 
 /// A file-level expression of a formula written at `span` (a cell, a Markdown `{= … }`).
 fn plain_expr(text: &str, span: Span) -> Expr {
     let (toks, _) = quadra_syntax::lexer::tokenize(text);
-    let map = toks.iter().filter(|t| !matches!(t.kind, K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT)).map(|t| (u32::from(t.range.start()), span.start + u32::from(t.range.start()))).collect();
-    Expr { text: text.to_string(), raw: false, span, map }
+    let map = toks
+        .iter()
+        .filter(|t| {
+            !matches!(
+                t.kind,
+                K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT
+            )
+        })
+        .map(|t| {
+            (
+                u32::from(t.range.start()),
+                span.start + u32::from(t.range.start()),
+            )
+        })
+        .collect();
+    Expr {
+        text: text.to_string(),
+        raw: false,
+        span,
+        map,
+    }
 }
 
 /// The app's parameters: (name, variable, type).
-fn app_params(model: &Model, app: &App, ctx_diags: &mut Vec<Diag>, refs: &mut Vec<(Span, Pending)>, ranges: &mut HashSet<String>) -> Vec<(String, String, Option<String>)> {
+fn app_params(
+    model: &Model,
+    app: &App,
+    ctx_diags: &mut Vec<Diag>,
+    refs: &mut Vec<(Span, Pending)>,
+    ranges: &mut HashSet<String>,
+) -> Vec<(String, String, Option<String>)> {
     let mut out = Vec::new();
     for f in &app.filters {
         let entity = &f.entity.text;
         let ty = match model.entity(entity) {
             Some(e) if e.kind == EntityKind::Entity => {
                 refs.push((f.entity.span, Pending::Entity(entity.clone())));
-                let mut tmp = Ctx { model, src: "", diags: Vec::new(), refs: Vec::new(), params: Vec::new(), known: HashSet::new(), params_text: String::new(), unknown: Vec::new(), sheets: HashSet::new(), ranges: HashSet::new(), filters: HashSet::new(), counter: 0 };
+                let mut tmp = Ctx {
+                    model,
+                    src: "",
+                    diags: Vec::new(),
+                    refs: Vec::new(),
+                    params: Vec::new(),
+                    known: HashSet::new(),
+                    params_text: String::new(),
+                    unknown: Vec::new(),
+                    sheets: HashSet::new(),
+                    ranges: HashSet::new(),
+                    filters: HashSet::new(),
+                    counter: 0,
+                };
                 let t = tmp.path(entity, &f.field.text, f.field.span);
                 ctx_diags.extend(tmp.diags);
                 refs.extend(tmp.refs);
                 t
             }
             _ => {
-                ctx_diags.push(Diag::new(format!("unknown entity `{entity}`"), f.entity.span));
+                ctx_diags.push(Diag::new(
+                    format!("unknown entity `{entity}`"),
+                    f.entity.span,
+                ));
                 None
             }
         };
@@ -428,7 +577,10 @@ fn app_params(model: &Model, app: &App, ctx_diags: &mut Vec<Diag>, refs: &mut Ve
         let var = format!("__p_{name}");
         let base = ty.clone().flatten();
         let tt = base.as_ref().and_then(type_text);
-        let kind = base.as_ref().map(|t| named(unopt(t)).unwrap_or_default()).unwrap_or_default();
+        let kind = base
+            .as_ref()
+            .map(|t| named(unopt(t)).unwrap_or_default())
+            .unwrap_or_default();
         let found = ty.is_some();
         let bad = |what: &str| Diag::new(format!("filter `{name}`: {what}"), f.widget.span);
         match f.widget.text.as_str() {
@@ -440,14 +592,32 @@ fn app_params(model: &Model, app: &App, ctx_diags: &mut Vec<Diag>, refs: &mut Ve
                 }
                 ranges.insert(name.clone());
                 out.push((name.clone(), var.clone(), Some("DateRange".into())));
-                out.push((format!("{name}__on"), format!("{var}__on"), Some("Bool".into())));
+                out.push((
+                    format!("{name}__on"),
+                    format!("{var}__on"),
+                    Some("Bool".into()),
+                ));
             }
             "number_range" => {
-                if found && base.is_some() && !matches!(kind.as_str(), "Int" | "Decimal" | "Money" | "Qty" | "Percent" | "Price") {
+                if found
+                    && base.is_some()
+                    && !matches!(
+                        kind.as_str(),
+                        "Int" | "Decimal" | "Money" | "Qty" | "Percent" | "Price"
+                    )
+                {
                     ctx_diags.push(bad("a number range filters a number or an amount"));
                 }
-                out.push((format!("{name}_min"), format!("{var}_min"), tt.clone().map(|t| format!("{t}?"))));
-                out.push((format!("{name}_max"), format!("{var}_max"), tt.map(|t| format!("{t}?"))));
+                out.push((
+                    format!("{name}_min"),
+                    format!("{var}_min"),
+                    tt.clone().map(|t| format!("{t}?")),
+                ));
+                out.push((
+                    format!("{name}_max"),
+                    format!("{var}_max"),
+                    tt.map(|t| format!("{t}?")),
+                ));
             }
             "toggle" => {
                 if found && base.is_some() && kind != "Bool" {
@@ -468,7 +638,10 @@ fn app_params(model: &Model, app: &App, ctx_diags: &mut Vec<Diag>, refs: &mut Ve
                     _ => None,
                 },
                 "form" => c.lines.iter().find_map(|l| match l {
-                    Line::Opt { value: Value::After(After::Select { entity, name }), .. } => Some((name.clone(), entity.clone())),
+                    Line::Opt {
+                        value: Value::After(After::Select { entity, name }),
+                        ..
+                    } => Some((name.clone(), entity.clone())),
                     _ => None,
                 }),
                 _ => None,
@@ -485,7 +658,16 @@ fn app_params(model: &Model, app: &App, ctx_diags: &mut Vec<Diag>, refs: &mut Ve
 }
 
 /// The generated script of an interface file, and what it found.
-fn generate(model: &Model, file: &File, src: &str) -> (Gen, Vec<Diag>, Vec<(Span, Pending)>, Vec<(String, Option<String>)>) {
+fn generate(
+    model: &Model,
+    file: &File,
+    src: &str,
+) -> (
+    Gen,
+    Vec<Diag>,
+    Vec<(Span, Pending)>,
+    Vec<(String, Option<String>)>,
+) {
     let mut out = Gen::default();
     let mut diags = Vec::new();
     let mut refs = Vec::new();
@@ -499,13 +681,25 @@ fn generate(model: &Model, file: &File, src: &str) -> (Gen, Vec<Diag>, Vec<(Span
                 // the `@names` the file writes that are not parameters: reported where they are,
                 // declared without a type so that nothing else fails because of them
                 let known: HashSet<String> = params.iter().map(|p| p.0.clone()).collect();
-                let region = &src[(app.span.start as usize).min(src.len())..(app.span.end as usize).min(src.len())];
+                let region = &src[(app.span.start as usize).min(src.len())
+                    ..(app.span.end as usize).min(src.len())];
                 let (toks, _) = quadra_syntax::lexer::tokenize(region);
-                let sig: Vec<_> = toks.iter().filter(|t| !matches!(t.kind, K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT)).collect();
+                let sig: Vec<_> = toks
+                    .iter()
+                    .filter(|t| {
+                        !matches!(
+                            t.kind,
+                            K::WHITESPACE | K::COMMENT | K::NEWLINE | K::INDENT | K::DEDENT
+                        )
+                    })
+                    .collect();
                 let mut extra_names: Vec<String> = Vec::new();
                 for (k, t) in sig.iter().enumerate() {
                     if t.kind == K::AT {
-                        if let Some(n) = sig.get(k + 1).filter(|n| n.kind == K::IDENT && n.range.start() == t.range.end()) {
+                        if let Some(n) = sig
+                            .get(k + 1)
+                            .filter(|n| n.kind == K::IDENT && n.range.start() == t.range.end())
+                        {
                             let name = region[n.range].to_string();
                             if !known.contains(&name) && !extra_names.contains(&name) {
                                 extra_names.push(name);
@@ -513,7 +707,15 @@ fn generate(model: &Model, file: &File, src: &str) -> (Gen, Vec<Diag>, Vec<(Span
                         }
                     }
                 }
-                let declared: Vec<(String, String, Option<String>)> = params.iter().cloned().chain(extra_names.iter().map(|n| (n.clone(), format!("__p_{n}"), None))).collect();
+                let declared: Vec<(String, String, Option<String>)> = params
+                    .iter()
+                    .cloned()
+                    .chain(
+                        extra_names
+                            .iter()
+                            .map(|n| (n.clone(), format!("__p_{n}"), None)),
+                    )
+                    .collect();
                 let params_text: String = declared
                     .iter()
                     .map(|(_, v, t)| match t {
@@ -562,7 +764,12 @@ fn generate(model: &Model, file: &File, src: &str) -> (Gen, Vec<Diag>, Vec<(Span
                     }
                 }
                 for (name, span) in std::mem::take(&mut ctx.unknown) {
-                    let known: Vec<String> = ctx.params.iter().filter(|p| !p.0.ends_with("__on")).map(|p| format!("@{}", p.0)).collect();
+                    let known: Vec<String> = ctx
+                        .params
+                        .iter()
+                        .filter(|p| !p.0.ends_with("__on"))
+                        .map(|p| format!("@{}", p.0))
+                        .collect();
                     ctx.err(
                         if known.is_empty() {
                             format!("`@{name}`: this app has no filter or selected record of that name")
@@ -575,24 +782,47 @@ fn generate(model: &Model, file: &File, src: &str) -> (Gen, Vec<Diag>, Vec<(Span
                 let mut head = Gen::default();
                 head.ctx(app.span);
                 let n = ctx.next();
-                head.put(&format!("fn __qdi_app_{n}({}):\n", ctx.params_text.trim_end_matches([',', ' '])));
+                head.put(&format!(
+                    "fn __qdi_app_{n}({}):\n",
+                    ctx.params_text.trim_end_matches([',', ' '])
+                ));
                 body.put("    return none\n");
                 head.append(body);
                 head.append(extra);
                 out.append(head);
                 diags.extend(std::mem::take(&mut ctx.diags));
                 refs.extend(std::mem::take(&mut ctx.refs));
-                all_params = ctx.params.iter().map(|p| (p.0.clone(), p.2.clone())).collect();
+                all_params = ctx
+                    .params
+                    .iter()
+                    .map(|p| (p.0.clone(), p.2.clone()))
+                    .collect();
                 counter = ctx.counter;
             }
             Item::View(v) => {
-                let mut ctx = Ctx { model, src, diags: Vec::new(), refs: Vec::new(), params: Vec::new(), known: HashSet::new(), params_text: String::new(), unknown: Vec::new(), sheets: HashSet::new(), ranges: HashSet::new(), filters: HashSet::new(), counter };
+                let mut ctx = Ctx {
+                    model,
+                    src,
+                    diags: Vec::new(),
+                    refs: Vec::new(),
+                    params: Vec::new(),
+                    known: HashSet::new(),
+                    params_text: String::new(),
+                    unknown: Vec::new(),
+                    sheets: HashSet::new(),
+                    ranges: HashSet::new(),
+                    filters: HashSet::new(),
+                    counter,
+                };
                 let mut g = Gen::default();
                 if ctx.entity(&v.entity.text, v.entity.span) {
                     view_rows(&mut ctx, &v.entity.text, &v.lines, &mut g);
                 }
                 for (name, span) in std::mem::take(&mut ctx.unknown) {
-                    ctx.err(format!("`@{name}`: a saved view has no filters or selections"), span);
+                    ctx.err(
+                        format!("`@{name}`: a saved view has no filters or selections"),
+                        span,
+                    );
                 }
                 out.append(g);
                 diags.extend(ctx.diags);
@@ -606,7 +836,10 @@ fn generate(model: &Model, file: &File, src: &str) -> (Gen, Vec<Diag>, Vec<(Span
 
 /// The span of the name `text` written on a line, else the line's.
 fn span_of(names: &[Name], text: &str, line: Span) -> Span {
-    names.iter().find(|n| n.text == text).map_or(line, |n| n.span)
+    names
+        .iter()
+        .find(|n| n.text == text)
+        .map_or(line, |n| n.span)
 }
 
 /// A `let` of the app's function for an expression.
@@ -628,25 +861,49 @@ fn component(ctx: &mut Ctx, c: &Component, body: &mut Gen, extra: &mut Gen) {
     let kind = c.kind.as_str();
     // the entity of a view, a form
     let entity: Option<String> = match kind {
-        "view" => word(&c.lines, "of").and_then(|(e, span)| ctx.entity(e, span).then(|| e.to_string())),
-        "form" => word(&c.lines, "entity").and_then(|(e, span)| ctx.entity(e, span).then(|| e.to_string())),
+        "view" => {
+            word(&c.lines, "of").and_then(|(e, span)| ctx.entity(e, span).then(|| e.to_string()))
+        }
+        "form" => word(&c.lines, "entity")
+            .and_then(|(e, span)| ctx.entity(e, span).then(|| e.to_string())),
         _ => None,
     };
     let mut fields: Vec<&FormField> = Vec::new();
     for l in &c.lines {
         match l {
-            Line::Opt { key, value, names, span } => {
+            Line::Opt {
+                key,
+                value,
+                names,
+                span,
+            } => {
                 let mut taken = HashSet::new();
                 match (kind, key.text.as_str(), value) {
-                    (_, _, Value::Source(DataSource::Expr(e))) | (_, "sparkline" | "message", Value::Expr(e)) | ("kpi", "compare", Value::Compare(Compare::Target(e))) => {
+                    (_, _, Value::Source(DataSource::Expr(e)))
+                    | (_, "sparkline" | "message", Value::Expr(e))
+                    | ("kpi", "compare", Value::Compare(Compare::Target(e))) => {
                         if !(kind == "form" && key.text == "message") {
                             let_expr(ctx, body, e);
                         }
                     }
-                    (_, _, Value::Source(DataSource::Cell { component, .. } | DataSource::Range { component, .. })) => {
+                    (
+                        _,
+                        _,
+                        Value::Source(
+                            DataSource::Cell { component, .. }
+                            | DataSource::Range { component, .. },
+                        ),
+                    ) => {
                         if !ctx.sheets.contains(component) {
                             let span = name_span(names, component, &mut taken);
-                            ctx.err(format!("no spreadsheet `{component}` in the app"), if span == Span::default() { c.span } else { span });
+                            ctx.err(
+                                format!("no spreadsheet `{component}` in the app"),
+                                if span == Span::default() {
+                                    c.span
+                                } else {
+                                    span
+                                },
+                            );
                         }
                     }
                     ("kpi", "compare", Value::Compare(Compare::Previous(f))) => {
@@ -677,7 +934,12 @@ fn component(ctx: &mut Ctx, c: &Component, body: &mut Gen, extra: &mut Gen) {
                     _ => {}
                 }
             }
-            Line::Section { fields: list, names, span, .. } => {
+            Line::Section {
+                fields: list,
+                names,
+                span,
+                ..
+            } => {
                 if let Some(e) = &entity {
                     let mut taken = HashSet::new();
                     for n in list {
@@ -686,7 +948,11 @@ fn component(ctx: &mut Ctx, c: &Component, body: &mut Gen, extra: &mut Gen) {
                     }
                 }
             }
-            Line::Default { field, source, span } => {
+            Line::Default {
+                field,
+                source,
+                span,
+            } => {
                 if let Some(e) = &entity {
                     ctx.path(e, &field.text, field.span);
                 }
@@ -694,7 +960,9 @@ fn component(ctx: &mut Ctx, c: &Component, body: &mut Gen, extra: &mut Gen) {
                     ctx.param(p, *span);
                 }
             }
-            Line::Apply { entity: ae, binds, .. } => {
+            Line::Apply {
+                entity: ae, binds, ..
+            } => {
                 if ctx.entity(&ae.text, ae.span) {
                     for (f, p) in binds {
                         if !ctx.filters.contains(&f.text) && !ctx.known.contains(&f.text) {
@@ -709,10 +977,18 @@ fn component(ctx: &mut Ctx, c: &Component, body: &mut Gen, extra: &mut Gen) {
             Line::Text(t, span) if kind == "markdown" => markdown(ctx, t, *span, body),
             Line::Tab(tab) => {
                 for tl in &tab.lines {
-                    if let TabLine::Cell { value: Some(CellValue::Formula(f, fspan)), .. } = tl {
+                    if let TabLine::Cell {
+                        value: Some(CellValue::Formula(f, fspan)),
+                        ..
+                    } = tl
+                    {
                         if !has_cell_refs(f) {
                             // where the formula's text starts in the file
-                            let at = ctx.src.get(fspan.start as usize..fspan.end as usize).and_then(|s| s.find(f.as_str())).map_or(fspan.start, |k| fspan.start + k as u32);
+                            let at = ctx
+                                .src
+                                .get(fspan.start as usize..fspan.end as usize)
+                                .and_then(|s| s.find(f.as_str()))
+                                .map_or(fspan.start, |k| fspan.start + k as u32);
                             let e = plain_expr(f, Span::new(at, at + f.len() as u32));
                             let_expr(ctx, body, &e);
                         }
@@ -728,14 +1004,19 @@ fn component(ctx: &mut Ctx, c: &Component, body: &mut Gen, extra: &mut Gen) {
             view_rows(ctx, e, &c.lines, extra);
         }
     }
-    if kind == "form" && (!fields.is_empty() || c.lines.iter().any(|l| matches!(l, Line::Submit { .. }))) {
+    if kind == "form"
+        && (!fields.is_empty() || c.lines.iter().any(|l| matches!(l, Line::Submit { .. })))
+    {
         custom_form(ctx, c, &fields, extra);
     }
 }
 
 /// The `{= … }` of a Markdown text.
 fn markdown(ctx: &mut Ctx, t: &str, span: Span, body: &mut Gen) {
-    let raw = ctx.src.get(span.start as usize..span.end as usize).unwrap_or("");
+    let raw = ctx
+        .src
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or("");
     let mut rest = t;
     let mut search_from = 0usize;
     while let Some(k) = rest.find("{=") {
@@ -746,7 +1027,9 @@ fn markdown(ctx: &mut Ctx, t: &str, span: Span, body: &mut Gen) {
         if e.is_empty() || has_cell_refs(e) {
             continue;
         }
-        let at = raw[search_from.min(raw.len())..].find(e).map(|x| x + search_from);
+        let at = raw[search_from.min(raw.len())..]
+            .find(e)
+            .map(|x| x + search_from);
         let file = at.map_or(span.start, |x| span.start + x as u32);
         if let Some(x) = at {
             search_from = x + e.len();
@@ -762,12 +1045,22 @@ fn run_check(ctx: &mut Ctx, run: &Run, names: &[Name], line: Span) {
         Target::Param(p) => {
             let s = span_of(names, &format!("@{p}"), line);
             ctx.param(p, s);
-            let ty = ctx.params.iter().find(|x| &x.0 == p).and_then(|x| x.2.clone());
+            let ty = ctx
+                .params
+                .iter()
+                .find(|x| &x.0 == p)
+                .and_then(|x| x.2.clone());
             match ty.as_deref().map(|t| t.trim_end_matches('?')) {
                 Some(e) if ctx.model.entity(e).is_some() => Some(e.to_string()),
                 _ => {
                     if ctx.known.contains(p) {
-                        ctx.err(format!("`@{p}` is not a selected record: write `<Entity>[@{p}].{}(…)`", run.action), s);
+                        ctx.err(
+                            format!(
+                                "`@{p}` is not a selected record: write `<Entity>[@{p}].{}(…)`",
+                                run.action
+                            ),
+                            s,
+                        );
                     }
                     None
                 }
@@ -785,24 +1078,54 @@ fn run_check(ctx: &mut Ctx, run: &Run, names: &[Name], line: Span) {
     let e = ctx.model.entity(&entity).unwrap();
     let action_span = span_of(names, &run.action, line);
     let action = e.actions.iter().find(|a| a.name == run.action);
-    let transition = e.flows.iter().any(|f| f.transitions.iter().any(|t| t.by.as_deref() == Some(run.action.as_str())));
+    let transition = e.flows.iter().any(|f| {
+        f.transitions
+            .iter()
+            .any(|t| t.by.as_deref() == Some(run.action.as_str()))
+    });
     if action.is_none() && !transition {
-        let options: Vec<&str> = e.actions.iter().map(|a| a.name.as_str()).chain(e.flows.iter().flat_map(|f| f.transitions.iter().filter_map(|t| t.by.as_deref()))).collect();
+        let options: Vec<&str> = e
+            .actions
+            .iter()
+            .map(|a| a.name.as_str())
+            .chain(
+                e.flows
+                    .iter()
+                    .flat_map(|f| f.transitions.iter().filter_map(|t| t.by.as_deref())),
+            )
+            .collect();
         let hint = closest(&run.action, options.iter().copied());
-        ctx.err(format!("`{entity}` has no action `{}`{}", run.action, hint.map(|h| format!(": did you mean `{h}`?")).unwrap_or_default()), action_span);
+        ctx.err(
+            format!(
+                "`{entity}` has no action `{}`{}",
+                run.action,
+                hint.map(|h| format!(": did you mean `{h}`?"))
+                    .unwrap_or_default()
+            ),
+            action_span,
+        );
         return;
     }
-    ctx.refs.push((action_span, Pending::Member(entity.clone(), run.action.clone())));
+    ctx.refs.push((
+        action_span,
+        Pending::Member(entity.clone(), run.action.clone()),
+    ));
     for (arg, src) in &run.args {
         let s = span_of(names, arg, line);
         let ok = action.is_some_and(|a| a.params.iter().any(|p| &p.name == arg));
         if !ok {
-            let list: Vec<String> = action.map(|a| a.params.iter().map(|p| p.name.clone()).collect()).unwrap_or_default();
+            let list: Vec<String> = action
+                .map(|a| a.params.iter().map(|p| p.name.clone()).collect())
+                .unwrap_or_default();
             ctx.err(
                 if list.is_empty() {
                     format!("`{}` takes no parameters", run.action)
                 } else {
-                    format!("`{}` has no parameter `{arg}` (it has {})", run.action, list.join(", "))
+                    format!(
+                        "`{}` has no parameter `{arg}` (it has {})",
+                        run.action,
+                        list.join(", ")
+                    )
                 },
                 s,
             );
@@ -813,11 +1136,25 @@ fn run_check(ctx: &mut Ctx, run: &Run, names: &[Name], line: Span) {
 
 /// The options of a view's rows: the paths of its entity, its expressions as formulas of it.
 fn view_rows(ctx: &mut Ctx, entity: &str, lines: &[Line], extra: &mut Gen) {
-    let personal: HashSet<&str> = lines.iter().filter_map(|l| if let Line::Compute { name, .. } = l { Some(name.text.as_str()) } else { None }).collect();
+    let personal: HashSet<&str> = lines
+        .iter()
+        .filter_map(|l| {
+            if let Line::Compute { name, .. } = l {
+                Some(name.text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut formulas = Gen::default();
     for l in lines {
         match l {
-            Line::Opt { key, value, names, span } => {
+            Line::Opt {
+                key,
+                value,
+                names,
+                span,
+            } => {
                 let mut taken = HashSet::new();
                 let mut path = |ctx: &mut Ctx, p: &str| {
                     if personal.contains(p) {
@@ -827,8 +1164,12 @@ fn view_rows(ctx: &mut Ctx, entity: &str, lines: &[Line], extra: &mut Gen) {
                     ctx.path(entity, p, if s == Span::default() { *span } else { s });
                 };
                 match (key.text.as_str(), value) {
-                    ("fields" | "cards", Value::Names(list)) => list.iter().for_each(|p| path(ctx, p)),
-                    ("widths" | "aggregates", Value::Pairs(ps)) => ps.iter().for_each(|(p, _)| path(ctx, p)),
+                    ("fields" | "cards", Value::Names(list)) => {
+                        list.iter().for_each(|p| path(ctx, p))
+                    }
+                    ("widths" | "aggregates", Value::Pairs(ps)) => {
+                        ps.iter().for_each(|(p, _)| path(ctx, p))
+                    }
                     ("sort", Value::Sort(s)) => s.iter().for_each(|(p, _)| path(ctx, p)),
                     ("group", Value::Group(g)) => g.iter().for_each(|(p, _)| path(ctx, p)),
                     ("by" | "card_title" | "sum", Value::Word(w)) => path(ctx, w),
@@ -836,7 +1177,9 @@ fn view_rows(ctx: &mut Ctx, entity: &str, lines: &[Line], extra: &mut Gen) {
                     _ => {}
                 }
             }
-            Line::Compute { expr, .. } | Line::Color { expr, .. } => formula(ctx, &mut formulas, expr),
+            Line::Compute { expr, .. } | Line::Color { expr, .. } => {
+                formula(ctx, &mut formulas, expr)
+            }
             _ => {}
         }
     }
@@ -870,14 +1213,21 @@ fn custom_form(ctx: &mut Ctx, c: &Component, fields: &[&FormField], extra: &mut 
     for f in fields {
         if let Some(w) = &f.where_ {
             let t = w.text.trim_start();
-            let op = ["==", "!=", "<=", ">=", "<", ">"].iter().any(|o| t.starts_with(o));
+            let op = ["==", "!=", "<=", ">=", "<", ">"]
+                .iter()
+                .any(|o| t.starts_with(o));
             if op || t.contains("..") {
                 let k = ctx.next();
                 g.ctx(w.span);
                 g.put(&format!("    let __qdi_{k} = "));
                 g.copy(&f.name.text, f.name.span.start);
                 g.put(if op { " " } else { " in " });
-                let e = Expr { text: w.text.clone(), raw: false, span: w.span, map: w.map.clone() };
+                let e = Expr {
+                    text: w.text.clone(),
+                    raw: false,
+                    span: w.span,
+                    map: w.map.clone(),
+                };
                 ctx.expr(&mut g, &e);
                 g.put("\n");
             }
@@ -889,10 +1239,19 @@ fn custom_form(ctx: &mut Ctx, c: &Component, fields: &[&FormField], extra: &mut 
         ctx.expr(&mut g, m);
         g.put("\n");
     }
-    let submit = c.lines.iter().find_map(|l| if let Line::Submit { code_span, .. } = l { Some(*code_span) } else { None });
+    let submit = c.lines.iter().find_map(|l| {
+        if let Line::Submit { code_span, .. } = l {
+            Some(*code_span)
+        } else {
+            None
+        }
+    });
     match submit {
         Some(cs) => {
-            let block = ctx.src.get(cs.start as usize..cs.end as usize).unwrap_or("");
+            let block = ctx
+                .src
+                .get(cs.start as usize..cs.end as usize)
+                .unwrap_or("");
             let indent = block.chars().take_while(|c| *c == ' ').count();
             let mut at = cs.start as usize;
             for line in block.split('\n') {
@@ -901,7 +1260,10 @@ fn custom_form(ctx: &mut Ctx, c: &Component, fields: &[&FormField], extra: &mut 
                 if content.is_empty() {
                     g.put("\n");
                 } else {
-                    g.ctx(Span::new((at + strip) as u32, (at + strip + content.len()) as u32));
+                    g.ctx(Span::new(
+                        (at + strip) as u32,
+                        (at + strip + content.len()) as u32,
+                    ));
                     g.put("    ");
                     g.copy(content, (at + strip) as u32);
                     g.put("\n");
@@ -915,7 +1277,10 @@ fn custom_form(ctx: &mut Ctx, c: &Component, fields: &[&FormField], extra: &mut 
         if let Some(d) = &f.default {
             let k = ctx.next();
             g.ctx(d.span);
-            g.put(&format!("fn __qdi_{k}({}) -> ", ctx.params_text.trim_end_matches([',', ' '])));
+            g.put(&format!(
+                "fn __qdi_{k}({}) -> ",
+                ctx.params_text.trim_end_matches([',', ' '])
+            ));
             g.copy(&f.ty.text, f.ty.span.start);
             g.put(":\n    return ");
             ctx.expr(&mut g, d);
@@ -929,8 +1294,16 @@ fn custom_form(ctx: &mut Ctx, c: &Component, fields: &[&FormField], extra: &mut 
 
 fn diagnostic(file: FileId, src: &str, d: &Diag, severity: Severity) -> Diagnostic {
     let len = src.len() as u32;
-    let (a, b) = (d.span.start.min(len), d.span.end.min(len).max(d.span.start.min(len)));
-    Diagnostic { file, range: TextRange::new(TextSize::from(a), TextSize::from(b)), severity, message: d.message.clone() }
+    let (a, b) = (
+        d.span.start.min(len),
+        d.span.end.min(len).max(d.span.start.min(len)),
+    );
+    Diagnostic {
+        file,
+        range: TextRange::new(TextSize::from(a), TextSize::from(b)),
+        severity,
+        message: d.message.clone(),
+    }
 }
 
 /// A hint for the checker's `` `E` has no field `x` ``: the closest field of `E`.
@@ -942,7 +1315,11 @@ fn with_hint(model: Option<&Model>, m: String) -> String {
     let parts: Vec<&str> = m.split('`').collect();
     if parts.len() >= 4 && parts[2] == " has no field " {
         if let Some(e) = model.entity(parts[1]) {
-            let options = e.fields.iter().map(|f| f.name.as_str()).chain(e.actions.iter().map(|a| a.name.as_str()));
+            let options = e
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .chain(e.actions.iter().map(|a| a.name.as_str()));
             if let Some(h) = closest(parts[3], options) {
                 return format!("{m}: did you mean `{h}`?");
             }
@@ -960,11 +1337,19 @@ pub fn migration_renames(project: &Project) -> Vec<(String, String, String)> {
             continue;
         }
         for line in f.text.lines() {
-            let Some(rest) = line.trim_start().strip_prefix("rename ") else { continue };
+            let Some(rest) = line.trim_start().strip_prefix("rename ") else {
+                continue;
+            };
             let rest = rest.split('#').next().unwrap_or("");
-            let Some((a, b)) = rest.split_once("->").or_else(|| rest.split_once('→')) else { continue };
+            let Some((a, b)) = rest.split_once("->").or_else(|| rest.split_once('→')) else {
+                continue;
+            };
             let (a, b) = (a.trim(), b.trim());
-            if let (Some((e, old)), Some(new)) = (a.rsplit_once('.').map(|(e, o)| (e.rsplit('.').next().unwrap_or(e), o)), b.rsplit('.').next()) {
+            if let (Some((e, old)), Some(new)) = (
+                a.rsplit_once('.')
+                    .map(|(e, o)| (e.rsplit('.').next().unwrap_or(e), o)),
+                b.rsplit('.').next(),
+            ) {
                 out.push((e.to_string(), old.to_string(), new.to_string()));
             }
         }
@@ -977,8 +1362,13 @@ fn rename_hint(renames: &[(String, String, String)], m: &str) -> Option<String> 
     let parts: Vec<&str> = m.split('`').collect();
     if parts.len() >= 4 && parts[2] == " has no field " {
         let (e, x) = (parts[1], parts[3]);
-        let (_, _, new) = renames.iter().rev().find(|(re, old, _)| re == e && old == x)?;
-        return Some(format!("`{e}` has no field `{x}`: a migration renamed it `{new}`: did you mean `{new}`?"));
+        let (_, _, new) = renames
+            .iter()
+            .rev()
+            .find(|(re, old, _)| re == e && old == x)?;
+        return Some(format!(
+            "`{e}` has no field `{x}`: a migration renamed it `{new}`: did you mean `{new}`?"
+        ));
     }
     None
 }
@@ -990,7 +1380,11 @@ fn message(m: &str) -> String {
     while let Some(k) = out.find("`__qdi_") {
         let rest = &out[k + 1..];
         let end = rest.find('`').map_or(rest.len(), |e| e);
-        out = format!("{}this expression{}", &out[..k], &rest[end + 1.min(rest.len() - end)..]);
+        out = format!(
+            "{}this expression{}",
+            &out[..k],
+            &rest[end + 1.min(rest.len() - end)..]
+        );
     }
     out
 }
@@ -1023,7 +1417,12 @@ pub fn check(project: &Project, model: Option<&Model>) -> Interfaces {
             }
             pending.extend(refs.into_iter().map(|(s, p)| (f.id, s, p)));
             params.insert(f.id, ps);
-            let rel = f.path.strip_prefix(&project.root).unwrap_or(&f.path).to_string_lossy().replace('\\', "/");
+            let rel = f
+                .path
+                .strip_prefix(&project.root)
+                .unwrap_or(&f.path)
+                .to_string_lossy()
+                .replace('\\', "/");
             let rel = rel.strip_prefix("interfaces/").unwrap_or(&rel).to_string();
             if !g.text.is_empty() {
                 gens.push((f.id, generated_path(&project.root, &rel), g));
@@ -1031,7 +1430,10 @@ pub fn check(project: &Project, model: Option<&Model>) -> Interfaces {
         }
         trees.insert(f.id, tree);
     }
-    let scripts: Vec<(PathBuf, String)> = gens.iter().map(|(_, p, g)| (p.clone(), format!("{}\n", g.text))).collect();
+    let scripts: Vec<(PathBuf, String)> = gens
+        .iter()
+        .map(|(_, p, g)| (p.clone(), format!("{}\n", g.text)))
+        .collect();
     if std::env::var_os("QUADRA_DEBUG_QDI").is_some() {
         for (p, t) in &scripts {
             eprintln!("--- {}\n{t}", p.display());
@@ -1057,19 +1459,31 @@ pub fn check(project: &Project, model: Option<&Model>) -> Interfaces {
             }
         }
     };
-    let name_errors: Vec<Diagnostic> = analysis.diagnostics.iter().filter(|d| by_gen.contains_key(&d.file)).cloned().collect();
+    let name_errors: Vec<Diagnostic> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| by_gen.contains_key(&d.file))
+        .cloned()
+        .collect();
     for d in &name_errors {
         if d.severity == Severity::Error {
             map_diag(d, &mut diagnostics);
         }
     }
     // the types, when every name is known
-    let code_errors = analysis.diagnostics.iter().any(|d| d.severity == Severity::Error);
+    let code_errors = analysis
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error);
     let mut accesses = Vec::new();
     if model.is_some() && !code_errors {
         let m = quadra_ir::lower(&extended, &analysis);
         let report = quadra_types::analyze_model(&m);
-        for d in report.diagnostics.iter().filter(|d| by_gen.contains_key(&d.file) && d.severity != Severity::Hint) {
+        for d in report
+            .diagnostics
+            .iter()
+            .filter(|d| by_gen.contains_key(&d.file) && d.severity != Severity::Hint)
+        {
             map_diag(d, &mut diagnostics);
         }
         accesses = report.accesses;
@@ -1081,7 +1495,11 @@ pub fn check(project: &Project, model: Option<&Model>) -> Interfaces {
             let (a, b) = (u32::from(r.range.start()), u32::from(r.range.end()));
             if let (Some(x), Some(y)) = (g.map(a), g.map(b.saturating_sub(1))) {
                 if y + 1 > x && (y + 1 - x) == b - a {
-                    refs.push(Reference { file: *qdi, range: TextRange::new(x.into(), (y + 1).into()), target: r.target.clone() });
+                    refs.push(Reference {
+                        file: *qdi,
+                        range: TextRange::new(x.into(), (y + 1).into()),
+                        target: r.target.clone(),
+                    });
                 }
             }
         }
@@ -1092,30 +1510,51 @@ pub fn check(project: &Project, model: Option<&Model>) -> Interfaces {
         }
         let target = match &p {
             Pending::Entity(e) => analysis.find_anywhere(e).map(SemaTarget::Decl),
-            Pending::Member(e, m) => analysis.find_anywhere(e).and_then(|d| analysis.lookup_member(d, m)).map(|(d, i)| SemaTarget::Member(d, i)),
+            Pending::Member(e, m) => analysis
+                .find_anywhere(e)
+                .and_then(|d| analysis.lookup_member(d, m))
+                .map(|(d, i)| SemaTarget::Member(d, i)),
         };
         if let Some(t) = target {
-            refs.push(Reference { file, range: TextRange::new(span.start.into(), span.end.into()), target: t });
+            refs.push(Reference {
+                file,
+                range: TextRange::new(span.start.into(), span.end.into()),
+                target: t,
+            });
         }
     }
     // the members the type checker found (`o.total`: sema does not know what `o` is), in the
     // code and in the interfaces
-    let known: HashSet<(FileId, TextRange)> = analysis.references.iter().map(|r| (r.file, r.range)).chain(refs.iter().map(|r| (r.file, r.range))).collect();
+    let known: HashSet<(FileId, TextRange)> = analysis
+        .references
+        .iter()
+        .map(|r| (r.file, r.range))
+        .chain(refs.iter().map(|r| (r.file, r.range)))
+        .collect();
     for (span, (entity, member)) in accesses {
-        let target = analysis.find_anywhere(&entity).and_then(|d| analysis.lookup_member(d, &member)).map(|(d, i)| SemaTarget::Member(d, i));
+        let target = analysis
+            .find_anywhere(&entity)
+            .and_then(|d| analysis.lookup_member(d, &member))
+            .map(|(d, i)| SemaTarget::Member(d, i));
         let Some(target) = target else { continue };
         let (file, range) = match by_gen.get(&span.file) {
             Some((qdi, g)) => {
                 let (a, b) = (u32::from(span.range.start()), u32::from(span.range.end()));
                 match (g.map(a), g.map(b.saturating_sub(1))) {
-                    (Some(x), Some(y)) if y + 1 > x && y + 1 - x == b - a => (*qdi, TextRange::new(x.into(), (y + 1).into())),
+                    (Some(x), Some(y)) if y + 1 > x && y + 1 - x == b - a => {
+                        (*qdi, TextRange::new(x.into(), (y + 1).into()))
+                    }
                     _ => continue,
                 }
             }
             None => (span.file, span.range),
         };
         if !known.contains(&(file, range)) {
-            refs.push(Reference { file, range, target });
+            refs.push(Reference {
+                file,
+                range,
+                target,
+            });
         }
     }
     analysis.references.extend(refs);
@@ -1124,7 +1563,10 @@ pub fn check(project: &Project, model: Option<&Model>) -> Interfaces {
         let parts: Vec<&str> = d.message.split('`').collect();
         if parts.len() >= 4 && parts[2] == " has no field " {
             let text = &project.file(d.file).text;
-            let (a, b) = (usize::from(d.range.start()), usize::from(d.range.end()).min(text.len()));
+            let (a, b) = (
+                usize::from(d.range.start()),
+                usize::from(d.range.end()).min(text.len()),
+            );
             if let Some(t) = text.get(a..b) {
                 if t.len() > parts[3].len() && t.ends_with(parts[3]) {
                     let start = (b - parts[3].len()) as u32;
@@ -1145,5 +1587,12 @@ pub fn check(project: &Project, model: Option<&Model>) -> Interfaces {
     // one message per place
     diagnostics.sort_by_key(|d| (d.file, d.range.start(), d.message.clone()));
     diagnostics.dedup_by(|a, b| a.file == b.file && a.range == b.range && a.message == b.message);
-    Interfaces { project: extended, analysis, diagnostics, trees, generated, params }
+    Interfaces {
+        project: extended,
+        analysis,
+        diagnostics,
+        trees,
+        generated,
+        params,
+    }
 }

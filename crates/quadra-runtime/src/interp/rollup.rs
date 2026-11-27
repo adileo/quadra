@@ -85,7 +85,9 @@ fn base_name(k: &str) -> &str {
 fn holds(v: &Option<V>, id: Id) -> bool {
     match v {
         Some(V::Ref { id: x, .. }) => *x == id,
-        Some(V::Set(items)) | Some(V::List(items)) => items.iter().any(|i| i.as_ref_id() == Some(id)),
+        Some(V::Set(items)) | Some(V::List(items)) => {
+            items.iter().any(|i| i.as_ref_id() == Some(id))
+        }
         _ => false,
     }
 }
@@ -122,11 +124,20 @@ fn only_param(m: &Model, owner: &Entity, param: &str, e: &Expr) -> bool {
         }
         match &e.kind {
             ExprKind::Name(n) => {
-                if !bound.iter().any(|b| b == n) && (m.find_field(owner, n).is_some() || crate::query::IMPLICIT.contains(&n.as_str()) || n == "me" || n == "current") {
+                if !bound.iter().any(|b| b == n)
+                    && (m.find_field(owner, n).is_some()
+                        || crate::query::IMPLICIT.contains(&n.as_str())
+                        || n == "me"
+                        || n == "current")
+                {
                     *ok = false;
                 }
             }
-            ExprKind::SelfRef | ExprKind::Block(_) | ExprKind::Match { .. } | ExprKind::As { .. } | ExprKind::Error => *ok = false,
+            ExprKind::SelfRef
+            | ExprKind::Block(_)
+            | ExprKind::Match { .. }
+            | ExprKind::As { .. }
+            | ExprKind::Error => *ok = false,
             ExprKind::Lit(_) | ExprKind::Quantity { .. } => {}
             ExprKind::FString(parts) => {
                 for p in parts {
@@ -154,7 +165,11 @@ fn only_param(m: &Model, owner: &Entity, param: &str, e: &Expr) -> bool {
                 walk(m, owner, bound, lhs, ok);
                 walk(m, owner, bound, rhs, ok);
             }
-            ExprKind::If { cond, then, otherwise } => {
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 walk(m, owner, bound, cond, ok);
                 walk(m, owner, bound, then, ok);
                 walk(m, owner, bound, otherwise, ok);
@@ -166,7 +181,9 @@ fn only_param(m: &Model, owner: &Entity, param: &str, e: &Expr) -> bool {
                 bound.truncate(n);
             }
             ExprKind::Tuple(items) => items.iter().for_each(|(_, x)| walk(m, owner, bound, x, ok)),
-            ExprKind::List(items) => items.iter().for_each(|a| walk(m, owner, bound, &a.value, ok)),
+            ExprKind::List(items) => items
+                .iter()
+                .for_each(|a| walk(m, owner, bound, &a.value, ok)),
             ExprKind::Set(items) => items.iter().for_each(|x| walk(m, owner, bound, x, ok)),
             ExprKind::When(arms) => {
                 for (c, v) in arms {
@@ -211,7 +228,13 @@ impl<'m> Interp<'m> {
     /// incremental formula whose value the record was loaded with (the API then does not load
     /// what the formula reads).
     pub fn has_stored(&mut self, ent: &str, id: Id, field: &str) -> bool {
-        self.store.lazy() && self.trusted(ent, field) && self.store.records.get(&id).is_some_and(|r| r.formulas.get(field).is_some_and(|v| !v.is_none()))
+        self.store.lazy()
+            && self.trusted(ent, field)
+            && self
+                .store
+                .records
+                .get(&id)
+                .is_some_and(|r| r.formulas.get(field).is_some_and(|v| !v.is_none()))
     }
 
     /// A new transaction, or one rolled back: nothing computed for the previous writes holds.
@@ -243,7 +266,11 @@ impl<'m> Interp<'m> {
         let at = (self.store.uid, self.store.wlog_gen);
         let mut s = match self.inc.stale.remove(key) {
             Some(s) if s.at == at => s,
-            _ => Stale { at, cursor: 0, ids: HashSet::new() },
+            _ => Stale {
+                at,
+                cursor: 0,
+                ids: HashSet::new(),
+            },
         };
         let mut added: Vec<Id> = Vec::new();
         while s.cursor < self.store.wlog.len() {
@@ -256,7 +283,10 @@ impl<'m> Interp<'m> {
             }
             let field = base_name(&wfield);
             for (path, rent, rfield) in &deps.reads {
-                if path.is_empty() || !self.is_a(&went, rent) || !(field.is_empty() || field == rfield) {
+                if path.is_empty()
+                    || !self.is_a(&went, rent)
+                    || !(field.is_empty() || field == rfield)
+                {
                     continue;
                 }
                 let found = self.back_along(path, wid);
@@ -285,7 +315,11 @@ impl<'m> Interp<'m> {
     }
 
     /// `quadra_analysis::deps::ledger_rollup` of a formula (cached).
-    fn ledger_rollup(&mut self, ent: &str, field: &str) -> Option<Rc<quadra_analysis::deps::LedgerRollup<'m>>> {
+    fn ledger_rollup(
+        &mut self,
+        ent: &str,
+        field: &str,
+    ) -> Option<Rc<quadra_analysis::deps::LedgerRollup<'m>>> {
         let key = (ent.to_string(), field.to_string());
         if let Some(r) = self.inc.ledger_rollups.get(&key) {
             return r.clone();
@@ -306,7 +340,14 @@ impl<'m> Interp<'m> {
     /// The rows of the ledger of `lr` posted in the transaction to record `id`.
     fn posted_to(&self, lr: &quadra_analysis::deps::LedgerRollup<'m>, id: Id) -> Vec<Id> {
         let tx = self.store.tx;
-        self.store.rows.iter().filter(|r| r.tx == tx && *r.ledger == *lr.ledger && holds(&r.cols.get(&lr.key).cloned(), id)).map(|r| r.id).collect()
+        self.store
+            .rows
+            .iter()
+            .filter(|r| {
+                r.tx == tx && *r.ledger == *lr.ledger && holds(&r.cols.get(&lr.key).cloned(), id)
+            })
+            .map(|r| r.id)
+            .collect()
     }
 
     /// Whether the stored value of `ent.field` on record `id` may be stale.
@@ -324,7 +365,8 @@ impl<'m> Interp<'m> {
             return false;
         }
         let deps = self.formula_deps(ent, field);
-        self.stale_set(&format!("f:{ent}.{field}"), ent, &deps).contains(&id)
+        self.stale_set(&format!("f:{ent}.{field}"), ent, &deps)
+            .contains(&id)
     }
 
     /// The records of `ent` whose stored `field` may be stale (the records a commit computes
@@ -334,13 +376,21 @@ impl<'m> Interp<'m> {
             Some(lr) => {
                 // the records the rows of the transaction are posted to, those written
                 let tx = self.store.tx;
-                let mut ids: Vec<Id> = self.store.rows.iter().filter(|r| r.tx == tx && *r.ledger == *lr.ledger).filter_map(|r| r.cols.get(&lr.key).and_then(|v| v.as_ref_id())).collect();
+                let mut ids: Vec<Id> = self
+                    .store
+                    .rows
+                    .iter()
+                    .filter(|r| r.tx == tx && *r.ledger == *lr.ledger)
+                    .filter_map(|r| r.cols.get(&lr.key).and_then(|v| v.as_ref_id()))
+                    .collect();
                 ids.extend(self.own_written(ent));
                 ids
             }
             None => {
                 let deps = self.formula_deps(ent, field);
-                self.stale_set(&format!("f:{ent}.{field}"), ent, &deps).into_iter().collect()
+                self.stale_set(&format!("f:{ent}.{field}"), ent, &deps)
+                    .into_iter()
+                    .collect()
             }
         };
         ids.extend(self.thawed_of(ent));
@@ -377,7 +427,13 @@ impl<'m> Interp<'m> {
     /// The value of the incremental formula `f` of record `id` without computing it from what it
     /// reads: its stored value while nothing it depends on was written, else by delta when it is
     /// a rollup. None: compute it.
-    pub(super) fn stored_formula(&mut self, ent: &str, f: &'m Field, id: Id, frozen: bool) -> R<Option<V>> {
+    pub(super) fn stored_formula(
+        &mut self,
+        ent: &str,
+        f: &'m Field,
+        id: Id,
+        frozen: bool,
+    ) -> R<Option<V>> {
         if !self.store.lazy() || self.store.uid == 0 {
             return Ok(None);
         }
@@ -388,7 +444,10 @@ impl<'m> Interp<'m> {
             // read), by its own materialization or a parent's change (free), or by a formula
             // computed in full (a read: its value depends on it)
             if self.store.deltas.contains_key(&(id, f.name.clone())) {
-                let own = self.materializing.as_ref().is_some_and(|(i, n)| *i == id && *n == f.name);
+                let own = self
+                    .materializing
+                    .as_ref()
+                    .is_some_and(|(i, n)| *i == id && *n == f.name);
                 match &mut self.capture {
                     Some(c) => c.push((id, f.name.clone())),
                     None if own || self.in_delta > 0 => {}
@@ -402,7 +461,14 @@ impl<'m> Interp<'m> {
             return Ok(Some(v));
         }
         // (an empty column: no value, or the formula failed: computed, which tells them apart)
-        let Some(stored) = self.store.records.get(&id).and_then(|r| r.formulas.get(&f.name)).filter(|v| !v.is_none()).cloned() else {
+        let Some(stored) = self
+            .store
+            .records
+            .get(&id)
+            .and_then(|r| r.formulas.get(&f.name))
+            .filter(|v| !v.is_none())
+            .cloned()
+        else {
             return Ok(None);
         };
         // a record frozen before this transaction reads the world as of then: its value holds
@@ -423,10 +489,21 @@ impl<'m> Interp<'m> {
             count(&DELTAS);
             // while committing, a sum changed by delta is a change that commutes with other
             // transactions' (`Store::deltas`); otherwise its stored value was read
-            let own = self.materializing.as_ref().is_some_and(|(i, n)| *i == id && *n == f.name);
-            if self.delta_free && crate::store::delta_amount(&stored, &v).is_some() && (own || self.in_delta > 0 || self.capture.is_some()) {
+            let own = self
+                .materializing
+                .as_ref()
+                .is_some_and(|(i, n)| *i == id && *n == f.name);
+            if self.delta_free
+                && crate::store::delta_amount(&stored, &v).is_some()
+                && (own || self.in_delta > 0 || self.capture.is_some())
+            {
                 let key = (id, f.name.clone());
-                let first = self.store.deltas.get(&key).map(|(old, _)| old.clone()).unwrap_or_else(|| stored.clone());
+                let first = self
+                    .store
+                    .deltas
+                    .get(&key)
+                    .map(|(old, _)| old.clone())
+                    .unwrap_or_else(|| stored.clone());
                 self.store.deltas.insert(key.clone(), (first, v.clone()));
                 if let Some(c) = &mut self.capture {
                     c.push(key);
@@ -446,7 +523,14 @@ impl<'m> Interp<'m> {
         if !self.trusted(ent, &f.name) {
             return fail("no value before the transaction");
         }
-        match self.store.records.get(&id).and_then(|r| r.formulas.get(&f.name)).filter(|v| !v.is_none()).cloned() {
+        match self
+            .store
+            .records
+            .get(&id)
+            .and_then(|r| r.formulas.get(&f.name))
+            .filter(|v| !v.is_none())
+            .cloned()
+        {
             Some(v) => {
                 // while committing, the old value only measures a change: the change is the
                 // same whatever others added meanwhile (the new value, computed, is read or
@@ -465,7 +549,12 @@ impl<'m> Interp<'m> {
         if !self.store.lazy() {
             return;
         }
-        let vals: Vec<((Id, String), V)> = self.store.materialized.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let vals: Vec<((Id, String), V)> = self
+            .store
+            .materialized
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for ((id, field), v) in vals {
             if let Some(r) = self.store.records.get_mut(&id) {
                 r.formulas.insert(field, v);
@@ -482,7 +571,11 @@ impl<'m> Interp<'m> {
     /// all together). Their selection; the others get every rule.
     pub(super) fn narrow_checks(&mut self, e: &'m Entity, ids: &[Id]) -> HashMap<Id, RuleSel> {
         let mut out = HashMap::new();
-        if !self.store.lazy() || self.store.uid == 0 || ids.len() < 2 || !self.store.thawed.is_empty() {
+        if !self.store.lazy()
+            || self.store.uid == 0
+            || ids.len() < 2
+            || !self.store.thawed.is_empty()
+        {
             return out;
         }
         let m = self.m;
@@ -500,19 +593,29 @@ impl<'m> Interp<'m> {
                 Some(Where::Compare(_, x)) | Some(Where::Expr(x)) => exprs.push(x),
                 None => {}
             }
-            if f.formula.is_none() && ty_names_inner_pub(f.ty.as_ref()).and_then(|n| m.entity(&n)).is_some_and(|x| x.kind == EntityKind::Record) {
+            if f.formula.is_none()
+                && ty_names_inner_pub(f.ty.as_ref())
+                    .and_then(|n| m.entity(&n))
+                    .is_some_and(|x| x.kind == EntityKind::Record)
+            {
                 return out;
             }
         }
         let fields = self.deps(&format!("fieldrules:{}", e.name), &e.name, &exprs, &[]);
-        let unfollowed = |d: &Deps| d.opaque || d.time || !d.globals.is_empty() || !d.recursive.is_empty();
+        let unfollowed =
+            |d: &Deps| d.opaque || d.time || !d.globals.is_empty() || !d.recursive.is_empty();
         if unfollowed(&fields) {
             return out;
         }
         let hit_fields = self.stale_set(&format!("fr:{}", e.name), &e.name, &fields);
         let mut per: Vec<HashSet<Id>> = Vec::new();
         for (i, c) in checks.iter().enumerate() {
-            let d = self.deps(&format!("check:{}:{i}", e.name), &e.name, &[&c.cond, &c.message], &[]);
+            let d = self.deps(
+                &format!("check:{}:{i}", e.name),
+                &e.name,
+                &[&c.cond, &c.message],
+                &[],
+            );
             if unfollowed(&d) {
                 return out;
             }
@@ -520,15 +623,29 @@ impl<'m> Interp<'m> {
         }
         let tx = self.store.tx;
         for id in ids {
-            let own = self.store.dirty.contains(id) || self.store.records.get(id).is_some_and(|r| r.created_tx == tx || r.history.iter().any(|(t, _, _)| *t == tx));
+            let own = self.store.dirty.contains(id)
+                || self.store.records.get(id).is_some_and(|r| {
+                    r.created_tx == tx || r.history.iter().any(|(t, _, _)| *t == tx)
+                });
             if own || hit_fields.contains(id) {
                 continue;
             }
-            let sel: std::collections::BTreeSet<usize> = per.iter().enumerate().filter(|(_, set)| set.contains(id)).map(|(i, _)| i).collect();
+            let sel: std::collections::BTreeSet<usize> = per
+                .iter()
+                .enumerate()
+                .filter(|(_, set)| set.contains(id))
+                .map(|(i, _)| i)
+                .collect();
             if sel.is_empty() || sel.len() == checks.len() {
                 continue;
             }
-            out.insert(*id, RuleSel { checks: sel, ..Default::default() });
+            out.insert(
+                *id,
+                RuleSel {
+                    checks: sel,
+                    ..Default::default()
+                },
+            );
         }
         out
     }
@@ -552,7 +669,12 @@ impl<'m> Interp<'m> {
         let ExprKind::Call { callee, args } = &e.kind else {
             return None;
         };
-        let ExprKind::Field { base, name, optional: false } = &callee.kind else {
+        let ExprKind::Field {
+            base,
+            name,
+            optional: false,
+        } = &callee.kind
+        else {
             return None;
         };
         let lam = match args.as_slice() {
@@ -565,7 +687,12 @@ impl<'m> Interp<'m> {
         let coll = loop {
             match &b.kind {
                 ExprKind::Call { callee, args } => {
-                    let ExprKind::Field { base, name, optional: false } = &callee.kind else {
+                    let ExprKind::Field {
+                        base,
+                        name,
+                        optional: false,
+                    } = &callee.kind
+                    else {
                         return None;
                     };
                     let [a] = args.as_slice() else { return None };
@@ -576,7 +703,11 @@ impl<'m> Interp<'m> {
                     b = base;
                 }
                 ExprKind::Name(n) => break n.as_str(),
-                ExprKind::Field { base, name, optional: false } if matches!(base.kind, ExprKind::SelfRef) => break name.as_str(),
+                ExprKind::Field {
+                    base,
+                    name,
+                    optional: false,
+                } if matches!(base.kind, ExprKind::SelfRef) => break name.as_str(),
                 _ => return None,
             }
         };
@@ -604,14 +735,17 @@ impl<'m> Interp<'m> {
         let Ty::Path { segments, .. } = inner else {
             return None;
         };
-        let child = m.entity(&segments[0]).filter(|c| c.kind == EntityKind::Entity && !c.is_ledger)?;
+        let child = m
+            .entity(&segments[0])
+            .filter(|c| c.kind == EntityKind::Entity && !c.is_ledger)?;
         let back = cf.via.clone().or_else(|| {
             child
                 .fields
                 .iter()
                 .find(|x| {
                     let n = ty_names(x.ty.as_ref());
-                    n.as_deref() == Some(owner.name.as_str()) || n.map_or(false, |n| owner.traits.contains(&n))
+                    n.as_deref() == Some(owner.name.as_str())
+                        || n.map_or(false, |n| owner.traits.contains(&n))
                 })
                 .map(|x| x.name.clone())
         })?;
@@ -635,8 +769,16 @@ impl<'m> Interp<'m> {
             }
             deps.reads.extend(d.reads);
         }
-        deps.reads.insert((Vec::new(), child.name.clone(), back.clone()));
-        Some(Rollup { child: child.name.clone(), back, filters, agg, span: e.span, deps: Rc::new(deps) })
+        deps.reads
+            .insert((Vec::new(), child.name.clone(), back.clone()));
+        Some(Rollup {
+            child: child.name.clone(),
+            back,
+            filters,
+            agg,
+            span: e.span,
+            deps: Rc::new(deps),
+        })
     }
 
     /// The extreme of what the children of `id` other than `changed` contribute (their stored
@@ -644,12 +786,23 @@ impl<'m> Interp<'m> {
     /// a number, an amount of one currency, a quantity of one unit or a date (none first when
     /// descending: a child without a value makes the interpreter fail, so then None). Some(None):
     /// no other child contributes. None: SQL cannot tell.
-    fn extreme_of_others(&mut self, r: &Rollup<'m>, id: Id, changed: &[Id], max: bool) -> R<Option<Option<V>>> {
+    fn extreme_of_others(
+        &mut self,
+        r: &Rollup<'m>,
+        id: Id,
+        changed: &[Id],
+        max: bool,
+    ) -> R<Option<Option<V>>> {
         let (Agg::Min(p, x) | Agg::Max(p, x)) = &r.agg else {
             return Ok(None);
         };
         // the value is a field of the child
-        let ExprKind::Field { base, name, optional: false } = &x.kind else {
+        let ExprKind::Field {
+            base,
+            name,
+            optional: false,
+        } = &x.kind
+        else {
             return Ok(None);
         };
         if !matches!(&base.kind, ExprKind::Name(n) if n == p) {
@@ -659,12 +812,14 @@ impl<'m> Interp<'m> {
         let Some(f) = m.entity(&r.child).and_then(|c| m.find_field(c, name)) else {
             return Ok(None);
         };
-        let fixed = |t: Option<&Ty>| match t {
+        let fixed = |t: Option<&Ty>| {
+            match t {
             Some(Ty::Optional(i)) => {
                 matches!(i.as_ref(), Ty::Path { segments, args, .. } if segments.len() == 1 && args.iter().all(|a| matches!(a, Ty::Path { segments, .. } if segments.len() == 1 && m.entity(&segments[0]).is_none() && segments[0] != "self")))
             }
             Some(Ty::Path { segments, args, .. }) => segments.len() == 1 && args.iter().all(|a| matches!(a, Ty::Path { segments, .. } if segments.len() == 1 && m.entity(&segments[0]).is_none() && segments[0] != "self")),
             _ => false,
+        }
         };
         let kind = match f.ty.as_ref() {
             Some(Ty::Optional(i)) => ty_names(Some(i)),
@@ -678,14 +833,30 @@ impl<'m> Interp<'m> {
         if !ok {
             return Ok(None);
         }
-        let binders: Vec<crate::query::Binder> = r.filters.iter().map(|(p, _)| crate::query::Binder::Param(p.to_string())).collect();
+        let binders: Vec<crate::query::Binder> = r
+            .filters
+            .iter()
+            .map(|(p, _)| crate::query::Binder::Param(p.to_string()))
+            .collect();
         let mut spec = Spec::new(&r.child);
-        spec.conds = r.filters.iter().zip(binders.iter()).map(|((_, e), b)| crate::query::Cond { binder: b, expr: e, negate: false }).collect();
+        spec.conds = r
+            .filters
+            .iter()
+            .zip(binders.iter())
+            .map(|((_, e), b)| crate::query::Cond {
+                binder: b,
+                expr: e,
+                negate: false,
+            })
+            .collect();
         spec.refs = vec![(r.back.clone(), id)];
         let mut ctx = Ctx::default();
         // none first: the descending order; the extreme: the order of the aggregate
         let mut desc_spec = spec.clone();
-        desc_spec.order = vec![crate::query::Key::Grid { path: vec![name.clone()], desc: true }];
+        desc_spec.order = vec![crate::query::Key::Grid {
+            path: vec![name.clone()],
+            desc: true,
+        }];
         desc_spec.id_desc = true;
         let Some(rows) = self.sql_rows_excluding(&desc_spec, &mut ctx, changed, 1)? else {
             return Ok(None);
@@ -700,7 +871,10 @@ impl<'m> Interp<'m> {
             top
         } else {
             let mut asc = spec.clone();
-            asc.order = vec![crate::query::Key::Grid { path: vec![name.clone()], desc: false }];
+            asc.order = vec![crate::query::Key::Grid {
+                path: vec![name.clone()],
+                desc: false,
+            }];
             let Some(rows) = self.sql_rows_excluding(&asc, &mut ctx, changed, 1)? else {
                 return Ok(None);
             };
@@ -709,7 +883,10 @@ impl<'m> Interp<'m> {
             };
             low
         };
-        let rec = V::Ref { ent: Rc::from(r.child.as_str()), id: pick };
+        let rec = V::Ref {
+            ent: Rc::from(r.child.as_str()),
+            id: pick,
+        };
         let v = self.get(&rec, name, None, None)?;
         Ok(if v.is_none() { None } else { Some(Some(v)) })
     }
@@ -717,7 +894,10 @@ impl<'m> Interp<'m> {
     /// The value of a child's contribution (None: it does not contribute; none: no value),
     /// now or before the transaction. An error stops the delta.
     fn contribution(&mut self, r: &Rollup<'m>, c: Id, old: bool) -> R<Option<V>> {
-        let rec = V::Ref { ent: Rc::from(r.child.as_str()), id: c };
+        let rec = V::Ref {
+            ent: Rc::from(r.child.as_str()),
+            id: c,
+        };
         let saved = self.inc.old_view;
         self.inc.old_view = old;
         let out = (|| {
@@ -745,15 +925,28 @@ impl<'m> Interp<'m> {
     /// stored value and the rows the transaction posted to it (rows are never changed or
     /// removed). None (compute it the interpreter's way): a stored field of the record was
     /// written (the conditions may read it), a sum of another currency or unit.
-    fn ledger_delta(&mut self, lr: &quadra_analysis::deps::LedgerRollup<'m>, ent: &str, f: &'m Field, id: Id, old: &V) -> R<Option<V>> {
+    fn ledger_delta(
+        &mut self,
+        lr: &quadra_analysis::deps::LedgerRollup<'m>,
+        ent: &str,
+        f: &'m Field,
+        id: Id,
+        old: &V,
+    ) -> R<Option<V>> {
         if old.is_none() || !self.store.thawed.is_empty() || self.own_written(ent).contains(&id) {
             return Ok(None);
         }
-        let this = V::Ref { ent: Rc::from(ent), id };
+        let this = V::Ref {
+            ent: Rc::from(ent),
+            id,
+        };
         let ledger: Rc<str> = Rc::from(lr.ledger.as_str());
         let mut add: Vec<V> = Vec::new();
         'rows: for row in self.posted_to(lr, id) {
-            let rv = V::Ref { ent: ledger.clone(), id: row };
+            let rv = V::Ref {
+                ent: ledger.clone(),
+                id: row,
+            };
             for (p, x) in &lr.filters {
                 let mut ctx = Ctx::for_record(&this, ent);
                 ctx.bind(p, rv.clone());
@@ -808,7 +1001,10 @@ impl<'m> Interp<'m> {
         if old.is_none() || !self.store.thawed.is_empty() {
             return Ok(None);
         }
-        let mut changed: Vec<Id> = self.stale_set(&format!("r:{ent}.{}", f.name), &r.child, &r.deps).into_iter().collect();
+        let mut changed: Vec<Id> = self
+            .stale_set(&format!("r:{ent}.{}", f.name), &r.child, &r.deps)
+            .into_iter()
+            .collect();
         changed.sort();
         let changed_children = changed.clone();
         let tx = self.store.tx;
@@ -823,7 +1019,11 @@ impl<'m> Interp<'m> {
                 continue;
             }
             let now = self.store.read(c, &r.back, None);
-            let before = self.store.records.get(&c).and_then(|x| x.before(tx, &r.back));
+            let before = self
+                .store
+                .records
+                .get(&c)
+                .and_then(|x| x.before(tx, &r.back));
             if holds(&now, id) {
                 match self.contribution(&r, c, false) {
                     Ok(Some(v)) => add.push(v),
@@ -839,7 +1039,10 @@ impl<'m> Interp<'m> {
                 }
             }
         }
-        let this = V::Ref { ent: Rc::from(ent), id };
+        let this = V::Ref {
+            ent: Rc::from(ent),
+            id,
+        };
         let v = match &r.agg {
             Agg::Count => {
                 let V::Int(n) = old else { return Ok(None) };
@@ -879,7 +1082,8 @@ impl<'m> Interp<'m> {
                 }
                 let mut best = old.clone();
                 if left {
-                    let Ok(Some(rest)) = self.extreme_of_others(&r, id, &changed_children, max) else {
+                    let Ok(Some(rest)) = self.extreme_of_others(&r, id, &changed_children, max)
+                    else {
                         return Ok(None);
                     };
                     if add.is_empty() && rest.is_none() {

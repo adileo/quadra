@@ -22,11 +22,16 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 
 fn clock() -> chrono::NaiveDateTime {
-    chrono::NaiveDate::from_ymd_opt(2026, 11, 20).unwrap().and_hms_opt(10, 0, 0).unwrap()
+    chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+        .unwrap()
+        .and_hms_opt(10, 0, 0)
+        .unwrap()
 }
 
 fn example(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(name)
 }
 
 /// A fresh database: a SQLite file or a PostgreSQL schema.
@@ -39,7 +44,10 @@ fn fresh(target: &str, name: &str) -> String {
         format!("sqlite:{}", p.display())
     } else {
         let schema = format!("qq_{}_{name}", std::process::id());
-        Conn::open(target).unwrap().batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")).unwrap();
+        Conn::open(target)
+            .unwrap()
+            .batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+            .unwrap();
         format!("{target}#schema={schema}")
     }
 }
@@ -50,7 +58,8 @@ fn cleanup(target: &str, url: &str) {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
     } else if let Some((_, schema)) = url.split_once("#schema=") {
-        let _ = Conn::open(target).and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
+        let _ = Conn::open(target)
+            .and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
     }
 }
 
@@ -66,15 +75,29 @@ struct World {
 impl World {
     fn new(root: PathBuf, url: String) -> World {
         let project = quadra_sema::Project::load(&root).unwrap();
-        let sources: Vec<(PathBuf, String)> = project.user_files().map(|f| (f.path.clone(), f.text.clone())).collect();
+        let sources: Vec<(PathBuf, String)> = project
+            .user_files()
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
         let checked = quadra_analysis::check(&project);
         assert!(checked.model.is_some(), "{} does not check", root.display());
-        let db = quadra_store::Database::open(&url, checked.model.as_ref().unwrap(), &checked.report);
+        let db =
+            quadra_store::Database::open(&url, checked.model.as_ref().unwrap(), &checked.report);
         let schema = match db {
             Ok(db) => db.schema.clone(),
-            Err(_) => Rc::new(quadra_store::schema::build(checked.model.as_ref().unwrap(), &checked.report)),
+            Err(_) => Rc::new(quadra_store::schema::build(
+                checked.model.as_ref().unwrap(),
+                &checked.report,
+            )),
         };
-        World { root, url, sources, checked, schema, overlays: RefCell::new(Default::default()) }
+        World {
+            root,
+            url,
+            sources,
+            checked,
+            schema,
+            overlays: RefCell::new(Default::default()),
+        }
     }
 
     fn model(&self) -> &quadra_ir::Model {
@@ -89,19 +112,36 @@ impl World {
         }
         let mut sources = self.sources.clone();
         if !items.is_empty() {
-            sources.push((self.root.join("tests/__api__.qd"), quadra_api::overlay_source(entity, items)));
+            sources.push((
+                self.root.join("tests/__api__.qd"),
+                quadra_api::overlay_source(entity, items),
+            ));
         }
         let project = quadra_sema::Project::from_sources(&self.root, sources);
         let c = quadra_analysis::check(&project);
-        let errors: Vec<String> = c.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
-        assert!(errors.is_empty() && c.model.is_some(), "{entity}: {items:?} does not check: {errors:?}");
+        let errors: Vec<String> = c
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == quadra_sema::Severity::Error)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            errors.is_empty() && c.model.is_some(),
+            "{entity}: {items:?} does not check: {errors:?}"
+        );
         let c = Rc::new(c);
         self.overlays.borrow_mut().insert(key, c.clone());
         c
     }
 
     /// An interpreter over the database as of `base`, answering queries in SQL or not.
-    fn interp<'m>(&self, model: &'m quadra_ir::Model, sql: bool, user: Option<u64>, base: Option<u64>) -> Interp<'m> {
+    fn interp<'m>(
+        &self,
+        model: &'m quadra_ir::Model,
+        sql: bool,
+        user: Option<u64>,
+        base: Option<u64>,
+    ) -> Interp<'m> {
         let mut conn = Conn::open(&self.url).unwrap();
         let base = base.unwrap_or_else(|| head(&mut conn).unwrap());
         let mut src = DbSource::at(Pooled::own(conn), base, self.schema.clone(), None).unwrap();
@@ -118,7 +158,13 @@ impl World {
     fn user(&self, login: &str) -> u64 {
         let mut i = self.interp(self.model(), false, None, None);
         let ids = i.ids("User", None);
-        ids.into_iter().find(|id| i.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login)).unwrap_or_else(|| panic!("no user {login}"))
+        ids.into_iter()
+            .find(|id| {
+                i.store
+                    .read(*id, "login", None)
+                    .map_or(false, |v| v.to_string() == login)
+            })
+            .unwrap_or_else(|| panic!("no user {login}"))
     }
 
     fn head(&self) -> u64 {
@@ -155,7 +201,11 @@ fn same_query_paged(w: &World, q: &J, user: Option<u64>, base: Option<u64>, page
     let used_sql = quadra_store::sqlq::SELECTS.load(Ordering::Relaxed) > before;
     let mut ri = w.interp(model, false, user, base);
     let want = quadra_api::query_rows(&mut ri, model, &entity, q, &items, &columns);
-    assert_eq!(comparable(&got), comparable(&want), "query {q} as {user:?} at {base:?}: SQL and the interpreter differ");
+    assert_eq!(
+        comparable(&got),
+        comparable(&want),
+        "query {q} as {user:?} at {base:?}: SQL and the interpreter differ"
+    );
     if want.is_err() || !pages {
         return used_sql;
     }
@@ -165,7 +215,13 @@ fn same_query_paged(w: &World, q: &J, user: Option<u64>, base: Option<u64>, page
     all["offset"] = json!(0);
     all.as_object_mut().unwrap().remove("aggregates");
     let mut ri = w.interp(model, false, user, base);
-    let reference: Vec<J> = quadra_api::query_rows(&mut ri, model, &entity, &all, &items, &columns).unwrap()["rows"].as_array().unwrap().iter().map(|r| r["id"].clone()).collect();
+    let reference: Vec<J> = quadra_api::query_rows(&mut ri, model, &entity, &all, &items, &columns)
+        .unwrap()["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].clone())
+        .collect();
     let mut paged: Vec<J> = Vec::new();
     let mut page = q.clone();
     page["limit"] = json!(23);
@@ -175,20 +231,39 @@ fn same_query_paged(w: &World, q: &J, user: Option<u64>, base: Option<u64>, page
     for _ in 0..400 {
         let mut si = w.interp(model, true, user, base);
         let r = quadra_api::query_rows(&mut si, model, &entity, &page, &items, &columns).unwrap();
-        paged.extend(r["rows"].as_array().unwrap().iter().map(|r| r["id"].clone()));
+        paged.extend(
+            r["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].clone()),
+        );
         match r["next"].as_str() {
             Some(c) => page["after"] = json!(c),
             None => break,
         }
     }
-    assert_eq!(paged, reference, "query {q} as {user:?}: the pages through the cursor are not the whole list");
+    assert_eq!(
+        paged, reference,
+        "query {q} as {user:?}: the pages through the cursor are not the whole list"
+    );
     used_sql
 }
 
 /// Expressions of the language evaluated on one record (as formulas of an overlay), with SQL
 /// and without, in a transaction that first runs `prepare` (and is rolled back).
-fn same_values(w: &World, entity: &str, rec: u64, exprs: &[&str], prepare: &dyn Fn(&mut Interp) -> Result<(), Flow>) -> usize {
-    let items: Vec<(String, String)> = exprs.iter().enumerate().map(|(n, e)| (format!("__q{n}"), e.to_string())).collect();
+fn same_values(
+    w: &World,
+    entity: &str,
+    rec: u64,
+    exprs: &[&str],
+    prepare: &dyn Fn(&mut Interp) -> Result<(), Flow>,
+) -> usize {
+    let items: Vec<(String, String)> = exprs
+        .iter()
+        .enumerate()
+        .map(|(n, e)| (format!("__q{n}"), e.to_string()))
+        .collect();
     let c = w.overlay(entity, &items);
     let model = c.model.as_ref().unwrap();
     let mut answers: Vec<Vec<String>> = Vec::new();
@@ -199,7 +274,10 @@ fn same_values(w: &World, entity: &str, rec: u64, exprs: &[&str], prepare: &dyn 
         let mut out: Vec<String> = Vec::new();
         let r: Result<(), Flow> = i.transaction(|i| {
             prepare(i)?;
-            let rec = V::Ref { ent: Rc::from(entity), id: rec };
+            let rec = V::Ref {
+                ent: Rc::from(entity),
+                id: rec,
+            };
             for (n, _) in exprs.iter().enumerate() {
                 let v = i.get(&rec, &format!("__q{n}"), None, None);
                 out.push(match v {
@@ -212,14 +290,20 @@ fn same_values(w: &World, entity: &str, rec: u64, exprs: &[&str], prepare: &dyn 
             }
             Err(Flow::Fail("roll back".into()))
         });
-        assert!(matches!(r, Err(Flow::Fail(ref m)) if m == "roll back"), "{r:?}");
+        assert!(
+            matches!(r, Err(Flow::Fail(ref m)) if m == "roll back"),
+            "{r:?}"
+        );
         if sql {
             sql_used = (quadra_store::sqlq::SELECTS.load(Ordering::Relaxed) - before) as usize;
         }
         answers.push(out);
     }
     for (n, e) in exprs.iter().enumerate() {
-        assert_eq!(answers[0][n], answers[1][n], "{entity}#{rec}: `{e}`: SQL and the interpreter differ");
+        assert_eq!(
+            answers[0][n], answers[1][n],
+            "{entity}#{rec}: `{e}`: SQL and the interpreter differ"
+        );
     }
     sql_used
 }
@@ -227,7 +311,14 @@ fn same_values(w: &World, entity: &str, rec: u64, exprs: &[&str], prepare: &dyn 
 fn show(i: &mut Interp, v: &V) -> String {
     match v {
         V::Ref { ent, .. } => format!("{ent} {}", i.display(v)),
-        V::List(items) | V::Set(items) => format!("[{}]", items.iter().map(|x| show(i, x)).collect::<Vec<_>>().join(", ")),
+        V::List(items) | V::Set(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|x| show(i, x))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         other => format!("{other:?}"),
     }
 }
@@ -237,24 +328,55 @@ fn show(i: &mut Interp, v: &V) -> String {
 fn stress_world(target: &str) -> World {
     let root = example("stress");
     let url = fresh(target, "stress");
-    let dir = std::env::temp_dir().join(format!("quadra-query-{}-gen-{}", std::process::id(), if target == "sqlite" { "s" } else { "p" }));
+    let dir = std::env::temp_dir().join(format!(
+        "quadra-query-{}-gen-{}",
+        std::process::id(),
+        if target == "sqlite" { "s" } else { "p" }
+    ));
     let _ = std::fs::remove_dir_all(&dir);
-    let st = std::process::Command::new(env!("CARGO_BIN_EXE_quadra")).args(["bench", "gen", "--scale", "tiny", "--out"]).arg(&dir).output().unwrap();
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_quadra"))
+        .args(["bench", "gen", "--scale", "tiny", "--out"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
     let w = World::new(root, url.clone());
     quadra_store::ops::init(&url, w.model(), &w.checked.report, clock()).unwrap();
-    quadra_store::bulk::import_dir(&url, w.model(), &w.checked.report, &dir, clock(), None, &mut |_| {}).unwrap();
+    quadra_store::bulk::import_dir(
+        &url,
+        w.model(),
+        &w.checked.report,
+        &dir,
+        clock(),
+        None,
+        &mut |_| {},
+    )
+    .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     World::new(example("stress"), url)
 }
 
 /// A value of the data, picked by SQL (as the benchmark does).
 fn pick(w: &World, sql: &str) -> String {
-    Conn::open(&w.url).unwrap().query(sql, &[]).unwrap().into_iter().next().and_then(|r| r.into_iter().next().flatten()).unwrap_or_default()
+    Conn::open(&w.url)
+        .unwrap()
+        .query(sql, &[])
+        .unwrap()
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+        .unwrap_or_default()
 }
 
 fn stress_queries(w: &World) {
-    let code = pick(w, "SELECT \"code\" FROM \"customer\" ORDER BY \"id\" LIMIT 1 OFFSET 3");
+    let code = pick(
+        w,
+        "SELECT \"code\" FROM \"customer\" ORDER BY \"id\" LIMIT 1 OFFSET 3",
+    );
     let admin = Some(w.user("admin"));
     let sales = Some(w.user("sales0001"));
     let shipment_filters = [
@@ -314,41 +436,123 @@ fn stress_queries(w: &World) {
             sql += 1;
         }
     }
-    assert!(sql * 10 >= n * 9, "only {sql} of {n} shipment queries went to SQL");
+    assert!(
+        sql * 10 >= n * 9,
+        "only {sql} of {n} shipment queries went to SQL"
+    );
     // without a filter, other entities, other orders, as other users
     let more = [
         (json!({ "entity": "Shipment", "limit": 30 }), sales),
-        (json!({ "entity": "Shipment", "where": "carrier is Air", "order_by": [{ "field": "date" }], "limit": 30 }), sales),
-        (json!({ "entity": "Customer", "where": "name.starts_with(\"R\")", "order_by": [{ "field": "name" }] }), admin),
-        (json!({ "entity": "Customer", "where": "credit_limit > 40000.00 EUR and active", "order_by": [{ "field": "credit_limit", "desc": true }], "aggregates": { "credit_limit": "avg" } }), admin),
-        (json!({ "entity": "Customer", "order_by": [{ "field": "region" }, { "field": "code", "desc": true }] }), sales),
-        (json!({ "entity": "Customer", "where": "tags.any(t => t.name.ends_with(\"A\")) or region.active == false" }), admin),
-        (json!({ "entity": "Order", "where": "state in {Confirmed, Shipped}", "order_by": [{ "field": "number" }], "aggregates": { "date": "min" } }), admin),
-        (json!({ "entity": "Order", "where": "lines.any(l => l.qty > 10 pcs) and date < 2026-09-01", "order_by": [{ "field": "customer.region.name" }, { "field": "date" }] }), sales),
-        (json!({ "entity": "Order", "where": "customer.salesperson == me" }), sales),
-        (json!({ "entity": "OrderLine", "where": "discount > 0% and order.state is not Cancelled", "order_by": [{ "field": "discount", "desc": true }], "aggregates": { "discount": "avg", "qty": "sum" } }), admin),
-        (json!({ "entity": "OrderLine", "where": "price > 10.00 EUR/pcs", "order_by": [{ "field": "price" }] }), admin),
-        (json!({ "entity": "OrderLine", "where": "shipments.count() == 0" }), admin),
-        (json!({ "entity": "Tag", "where": "customers.count() > 2" }), admin),
-        (json!({ "entity": "Region", "where": "team.contains(manager)" }), admin),
-        (json!({ "entity": "Region", "order_by": [{ "field": "last_delivery" }] }), admin),
-        (json!({ "entity": "Category", "where": "parent?.active ?? true", "order_by": [{ "field": "parent" }] }), admin),
-        (json!({ "entity": "Shipment", "where": "line.order.customer.region.code == \"R01\"", "refs": { "line": 0 } }), admin),
-        (json!({ "entity": "Shipment", "offset": 13, "limit": 9, "order_by": [{ "field": "date" }] }), admin),
-        (json!({ "entity": "Shipment", "where": "qty > none" }), admin),
+        (
+            json!({ "entity": "Shipment", "where": "carrier is Air", "order_by": [{ "field": "date" }], "limit": 30 }),
+            sales,
+        ),
+        (
+            json!({ "entity": "Customer", "where": "name.starts_with(\"R\")", "order_by": [{ "field": "name" }] }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Customer", "where": "credit_limit > 40000.00 EUR and active", "order_by": [{ "field": "credit_limit", "desc": true }], "aggregates": { "credit_limit": "avg" } }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Customer", "order_by": [{ "field": "region" }, { "field": "code", "desc": true }] }),
+            sales,
+        ),
+        (
+            json!({ "entity": "Customer", "where": "tags.any(t => t.name.ends_with(\"A\")) or region.active == false" }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Order", "where": "state in {Confirmed, Shipped}", "order_by": [{ "field": "number" }], "aggregates": { "date": "min" } }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Order", "where": "lines.any(l => l.qty > 10 pcs) and date < 2026-09-01", "order_by": [{ "field": "customer.region.name" }, { "field": "date" }] }),
+            sales,
+        ),
+        (
+            json!({ "entity": "Order", "where": "customer.salesperson == me" }),
+            sales,
+        ),
+        (
+            json!({ "entity": "OrderLine", "where": "discount > 0% and order.state is not Cancelled", "order_by": [{ "field": "discount", "desc": true }], "aggregates": { "discount": "avg", "qty": "sum" } }),
+            admin,
+        ),
+        (
+            json!({ "entity": "OrderLine", "where": "price > 10.00 EUR/pcs", "order_by": [{ "field": "price" }] }),
+            admin,
+        ),
+        (
+            json!({ "entity": "OrderLine", "where": "shipments.count() == 0" }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Tag", "where": "customers.count() > 2" }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Region", "where": "team.contains(manager)" }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Region", "order_by": [{ "field": "last_delivery" }] }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Category", "where": "parent?.active ?? true", "order_by": [{ "field": "parent" }] }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Shipment", "where": "line.order.customer.region.code == \"R01\"", "refs": { "line": 0 } }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Shipment", "offset": 13, "limit": 9, "order_by": [{ "field": "date" }] }),
+            admin,
+        ),
+        (
+            json!({ "entity": "Shipment", "where": "qty > none" }),
+            admin,
+        ),
     ];
     for (q, u) in more.iter() {
         same_query(w, q, *u, None);
     }
     // the lines of a record
-    let order: u64 = pick(w, "SELECT CAST(\"id\" AS TEXT) FROM \"order\" ORDER BY \"id\" LIMIT 1 OFFSET 5").parse().unwrap();
-    assert!(same_query(w, &json!({ "entity": "OrderLine", "refs": { "order": order }, "order_by": [{ "field": "qty", "desc": true }] }), admin, None));
-    let tag: u64 = pick(w, "SELECT CAST(\"id\" AS TEXT) FROM \"tag\" ORDER BY \"id\" LIMIT 1").parse().unwrap();
-    assert!(same_query(w, &json!({ "entity": "Customer", "refs": { "tags": tag } }), admin, None));
+    let order: u64 = pick(
+        w,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"order\" ORDER BY \"id\" LIMIT 1 OFFSET 5",
+    )
+    .parse()
+    .unwrap();
+    assert!(same_query(
+        w,
+        &json!({ "entity": "OrderLine", "refs": { "order": order }, "order_by": [{ "field": "qty", "desc": true }] }),
+        admin,
+        None
+    ));
+    let tag: u64 = pick(
+        w,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"tag\" ORDER BY \"id\" LIMIT 1",
+    )
+    .parse()
+    .unwrap();
+    assert!(same_query(
+        w,
+        &json!({ "entity": "Customer", "refs": { "tags": tag } }),
+        admin,
+        None
+    ));
 }
 
 fn stress_language(w: &World) {
-    let region: u64 = pick(w, "SELECT CAST(\"id\" AS TEXT) FROM \"region\" ORDER BY \"id\" LIMIT 1").parse().unwrap();
+    let region: u64 = pick(
+        w,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"region\" ORDER BY \"id\" LIMIT 1",
+    )
+    .parse()
+    .unwrap();
     let exprs = [
         "Customer.where(c => c.region == self and c.active).count()",
         "Customer.count(c => c.region == self)",
@@ -380,22 +584,75 @@ fn stress_language(w: &World) {
         "Order.where(o => o.customer.region == self).sort_by(o => o.date).last()",
     ];
     let used = same_values(w, "Region", region, &exprs, &|_| Ok(()));
-    assert!(used >= exprs.len(), "only {used} SQL queries for {} expressions", exprs.len());
+    assert!(
+        used >= exprs.len(),
+        "only {used} SQL queries for {} expressions",
+        exprs.len()
+    );
     // inside a transaction that wrote some of the records the queries read
     let customer: u64 = pick(w, &format!("SELECT CAST(\"id\" AS TEXT) FROM \"customer\" WHERE \"region_id\" = {region} ORDER BY \"id\" LIMIT 1")).parse().unwrap();
     let other: u64 = pick(w, &format!("SELECT CAST(\"id\" AS TEXT) FROM \"region\" WHERE \"id\" <> {region} ORDER BY \"id\" LIMIT 1")).parse().unwrap();
     let order: u64 = pick(w, &format!("SELECT CAST(o.\"id\" AS TEXT) FROM \"order\" o JOIN \"customer\" c ON c.\"id\" = o.\"customer_id\" WHERE c.\"region_id\" = {region} AND o.\"state\" = 'Draft' ORDER BY o.\"id\" LIMIT 1")).parse().unwrap();
     let writes = |i: &mut Interp| -> Result<(), Flow> {
-        let c = V::Ref { ent: Rc::from("Customer"), id: customer };
+        let c = V::Ref {
+            ent: Rc::from("Customer"),
+            id: customer,
+        };
         i.set(&c, "name", V::Text(Rc::from("Aaaa first")), None)?;
         i.set(&c, "active", V::Bool(false), None)?;
-        let o = V::Ref { ent: Rc::from("Order"), id: order };
-        i.set(&o, "priority", V::Variant { name: Rc::from("High"), fields: Rc::new(Vec::new()) }, None)?;
+        let o = V::Ref {
+            ent: Rc::from("Order"),
+            id: order,
+        };
+        i.set(
+            &o,
+            "priority",
+            V::Variant {
+                name: Rc::from("High"),
+                fields: Rc::new(Vec::new()),
+            },
+            None,
+        )?;
         // a customer moved to another region, and a new one
-        let moved: u64 = i.ids("Customer", None).into_iter().find(|id| *id != customer && i.store.read(*id, "region", None).and_then(|v| v.as_ref_id()) == Some(region)).unwrap();
-        i.set(&V::Ref { ent: Rc::from("Customer"), id: moved }, "region", V::Ref { ent: Rc::from("Region"), id: other }, None)?;
+        let moved: u64 = i
+            .ids("Customer", None)
+            .into_iter()
+            .find(|id| {
+                *id != customer
+                    && i.store
+                        .read(*id, "region", None)
+                        .and_then(|v| v.as_ref_id())
+                        == Some(region)
+            })
+            .unwrap();
+        i.set(
+            &V::Ref {
+                ent: Rc::from("Customer"),
+                id: moved,
+            },
+            "region",
+            V::Ref {
+                ent: Rc::from("Region"),
+                id: other,
+            },
+            None,
+        )?;
         let sp = i.store.read(customer, "salesperson", None).unwrap();
-        i.create("Customer", vec![("code".into(), V::Text(Rc::from("ZZ-NEW"))), ("name".into(), V::Text(Rc::from("Zeta new"))), ("region".into(), V::Ref { ent: Rc::from("Region"), id: region }), ("salesperson".into(), sp)])?;
+        i.create(
+            "Customer",
+            vec![
+                ("code".into(), V::Text(Rc::from("ZZ-NEW"))),
+                ("name".into(), V::Text(Rc::from("Zeta new"))),
+                (
+                    "region".into(),
+                    V::Ref {
+                        ent: Rc::from("Region"),
+                        id: region,
+                    },
+                ),
+                ("salesperson".into(), sp),
+            ],
+        )?;
         Ok(())
     };
     same_values(w, "Region", region, &exprs, &writes);
@@ -412,11 +669,28 @@ fn stress_as_of(w: &World) {
         i.materialize = quadra_store::materialized_formulas(&db.schema);
         i.sink = Some(Box::new(quadra_store::Sink { db, model }));
         let ship: u64 = pick(w, "SELECT CAST(\"id\" AS TEXT) FROM \"shipment\" WHERE \"carrier\" = 'Road' ORDER BY \"id\" LIMIT 1").parse().unwrap();
-        i.transaction(|i| i.set(&V::Ref { ent: Rc::from("Shipment"), id: ship }, "carrier", V::Variant { name: Rc::from("Air"), fields: Rc::new(Vec::new()) }, None)).unwrap();
+        i.transaction(|i| {
+            i.set(
+                &V::Ref {
+                    ent: Rc::from("Shipment"),
+                    id: ship,
+                },
+                "carrier",
+                V::Variant {
+                    name: Rc::from("Air"),
+                    fields: Rc::new(Vec::new()),
+                },
+                None,
+            )
+        })
+        .unwrap();
     }
     assert!(w.head() > before);
     let admin = Some(w.user("admin"));
-    for q in [json!({ "entity": "Shipment", "where": "carrier is Air", "order_by": [{ "field": "date" }] }), json!({ "entity": "Shipment", "order_by": [{ "field": "carrier" }], "limit": 20 })] {
+    for q in [
+        json!({ "entity": "Shipment", "where": "carrier is Air", "order_by": [{ "field": "date" }] }),
+        json!({ "entity": "Shipment", "order_by": [{ "field": "carrier" }], "limit": 20 }),
+    ] {
         same_query(w, &q, admin, Some(before));
         same_query(w, &q, admin, None);
     }
@@ -474,7 +748,12 @@ fn extended_on(target: &str) {
     for q in &queries {
         same_query(&w, q, admin, None);
     }
-    let product: u64 = pick(&w, "SELECT CAST(\"id\" AS TEXT) FROM \"product\" ORDER BY \"id\" LIMIT 1").parse().unwrap();
+    let product: u64 = pick(
+        &w,
+        "SELECT CAST(\"id\" AS TEXT) FROM \"product\" ORDER BY \"id\" LIMIT 1",
+    )
+    .parse()
+    .unwrap();
     let exprs = [
         "StockMove.where(m => m.product == self).sum(m => m.qty.to(pcs))",
         "StockMove.where(m => m.product == self and m.qty > 0 pcs).count()",

@@ -49,7 +49,12 @@ fn main() -> ExitCode {
             None => usage(),
         },
         Some("trace") => match args.get(1) {
-            Some(target) => trace(target, args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))),
+            Some(target) => trace(
+                target,
+                args.get(2)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            ),
             None => usage(),
         },
         Some("certify") => certify(&args[1..]),
@@ -149,7 +154,10 @@ fn load(path: &Path) -> Result<(PathBuf, quadra_sema::Project), ExitCode> {
     let root = match quadra_sema::find_project_root(path) {
         Some(r) => r,
         None => {
-            eprintln!("error: no quadra.toml found in {} or its parents", path.display());
+            eprintln!(
+                "error: no quadra.toml found in {} or its parents",
+                path.display()
+            );
             return Err(ExitCode::FAILURE);
         }
     };
@@ -207,15 +215,35 @@ fn certify(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let lock_path = root.join("metrics.lock");
-    let old = std::fs::read_to_string(&lock_path).map(|t| quadra_analysis::read_lock(&t)).unwrap_or_default();
-    let today = std::process::Command::new("date").arg("+%Y-%m-%d").output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let old = std::fs::read_to_string(&lock_path)
+        .map(|t| quadra_analysis::read_lock(&t))
+        .unwrap_or_default();
+    let today = std::process::Command::new("date")
+        .arg("+%Y-%m-%d")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
     let all = quadra_analysis::fingerprints(model, &checked.report);
-    let unknown: Vec<&String> = names.iter().filter(|n| !all.iter().any(|(m, _, _)| m == *n)).collect();
+    let unknown: Vec<&String> = names
+        .iter()
+        .filter(|n| !all.iter().any(|(m, _, _)| m == *n))
+        .collect();
     if !unknown.is_empty() {
         let known: Vec<&str> = all.iter().map(|(m, _, _)| m.as_str()).collect();
-        let list = unknown.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
-        eprintln!("error: unknown metric {list} (metrics: {})", if known.is_empty() { "none".into() } else { known.join(", ") });
+        let list = unknown
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "error: unknown metric {list} (metrics: {})",
+            if known.is_empty() {
+                "none".into()
+            } else {
+                known.join(", ")
+            }
+        );
         return ExitCode::FAILURE;
     }
     let mut entries = Vec::new();
@@ -227,9 +255,18 @@ fn certify(args: &[String]) -> ExitCode {
             (Some(p), false) => p.clone(),
             (Some(p), true) if p.fingerprint == fp => p.clone(),
             _ => {
-                let by = approver.clone().or_else(|| prev.map(|p| p.approved_by.clone())).unwrap_or_else(|| "unapproved".into());
+                let by = approver
+                    .clone()
+                    .or_else(|| prev.map(|p| p.approved_by.clone()))
+                    .unwrap_or_else(|| "unapproved".into());
                 println!("certified {name}: {fp} ({deps} dependencies)");
-                quadra_analysis::LockEntry { name, fingerprint: fp, dependencies: deps, approved_by: by, approved_on: today.clone() }
+                quadra_analysis::LockEntry {
+                    name,
+                    fingerprint: fp,
+                    dependencies: deps,
+                    approved_by: by,
+                    approved_on: today.clone(),
+                }
             }
         };
         entries.push(entry);
@@ -243,7 +280,11 @@ fn certify(args: &[String]) -> ExitCode {
 
 fn fmt(args: &[String]) -> ExitCode {
     let check_only = args.iter().any(|a| a == "--check");
-    let path = args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     let (_, project) = match load(&path) {
         Ok(x) => x,
         Err(c) => return c,
@@ -277,13 +318,18 @@ fn test(args: &[String]) -> ExitCode {
         Err(c) => return c,
     };
     let mut backend = target.as_deref().map(quadra_store::DbBackend::new);
-    let backend_ref = backend.as_mut().map(|b| b as &mut dyn quadra_runtime::TestBackend);
+    let backend_ref = backend
+        .as_mut()
+        .map(|b| b as &mut dyn quadra_runtime::TestBackend);
     if let Some(t) = &target {
         println!("database: {t} (a fresh database per test, reloaded and verified at the end)\n");
     }
     match quadra_runtime::run_tests_with(&project, filter.as_deref(), backend_ref) {
         Err(diags) => {
-            for d in diags.iter().filter(|d| d.severity == quadra_sema::Severity::Error) {
+            for d in diags
+                .iter()
+                .filter(|d| d.severity == quadra_sema::Severity::Error)
+            {
                 eprintln!("error: {}", d.message);
             }
             eprintln!("✗ the project has errors: run `quadra check`");
@@ -295,7 +341,12 @@ fn test(args: &[String]) -> ExitCode {
                 if r.passed {
                     println!("✓ {}", r.name);
                 } else {
-                    println!("✗ {}  ({})\n    {}", r.name, r.location, r.message.as_deref().unwrap_or("").replace('\n', "\n    "));
+                    println!(
+                        "✗ {}  ({})\n    {}",
+                        r.name,
+                        r.location,
+                        r.message.as_deref().unwrap_or("").replace('\n', "\n    ")
+                    );
                 }
             }
             println!("\n{} passed, {failed} failed", results.len() - failed);
@@ -309,7 +360,10 @@ fn test(args: &[String]) -> ExitCode {
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// The arguments that are neither flags nor a flag's value (`with_value`: the flags that
@@ -317,26 +371,47 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn positionals(args: &[String], with_value: &[&str]) -> Vec<String> {
     args.iter()
         .enumerate()
-        .filter(|(i, a)| !a.starts_with("--") && (*i == 0 || !with_value.contains(&args[i - 1].as_str())))
+        .filter(|(i, a)| {
+            !a.starts_with("--") && (*i == 0 || !with_value.contains(&args[i - 1].as_str()))
+        })
         .map(|(_, a)| a.clone())
         .collect()
 }
 
 /// The flags of the `db`, `change`, `token` and `outbox` commands that take a value.
-const VALUE_FLAGS: &[&str] = &["--url", "--approved-by", "--name", "--days", "--commit-size"];
+const VALUE_FLAGS: &[&str] = &[
+    "--url",
+    "--approved-by",
+    "--name",
+    "--days",
+    "--commit-size",
+];
 
 /// The first positional argument (see `positionals`) and the other arguments.
 fn take_positional(args: &[String], with_value: &[&str]) -> (Option<String>, Vec<String>) {
-    let at = args.iter().enumerate().position(|(i, a)| !a.starts_with("--") && (i == 0 || !with_value.contains(&args[i - 1].as_str())));
+    let at = args.iter().enumerate().position(|(i, a)| {
+        !a.starts_with("--") && (i == 0 || !with_value.contains(&args[i - 1].as_str()))
+    });
     match at {
-        Some(i) => (Some(args[i].clone()), args.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, a)| a.clone()).collect()),
+        Some(i) => (
+            Some(args[i].clone()),
+            args.iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, a)| a.clone())
+                .collect(),
+        ),
         None => (None, args.to_vec()),
     }
 }
 
 /// First argument that is neither a flag nor a flag's value.
 fn positional(args: &[String], with_value: &[&str]) -> PathBuf {
-    positionals(args, with_value).into_iter().next().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    positionals(args, with_value)
+        .into_iter()
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// `--url`, else `[database] url` in quadra.toml, else `sqlite:<root>/.quadra/data.db`.
@@ -354,7 +429,9 @@ pub(crate) fn database_url(root: &Path, args: &[String]) -> String {
                 if let Some((_, v)) = l.split_once('=') {
                     let v = v.trim().trim_matches('"');
                     return match v.strip_prefix("sqlite:") {
-                        Some(p) if !p.starts_with('/') && p != ":memory:" => format!("sqlite:{}", root.join(p).display()),
+                        Some(p) if !p.starts_with('/') && p != ":memory:" => {
+                            format!("sqlite:{}", root.join(p).display())
+                        }
                         _ => v.to_string(),
                     };
                 }
@@ -376,7 +453,14 @@ fn open_project(rest: &[String]) -> Result<(PathBuf, quadra_analysis::Checked, S
         return Err(ExitCode::FAILURE);
     }
     // the interface files are part of the version deployed
-    let bad = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error && project.file(d.file).kind == quadra_sema::FileKind::Interface).count();
+    let bad = checked
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            d.severity == quadra_sema::Severity::Error
+                && project.file(d.file).kind == quadra_sema::FileKind::Interface
+        })
+        .count();
     if bad > 0 && matches!(rest.first().map(String::as_str), Some("migrate" | "init")) {
         eprintln!("error: the interface files have {bad} error(s), run `quadra check`");
         return Err(ExitCode::FAILURE);
@@ -396,9 +480,15 @@ fn finish(result: Result<(), String>) -> ExitCode {
 }
 
 fn db(args: &[String]) -> ExitCode {
-    let Some(cmd) = args.first().map(String::as_str) else { return usage() };
+    let Some(cmd) = args.first().map(String::as_str) else {
+        return usage();
+    };
     // `db fixture <name> [path]`: the name comes before the path
-    let views_cmd = if cmd == "views" { args.get(1).cloned() } else { None };
+    let views_cmd = if cmd == "views" {
+        args.get(1).cloned()
+    } else {
+        None
+    };
     let (fixture_name, rest) = match cmd {
         "fixture" | "import" => take_positional(&args[1..], VALUE_FLAGS),
         // `db views export|import <file> [path]`
@@ -413,7 +503,8 @@ fn db(args: &[String]) -> ExitCode {
     let model = checked.model.as_ref().unwrap();
     let report = &checked.report;
     use quadra_store::ops;
-    finish((|| match cmd {
+    finish((|| {
+        match cmd {
         "init" => {
             let _writer = quadra_store::writer::acquire(&url)?;
             let tables = ops::init(&url, model, report, now())?;
@@ -584,19 +675,24 @@ fn db(args: &[String]) -> ExitCode {
             Ok(())
         }
         _ => Err(format!("unknown db command `{cmd}` (init, status, migrate, verify, provisional, sweep, fixture, import, views)")),
+    }
     })())
 }
 
 /// `quadra outbox list [--pending] [--json]`: the events emitted by `emit`, written with
 /// their commit; `quadra outbox delivered <id…>`: an integration has handed them on.
 fn outbox(args: &[String]) -> ExitCode {
-    let Some(cmd) = args.first().map(String::as_str) else { return usage() };
+    let Some(cmd) = args.first().map(String::as_str) else {
+        return usage();
+    };
     let mut rest = args[1..].to_vec();
     let mut ids: Vec<u64> = Vec::new();
     if cmd == "delivered" {
         // the ids (`12` or `#12`) are the positional arguments before the path
         while let (Some(word), others) = take_positional(&rest, VALUE_FLAGS) {
-            let Ok(id) = word.trim_start_matches('#').parse::<u64>() else { break };
+            let Ok(id) = word.trim_start_matches('#').parse::<u64>() else {
+                break;
+            };
             ids.push(id);
             rest = others;
         }
@@ -628,14 +724,24 @@ fn outbox(args: &[String]) -> ExitCode {
                 return Ok(());
             }
             if events.is_empty() {
-                println!("{}", if pending { "no pending events" } else { "the outbox is empty" });
+                println!(
+                    "{}",
+                    if pending {
+                        "no pending events"
+                    } else {
+                        "the outbox is empty"
+                    }
+                );
             }
             for e in &events {
                 let state = match &e.delivered_at {
                     Some(at) => format!("delivered {at}"),
                     None => "pending".into(),
                 };
-                println!("#{:<5} tx {:<6} {}  {}  {}  ({state})", e.id, e.tx, e.created_at, e.event, e.fields);
+                println!(
+                    "#{:<5} tx {:<6} {}  {}  {}  ({state})",
+                    e.id, e.tx, e.created_at, e.event, e.fields
+                );
             }
             Ok(())
         }
@@ -648,7 +754,22 @@ fn outbox(args: &[String]) -> ExitCode {
     })())
 }
 
-const SERVE_FLAGS: &[&str] = &["--url", "--port", "--web", "--cache-mb", "--prewarm-days", "--sweep-every", "--editors", "--job-timeout", "--max-rows", "--max-list", "--max-queue", "--readers", "--writers", "--log-dir"];
+const SERVE_FLAGS: &[&str] = &[
+    "--url",
+    "--port",
+    "--web",
+    "--cache-mb",
+    "--prewarm-days",
+    "--sweep-every",
+    "--editors",
+    "--job-timeout",
+    "--max-rows",
+    "--max-list",
+    "--max-queue",
+    "--readers",
+    "--writers",
+    "--log-dir",
+];
 
 /// `--job-timeout <seconds>` (0: none), `--max-rows <n>`, `--max-list <n>`, `--max-queue <n>`
 /// (0: none): the limits of the server's requests, on top of the defaults (two minutes, no
@@ -658,8 +779,12 @@ fn serve_limits(args: &[String]) -> quadra_server::Limits {
     if let Some(s) = flag(args, "--job-timeout").and_then(|v| v.parse::<u64>().ok()) {
         l.job = (s > 0).then(|| std::time::Duration::from_secs(s));
     }
-    l.max_rows = flag(args, "--max-rows").and_then(|v| v.parse().ok()).or(l.max_rows);
-    l.max_list = flag(args, "--max-list").and_then(|v| v.parse().ok()).or(l.max_list);
+    l.max_rows = flag(args, "--max-rows")
+        .and_then(|v| v.parse().ok())
+        .or(l.max_rows);
+    l.max_list = flag(args, "--max-list")
+        .and_then(|v| v.parse().ok())
+        .or(l.max_list);
     if let Some(n) = flag(args, "--max-queue").and_then(|v| v.parse::<usize>().ok()) {
         l.max_queue = (n > 0).then_some(n);
     }
@@ -683,10 +808,20 @@ fn serve(args: &[String]) -> ExitCode {
         prewarm_days: flag(args, "--prewarm-days").and_then(|v| v.parse().ok()),
         web: flag(args, "--web").map(PathBuf::from),
         sweep_every: num("--sweep-every", 3600),
-        editors: flag(args, "--editors").map(|e| e.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default(),
+        editors: flag(args, "--editors")
+            .map(|e| {
+                e.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
         watch: false,
         limits: serve_limits(args),
-        engines: quadra_server::Engines { readers: num("--readers", 2) as usize, writers: num("--writers", 1).max(1) as usize },
+        engines: quadra_server::Engines {
+            readers: num("--readers", 2) as usize,
+            writers: num("--writers", 1).max(1) as usize,
+        },
         root,
     };
     // every commit also kept as a file in this folder (another disk) before it is confirmed
@@ -695,8 +830,12 @@ fn serve(args: &[String]) -> ExitCode {
 }
 
 fn token(args: &[String]) -> ExitCode {
-    let Some(cmd) = args.first().map(String::as_str) else { return usage() };
-    let (Some(arg), rest) = take_positional(&args[1..], VALUE_FLAGS) else { return usage() };
+    let Some(cmd) = args.first().map(String::as_str) else {
+        return usage();
+    };
+    let (Some(arg), rest) = take_positional(&args[1..], VALUE_FLAGS) else {
+        return usage();
+    };
     let rest = rest.as_slice();
     let (_, checked, url) = match open_project(rest) {
         Ok(x) => x,
@@ -712,13 +851,32 @@ fn token(args: &[String]) -> ExitCode {
                 let users = interp.ids("User", None);
                 let user = users
                     .into_iter()
-                    .find(|id| interp.store.read(*id, "login", None).map_or(false, |v| v.to_string() == arg))
+                    .find(|id| {
+                        interp
+                            .store
+                            .read(*id, "login", None)
+                            .map_or(false, |v| v.to_string() == arg)
+                    })
                     .ok_or_else(|| format!("no user `{arg}`"))?;
-                let name = flag(rest, "--name").unwrap_or_else(|| format!("{arg}-{}", now().format("%Y%m%d%H%M%S")));
-                let days: i64 = flag(rest, "--days").and_then(|d| d.parse().ok()).unwrap_or(90);
+                let name = flag(rest, "--name")
+                    .unwrap_or_else(|| format!("{arg}-{}", now().format("%Y%m%d%H%M%S")));
+                let days: i64 = flag(rest, "--days")
+                    .and_then(|d| d.parse().ok())
+                    .unwrap_or(90);
                 let read_only = rest.iter().any(|a| a == "--read-only");
-                let (secret, _) = quadra_store::auth::create(&mut conn, "token", user, &name, read_only, now(), Some(now() + chrono::Duration::days(days)))?;
-                println!("token `{name}` for {arg}{}, valid {days} days:", if read_only { " (read-only)" } else { "" });
+                let (secret, _) = quadra_store::auth::create(
+                    &mut conn,
+                    "token",
+                    user,
+                    &name,
+                    read_only,
+                    now(),
+                    Some(now() + chrono::Duration::days(days)),
+                )?;
+                println!(
+                    "token `{name}` for {arg}{}, valid {days} days:",
+                    if read_only { " (read-only)" } else { "" }
+                );
                 println!("{secret}");
                 println!("it is shown only now: store it in a secret manager");
                 Ok(())
@@ -734,7 +892,9 @@ fn token(args: &[String]) -> ExitCode {
 }
 
 fn change(args: &[String]) -> ExitCode {
-    let Some(cmd) = args.first().map(String::as_str) else { return usage() };
+    let Some(cmd) = args.first().map(String::as_str) else {
+        return usage();
+    };
     let needs_name = matches!(cmd, "preview" | "apply" | "revert");
     let (name, rest) = if needs_name {
         match take_positional(&args[1..], VALUE_FLAGS) {
@@ -774,13 +934,32 @@ fn change(args: &[String]) -> ExitCode {
         }
         "preview" | "apply" => {
             let apply = cmd == "apply";
-            let _writer = if apply { Some(quadra_store::writer::acquire(&url)?) } else { None };
-            let o = ops::run_change(&url, model, report, &name, approver.as_deref(), now(), apply)?;
+            let _writer = if apply {
+                Some(quadra_store::writer::acquire(&url)?)
+            } else {
+                None
+            };
+            let o = ops::run_change(
+                &url,
+                model,
+                report,
+                &name,
+                approver.as_deref(),
+                now(),
+                apply,
+            )?;
             if let Some(r) = &o.meta.reason {
                 println!("{name}: {r}");
             }
             if let Some(role) = &o.meta.approved_by_role {
-                println!("  approval: {}", if role.starts_with(|c: char| "AEIOUaeiou".contains(c)) { format!("an {role}") } else { format!("a {role}") });
+                println!(
+                    "  approval: {}",
+                    if role.starts_with(|c: char| "AEIOUaeiou".contains(c)) {
+                        format!("an {role}")
+                    } else {
+                        format!("a {role}")
+                    }
+                );
             }
             if let Some(d) = o.meta.effective {
                 println!("  effective from {d}");
@@ -812,14 +991,20 @@ fn change(args: &[String]) -> ExitCode {
             println!("✓ reverted {name}: {n} values restored in a new transaction");
             Ok(())
         }
-        _ => Err(format!("unknown change command `{cmd}` (list, preview, apply, revert)")),
+        _ => Err(format!(
+            "unknown change command `{cmd}` (list, preview, apply, revert)"
+        )),
     })())
 }
 
 fn check(args: &[String]) -> ExitCode {
     let json = args.iter().any(|a| a == "--json");
     let fix = args.iter().any(|a| a == "--fix");
-    let path = args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     let (root, mut project) = match load(&path) {
         Ok(x) => x,
         Err(c) => return c,
@@ -849,14 +1034,27 @@ fn check(args: &[String]) -> ExitCode {
     }
     let modules = project.files().count();
     if json {
-        let list: Vec<serde_json::Value> = diagnostics.iter().filter(|d| d.severity != quadra_sema::Severity::Hint).map(|d| diagnostic_json(&root, &project, d)).collect();
+        let list: Vec<serde_json::Value> = diagnostics
+            .iter()
+            .filter(|d| d.severity != quadra_sema::Severity::Hint)
+            .map(|d| diagnostic_json(&root, &project, d))
+            .collect();
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ok": errors == 0, "errors": errors, "warnings": warnings, "diagnostics": list })).unwrap());
-        return if errors == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        return if errors == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
     let mut files = SimpleFiles::new();
     let mut ids = std::collections::HashMap::new();
     for f in project.files() {
-        let display = f.path.strip_prefix(&root).unwrap_or(&f.path).display().to_string();
+        let display = f
+            .path
+            .strip_prefix(&root)
+            .unwrap_or(&f.path)
+            .display()
+            .to_string();
         ids.insert(f.id, files.add(display, f.text.clone()));
     }
     let writer = termcolor::StandardStream::stderr(termcolor::ColorChoice::Auto);
@@ -868,14 +1066,22 @@ fn check(args: &[String]) -> ExitCode {
             quadra_sema::Severity::Hint => Diagnostic::note(),
         };
         let range = usize::from(d.range.start())..usize::from(d.range.end());
-        let mut diag = diag.with_message(&d.message).with_labels(vec![Label::primary(ids[&d.file], range)]);
+        let mut diag = diag
+            .with_message(&d.message)
+            .with_labels(vec![Label::primary(ids[&d.file], range)]);
         if let Some(f) = fix_of(&d.message) {
-            diag = diag.with_notes(vec![format!("fix: write `{f}` (`quadra check --fix` does it in .qdi files)")]);
+            diag = diag.with_notes(vec![format!(
+                "fix: write `{f}` (`quadra check --fix` does it in .qdi files)"
+            )]);
         }
         let _ = term::emit(&mut writer.lock(), &config, &files, &diag);
     }
     let interfaces = project.interface_files().count();
-    let what = if interfaces > 0 { format!("{modules} modules ({interfaces} interface files)") } else { format!("{modules} modules") };
+    let what = if interfaces > 0 {
+        format!("{modules} modules ({interfaces} interface files)")
+    } else {
+        format!("{modules} modules")
+    };
     if errors == 0 {
         eprintln!("✓ {what} checked, {warnings} warnings");
         ExitCode::SUCCESS
@@ -888,21 +1094,39 @@ fn check(args: &[String]) -> ExitCode {
 /// The name a message suggests (`did you mean `x`?`).
 fn fix_of(message: &str) -> Option<String> {
     let rest = message.split("did you mean `").nth(1)?;
-    rest.split('`').next().map(str::to_string).filter(|s| !s.is_empty())
+    rest.split('`')
+        .next()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
 }
 
 /// A diagnostic as `quadra check --json` gives it: the file, 1-based lines and columns
 /// (in characters), and the fix when there is one.
-fn diagnostic_json(root: &Path, project: &quadra_sema::Project, d: &quadra_sema::Diagnostic) -> serde_json::Value {
+fn diagnostic_json(
+    root: &Path,
+    project: &quadra_sema::Project,
+    d: &quadra_sema::Diagnostic,
+) -> serde_json::Value {
     let f = project.file(d.file);
     let pos = |at: usize| {
         let at = at.min(f.text.len());
         let before = &f.text[..at];
-        (before.matches('\n').count() + 1, before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1)
+        (
+            before.matches('\n').count() + 1,
+            before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1,
+        )
     };
     let (start, end) = (usize::from(d.range.start()), usize::from(d.range.end()));
     let ((l1, c1), (l2, c2)) = (pos(start), pos(end));
-    let path = if f.kind == quadra_sema::FileKind::Std { f.path.display().to_string() } else { f.path.strip_prefix(root).unwrap_or(&f.path).display().to_string() };
+    let path = if f.kind == quadra_sema::FileKind::Std {
+        f.path.display().to_string()
+    } else {
+        f.path
+            .strip_prefix(root)
+            .unwrap_or(&f.path)
+            .display()
+            .to_string()
+    };
     serde_json::json!({
         "path": path,
         "line": l1, "column": c1, "end_line": l2, "end_column": c2,
@@ -915,13 +1139,16 @@ fn diagnostic_json(root: &Path, project: &quadra_sema::Project, d: &quadra_sema:
 /// Apply the suggested names of the diagnostics of interface files (a name renamed by a
 /// migration, a close one): the number of edits.
 fn apply_fixes(project: &quadra_sema::Project, diagnostics: &[quadra_sema::Diagnostic]) -> usize {
-    let mut by_file: std::collections::HashMap<quadra_sema::FileId, Vec<(usize, usize, String)>> = Default::default();
+    let mut by_file: std::collections::HashMap<quadra_sema::FileId, Vec<(usize, usize, String)>> =
+        Default::default();
     for d in diagnostics {
         let f = project.file(d.file);
         if f.kind != quadra_sema::FileKind::Interface {
             continue;
         }
-        let Some(w) = fix_of(&d.message) else { continue };
+        let Some(w) = fix_of(&d.message) else {
+            continue;
+        };
         let (a, b) = (usize::from(d.range.start()), usize::from(d.range.end()));
         let old = f.text.get(a..b).unwrap_or("");
         // only a name, replaced by a name
@@ -968,27 +1195,64 @@ mod tests {
         let dir = std::env::temp_dir();
         let d = dir.display().to_string();
         let (path, names, by) = certify_args(&strings(&["--approved-by", "alice"]));
-        assert_eq!((path, names, by.as_deref()), (PathBuf::from("."), vec![], Some("alice")));
+        assert_eq!(
+            (path, names, by.as_deref()),
+            (PathBuf::from("."), vec![], Some("alice"))
+        );
         let (path, names, by) = certify_args(&strings(&["margin", "--approved-by", "alice", &d]));
-        assert_eq!((path, names, by.as_deref()), (dir.clone(), strings(&["margin"]), Some("alice")));
-        let (path, names, _) = certify_args(&strings(&["--approved-by", "alice", "margin", "revenue"]));
-        assert_eq!((path, names), (PathBuf::from("."), strings(&["margin", "revenue"])));
+        assert_eq!(
+            (path, names, by.as_deref()),
+            (dir.clone(), strings(&["margin"]), Some("alice"))
+        );
+        let (path, names, _) =
+            certify_args(&strings(&["--approved-by", "alice", "margin", "revenue"]));
+        assert_eq!(
+            (path, names),
+            (PathBuf::from("."), strings(&["margin", "revenue"]))
+        );
         let (path, names, _) = certify_args(&strings(&[&d, "margin", "--approved-by", "alice"]));
         assert_eq!((path, names), (dir.clone(), strings(&["margin"])));
         // change apply / db fixture / token: the name is the first positional argument
-        let (name, rest) = take_positional(&strings(&["--approved-by", "alex", "prices", &d]), VALUE_FLAGS);
+        let (name, rest) = take_positional(
+            &strings(&["--approved-by", "alex", "prices", &d]),
+            VALUE_FLAGS,
+        );
         assert_eq!(name.as_deref(), Some("prices"));
         assert_eq!(positional(&rest, VALUE_FLAGS), dir);
-        let (name, rest) = take_positional(&strings(&["--url", "sqlite:x.db", "demo"]), VALUE_FLAGS);
-        assert_eq!((name.as_deref(), rest), (Some("demo"), strings(&["--url", "sqlite:x.db"])));
-        assert_eq!(positional(&strings(&["--url", "sqlite:x.db"]), VALUE_FLAGS), PathBuf::from("."));
+        let (name, rest) =
+            take_positional(&strings(&["--url", "sqlite:x.db", "demo"]), VALUE_FLAGS);
+        assert_eq!(
+            (name.as_deref(), rest),
+            (Some("demo"), strings(&["--url", "sqlite:x.db"]))
+        );
+        assert_eq!(
+            positional(&strings(&["--url", "sqlite:x.db"]), VALUE_FLAGS),
+            PathBuf::from(".")
+        );
         // db import: the directory first, then the project
-        let (name, rest) = take_positional(&strings(&["--commit-size", "1000", "data", &d]), VALUE_FLAGS);
+        let (name, rest) = take_positional(
+            &strings(&["--commit-size", "1000", "data", &d]),
+            VALUE_FLAGS,
+        );
         assert_eq!(name.as_deref(), Some("data"));
         assert_eq!(positional(&rest, VALUE_FLAGS), dir);
         // bench: the project is the argument that is not a flag's value
-        assert_eq!(bench::path_arg(&strings(&["--url", "sqlite:x.db", "--scale", "small", &d, "--json", "out.json"])), dir);
-        assert_eq!(bench::path_arg(&strings(&["--scale", "tiny", "--only", "grid,load"])), PathBuf::from("."));
+        assert_eq!(
+            bench::path_arg(&strings(&[
+                "--url",
+                "sqlite:x.db",
+                "--scale",
+                "small",
+                &d,
+                "--json",
+                "out.json"
+            ])),
+            dir
+        );
+        assert_eq!(
+            bench::path_arg(&strings(&["--scale", "tiny", "--only", "grid,load"])),
+            PathBuf::from(".")
+        );
     }
 
     /// Every scenario of the benchmark is described once, the load first.

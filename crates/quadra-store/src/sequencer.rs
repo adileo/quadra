@@ -151,15 +151,75 @@ pub trait DurabilitySink: Send {
     }
 }
 
+/// How a tenant's log stands (`Sequencer::health`), for the host's monitoring.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Health {
+    /// the last transaction written to the database
+    pub written: u64,
+    /// the last transaction the destinations keep (`written` without destinations)
+    pub kept: u64,
+    /// why the destinations count as down, while they do
+    pub down: Option<String>,
+    /// transactions refused since the start because too many were not kept
+    pub refused: u64,
+    /// whether it has destinations at all
+    pub destinations: bool,
+}
+
+/// What `Health` is read from: kept up to date by the sequencer and its uploader, read by anyone
+/// without asking their threads (a sequencer busy with a snapshot still answers at once).
+#[derive(Default)]
+struct HealthCell {
+    written: std::sync::atomic::AtomicU64,
+    kept: std::sync::atomic::AtomicU64,
+    refused: std::sync::atomic::AtomicU64,
+    destinations: std::sync::atomic::AtomicBool,
+    down: std::sync::Mutex<Option<String>>,
+}
+
 /// A change outside the hash chain, run by the sequencer (`Sequencer::side`).
 type SideFn = Box<dyn FnOnce(&mut Conn) -> Result<Box<dyn std::any::Any + Send>, String> + Send>;
 
 /// A file of its own for a snapshot on its way to the destinations (many tenants, and their
 /// sequencers, share a process).
-fn snapshot_file() -> std::path::PathBuf {
+/// A file for a snapshot of the database of `url`: next to it (the same disk, which has room
+/// for a copy of it; the system's temporary folder may be small or in memory), else in the
+/// temporary folder.
+fn snapshot_file(url: &str) -> std::path::PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("quadra-snapshot-{}-{n}.db", std::process::id()))
+    let dir = url
+        .strip_prefix("sqlite:")
+        .map(std::path::Path::new)
+        .and_then(|p| p.parent())
+        .filter(|d| !d.as_os_str().is_empty() && d.is_dir())
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join(format!(".quadra-snapshot-{}-{n}.db", std::process::id()))
+}
+
+/// Snapshot files a process that died left next to the database (an hour old: none of a
+/// live one, which removes them once uploaded).
+fn forget_old_snapshots(url: &str) {
+    let Some(dir) = snapshot_file(url).parent().map(|d| d.to_path_buf()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let ours = format!(".quadra-snapshot-{}-", std::process::id());
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|d| d > Duration::from_secs(3600));
+        if name.starts_with(".quadra-snapshot-") && !name.starts_with(&ours) && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// When a commit is confirmed to its client.
@@ -189,6 +249,9 @@ pub struct Options {
     /// SQLite: a snapshot once the log since the last one is larger than this and than the
     /// database; the destinations then drop the segments it holds (`DurabilitySink::prune`)
     pub snapshot_bytes: u64,
+    /// a snapshot also once this many batches went since the last one (and an eighth of the
+    /// database's size): a log of many small batches does not pile up objects
+    pub snapshot_segments: u64,
     pub destinations: Vec<Box<dyn DurabilitySink>>,
     pub rule: Rule,
     /// SQLite: the size the database may grow to (`conn::set_max_bytes`)
@@ -206,6 +269,7 @@ impl Default for Options {
             abandon_after: Duration::from_secs(60),
             max_behind: 20_000,
             snapshot_bytes: 64 << 20,
+            snapshot_segments: 2000,
             destinations: Vec::new(),
             rule: Rule::Local,
             max_bytes: None,
@@ -235,7 +299,10 @@ impl Responder {
 /// A commit handed over without waiting for it: its result arrives later (`then`).
 #[derive(Default)]
 pub struct Ticket {
-    state: std::sync::Mutex<(Option<Result<u64, CommitError>>, Option<Box<dyn FnOnce(Result<u64, CommitError>) + Send>>)>,
+    state: std::sync::Mutex<(
+        Option<Result<u64, CommitError>>,
+        Option<Box<dyn FnOnce(Result<u64, CommitError>) + Send>>,
+    )>,
 }
 
 impl Ticket {
@@ -272,7 +339,11 @@ enum Msg {
     Ids(u64, mpsc::Sender<u64>),
     Snapshot(Duration),
     Written(u64, Vec<u64>, mpsc::Sender<Option<bool>>),
-    Side(SideFn, mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>, Responder),
+    Side(
+        SideFn,
+        mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>,
+        Responder,
+    ),
     Stop(mpsc::Sender<()>),
 }
 
@@ -280,6 +351,7 @@ enum Msg {
 #[derive(Clone)]
 pub struct Sequencer {
     tx: mpsc::Sender<Msg>,
+    health: std::sync::Arc<HealthCell>,
 }
 
 fn gone() -> String {
@@ -292,9 +364,11 @@ impl Sequencer {
         let (tx, rx) = mpsc::channel();
         let (ready, started) = mpsc::channel();
         let url = url.to_string();
+        let health = std::sync::Arc::new(HealthCell::default());
+        let cell = health.clone();
         std::thread::Builder::new()
             .name("quadra-sequencer".into())
-            .spawn(move || match State::open(&url, options) {
+            .spawn(move || match State::open(&url, options, cell) {
                 Ok(mut s) => {
                     let _ = ready.send(Ok(()));
                     s.run(rx);
@@ -305,13 +379,15 @@ impl Sequencer {
             })
             .map_err(|e| e.to_string())?;
         started.recv().map_err(|_| gone())??;
-        Ok(Sequencer { tx })
+        Ok(Sequencer { tx, health })
     }
 
     /// Checks a transaction and numbers it, or refuses it.
     pub fn reserve(&self, r: Request) -> Result<Reservation, CommitError> {
         let (tx, rx) = mpsc::channel();
-        self.tx.send(Msg::Reserve(r, tx)).map_err(|_| CommitError::Failed(gone()))?;
+        self.tx
+            .send(Msg::Reserve(r, tx))
+            .map_err(|_| CommitError::Failed(gone()))?;
         rx.recv().map_err(|_| CommitError::Failed(gone()))?
     }
 
@@ -319,13 +395,22 @@ impl Sequencer {
     /// durable; returns the transaction's number.
     pub fn submit(&self, tx: u64, p: Prepared) -> Result<u64, CommitError> {
         let (reply, rx) = mpsc::channel();
-        self.tx.send(Msg::Submit(tx, p, Responder::Chan(reply))).map_err(|_| CommitError::Failed(gone()))?;
+        self.tx
+            .send(Msg::Submit(tx, p, Responder::Chan(reply)))
+            .map_err(|_| CommitError::Failed(gone()))?;
         rx.recv().map_err(|_| CommitError::Failed(gone()))?
     }
 
     /// `submit` without waiting: `then` gets the result once the writes are durable.
-    pub fn submit_then(&self, tx: u64, p: Prepared, then: Box<dyn FnOnce(Result<u64, CommitError>) + Send>) {
-        if let Err(mpsc::SendError(Msg::Submit(_, _, r))) = self.tx.send(Msg::Submit(tx, p, Responder::Call(then))) {
+    pub fn submit_then(
+        &self,
+        tx: u64,
+        p: Prepared,
+        then: Box<dyn FnOnce(Result<u64, CommitError>) + Send>,
+    ) {
+        if let Err(mpsc::SendError(Msg::Submit(_, _, r))) =
+            self.tx.send(Msg::Submit(tx, p, Responder::Call(then)))
+        {
             let _ = r.send(Err(CommitError::Failed(gone())));
         }
     }
@@ -366,11 +451,17 @@ impl Sequencer {
     /// as a batch of its own, with no transaction: in the database and in the destinations in
     /// the order of the log, confirmed like a commit (under `Rule::All`, once kept). `f` runs on
     /// the sequencer's connection; its own `BEGIN`/`COMMIT` become part of the batch.
-    pub fn side<T: Send + 'static>(&self, f: impl FnOnce(&mut Conn) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    pub fn side<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Conn) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
         let (value, value_rx) = mpsc::channel();
         let (kept, kept_rx) = mpsc::channel();
-        let f: SideFn = Box::new(move |c| f(c).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>));
-        self.tx.send(Msg::Side(f, value, Responder::Chan(kept))).map_err(|_| gone())?;
+        let f: SideFn =
+            Box::new(move |c| f(c).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>));
+        self.tx
+            .send(Msg::Side(f, value, Responder::Chan(kept)))
+            .map_err(|_| gone())?;
         let v = value_rx.recv().map_err(|_| gone())??;
         match kept_rx.recv() {
             Ok(Ok(_)) => {}
@@ -378,7 +469,29 @@ impl Sequencer {
             Ok(Err(e)) => return Err(format!("{e:?}")),
             Err(_) => return Err(gone()),
         }
-        v.downcast::<T>().map(|v| *v).map_err(|_| "the sequencer answered with another type".into())
+        v.downcast::<T>()
+            .map(|v| *v)
+            .map_err(|_| "the sequencer answered with another type".into())
+    }
+
+    /// How its log stands: what is written, what is kept, whether the destinations are down.
+    pub fn health(&self) -> Option<Health> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let h = &self.health;
+        let written = h.written.load(Relaxed);
+        let destinations = h.destinations.load(Relaxed);
+        let kept = if destinations {
+            h.kept.load(Relaxed).min(written)
+        } else {
+            written
+        };
+        Some(Health {
+            written,
+            kept,
+            down: h.down.lock().unwrap().clone(),
+            refused: h.refused.load(Relaxed),
+            destinations,
+        })
     }
 
     /// Gives up a reserved transaction (its writes could not be prepared).
@@ -531,19 +644,47 @@ impl Window {
             return self.seen.back().is_some_and(|s| s.tx > base);
         }
         reads.records.iter().any(|id| after(self.fields.get(id)))
-            || reads.formula_fields.iter().any(|k| after(self.formula_fields.get(k)))
-            || reads.formulas.iter().any(|id| reads.formula_fields.range((*id, String::new())..).next().is_none_or(|(i, _)| i != id) && after(self.rows.get(id)))
-            || reads.formula_scans.iter().any(|e| after(self.entity_rows.get(e)))
+            || reads
+                .formula_fields
+                .iter()
+                .any(|k| after(self.formula_fields.get(k)))
+            || reads.formulas.iter().any(|id| {
+                reads
+                    .formula_fields
+                    .range((*id, String::new())..)
+                    .next()
+                    .is_none_or(|(i, _)| i != id)
+                    && after(self.rows.get(id))
+            })
+            || reads
+                .formula_scans
+                .iter()
+                .any(|e| after(self.entity_rows.get(e)))
             || reads.scans.iter().any(|e| after(self.created.get(e)))
             || reads.finds.iter().any(|k| after(self.field_keys.get(k)))
-            || reads.find_values.iter().any(|k| after(self.field_values.get(k)))
-            || reads.ledgers.iter().any(|(l, _)| after(self.ledgers.get(l)))
-            || reads.counters.iter().any(|(k, seen)| self.counters.get(k).is_some_and(|(t, n)| *t > base && n != seen))
+            || reads
+                .find_values
+                .iter()
+                .any(|k| after(self.field_values.get(k)))
+            || reads
+                .ledgers
+                .iter()
+                .any(|(l, _)| after(self.ledgers.get(l)))
+            || reads.counters.iter().any(|(k, seen)| {
+                self.counters
+                    .get(k)
+                    .is_some_and(|(t, n)| *t > base && n != seen)
+            })
     }
 
     /// What each transaction after `base` changed that `reads` read, as the database's check
     /// says it (`Database::find_conflicts`).
-    fn describe(&self, base: u64, whole: bool, reads: &ReadSet) -> BTreeMap<u64, (Vec<String>, &Seen)> {
+    fn describe(
+        &self,
+        base: u64,
+        whole: bool,
+        reads: &ReadSet,
+    ) -> BTreeMap<u64, (Vec<String>, &Seen)> {
         let mut out: BTreeMap<u64, (Vec<String>, &Seen)> = BTreeMap::new();
         for s in self.seen.iter().filter(|s| s.tx > base) {
             let mut what = Vec::new();
@@ -551,7 +692,9 @@ impl Window {
                 what.push("data read by this transaction".to_string());
             } else {
                 for (id, ent, field) in &s.writes.fields {
-                    if reads.records.contains(id) || reads.finds.contains(&(ent.clone(), field.clone())) {
+                    if reads.records.contains(id)
+                        || reads.finds.contains(&(ent.clone(), field.clone()))
+                    {
                         what.push(format!("{ent}#{id}.{field}"));
                     }
                 }
@@ -562,13 +705,25 @@ impl Window {
                 }
                 for (id, ent) in &s.writes.rows {
                     // a formula read by field: only a change of that formula
-                    let by_field = reads.formula_fields.range((*id, String::new())..).next().is_some_and(|(i, _)| i == id);
-                    let fields: Vec<&str> = s.writes.formula_fields.iter().filter(|k| k.0 == *id && reads.formula_fields.contains(*k)).map(|k| k.1.as_str()).collect();
+                    let by_field = reads
+                        .formula_fields
+                        .range((*id, String::new())..)
+                        .next()
+                        .is_some_and(|(i, _)| i == id);
+                    let fields: Vec<&str> = s
+                        .writes
+                        .formula_fields
+                        .iter()
+                        .filter(|k| k.0 == *id && reads.formula_fields.contains(*k))
+                        .map(|k| k.1.as_str())
+                        .collect();
                     if by_field && !fields.is_empty() {
                         for f in fields {
                             what.push(format!("{ent}#{id}.{f} (computed)"));
                         }
-                    } else if (!by_field && reads.formulas.contains(id)) || reads.formula_scans.contains(ent) {
+                    } else if (!by_field && reads.formulas.contains(id))
+                        || reads.formula_scans.contains(ent)
+                    {
                         what.push(format!("{ent}#{id} (its computed values)"));
                     }
                 }
@@ -584,7 +739,9 @@ impl Window {
                         }
                         match filter {
                             None => what.push(format!("{ledger} rows")),
-                            Some((col, key)) if cols.iter().any(|(c, v)| c == col && v == key) => what.push(format!("{ledger} rows with {col} = {key}")),
+                            Some((col, key)) if cols.iter().any(|(c, v)| c == col && v == key) => {
+                                what.push(format!("{ledger} rows with {col} = {key}"))
+                            }
                             Some(_) => {}
                         }
                     }
@@ -644,8 +801,16 @@ struct State {
     uploader: Option<Uploader>,
     /// when a snapshot is due for the destinations
     snapshot_due: Option<Instant>,
-    /// the size of the batches sent to the destinations since their last snapshot
+    /// the size of the batches sent to the destinations since their last snapshot, and how many
     log_bytes: u64,
+    log_segments: u64,
+    /// transactions refused because too many were not kept by the destinations
+    refused: u64,
+    /// numbered and never written (given up, or refused by the database): their deltas count
+    /// for no rule on a total
+    void: HashSet<u64>,
+    /// what `Sequencer::health` reads
+    health: std::sync::Arc<HealthCell>,
     url: String,
 }
 
@@ -654,8 +819,13 @@ fn num(s: &Option<String>) -> i64 {
 }
 
 impl State {
-    fn open(url: &str, options: Options) -> Result<State, String> {
+    fn open(
+        url: &str,
+        options: Options,
+        health: std::sync::Arc<HealthCell>,
+    ) -> Result<State, String> {
         let lock = crate::writer::acquire(url)?;
+        forget_old_snapshots(url);
         crate::conn::set_max_bytes(options.max_bytes);
         crate::conn::set_statement_timeout(options.statement_timeout);
         let mut conn = Conn::open(url)?;
@@ -676,19 +846,27 @@ impl State {
             pending: BTreeMap::new(),
             options,
             logins: HashMap::new(),
-            stats: std::env::var_os("QUADRA_SEQ_STATS").map(|_| (0, 0, Duration::ZERO, Duration::ZERO, Instant::now())),
+            stats: std::env::var_os("QUADRA_SEQ_STATS")
+                .map(|_| (0, 0, Duration::ZERO, Duration::ZERO, Instant::now())),
             refusals: BTreeMap::new(),
             lock: Some(lock),
             uploader: None,
             snapshot_due: None,
             log_bytes: 0,
+            log_segments: 0,
+            refused: 0,
+            void: HashSet::new(),
+            health,
             url: url.to_string(),
         };
         s.reload()?;
         let mut destinations = std::mem::take(&mut s.options.destinations);
         // with the batches kept elsewhere before they are confirmed, the database itself need not
         // sync at every commit: SQLite in WAL then syncs at checkpoints (the log is the durability)
-        if !destinations.is_empty() && s.conn.dialect() == Dialect::Sqlite && s.options.rule != Rule::Local {
+        if !destinations.is_empty()
+            && s.conn.dialect() == Dialect::Sqlite
+            && s.options.rule != Rule::Local
+        {
             s.conn.batch("PRAGMA synchronous = NORMAL")?;
         }
         // a destination ahead of the database (the machine lost its last commits, already kept
@@ -708,26 +886,41 @@ impl State {
         // (PostgreSQL: no snapshots, it has its own backups)
         let sqlite = s.conn.dialect() == Dialect::Sqlite;
         for d in destinations.iter_mut().filter(|_| sqlite) {
+            // (one that cannot say what it holds is taken as behind: a snapshot costs less than a log
+            // that cannot rebuild the database)
             match d.last() {
                 Ok(Some(p)) if p == (s.batch, s.durable) => {}
-                Ok(_) => {
-                    let file = snapshot_file();
-                    let r = crate::segments::snapshot(url, &file).and_then(|(b, t)| d.snapshot(b, t, &file));
+                answer => {
+                    if let Err(e) = answer {
+                        eprintln!("sequencer: a destination cannot say what it holds ({e}): it gets a snapshot");
+                    }
+                    let file = snapshot_file(url);
+                    let r = crate::segments::snapshot(url, &file)
+                        .and_then(|(b, t)| d.snapshot(b, t, &file));
                     let _ = std::fs::remove_file(&file);
                     if let Err(e) = r {
                         // what it would keep from now on could not rebuild the database
                         if s.options.rule != Rule::Local {
-                            return Err(format!("a destination is behind and could not get a snapshot: {e}"));
+                            return Err(format!(
+                                "a destination is behind and could not get a snapshot: {e}"
+                            ));
                         }
                         eprintln!("sequencer: a destination is behind and could not get a snapshot ({e}): another in a minute");
                         s.snapshot_due = Some(Instant::now() + Duration::from_secs(60));
                     }
                 }
-                Err(e) => eprintln!("sequencer: a destination cannot say what it holds: {e}"),
             }
         }
         if !destinations.is_empty() {
-            s.uploader = Some(Uploader::start(destinations, s.options.rule, s.acked)?);
+            s.health
+                .destinations
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            s.uploader = Some(Uploader::start(
+                destinations,
+                s.options.rule,
+                s.acked,
+                s.health.clone(),
+            )?);
         }
         Ok(s)
     }
@@ -740,19 +933,38 @@ impl State {
         )?;
         let row = r.into_iter().next().unwrap_or_default();
         let at = |i: usize| row.get(i).cloned().flatten();
-        self.head = num(&at(0)) as u64;
-        self.durable = self.head;
-        self.acked = self.head;
+        let written = num(&at(0)) as u64;
+        // numbers given before a restart are never given again: an engine late with its writes
+        // for one of them must not land on a new transaction (the batch after covers the gap)
+        self.head = self.head.max(written);
+        self.durable = written;
+        self.health
+            .written
+            .store(self.durable, std::sync::atomic::Ordering::Relaxed);
+        self.acked = written;
         self.seq = num(&at(1));
         self.prev_hash = at(2).unwrap_or_else(|| "0".repeat(64));
         self.outbox = num(&at(3));
-        self.next_id = at(4).and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|s| s["next_id"].as_u64()).unwrap_or(0);
+        self.next_id = at(4)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|s| s["next_id"].as_u64())
+            .unwrap_or(0);
         // ids reserved by engines before (in the database): never given twice
-        let reserved = self.conn.query("SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'id_reserved'", &[])?;
-        let reserved = reserved.first().and_then(|r| r[0].as_deref()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let reserved = self.conn.query(
+            "SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'id_reserved'",
+            &[],
+        )?;
+        let reserved = reserved
+            .first()
+            .and_then(|r| r[0].as_deref())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
         self.ids_given = self.ids_given.max(reserved).max(self.next_id);
         self.batch = num(&at(5)) as u64;
-        self.window = Window { floor: self.head, ..Default::default() };
+        self.window = Window {
+            floor: self.durable,
+            ..Default::default()
+        };
         Ok(())
     }
 
@@ -763,7 +975,7 @@ impl State {
                 Some(d) if d.is_zero() => match rx.try_recv() {
                     Ok(m) => Some(m),
                     Err(TryRecvError::Empty) => {
-                        self.flush();
+                        self.guarded(|s| s.flush());
                         continue;
                     }
                     Err(TryRecvError::Disconnected) => None,
@@ -771,7 +983,7 @@ impl State {
                 Some(d) => match rx.recv_timeout(d) {
                     Ok(m) => Some(m),
                     Err(RecvTimeoutError::Timeout) => {
-                        self.flush();
+                        self.guarded(|s| s.flush());
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => None,
@@ -784,14 +996,53 @@ impl State {
                 }
                 return;
             };
-            if let Some(stopped) = self.handle(msg) {
+            if let Some(stopped) = self.guarded(|s| s.handle(msg)).flatten() {
                 self.flush_all();
+                // a snapshot asked for and not taken yet (after a deploy, writes past the
+                // sequencer): before the end, or the destinations could not rebuild what is now
+                if self.snapshot_due.is_some() {
+                    self.take_snapshot();
+                }
                 if let Some(u) = self.uploader.take() {
                     u.finish();
+                }
+                // the WAL written back into the file before anyone takes the file (a hibernation
+                // uploads it whole): checked, and tried again while a reader holds it
+                if self.conn.dialect() == Dialect::Sqlite {
+                    // (each try waits for readers up to the connection's busy timeout)
+                    for attempt in 0..3 {
+                        match self.conn.query("PRAGMA wal_checkpoint(TRUNCATE)", &[]) {
+                            Ok(r) if r.first().and_then(|r| r[0].as_deref()) == Some("0") => break,
+                            _ if attempt == 2 => eprintln!("sequencer: the WAL could not be written back into the file at the stop"),
+                            _ => std::thread::sleep(Duration::from_millis(100)),
+                        }
+                    }
                 }
                 self.lock = None;
                 let _ = stopped.send(());
                 return;
+            }
+        }
+    }
+
+    /// A bug met on the sequencer's thread (in the code of a change outside the chain, in
+    /// conflict checks) does not stop it: what was open is rolled back, the transactions in
+    /// line are refused and the state read again from the database, with a snapshot for the
+    /// destinations (a batch written and not yet handed over would be missing from the log).
+    fn guarded<T>(&mut self, f: impl FnOnce(&mut State) -> T) -> Option<T> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
+            Ok(v) => Some(v),
+            Err(panic) => {
+                let why = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                eprintln!("sequencer: an internal error ({why}): the state is read again from the database");
+                crate::conn::side_end();
+                let _ = self.conn.batch("ROLLBACK");
+                self.restart("an internal error of the sequencer: try again");
+                None
             }
         }
     }
@@ -821,12 +1072,23 @@ impl State {
                 None => break,
             }
         }
-        let first = first?;
+        let Some(first) = first else {
+            // the first in line is still being prepared: woken when it is given up at the latest
+            return self
+                .pending
+                .values()
+                .filter(|p| p.submitted.is_none() && !p.cancelled)
+                .map(|p| self.options.abandon_after.saturating_sub(p.since.elapsed()))
+                .min();
+        };
         if ready >= self.options.max_batch {
             return Some(Duration::ZERO);
         }
         // transactions numbered but still being prepared may join the batch
-        let preparing = self.pending.values().any(|p| p.submitted.is_none() && !p.cancelled);
+        let preparing = self
+            .pending
+            .values()
+            .any(|p| p.submitted.is_none() && !p.cancelled);
         if !preparing {
             return Some(Duration::ZERO);
         }
@@ -850,10 +1112,18 @@ impl State {
                 let _ = reply.send(res);
             }
             Msg::Submit(tx, p, reply) => match self.pending.get_mut(&tx) {
-                Some(pending) if !pending.cancelled => pending.submitted = Some((p, reply, Instant::now())),
+                Some(pending) if !pending.cancelled => {
+                    pending.submitted = Some((p, reply, Instant::now()))
+                }
                 // given up (too slow, or the sequencer started again): the engine runs it again
                 _ => {
-                    let _ = reply.send(Err(CommitError::Conflict(vec![Conflict { tx, at: String::new(), user: None, cause: "given up before its writes arrived".into(), what: vec!["this transaction".into()] }])));
+                    let _ = reply.send(Err(CommitError::Conflict(vec![Conflict {
+                        tx,
+                        at: String::new(),
+                        user: None,
+                        cause: "given up before its writes arrived".into(),
+                        what: vec!["this transaction".into()],
+                    }])));
                 }
             },
             Msg::Reload(reply) => {
@@ -869,12 +1139,18 @@ impl State {
                 }
             }
             Msg::Durable(reply) => {
-                let acked = self.uploader.as_ref().map_or(self.acked, |u| u.acked.load(std::sync::atomic::Ordering::SeqCst));
+                let acked = self.uploader.as_ref().map_or(self.acked, |u| {
+                    u.acked.load(std::sync::atomic::Ordering::SeqCst)
+                });
                 let _ = reply.send(acked);
             }
             Msg::Written(base, records, reply) => {
                 let known = base >= self.window.floor;
-                let _ = reply.send(known.then(|| records.iter().any(|id| self.window.fields.get(id).is_some_and(|t| *t > base))));
+                let _ = reply.send(known.then(|| {
+                    records
+                        .iter()
+                        .any(|id| self.window.fields.get(id).is_some_and(|t| *t > base))
+                }));
             }
             Msg::Side(f, value, kept) => {
                 // in the order of the log: the transactions ready before it are written first
@@ -901,14 +1177,24 @@ impl State {
             // the destinations unreachable for long: no more commits only this machine holds
             let kept = u.acked.load(std::sync::atomic::Ordering::SeqCst);
             if self.durable.saturating_sub(kept) > self.options.max_behind {
-                return Err(f(format!("{} commits are not yet kept elsewhere: try again later", self.durable - kept)));
+                self.refused += 1;
+                self.health
+                    .refused
+                    .store(self.refused, std::sync::atomic::Ordering::Relaxed);
+                return Err(f(format!(
+                    "{} commits are not yet kept elsewhere: try again later",
+                    self.durable - kept
+                )));
             }
         }
         if r.base > self.head {
             // the database moved past the sequencer (another writer): start again from it
             self.restart("the database was changed by another writer: try again");
             if r.base > self.head {
-                return Err(f(format!("base {} is ahead of the latest commit ({})", r.base, self.head)));
+                return Err(f(format!(
+                    "base {} is ahead of the latest commit ({})",
+                    r.base, self.head
+                )));
             }
         }
         if let Some(k) = &r.writes.idempotency {
@@ -925,26 +1211,50 @@ impl State {
         let mut conflicts = Vec::new();
         // a snapshot older than the window: the database says what changed up to now
         if r.base < self.window.floor {
-            let found = if r.whole { crate::db::commits_after(&mut self.conn, r.base) } else { crate::db::find_conflicts(&mut self.conn, r.base, &r.reads) };
+            let found = if r.whole {
+                crate::db::commits_after(&mut self.conn, r.base)
+            } else {
+                crate::db::find_conflicts(&mut self.conn, r.base, &r.reads)
+            };
             conflicts.extend(found.map_err(f)?);
         }
         if self.window.touches(r.base, r.whole, &r.reads) {
-            let described: Vec<(u64, Vec<String>, String, Option<u64>, String)> =
-                self.window.describe(r.base, r.whole, &r.reads).into_iter().map(|(tx, (what, s))| (tx, what, s.at.clone(), s.user, s.cause.clone())).collect();
+            let described: Vec<(u64, Vec<String>, String, Option<u64>, String)> = self
+                .window
+                .describe(r.base, r.whole, &r.reads)
+                .into_iter()
+                .map(|(tx, (what, s))| (tx, what, s.at.clone(), s.user, s.cause.clone()))
+                .collect();
             for (tx, what, at, user, cause) in described {
                 if conflicts.iter().any(|c: &Conflict| c.tx == tx) {
                     continue;
                 }
                 let user = user.and_then(|u| self.login(u));
-                conflicts.push(Conflict { tx, at, user, cause, what });
+                conflicts.push(Conflict {
+                    tx,
+                    at,
+                    user,
+                    cause,
+                    what,
+                });
             }
         }
         if !conflicts.is_empty() {
             if self.stats.is_some() {
                 for c in &conflicts {
                     for w in &c.what {
-                        let kind: String = w.chars().map(|ch| if ch.is_ascii_digit() { '#' } else { ch }).collect();
-                        *self.refusals.entry(kind.replace("##", "#").replace("##", "#").replace("##", "#")).or_default() += 1;
+                        let kind: String = w
+                            .chars()
+                            .map(|ch| if ch.is_ascii_digit() { '#' } else { ch })
+                            .collect();
+                        *self
+                            .refusals
+                            .entry(
+                                kind.replace("##", "#")
+                                    .replace("##", "#")
+                                    .replace("##", "#"),
+                            )
+                            .or_default() += 1;
                     }
                 }
             }
@@ -956,11 +1266,32 @@ impl State {
         }
         self.head += 1;
         let tx = self.head;
-        let res = Reservation { tx, seq: self.seq, outbox: self.outbox };
+        let res = Reservation {
+            tx,
+            seq: self.seq,
+            outbox: self.outbox,
+        };
         self.seq += r.history as i64;
         self.outbox += r.outbox as i64;
-        self.window.add(Seen { tx, at: r.at.clone(), user: r.user, cause: r.cause.clone(), writes: r.writes, when: Instant::now() });
-        self.pending.insert(tx, Pending { at: r.at, user: r.user, cause: r.cause, since: Instant::now(), submitted: None, cancelled: false });
+        self.window.add(Seen {
+            tx,
+            at: r.at.clone(),
+            user: r.user,
+            cause: r.cause.clone(),
+            writes: r.writes,
+            when: Instant::now(),
+        });
+        self.pending.insert(
+            tx,
+            Pending {
+                at: r.at,
+                user: r.user,
+                cause: r.cause,
+                since: Instant::now(),
+                submitted: None,
+                cancelled: false,
+            },
+        );
         Ok(res)
     }
 
@@ -968,17 +1299,51 @@ impl State {
     /// (or cannot be told from the window): refused, and run again on the latest data.
     fn broken_guard(&self, r: &Request) -> Option<Conflict> {
         for g in &r.guards {
-            let refused = |why: &str| Conflict { tx: self.head, at: String::new(), user: None, cause: why.to_string(), what: vec![format!("#{}.{}", g.id, g.field)] };
+            let refused = |why: &str| Conflict {
+                tx: self.head,
+                at: String::new(),
+                user: None,
+                cause: why.to_string(),
+                what: vec![format!("#{}.{}", g.id, g.field)],
+            };
             if r.base < self.window.floor {
                 return Some(refused("a rule on a total read long ago"));
             }
             let mut now = g.seen + g.own;
-            for s in self.window.seen.iter().filter(|s| s.tx > r.base) {
+            // a lower bound (>=, >) can be broken by what takes away, an upper one by what adds
+            let lower = !matches!(g.op, quadra_ir::BinOp::Lt | quadra_ir::BinOp::Le);
+            // the transactions after the base only (the newest are at the back), and none
+            // when the record was not written since it was read
+            let touched = self
+                .window
+                .rows
+                .get(&g.id)
+                .is_some_and(|last| *last > r.base);
+            for s in self
+                .window
+                .seen
+                .iter()
+                .rev()
+                .take_while(|s| touched && s.tx > r.base)
+                .filter(|s| !self.void.contains(&s.tx))
+            {
                 if !s.writes.rows.iter().any(|(id, _)| *id == g.id) {
                     continue;
                 }
-                match s.writes.deltas.iter().find(|(id, f, _)| *id == g.id && *f == g.field) {
-                    Some((_, _, d)) => now += *d,
+                match s
+                    .writes
+                    .deltas
+                    .iter()
+                    .find(|(id, f, _)| *id == g.id && *f == g.field)
+                {
+                    // written: as it is; still to be written (it may never be): only in the
+                    // direction that could break the rule
+                    Some((_, _, d)) if s.tx <= self.durable => now += *d,
+                    Some((_, _, d)) => {
+                        if (lower && d.is_sign_negative()) || (!lower && d.is_sign_positive()) {
+                            now += *d;
+                        }
+                    }
                     None => return Some(refused("the record changed since it was read")),
                 }
             }
@@ -989,7 +1354,9 @@ impl State {
                 _ => now >= g.bound,
             };
             if !holds {
-                return Some(refused("the rule on this total no longer holds with what others committed"));
+                return Some(refused(
+                    "the rule on this total no longer holds with what others committed",
+                ));
             }
         }
         None
@@ -1029,7 +1396,13 @@ impl State {
     /// Starts again from where the database stands: the transactions numbered and not written
     /// are refused as conflicts (their engines run them again on the new state).
     fn restart(&mut self, why: &str) {
-        let refused = Conflict { tx: self.durable, at: String::new(), user: None, cause: why.to_string(), what: vec!["the project's database".into()] };
+        let refused = Conflict {
+            tx: self.durable,
+            at: String::new(),
+            user: None,
+            cause: why.to_string(),
+            what: vec!["the project's database".into()],
+        };
         for (_, p) in std::mem::take(&mut self.pending) {
             if let Some((_, reply, _)) = p.submitted {
                 let _ = reply.send(Err(CommitError::Conflict(vec![refused.clone()])));
@@ -1052,21 +1425,42 @@ impl State {
             }
             items.push((tx, self.pending.remove(&tx).unwrap()));
         }
-        let submitted: Vec<(u64, Pending)> = items.into_iter().filter(|(_, p)| p.submitted.is_some()).collect();
+        for (tx, p) in &items {
+            if p.submitted.is_none() {
+                self.void.insert(*tx);
+            }
+        }
+        let submitted: Vec<(u64, Pending)> = items
+            .into_iter()
+            .filter(|(_, p)| p.submitted.is_some())
+            .collect();
         if submitted.is_empty() {
             return;
         }
         let clock = Instant::now();
-        let waited: Duration = submitted.iter().filter_map(|(_, p)| p.submitted.as_ref().map(|(_, _, at)| at.elapsed())).max().unwrap_or_default();
+        let waited: Duration = submitted
+            .iter()
+            .filter_map(|(_, p)| p.submitted.as_ref().map(|(_, _, at)| at.elapsed()))
+            .max()
+            .unwrap_or_default();
         let n = submitted.len() as u64;
+        // a batch covers every number after the last one written, those given up included: the
+        // log has no gap where a reserved transaction was never written
+        let from = self.durable + 1;
         let results = match self.write(&submitted) {
             Ok(executed) => {
-                let first = submitted.first().unwrap().0;
+                let first = from;
                 let last = submitted.last().unwrap().0;
                 self.durable = self.durable.max(last);
+                self.health
+                    .written
+                    .store(self.durable, std::sync::atomic::Ordering::Relaxed);
                 if self.uploader.is_some() && self.options.rule != Rule::Local {
                     // confirmed by the uploader once the batch is kept elsewhere too
-                    let replies = submitted.into_iter().filter_map(|(tx, p)| p.submitted.map(|(_, reply, _)| (tx, reply))).collect();
+                    let replies = submitted
+                        .into_iter()
+                        .filter_map(|(tx, p)| p.submitted.map(|(_, reply, _)| (tx, reply)))
+                        .collect();
                     self.upload(first, last, executed, replies);
                     self.after_flush(clock, waited, n);
                     return;
@@ -1087,7 +1481,11 @@ impl State {
                 return;
             }
             // one by one: a transaction the database refuses fails alone
-            Err(Failure::Db(_)) => self.write_one_by_one(&submitted),
+            Err(Failure::Db(_)) => {
+                self.write_one_by_one(submitted);
+                self.after_flush(clock, waited, n);
+                return;
+            }
         };
         for ((_, p), res) in submitted.into_iter().zip(results) {
             if let Some((_, reply, _)) = p.submitted {
@@ -1125,43 +1523,62 @@ impl State {
             }
         }
         self.window.prune(self.options.keep, self.durable);
+        let floor = self.window.floor;
+        self.void.retain(|t| *t >= floor);
     }
 
-    /// Results of the transactions written one by one. Those that went through and wait for the
-    /// uploader's confirmation get `None` here: the uploader answers them.
-    fn write_one_by_one(&mut self, items: &[(u64, Pending)]) -> Vec<Result<u64, CommitError>> {
-        let mut out = Vec::new();
+    /// Writes the transactions one by one and answers each: a refused one fails alone, one
+    /// that went through is confirmed now (`Rule::Local`) or by the uploader once kept elsewhere,
+    /// never by waiting here (the sequencer thread keeps serving).
+    fn write_one_by_one(&mut self, items: Vec<(u64, Pending)>) {
         for item in items {
-            let res = match self.write(std::slice::from_ref(item)) {
-                Ok(executed) => {
-                    self.durable = self.durable.max(item.0);
-                    if self.uploader.is_some() {
-                        self.upload(item.0, item.0, executed, Vec::new());
-                        // (its client is answered here once the uploader confirmed: rare path)
-                        if self.options.rule == Rule::Local {
-                            Ok(item.0)
-                        } else {
-                            self.wait_acked(item.0).map(|_| item.0).map_err(CommitError::Failed)
-                        }
-                    } else {
-                        self.acked = self.acked.max(item.0);
-                        Ok(item.0)
-                    }
-                }
-                Err(Failure::Db(e)) => Err(CommitError::Failed(e)),
-                Err(Failure::Foreign) => Err(CommitError::Failed("the database was changed by another writer".into())),
+            let from = self.durable + 1;
+            let res = self.write(std::slice::from_ref(&item));
+            let (tx, p) = item;
+            let Some((_, reply, _)) = p.submitted else {
+                continue;
             };
-            out.push(res);
+            let res = match res {
+                Ok(executed) => {
+                    self.durable = self.durable.max(tx);
+                    self.health
+                        .written
+                        .store(self.durable, std::sync::atomic::Ordering::Relaxed);
+                    if self.uploader.is_some() && self.options.rule != Rule::Local {
+                        self.upload(from, tx, executed, vec![(tx, reply)]);
+                        continue;
+                    }
+                    if self.uploader.is_some() {
+                        self.upload(from, tx, executed, Vec::new());
+                    }
+                    self.acked = self.acked.max(tx);
+                    Ok(tx)
+                }
+                Err(Failure::Db(e)) => {
+                    self.void.insert(tx);
+                    Err(CommitError::Failed(e))
+                }
+                Err(Failure::Foreign) => Err(CommitError::Failed(
+                    "the database was changed by another writer".into(),
+                )),
+            };
+            let _ = reply.send(res);
         }
-        out
     }
 
     /// A change outside the hash chain as a batch of its own (`Sequencer::side`): `f` and the
     /// batch's row in one transaction (the `BEGIN`/`COMMIT` of `f` are folded into it), then the
     /// statements to the destinations. No transaction number: `first_tx = last_tx + 1`.
-    fn side(&mut self, f: SideFn, value: mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>, kept: Responder) {
+    fn side(
+        &mut self,
+        f: SideFn,
+        value: mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>,
+        kept: Responder,
+    ) {
         let sqlite = self.conn.dialect() == Dialect::Sqlite;
-        let began = self.conn.batch(if sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" });
+        let began = self
+            .conn
+            .batch(if sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" });
         if let Err(e) = began {
             let _ = value.send(Err(e));
             let _ = kept.send(Ok(self.durable));
@@ -1174,7 +1591,11 @@ impl State {
             Ok(v) if !side.rolled_back && !side.statements.is_empty() => v,
             other => {
                 // failed, rolled back by `f`, or nothing written: nothing to keep
-                let _ = self.conn.batch(if other.is_ok() && !side.rolled_back { "COMMIT" } else { "ROLLBACK" });
+                let _ = self.conn.batch(if other.is_ok() && !side.rolled_back {
+                    "COMMIT"
+                } else {
+                    "ROLLBACK"
+                });
                 let _ = value.send(other);
                 let _ = kept.send(Ok(self.durable));
                 return;
@@ -1186,7 +1607,10 @@ impl State {
             vec![Sql::Int(self.batch as i64 + 1), Sql::Int(first as i64), Sql::Int(last as i64), Sql::Text(self.prev_hash.clone())],
         );
         let mut statements = side.statements;
-        let written = self.conn.exec(&row.0, &row.1).and_then(|_| self.conn.batch("COMMIT"));
+        let written = self
+            .conn
+            .exec(&row.0, &row.1)
+            .and_then(|_| self.conn.batch("COMMIT"));
         if let Err(e) = written {
             let _ = self.conn.batch("ROLLBACK");
             let _ = value.send(Err(e));
@@ -1210,29 +1634,78 @@ impl State {
     fn take_snapshot(&mut self) {
         self.snapshot_due = None;
         self.log_bytes = 0;
+        self.log_segments = 0;
         let Some(up) = &self.uploader else { return };
-        let file = snapshot_file();
+        let file = snapshot_file(&self.url);
         match crate::segments::snapshot(&self.url, &file) {
             Ok((batch, tx)) => {
-                let u = Upload { snapshot: Some((batch, tx, file)), number: batch, first_tx: tx, last_tx: tx, hash: self.prev_hash.clone(), statements: Vec::new(), replies: Vec::new() };
-                let _ = up.tx.send(u);
+                let u = Upload {
+                    snapshot: Some((batch, tx, file)),
+                    number: batch,
+                    first_tx: tx,
+                    last_tx: tx,
+                    hash: self.prev_hash.clone(),
+                    statements: Vec::new(),
+                    replies: Vec::new(),
+                };
+                if let Err(mpsc::SendError(u)) = up.tx.send(u) {
+                    if let Some((_, _, file)) = u.snapshot {
+                        let _ = std::fs::remove_file(file);
+                    }
+                }
             }
-            Err(e) => eprintln!("sequencer: cannot take a snapshot: {e}"),
+            Err(e) => {
+                let _ = std::fs::remove_file(&file);
+                eprintln!("sequencer: cannot take a snapshot: {e}");
+            }
         }
     }
 
     /// Hands a batch written to the database to the uploader, with the clients to confirm.
-    fn upload(&mut self, first: u64, last: u64, statements: Vec<(String, Vec<Sql>)>, replies: Vec<(u64, Responder)>) {
-        // the log since the last snapshot as large as the database (and past `snapshot_bytes`):
-        // a new snapshot, after which the destinations drop what it holds
-        self.log_bytes += statements.iter().map(|(sql, ps)| sql.len() as u64 + ps.iter().map(|p| match p { Sql::Text(t) => t.len() as u64, _ => 8 }).sum::<u64>()).sum::<u64>();
-        if self.log_bytes > self.options.snapshot_bytes && self.snapshot_due.is_none() && self.conn.dialect() == Dialect::Sqlite {
+    fn upload(
+        &mut self,
+        first: u64,
+        last: u64,
+        statements: Vec<(String, Vec<Sql>)>,
+        replies: Vec<(u64, Responder)>,
+    ) {
+        // the log since the last snapshot as large as the database (and past `snapshot_bytes`),
+        // or many segments and an eighth of its size: a new snapshot, after which the
+        // destinations drop what it holds (few objects stay, a restore reads few)
+        self.log_bytes += statements
+            .iter()
+            .map(|(sql, ps)| {
+                sql.len() as u64
+                    + ps.iter()
+                        .map(|p| match p {
+                            Sql::Text(t) => t.len() as u64,
+                            _ => 8,
+                        })
+                        .sum::<u64>()
+            })
+            .sum::<u64>();
+        self.log_segments += 1;
+        let many = self.log_segments > self.options.snapshot_segments;
+        if (self.log_bytes > self.options.snapshot_bytes || many)
+            && self.snapshot_due.is_none()
+            && self.conn.dialect() == Dialect::Sqlite
+        {
             let size = self.conn.query("SELECT CAST(page_count * page_size AS TEXT) FROM pragma_page_count(), pragma_page_size()", &[]).ok().and_then(|r| r.into_iter().next()).and_then(|r| r[0].as_deref().and_then(|v| v.parse::<u64>().ok())).unwrap_or(0);
-            if self.log_bytes > size {
+            if (self.log_bytes > self.options.snapshot_bytes && self.log_bytes > size)
+                || (many && self.log_bytes > size / 8)
+            {
                 self.snapshot_due = Some(Instant::now());
             }
         }
-        let u = Upload { snapshot: None, number: self.batch, first_tx: first, last_tx: last, hash: self.prev_hash.clone(), statements, replies };
+        let u = Upload {
+            snapshot: None,
+            number: self.batch,
+            first_tx: first,
+            last_tx: last,
+            hash: self.prev_hash.clone(),
+            statements,
+            replies,
+        };
         if let Some(up) = &self.uploader {
             if let Err(mpsc::SendError(u)) = up.tx.send(u) {
                 for (_, reply) in u.replies {
@@ -1242,24 +1715,13 @@ impl State {
         }
     }
 
-    /// Waits until the uploader confirmed `tx` (or gave up on it).
-    fn wait_acked(&self, tx: u64) -> Result<(), String> {
-        let Some(u) = &self.uploader else { return Ok(()) };
-        let until = Instant::now() + Duration::from_secs(30);
-        while u.acked.load(std::sync::atomic::Ordering::SeqCst) < tx {
-            if Instant::now() > until {
-                return Err("the commit is in the database but not yet kept elsewhere".into());
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Ok(())
-    }
-
     /// One database transaction for these transactions, with their commit rows and the state.
     /// Returns every statement run (what the durability destinations receive).
     fn write(&mut self, items: &[(u64, Pending)]) -> Result<Vec<(String, Vec<Sql>)>, Failure> {
         let sqlite = self.conn.dialect() == Dialect::Sqlite;
-        self.conn.batch(if sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" }).map_err(Failure::Db)?;
+        self.conn
+            .batch(if sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" })
+            .map_err(Failure::Db)?;
         let prev = self.prev_hash.clone();
         let next_id = self.next_id;
         let durable = self.durable;
@@ -1267,7 +1729,9 @@ impl State {
             if !sqlite {
                 // a second writer (a process that should not be one) waits here instead of
                 // interleaving
-                self.conn.batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE").map_err(Failure::Db)?;
+                self.conn
+                    .batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE")
+                    .map_err(Failure::Db)?;
             }
             // nobody else may have committed since the last batch (a deploy, a migration, a
             // command line on the same database): then the numbers given are not free
@@ -1312,7 +1776,7 @@ impl State {
             executed.push(state);
             let batch = (
                 "INSERT INTO \"_quadra_batches\" (\"number\", \"first_tx\", \"last_tx\", \"hash\") VALUES (?bigint, ?bigint, ?bigint, ?text)".to_string(),
-                vec![Sql::Int(self.batch as i64 + 1), Sql::Int(items[0].0 as i64), Sql::Int(last as i64), Sql::Text(prev.clone())],
+                vec![Sql::Int(self.batch as i64 + 1), Sql::Int(durable as i64 + 1), Sql::Int(last as i64), Sql::Text(prev.clone())],
             );
             self.conn.exec(&batch.0, &batch.1).map_err(Failure::Db)?;
             executed.push(batch);
@@ -1340,18 +1804,38 @@ impl State {
 impl State {
     /// Adds a delta to a column's current value; returns the statement that set it.
     fn add(&mut self, d: &DeltaOp) -> Result<(String, Vec<Sql>), String> {
-        let read = format!("SELECT CAST(\"{}\" AS TEXT) FROM \"{}\" WHERE \"id\" = ?bigint", d.column, d.table);
-        let cur = self.conn.query(&read, &[Sql::Int(d.id as i64)])?.into_iter().next().and_then(|r| r[0].clone());
+        let read = format!(
+            "SELECT CAST(\"{}\" AS TEXT) FROM \"{}\" WHERE \"id\" = ?bigint",
+            d.column, d.table
+        );
+        let cur = self
+            .conn
+            .query(&read, &[Sql::Int(d.id as i64)])?
+            .into_iter()
+            .next()
+            .and_then(|r| r[0].clone());
         let value = if d.int {
             let a: i64 = cur.as_deref().and_then(|v| v.parse().ok()).unwrap_or(0);
-            let b: i64 = d.amount.parse().map_err(|_| format!("not an integer: {}", d.amount))?;
+            let b: i64 = d
+                .amount
+                .parse()
+                .map_err(|_| format!("not an integer: {}", d.amount))?;
             Sql::Int(a + b)
         } else {
-            let a: rust_decimal::Decimal = cur.as_deref().and_then(|v| v.parse().ok()).unwrap_or_default();
-            let b: rust_decimal::Decimal = d.amount.parse().map_err(|_| format!("not a number: {}", d.amount))?;
+            let a: rust_decimal::Decimal = cur
+                .as_deref()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_default();
+            let b: rust_decimal::Decimal = d
+                .amount
+                .parse()
+                .map_err(|_| format!("not a number: {}", d.amount))?;
             Sql::Text((a + b).to_string())
         };
-        let set = format!("UPDATE \"{}\" SET \"{}\" = {} WHERE \"id\" = ?bigint", d.table, d.column, d.param);
+        let set = format!(
+            "UPDATE \"{}\" SET \"{}\" = {} WHERE \"id\" = ?bigint",
+            d.table, d.column, d.param
+        );
         let params = vec![value, Sql::Int(d.id as i64)];
         self.conn.exec(&set, &params)?;
         Ok((set, params))
@@ -1428,20 +1912,37 @@ impl quadra_runtime::CommitSink for SequencedSink<'_> {
         let t_set = clock.elapsed();
         let r = self.sequencer.reserve(request)?;
         let t_reserve = clock.elapsed();
-        let mut guard = Reserved { sequencer: &self.sequencer, tx: Some(r.tx) };
-        let prepared = self.db.prepare(self.model, c, &r).map_err(CommitError::Failed)?;
+        let mut guard = Reserved {
+            sequencer: &self.sequencer,
+            tx: Some(r.tx),
+        };
+        let prepared = self
+            .db
+            .prepare(self.model, c, &r)
+            .map_err(CommitError::Failed)?;
         guard.tx = None;
         let t_prepare = clock.elapsed();
         if let Some(tickets) = &self.tickets {
             let ticket = std::sync::Arc::new(Ticket::default());
             let t = ticket.clone();
-            self.sequencer.submit_then(r.tx, prepared, Box::new(move |res| t.complete(res)));
+            self.sequencer
+                .submit_then(r.tx, prepared, Box::new(move |res| t.complete(res)));
             tickets.borrow_mut().push(ticket);
-            note_times(t_set, t_reserve - t_set, t_prepare - t_reserve, Duration::ZERO);
+            note_times(
+                t_set,
+                t_reserve - t_set,
+                t_prepare - t_reserve,
+                Duration::ZERO,
+            );
             return Ok(r.tx);
         }
         let res = self.sequencer.submit(r.tx, prepared);
-        note_times(t_set, t_reserve - t_set, t_prepare - t_reserve, clock.elapsed() - t_prepare);
+        note_times(
+            t_set,
+            t_reserve - t_set,
+            t_prepare - t_reserve,
+            clock.elapsed() - t_prepare,
+        );
         // a limit met while the sequencer wrote (the database's size) is this job's answer
         if let Err(CommitError::Failed(e)) = &res {
             if e.starts_with("too large:") {
@@ -1464,7 +1965,14 @@ fn guard_checks(c: &quadra_runtime::Commit, reads: &mut ReadSet) -> Vec<GuardChe
             let own = delta_amount(old, now)?;
             let (seen, unit) = amount_of(old)?;
             let (bound, bound_unit) = amount_of(&g.bound)?;
-            (unit == bound_unit || bound_unit.is_empty() && unit.is_empty()).then_some(GuardCheck { id: g.id, field: g.field.clone(), op: g.op, seen, own, bound })
+            (unit == bound_unit || bound_unit.is_empty() && unit.is_empty()).then_some(GuardCheck {
+                id: g.id,
+                field: g.field.clone(),
+                op: g.op,
+                seen,
+                own,
+                bound,
+            })
         });
         match check {
             Some(gc) => out.push(gc),
@@ -1498,7 +2006,15 @@ struct Uploader {
 }
 
 impl Uploader {
-    fn start(mut destinations: Vec<Box<dyn DurabilitySink>>, rule: Rule, acked: u64) -> Result<Uploader, String> {
+    fn start(
+        mut destinations: Vec<Box<dyn DurabilitySink>>,
+        rule: Rule,
+        acked: u64,
+        health: std::sync::Arc<HealthCell>,
+    ) -> Result<Uploader, String> {
+        health
+            .kept
+            .store(acked, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = mpsc::channel::<Upload>();
         let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(acked));
         let shared = acked.clone();
@@ -1567,21 +2083,28 @@ impl Uploader {
                         let (number, last_tx, hash) = queue.range(..n).last().map(|l| (l.number, l.last_tx, l.hash.clone())).unwrap();
                         let (first_number, first_tx) = (queue[0].number, queue[0].first_tx);
                         let batch = Batch { first_number, number, first_tx, last_tx, hash: &hash, statements: &statements };
-                        let r = keep(&mut destinations, rule, &batch);
-                        if r.is_ok() {
-                            shared.store(last_tx, std::sync::atomic::Ordering::SeqCst);
-                            for u in queue.drain(..n) {
-                                for (tx, reply) in u.replies {
+                        // the clients hear once the rule is met; the batch leaves the queue only once
+                        // every destination has it (under any rule: a gap would make the log useless)
+                        let (all, met) = keep(&mut destinations, rule, &batch);
+                        if met {
+                            for u in queue.range_mut(..n) {
+                                for (tx, reply) in u.replies.drain(..) {
                                     let _ = reply.send(Ok(tx));
                                 }
                             }
                         }
-                        r
+                        if all.is_ok() {
+                            shared.store(last_tx, std::sync::atomic::Ordering::SeqCst);
+                            health.kept.store(last_tx, std::sync::atomic::Ordering::Relaxed);
+                            queue.drain(..n);
+                        }
+                        all
                     };
                     match result {
                         Ok(()) => {
                             attempt = 0;
                             if down.take().is_some() {
+                                *health.down.lock().unwrap() = None;
                                 eprintln!("sequencer: the destinations are back");
                             }
                         }
@@ -1591,6 +2114,7 @@ impl Uploader {
                                 eprintln!("sequencer: the destinations are down ({e}): commits are kept here until they are back");
                                 fail_waiting(&mut queue, &e);
                                 down = Some(e.clone());
+                                *health.down.lock().unwrap() = Some(e.clone());
                             }
                             if attempt >= 6 && stopping.load(std::sync::atomic::Ordering::SeqCst) {
                                 let last = queue.back().map_or(0, |u| u.last_tx);
@@ -1625,21 +2149,32 @@ impl Uploader {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Uploader { tx, handle: Some(handle), acked, stopping: stop })
+        Ok(Uploader {
+            tx,
+            handle: Some(handle),
+            acked,
+            stopping: stop,
+        })
     }
 
     /// Keeps what it was given (a few tries for what does not go through), then stops.
     fn finish(mut self) {
         drop(self.tx);
-        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
     }
 }
 
-/// The destinations get the batch; whether the rule is met.
-fn keep(destinations: &mut [Box<dyn DurabilitySink>], rule: Rule, batch: &Batch) -> Result<(), String> {
+/// The destinations get the batch: whether all have it, and whether the rule of confirmation is
+/// met (`Local`: always; `Any`: one has it; `All`: all have it).
+fn keep(
+    destinations: &mut [Box<dyn DurabilitySink>],
+    rule: Rule,
+    batch: &Batch,
+) -> (Result<(), String>, bool) {
     let mut ok = 0;
     let mut errors = Vec::new();
     for d in destinations.iter_mut() {
@@ -1649,16 +2184,25 @@ fn keep(destinations: &mut [Box<dyn DurabilitySink>], rule: Rule, batch: &Batch)
         }
     }
     if !errors.is_empty() {
-        eprintln!("sequencer: batch {}–{} not kept everywhere: {}", batch.first_tx, batch.last_tx, errors.join("; "));
+        eprintln!(
+            "sequencer: batch {}–{} not kept everywhere: {}",
+            batch.first_tx,
+            batch.last_tx,
+            errors.join("; ")
+        );
     }
     let met = match rule {
         Rule::Local => true,
         Rule::Any => ok > 0,
         Rule::All => errors.is_empty(),
     };
-    if met {
+    let all = if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("the commit is in the database but not yet kept elsewhere: {}", errors.join("; ")))
-    }
+        Err(format!(
+            "the commit is in the database but not yet kept elsewhere: {}",
+            errors.join("; ")
+        ))
+    };
+    (all, met)
 }

@@ -41,7 +41,10 @@ mod tests {
     #[test]
     fn whitespace_only() {
         let src = "entity A:   \n    x: Int\n\n\n\n\nentity B:\n    y: Int\n\n\n";
-        assert_eq!(format_source(src), "entity A:\n    x: Int\n\n\nentity B:\n    y: Int\n");
+        assert_eq!(
+            format_source(src),
+            "entity A:\n    x: Int\n\n\nentity B:\n    y: Int\n"
+        );
         let formatted = format_source(src);
         assert_eq!(format_source(&formatted), formatted, "idempotent");
     }

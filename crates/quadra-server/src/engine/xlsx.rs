@@ -6,13 +6,18 @@
 
 use super::sheets::{parse_a1, Out};
 use quadra_runtime::{Interp, V};
-use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, FormatPattern, FormatUnderline, Note, Workbook};
+use rust_xlsxwriter::{
+    Color, Format, FormatAlign, FormatBorder, FormatPattern, FormatUnderline, Note, Workbook,
+};
 use serde_json::Value as J;
 use std::collections::BTreeMap;
 
 /// An Excel sheet name: at most 31 characters, none of `[]:*?/\`, unique.
 fn sheet_name(name: &str, taken: &mut Vec<String>) -> String {
-    let mut n: String = name.chars().map(|c| if "[]:*?/\\".contains(c) { '_' } else { c }).collect();
+    let mut n: String = name
+        .chars()
+        .map(|c| if "[]:*?/\\".contains(c) { '_' } else { c })
+        .collect();
     n = n.trim_matches('\'').chars().take(31).collect();
     if n.trim().is_empty() {
         n = "Sheet".into();
@@ -21,7 +26,10 @@ fn sheet_name(name: &str, taken: &mut Vec<String>) -> String {
     let mut k = 2;
     while taken.iter().any(|t| t.eq_ignore_ascii_case(&n)) {
         let suffix = format!(" ({k})");
-        n = format!("{}{suffix}", base.chars().take(31 - suffix.len()).collect::<String>());
+        n = format!(
+            "{}{suffix}",
+            base.chars().take(31 - suffix.len()).collect::<String>()
+        );
         k += 1;
     }
     taken.push(n.clone());
@@ -89,7 +97,11 @@ fn num_format(fmt: &J, v: Option<&V>) -> Option<String> {
     match v? {
         V::Money { cur, .. } => Some(format!("{} {}", number(dec.unwrap_or(2)), quoted(cur))),
         V::Qty { unit, .. } => Some(format!("0.###### {}", quoted(unit))),
-        V::Price { cur, per, .. } => Some(format!("{} {}", number(dec.unwrap_or(2)), quoted(&format!("{cur}/{per}")))),
+        V::Price { cur, per, .. } => Some(format!(
+            "{} {}",
+            number(dec.unwrap_or(2)),
+            quoted(&format!("{cur}/{per}"))
+        )),
         V::Pct(_) => Some(format!("0{}%", digits(dec.unwrap_or(0)))),
         V::Date(_) => Some("yyyy-mm-dd".into()),
         V::DateTime(_) => Some("yyyy-mm-dd hh:mm".into()),
@@ -171,14 +183,22 @@ fn number(d: &rust_decimal::Decimal) -> f64 {
 
 /// The workbook of a component (its `config`) with what each cell shows, as an `.xlsx` file.
 /// `grid`: per sheet, (row, col) → the result of a formula or of a spilled cell.
-pub fn workbook(cfg: &J, grid: &[BTreeMap<(u32, u32), Out>], i: &mut Interp) -> Result<Vec<u8>, String> {
+pub fn workbook(
+    cfg: &J,
+    grid: &[BTreeMap<(u32, u32), Out>],
+    i: &mut Interp,
+) -> Result<Vec<u8>, String> {
     let e = |x: rust_xlsxwriter::XlsxError| x.to_string();
     let mut wb = Workbook::new();
     let mut taken = Vec::new();
     let sheets = cfg["sheets"].as_array().cloned().unwrap_or_default();
     for (k, s) in sheets.iter().enumerate() {
         let ws = wb.add_worksheet();
-        ws.set_name(sheet_name(s["name"].as_str().unwrap_or("Sheet"), &mut taken)).map_err(e)?;
+        ws.set_name(sheet_name(
+            s["name"].as_str().unwrap_or("Sheet"),
+            &mut taken,
+        ))
+        .map_err(e)?;
         let inputs = s["cells"].as_object().cloned().unwrap_or_default();
         let empty = BTreeMap::new();
         let results = grid.get(k).unwrap_or(&empty);
@@ -205,8 +225,19 @@ pub fn workbook(cfg: &J, grid: &[BTreeMap<(u32, u32), Out>], i: &mut Interp) -> 
             .collect();
         for (r1, c1, r2, c2) in &merges {
             if (r1, c1) != (r2, c2) {
-                let style = inputs.get(&super::sheets::a1(*r1, *c1)).map(|c| c["s"].clone()).unwrap_or(J::Null);
-                ws.merge_range(r1 - 1, (c1 - 1) as u16, r2 - 1, (c2 - 1) as u16, "", &format_of(&style, None)).map_err(e)?;
+                let style = inputs
+                    .get(&super::sheets::a1(*r1, *c1))
+                    .map(|c| c["s"].clone())
+                    .unwrap_or(J::Null);
+                ws.merge_range(
+                    r1 - 1,
+                    (c1 - 1) as u16,
+                    r2 - 1,
+                    (c2 - 1) as u16,
+                    "",
+                    &format_of(&style, None),
+                )
+                .map_err(e)?;
             }
         }
         for ((r, c), (input, out)) in cells {
@@ -221,10 +252,13 @@ pub fn workbook(cfg: &J, grid: &[BTreeMap<(u32, u32), Out>], i: &mut Interp) -> 
             let value: Option<Result<V, (String, String)>> = match out {
                 Some(Out::Ok(v)) => Some(Ok(v.clone())),
                 Some(Out::Err { code, msg }) => Some(Err((code.to_string(), msg.clone()))),
-                None => raw.as_deref().and_then(|t| super::sheets::classify(i, t)).and_then(|x| match x {
-                    super::sheets::Input::Value(v) => Some(Ok(v)),
-                    super::sheets::Input::Formula(_) => None,
-                }),
+                None => raw
+                    .as_deref()
+                    .and_then(|t| super::sheets::classify(i, t))
+                    .and_then(|x| match x {
+                        super::sheets::Input::Value(v) => Some(Ok(v)),
+                        super::sheets::Input::Formula(_) => None,
+                    }),
             };
             let fmt = format_of(&style, value.as_ref().and_then(|v| v.as_ref().ok()));
             match &value {
@@ -232,30 +266,45 @@ pub fn workbook(cfg: &J, grid: &[BTreeMap<(u32, u32), Out>], i: &mut Interp) -> 
                     ws.write_blank(row, col, &fmt).map_err(e)?;
                 }
                 Some(Err((code, _))) => {
-                    ws.write_string_with_format(row, col, code, &fmt).map_err(e)?;
+                    ws.write_string_with_format(row, col, code, &fmt)
+                        .map_err(e)?;
                 }
                 Some(Ok(v)) => match v {
                     V::Int(n) => {
-                        ws.write_number_with_format(row, col, *n as f64, &fmt).map_err(e)?;
+                        ws.write_number_with_format(row, col, *n as f64, &fmt)
+                            .map_err(e)?;
                     }
-                    V::Dec(d) | V::Pct(d) | V::Money { amt: d, .. } | V::Qty { v: d, .. } | V::Price { amt: d, .. } => {
-                        ws.write_number_with_format(row, col, number(d), &fmt).map_err(e)?;
+                    V::Dec(d)
+                    | V::Pct(d)
+                    | V::Money { amt: d, .. }
+                    | V::Qty { v: d, .. }
+                    | V::Price { amt: d, .. } => {
+                        ws.write_number_with_format(row, col, number(d), &fmt)
+                            .map_err(e)?;
                     }
                     V::Bool(b) => {
-                        ws.write_boolean_with_format(row, col, *b, &fmt).map_err(e)?;
+                        ws.write_boolean_with_format(row, col, *b, &fmt)
+                            .map_err(e)?;
                     }
                     V::Date(d) => {
-                        ws.write_datetime_with_format(row, col, d, &fmt).map_err(e)?;
+                        ws.write_datetime_with_format(row, col, d, &fmt)
+                            .map_err(e)?;
                     }
                     V::DateTime(d) => {
-                        ws.write_datetime_with_format(row, col, d, &fmt).map_err(e)?;
+                        ws.write_datetime_with_format(row, col, d, &fmt)
+                            .map_err(e)?;
                     }
                     V::Text(t) => {
-                        ws.write_string_with_format(row, col, t.as_ref(), &fmt).map_err(e)?;
+                        ws.write_string_with_format(row, col, t.as_ref(), &fmt)
+                            .map_err(e)?;
                     }
                     other => {
-                        let shown = super::sheets::value_json(i, other)["d"].as_str().unwrap_or("").to_string();
-                        ws.write_string_with_format(row, col, &shown, &fmt).map_err(e)?;
+                        let shown = super::sheets::value_json(i, other)["d"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        ws.write_string_with_format(row, col, &shown, &fmt)
+                            .map_err(e)?;
                     }
                 },
             }
@@ -264,18 +313,21 @@ pub fn workbook(cfg: &J, grid: &[BTreeMap<(u32, u32), Out>], i: &mut Interp) -> 
                 if let Some(Err((_, msg))) = &value {
                     text.push_str(&format!("\n{msg}"));
                 }
-                ws.insert_note(row, col, &Note::new(text).set_author("Quadra")).map_err(e)?;
+                ws.insert_note(row, col, &Note::new(text).set_author("Quadra"))
+                    .map_err(e)?;
             }
         }
         for (letters, w) in s["cols_w"].as_object().into_iter().flatten() {
             if let (Some(c), Some(px)) = (super::sheets::col_index(letters), w.as_f64()) {
-                ws.set_column_width_pixels((c - 1) as u16, px.clamp(4.0, 2000.0) as u32).map_err(e)?;
+                ws.set_column_width_pixels((c - 1) as u16, px.clamp(4.0, 2000.0) as u32)
+                    .map_err(e)?;
             }
         }
         for (row, h) in s["rows_h"].as_object().into_iter().flatten() {
             if let (Ok(r), Some(px)) = (row.parse::<u32>(), h.as_f64()) {
                 if r >= 1 {
-                    ws.set_row_height_pixels(r - 1, px.clamp(4.0, 2000.0) as u32).map_err(e)?;
+                    ws.set_row_height_pixels(r - 1, px.clamp(4.0, 2000.0) as u32)
+                        .map_err(e)?;
                 }
             }
         }

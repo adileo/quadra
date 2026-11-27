@@ -30,13 +30,21 @@ pub enum DeclKind {
 
 impl DeclKind {
     pub fn is_type(self) -> bool {
-        matches!(self, DeclKind::Entity | DeclKind::Record | DeclKind::Trait | DeclKind::Enum)
+        matches!(
+            self,
+            DeclKind::Entity | DeclKind::Record | DeclKind::Trait | DeclKind::Enum
+        )
     }
 
     pub fn has_members(self) -> bool {
         matches!(
             self,
-            DeclKind::Entity | DeclKind::Record | DeclKind::Trait | DeclKind::Ledger | DeclKind::Metric | DeclKind::Control
+            DeclKind::Entity
+                | DeclKind::Record
+                | DeclKind::Trait
+                | DeclKind::Ledger
+                | DeclKind::Metric
+                | DeclKind::Control
         )
     }
 
@@ -134,13 +142,39 @@ pub struct Reference {
 }
 
 /// Fields every entity has without declaring them.
-pub const IMPLICIT_MEMBERS: &[&str] = &["id", "created_at", "created_by", "updated_at", "updated_by", "version", "history"];
+pub const IMPLICIT_MEMBERS: &[&str] = &[
+    "id",
+    "created_at",
+    "created_by",
+    "updated_at",
+    "updated_by",
+    "version",
+    "history",
+];
 /// Columns every ledger row has.
 pub const IMPLICIT_LEDGER_MEMBERS: &[&str] = &["source", "date"];
 
 pub const BUILTIN_TYPES: &[&str] = &[
-    "Text", "Code", "Int", "Decimal", "Bool", "Date", "DateTime", "Duration", "DateRange", "Percent", "Email",
-    "Phone", "VatNumber", "Barcode", "Role", "Money", "Price", "Qty", "Exact", "File",
+    "Text",
+    "Code",
+    "Int",
+    "Decimal",
+    "Bool",
+    "Date",
+    "DateTime",
+    "Duration",
+    "DateRange",
+    "Percent",
+    "Email",
+    "Phone",
+    "VatNumber",
+    "Barcode",
+    "Role",
+    "Money",
+    "Price",
+    "Qty",
+    "Exact",
+    "File",
 ];
 /// Generic types whose arguments are units or currencies, checked in phase 3.
 const UNIT_GENERICS: &[&str] = &["Money", "Price", "Qty"];
@@ -182,11 +216,20 @@ impl Analysis {
         self.lookup_member_in(owner, name, &mut seen)
     }
 
-    fn lookup_member_in(&self, owner: DeclId, name: &str, seen: &mut HashSet<DeclId>) -> Option<(DeclId, usize)> {
+    fn lookup_member_in(
+        &self,
+        owner: DeclId,
+        name: &str,
+        seen: &mut HashSet<DeclId>,
+    ) -> Option<(DeclId, usize)> {
         if !seen.insert(owner) {
             return None;
         }
-        if let Some(i) = self.members.get(&owner).and_then(|ms| ms.iter().position(|m| m.name == name)) {
+        if let Some(i) = self
+            .members
+            .get(&owner)
+            .and_then(|ms| ms.iter().position(|m| m.name == name))
+        {
             return Some((owner, i));
         }
         for t in self.decl(owner).traits.clone() {
@@ -203,7 +246,9 @@ impl Analysis {
         }
         match self.decl(owner).kind {
             DeclKind::Ledger => IMPLICIT_LEDGER_MEMBERS.contains(&name),
-            DeclKind::Entity | DeclKind::Record | DeclKind::Trait => IMPLICIT_MEMBERS.contains(&name),
+            DeclKind::Entity | DeclKind::Record | DeclKind::Trait => {
+                IMPLICIT_MEMBERS.contains(&name)
+            }
             _ => false,
         }
     }
@@ -235,21 +280,32 @@ impl Analysis {
 
     /// The declaration that defines `name`, in any module (for "add an import" hints).
     pub fn find_anywhere(&self, name: &str) -> Option<DeclId> {
-        let mut found: Vec<DeclId> =
-            self.module_decls.values().filter_map(|m| m.get(name).copied()).collect();
+        let mut found: Vec<DeclId> = self
+            .module_decls
+            .values()
+            .filter_map(|m| m.get(name).copied())
+            .collect();
         found.sort();
         found.first().copied()
     }
 }
 
 pub(crate) fn analyze(project: &Project) -> Analysis {
-    let mut r = Resolver { project, a: Analysis::default() };
+    let mut r = Resolver {
+        project,
+        a: Analysis::default(),
+    };
     for f in project.files() {
         for e in &f.parse.errors {
             r.error(f.id, e.range, e.message.clone());
         }
         // `@name` is a parameter of an app: `.qdi` files only (their generated code has none)
-        for n in f.parse.syntax().descendants().filter(|n| n.kind() == PARAM_REF) {
+        for n in f
+            .parse
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == PARAM_REF)
+        {
             r.error(f.id, n.text_range(), format!("`{}`: `@name` (a filter or a selection of an app) is written only in `.qdi` files", n.text()));
         }
     }
@@ -279,16 +335,29 @@ fn ident(node: &SyntaxNode) -> Option<SyntaxToken> {
 
 impl<'p> Resolver<'p> {
     fn error(&mut self, file: FileId, range: TextRange, message: String) {
-        self.a.diagnostics.push(Diagnostic { file, range, severity: Severity::Error, message });
+        self.a.diagnostics.push(Diagnostic {
+            file,
+            range,
+            severity: Severity::Error,
+            message,
+        });
     }
 
     fn warning(&mut self, file: FileId, range: TextRange, message: String) {
-        self.a.diagnostics.push(Diagnostic { file, range, severity: Severity::Warning, message });
+        self.a.diagnostics.push(Diagnostic {
+            file,
+            range,
+            severity: Severity::Warning,
+            message,
+        });
     }
 
     fn line(&self, file: FileId, range: TextRange) -> usize {
         let text = &self.project.file(file).text;
-        text[..usize::from(range.start()).min(text.len())].matches('\n').count() + 1
+        text[..usize::from(range.start()).min(text.len())]
+            .matches('\n')
+            .count()
+            + 1
     }
 
     fn location(&self, file: FileId, range: TextRange) -> String {
@@ -298,7 +367,11 @@ impl<'p> Resolver<'p> {
     }
 
     fn reference(&mut self, file: FileId, range: TextRange, target: Target) {
-        self.a.references.push(Reference { file, range, target });
+        self.a.references.push(Reference {
+            file,
+            range,
+            target,
+        });
     }
 
     // ---- 1. declarations --------------------------------------------------------------
@@ -310,7 +383,9 @@ impl<'p> Resolver<'p> {
             for item in f.parse.syntax().children() {
                 let kind = match item.kind() {
                     ENTITY => {
-                        if ast::token(&item, EXTEND_KW).is_some() || ast::ctx_keyword(&item).as_deref() == Some("patch") {
+                        if ast::token(&item, EXTEND_KW).is_some()
+                            || ast::ctx_keyword(&item).as_deref() == Some("patch")
+                        {
                             continue;
                         }
                         if ast::token(&item, RECORD_KW).is_some() {
@@ -336,7 +411,9 @@ impl<'p> Resolver<'p> {
                     EVENT => DeclKind::Event,
                     _ => continue,
                 };
-                let Some(tok) = ast::name_token(&item) else { continue };
+                let Some(tok) = ast::name_token(&item) else {
+                    continue;
+                };
                 let id = DeclId(self.a.decls.len() as u32);
                 self.a.decls.push(Decl {
                     name: tok.text().to_string(),
@@ -350,7 +427,11 @@ impl<'p> Resolver<'p> {
                 });
                 if let Some(prev) = names.get(tok.text()).copied() {
                     let at = self.location(f.id, self.a.decl(prev).name_range);
-                    self.error(f.id, tok.text_range(), format!("`{}` is already declared at {at}", tok.text()));
+                    self.error(
+                        f.id,
+                        tok.text_range(),
+                        format!("`{}` is already declared at {at}", tok.text()),
+                    );
                 } else {
                     names.insert(tok.text().to_string(), id);
                 }
@@ -362,7 +443,11 @@ impl<'p> Resolver<'p> {
             .project
             .files()
             .filter(|f| f.kind == FileKind::Std)
-            .flat_map(|f| self.a.module_decls[&f.id].iter().map(|(n, id)| (n.clone(), *id)))
+            .flat_map(|f| {
+                self.a.module_decls[&f.id]
+                    .iter()
+                    .map(|(n, id)| (n.clone(), *id))
+            })
             .collect();
         for f in self.project.user_files() {
             let mut clashes: Vec<(String, DeclId, DeclId)> = Vec::new();
@@ -381,7 +466,11 @@ impl<'p> Resolver<'p> {
                     _ => ": choose another name".to_string(),
                 };
                 let range = self.a.decl(id).name_range;
-                self.error(f.id, range, format!("`{name}` is declared in the standard library (`{module}`){hint}"));
+                self.error(
+                    f.id,
+                    range,
+                    format!("`{name}` is declared in the standard library (`{module}`){hint}"),
+                );
             }
         }
     }
@@ -393,17 +482,28 @@ impl<'p> Resolver<'p> {
         for f in self.project.files() {
             let mut scope = self.a.module_decls[&f.id].clone();
             for imp in f.parse.syntax().children().filter(|n| n.kind() == IMPORT) {
-                let Some(path) = ast::child(&imp, PATH) else { continue };
+                let Some(path) = ast::child(&imp, PATH) else {
+                    continue;
+                };
                 let module = ast::path_text(&path);
                 let Some(&target) = self.a.module_files.get(&module) else {
-                    self.error(f.id, path.text_range(), format!("unknown module `{module}`"));
+                    self.error(
+                        f.id,
+                        path.text_range(),
+                        format!("unknown module `{module}`"),
+                    );
                     continue;
                 };
                 if target == f.id {
-                    self.error(f.id, path.text_range(), "a module cannot import itself".into());
+                    self.error(
+                        f.id,
+                        path.text_range(),
+                        "a module cannot import itself".into(),
+                    );
                     continue;
                 }
-                if f.kind == FileKind::Module && self.project.file(target).kind == FileKind::Script {
+                if f.kind == FileKind::Module && self.project.file(target).kind == FileKind::Script
+                {
                     self.error(
                         f.id,
                         path.text_range(),
@@ -411,17 +511,27 @@ impl<'p> Resolver<'p> {
                     );
                     continue;
                 }
-                edges.entry(f.id).or_default().push((target, imp.text_range()));
+                edges
+                    .entry(f.id)
+                    .or_default()
+                    .push((target, imp.text_range()));
                 for nr in ast::children(&imp, NAME_REF) {
                     let Some(tok) = ident(&nr) else { continue };
                     let name = tok.text();
                     match self.a.module_decls[&target].get(name).copied() {
                         None => {
                             let hint = match self.a.find_anywhere(name) {
-                                Some(d) => format!(" (it is declared in `{}`)", self.project.file(self.a.decl(d).file).module),
+                                Some(d) => format!(
+                                    " (it is declared in `{}`)",
+                                    self.project.file(self.a.decl(d).file).module
+                                ),
                                 None => String::new(),
                             };
-                            self.error(f.id, tok.text_range(), format!("`{name}` is not declared in module `{module}`{hint}"));
+                            self.error(
+                                f.id,
+                                tok.text_range(),
+                                format!("`{name}` is not declared in module `{module}`{hint}"),
+                            );
                         }
                         Some(id) => {
                             match scope.get(name).copied() {
@@ -433,7 +543,9 @@ impl<'p> Resolver<'p> {
                                 Some(_) => self.error(
                                     f.id,
                                     tok.text_range(),
-                                    format!("`{name}` is already declared or imported in this module"),
+                                    format!(
+                                        "`{name}` is already declared or imported in this module"
+                                    ),
                                 ),
                                 None => {
                                     scope.insert(name.to_string(), id);
@@ -507,11 +619,17 @@ impl<'p> Resolver<'p> {
             if !reported.insert(key) {
                 continue;
             }
-            let names: Vec<String> = cycle.iter().map(|id| self.project.file(*id).module.clone()).collect();
+            let names: Vec<String> = cycle
+                .iter()
+                .map(|id| self.project.file(*id).module.clone())
+                .collect();
             self.error(
                 file,
                 range,
-                format!("import cycle: {} (use `extend` in the higher module instead)", names.join(" → ")),
+                format!(
+                    "import cycle: {} (use `extend` in the higher module instead)",
+                    names.join(" → ")
+                ),
             );
         }
     }
@@ -527,10 +645,16 @@ impl<'p> Resolver<'p> {
     fn resolve_traits(&mut self) {
         for f in self.project.files() {
             for item in f.parse.syntax().children().filter(|n| n.kind() == ENTITY) {
-                let Some(owner) = self.local_decl_of(f.id, &item) else { continue };
-                let Some(clause) = ast::child(&item, IS_CLAUSE) else { continue };
+                let Some(owner) = self.local_decl_of(f.id, &item) else {
+                    continue;
+                };
+                let Some(clause) = ast::child(&item, IS_CLAUSE) else {
+                    continue;
+                };
                 for path in ast::children(&clause, PATH) {
-                    if let Some(t) = self.resolve_path_decl(f.id, &path, &[DeclKind::Trait], "a trait") {
+                    if let Some(t) =
+                        self.resolve_path_decl(f.id, &path, &[DeclKind::Trait], "a trait")
+                    {
                         self.a.decls[owner.0 as usize].traits.push(t);
                     }
                 }
@@ -539,7 +663,13 @@ impl<'p> Resolver<'p> {
     }
 
     /// Resolve a one-segment PATH to a declaration of one of `kinds`.
-    fn resolve_path_decl(&mut self, file: FileId, path: &SyntaxNode, kinds: &[DeclKind], what: &str) -> Option<DeclId> {
+    fn resolve_path_decl(
+        &mut self,
+        file: FileId,
+        path: &SyntaxNode,
+        kinds: &[DeclKind],
+        what: &str,
+    ) -> Option<DeclId> {
         let segs = ast::path_segments(path);
         let first = segs.first()?;
         let name = first.text();
@@ -550,7 +680,11 @@ impl<'p> Resolver<'p> {
             }
             Some(id) => {
                 let k = self.a.decl(id).kind.describe();
-                self.error(file, first.text_range(), format!("`{name}` is a {k}, expected {what}"));
+                self.error(
+                    file,
+                    first.text_range(),
+                    format!("`{name}` is a {k}, expected {what}"),
+                );
                 None
             }
             None => {
@@ -570,7 +704,11 @@ impl<'p> Resolver<'p> {
             }
             None => String::new(),
         };
-        self.error(file, tok.text_range(), format!("unknown {what} `{name}`{hint}"));
+        self.error(
+            file,
+            tok.text_range(),
+            format!("unknown {what} `{name}`{hint}"),
+        );
     }
 
     // ---- 4. members and extend --------------------------------------------------------
@@ -582,7 +720,9 @@ impl<'p> Resolver<'p> {
                 if !matches!(item.kind(), ENTITY | LEDGER | METRIC | CONTROL) {
                     continue;
                 }
-                let Some(owner) = self.local_decl_of(f.id, &item) else { continue };
+                let Some(owner) = self.local_decl_of(f.id, &item) else {
+                    continue;
+                };
                 if let Some(list) = ast::child(&item, MEMBER_LIST) {
                     self.collect_members(owner, f.id, &list, false);
                 }
@@ -593,9 +733,13 @@ impl<'p> Resolver<'p> {
                 if ast::token(&item, EXTEND_KW).is_none() {
                     continue;
                 }
-                let Some(path) = ast::child(&item, PATH) else { continue };
+                let Some(path) = ast::child(&item, PATH) else {
+                    continue;
+                };
                 let kinds = [DeclKind::Entity, DeclKind::Record, DeclKind::Trait];
-                let Some(owner) = self.resolve_path_decl(f.id, &path, &kinds, "entity, record or trait") else {
+                let Some(owner) =
+                    self.resolve_path_decl(f.id, &path, &kinds, "entity, record or trait")
+                else {
                     continue;
                 };
                 if let Some(list) = ast::child(&item, MEMBER_LIST) {
@@ -605,12 +749,20 @@ impl<'p> Resolver<'p> {
         }
     }
 
-    fn collect_members(&mut self, owner: DeclId, file: FileId, list: &SyntaxNode, via_extend: bool) {
+    fn collect_members(
+        &mut self,
+        owner: DeclId,
+        file: FileId,
+        list: &SyntaxNode,
+        via_extend: bool,
+    ) {
         let mut flow_actions: Vec<(String, TextRange, String)> = Vec::new();
         for m in list.children() {
             let (kind, tok) = match m.kind() {
                 FIELD => {
-                    let Some(tok) = ast::name_token(&m) else { continue };
+                    let Some(tok) = ast::name_token(&m) else {
+                        continue;
+                    };
                     let ledger_kw = ast::ctx_keyword(&m);
                     let has_type = type_child(&m).is_some();
                     let kind = match ledger_kw.as_deref() {
@@ -626,7 +778,10 @@ impl<'p> Resolver<'p> {
                                 self.error(
                                     file,
                                     tok.text_range(),
-                                    format!("`{}` is not declared on `{o}` or its traits", tok.text()),
+                                    format!(
+                                        "`{}` is not declared on `{o}` or its traits",
+                                        tok.text()
+                                    ),
                                 );
                             } else if let Some((d, i)) = self.a.lookup_member(owner, tok.text()) {
                                 self.reference(file, tok.text_range(), Target::Member(d, i));
@@ -647,7 +802,11 @@ impl<'p> Resolver<'p> {
                 FLOW => {
                     for t in ast::children(&m, TRANSITION) {
                         if let Some(by) = action_after_by(&t) {
-                            flow_actions.push((by.text().to_string(), by.text_range(), ast::header(&t)));
+                            flow_actions.push((
+                                by.text().to_string(),
+                                by.text_range(),
+                                ast::header(&t),
+                            ));
                         }
                     }
                     continue;
@@ -656,12 +815,20 @@ impl<'p> Resolver<'p> {
             };
             let name = tok.text().to_string();
             // redeclaring a trait member implements it (types are checked by the type checker)
-            let in_own = self.a.members.get(&owner).map_or(false, |ms| ms.iter().any(|m| m.name == name));
+            let in_own = self
+                .a
+                .members
+                .get(&owner)
+                .map_or(false, |ms| ms.iter().any(|m| m.name == name));
             if let Some((d, i)) = self.a.lookup_member(owner, &name).filter(|_| in_own) {
                 let prev = self.a.member(d, i).clone();
                 let at = self.location(prev.file, prev.name_range);
                 let o = self.a.decl(owner).name.clone();
-                self.error(file, tok.text_range(), format!("`{name}` is already declared on `{o}` at {at}"));
+                self.error(
+                    file,
+                    tok.text_range(),
+                    format!("`{name}` is already declared on `{o}` at {at}"),
+                );
                 continue;
             }
             let variants = member_variants(&m);
@@ -693,23 +860,34 @@ impl<'p> Resolver<'p> {
         }
     }
 
-
     // ---- 5. variants ------------------------------------------------------------------
 
     fn collect_unit_codes(&mut self) {
         for f in self.project.files() {
             for seed in f.parse.syntax().children().filter(|n| n.kind() == SEED) {
                 for call in seed.descendants().filter(|n| n.kind() == CALL_EXPR) {
-                    let callee = call.first_child().filter(|c| c.kind() == NAME_REF).and_then(|c| ident(&c));
-                    if !matches!(callee.as_ref().map(|t| t.text()), Some("Currency") | Some("Uom")) {
+                    let callee = call
+                        .first_child()
+                        .filter(|c| c.kind() == NAME_REF)
+                        .and_then(|c| ident(&c));
+                    if !matches!(
+                        callee.as_ref().map(|t| t.text()),
+                        Some("Currency") | Some("Uom")
+                    ) {
                         continue;
                     }
                     for arg in call.descendants().filter(|n| n.kind() == ARG) {
                         if ast::name_text(&arg).as_deref() != Some("code") {
                             continue;
                         }
-                        if let Some(lit) = arg.descendants_with_tokens().filter_map(|e| e.into_token()).find(|t| t.kind() == STRING) {
-                            self.a.unit_codes.insert(lit.text().trim_matches('"').to_string());
+                        if let Some(lit) = arg
+                            .descendants_with_tokens()
+                            .filter_map(|e| e.into_token())
+                            .find(|t| t.kind() == STRING)
+                        {
+                            self.a
+                                .unit_codes
+                                .insert(lit.text().trim_matches('"').to_string());
                         }
                     }
                 }
@@ -719,7 +897,12 @@ impl<'p> Resolver<'p> {
 
     fn collect_variants(&mut self) {
         for f in self.project.files() {
-            for node in f.parse.syntax().descendants().filter(|n| n.kind() == VARIANT) {
+            for node in f
+                .parse
+                .syntax()
+                .descendants()
+                .filter(|n| n.kind() == VARIANT)
+            {
                 if let Some(tok) = ast::name_token(&node) {
                     let entry = self.a.variants.entry(tok.text().to_string()).or_default();
                     if !entry.contains(&(f.id, tok.text_range())) {
@@ -737,7 +920,9 @@ impl<'p> Resolver<'p> {
             let root = f.parse.syntax();
             let mut preorder = root.preorder();
             while let Some(event) = preorder.next() {
-                let rowan::WalkEvent::Enter(node) = event else { continue };
+                let rowan::WalkEvent::Enter(node) = event else {
+                    continue;
+                };
                 if is_excluded(&node) {
                     preorder.skip_subtree();
                     continue;
@@ -748,7 +933,9 @@ impl<'p> Resolver<'p> {
     }
 
     fn enclosing_owner(&mut self, file: FileId, node: &SyntaxNode) -> Option<DeclId> {
-        let item = node.ancestors().find(|n| matches!(n.kind(), ENTITY | LEDGER))?;
+        let item = node
+            .ancestors()
+            .find(|n| matches!(n.kind(), ENTITY | LEDGER))?;
         if ast::token(&item, EXTEND_KW).is_some() {
             let path = ast::child(&item, PATH)?;
             let seg = ast::path_segments(&path).into_iter().next()?;
@@ -788,7 +975,11 @@ impl<'p> Resolver<'p> {
                 }
             }
             KEYWORD_STMT if ast::ctx_keyword(node).as_deref() == Some("use") => {
-                if let Some(tok) = node.descendants().find(|n| n.kind() == NAME_REF).and_then(|n| ident(&n)) {
+                if let Some(tok) = node
+                    .descendants()
+                    .find(|n| n.kind() == NAME_REF)
+                    .and_then(|n| ident(&n))
+                {
                     self.check_decl_name(file, &tok, &[DeclKind::Fixture], "fixture");
                 }
             }
@@ -821,11 +1012,15 @@ impl<'p> Resolver<'p> {
             }
             FLOW => self.check_flow(file, node),
             UNIQUE | FROZEN | CHECK => {
-                let Some(owner) = self.enclosing_owner(file, node) else { return };
+                let Some(owner) = self.enclosing_owner(file, node) else {
+                    return;
+                };
                 let mut keyword = String::new();
                 for el in node.children_with_tokens() {
                     match el {
-                        rowan::NodeOrToken::Token(t) if t.kind() == CONTEXT_KW => keyword = t.text().to_string(),
+                        rowan::NodeOrToken::Token(t) if t.kind() == CONTEXT_KW => {
+                            keyword = t.text().to_string()
+                        }
                         rowan::NodeOrToken::Node(list) if list.kind() == NAME_LIST => {
                             for nr in ast::children(&list, NAME_REF) {
                                 let Some(tok) = ident(&nr) else { continue };
@@ -837,7 +1032,10 @@ impl<'p> Resolver<'p> {
                                         self.error(
                                             file,
                                             tok.text_range(),
-                                            format!("`live` lists formulas; `{}` is a stored field", tok.text()),
+                                            format!(
+                                                "`live` lists formulas; `{}` is a stored field",
+                                                tok.text()
+                                            ),
                                         );
                                     }
                                 }
@@ -859,7 +1057,11 @@ impl<'p> Resolver<'p> {
             }
             Some(id) => {
                 let k = self.a.decl(id).kind.describe();
-                self.error(file, tok.text_range(), format!("`{}` is a {k}, expected a {what}", tok.text()));
+                self.error(
+                    file,
+                    tok.text_range(),
+                    format!("`{}` is a {k}, expected a {what}", tok.text()),
+                );
             }
             None => self.unknown(file, tok, what),
         }
@@ -874,7 +1076,11 @@ impl<'p> Resolver<'p> {
             return true; // implicit
         }
         let o = self.a.decl(owner).name.clone();
-        self.error(file, tok.text_range(), format!("`{o}` has no member `{}`", tok.text()));
+        self.error(
+            file,
+            tok.text_range(),
+            format!("`{o}` has no member `{}`", tok.text()),
+        );
         false
     }
 
@@ -899,11 +1105,17 @@ impl<'p> Resolver<'p> {
     }
 
     fn check_reaction(&mut self, file: FileId, node: &SyntaxNode) {
-        let Some(path) = ast::child(node, PATH) else { return };
+        let Some(path) = ast::child(node, PATH) else {
+            return;
+        };
         let segs = ast::path_segments(&path);
         let Some(first) = segs.first() else { return };
         let kinds = [DeclKind::Entity, DeclKind::Record];
-        let Some(owner) = self.a.resolve(file, first.text()).filter(|d| kinds.contains(&self.a.decl(*d).kind)) else {
+        let Some(owner) = self
+            .a
+            .resolve(file, first.text())
+            .filter(|d| kinds.contains(&self.a.decl(*d).kind))
+        else {
             self.unknown(file, first, "entity");
             return;
         };
@@ -917,7 +1129,11 @@ impl<'p> Resolver<'p> {
                 if self.check_member_name(file, owner, action) {
                     if let Some((d, i)) = self.a.lookup_member(owner, action.text()) {
                         if !self.a.member(d, i).kind.is_action() {
-                            self.error(file, action.text_range(), format!("`{}` is not an action", action.text()));
+                            self.error(
+                                file,
+                                action.text_range(),
+                                format!("`{}` is not an action", action.text()),
+                            );
                         }
                     }
                 }
@@ -931,10 +1147,18 @@ impl<'p> Resolver<'p> {
                     if let Some(state) = ast::child(node, NAME_REF).and_then(|n| ident(&n)) {
                         let variants = self.a.owner_variants(owner);
                         if variants.contains(state.text()) {
-                            self.reference(file, state.text_range(), Target::Variant(state.text().into()));
+                            self.reference(
+                                file,
+                                state.text_range(),
+                                Target::Variant(state.text().into()),
+                            );
                         } else {
                             let o = self.a.decl(owner).name.clone();
-                            self.error(file, state.text_range(), format!("`{o}` has no state `{}`", state.text()));
+                            self.error(
+                                file,
+                                state.text_range(),
+                                format!("`{o}` has no state `{}`", state.text()),
+                            );
                         }
                     }
                 }
@@ -943,12 +1167,18 @@ impl<'p> Resolver<'p> {
     }
 
     fn check_flow(&mut self, file: FileId, node: &SyntaxNode) {
-        let Some(owner) = self.enclosing_owner(file, node) else { return };
-        let Some(field) = ast::child(node, NAME_REF).and_then(|n| ident(&n)) else { return };
+        let Some(owner) = self.enclosing_owner(file, node) else {
+            return;
+        };
+        let Some(field) = ast::child(node, NAME_REF).and_then(|n| ident(&n)) else {
+            return;
+        };
         if !self.check_member_name(file, owner, &field) {
             return;
         }
-        let Some((d, i)) = self.a.lookup_member(owner, field.text()) else { return };
+        let Some((d, i)) = self.a.lookup_member(owner, field.text()) else {
+            return;
+        };
         let states: HashSet<String> = self.a.member(d, i).variants.iter().cloned().collect();
         if states.is_empty() {
             self.error(
@@ -967,7 +1197,11 @@ impl<'p> Resolver<'p> {
             let mut state_refs = Vec::new();
             for el in t.children_with_tokens() {
                 match el {
-                    rowan::NodeOrToken::Token(tok) if matches!(tok.kind(), CONTEXT_KW | WHEN_KW) => break,
+                    rowan::NodeOrToken::Token(tok)
+                        if matches!(tok.kind(), CONTEXT_KW | WHEN_KW) =>
+                    {
+                        break
+                    }
                     rowan::NodeOrToken::Node(n) if n.kind() == NAME_REF => state_refs.push(n),
                     _ => {}
                 }
@@ -988,7 +1222,9 @@ impl<'p> Resolver<'p> {
     }
 
     fn check_type_path(&mut self, file: FileId, node: &SyntaxNode) {
-        let Some(path) = ast::child(node, PATH) else { return };
+        let Some(path) = ast::child(node, PATH) else {
+            return;
+        };
         let segs = ast::path_segments(&path);
         if segs.len() != 1 {
             return; // field paths in generic arguments (`order.currency`) or `old.Text`
@@ -996,8 +1232,14 @@ impl<'p> Resolver<'p> {
         let tok = &segs[0];
         let name = tok.text();
         if let Some(args) = node.parent().filter(|p| p.kind() == GENERIC_ARGS) {
-            let generic = args.parent().and_then(|g| ast::child(&g, PATH)).map(|p| ast::path_text(&p));
-            if generic.as_deref().map_or(false, |g| UNIT_GENERICS.contains(&g)) {
+            let generic = args
+                .parent()
+                .and_then(|g| ast::child(&g, PATH))
+                .map(|p| ast::path_text(&p));
+            if generic
+                .as_deref()
+                .map_or(false, |g| UNIT_GENERICS.contains(&g))
+            {
                 return; // unit or currency: checked by the type checker (phase 3)
             }
         }
@@ -1005,17 +1247,24 @@ impl<'p> Resolver<'p> {
             self.error(
                 file,
                 payload.text_range(),
-                "variants with data are declared inside `enum(...)` or an `enum` declaration".into(),
+                "variants with data are declared inside `enum(...)` or an `enum` declaration"
+                    .into(),
             );
         }
         if BUILTIN_TYPES.contains(&name) {
             return;
         }
         match self.a.resolve(file, name) {
-            Some(id) if self.a.decl(id).kind.is_type() => self.reference(file, tok.text_range(), Target::Decl(id)),
+            Some(id) if self.a.decl(id).kind.is_type() => {
+                self.reference(file, tok.text_range(), Target::Decl(id))
+            }
             Some(id) => {
                 let k = self.a.decl(id).kind.describe();
-                self.error(file, tok.text_range(), format!("`{name}` is a {k}, not a type"));
+                self.error(
+                    file,
+                    tok.text_range(),
+                    format!("`{name}` is a {k}, not a type"),
+                );
             }
             None => self.unknown(file, tok, "type"),
         }
@@ -1029,7 +1278,8 @@ impl<'p> Resolver<'p> {
         }
         let Some(parent) = node.parent() else { return };
         match parent.kind() {
-            PATH | IMPORT | NAME_LIST | TRANSITION | FLOW | REACTION | KEYWORD_STMT | AS_STMT | AS_EXPR => return,
+            PATH | IMPORT | NAME_LIST | TRANSITION | FLOW | REACTION | KEYWORD_STMT | AS_STMT
+            | AS_EXPR => return,
             FIELD_EXPR if is_member_name(node) => return,
             CALL_EXPR if is_emit_callee(&parent) => return,
             _ => {}
@@ -1047,8 +1297,16 @@ impl<'p> Resolver<'p> {
 
 // ---- syntax helpers ---------------------------------------------------------------------
 
-const TYPE_KINDS: &[quadra_syntax::SyntaxKind] =
-    &[TYPE_PATH, TYPE_OPTIONAL, TYPE_UNION, TYPE_ENUM, TYPE_LIST, TYPE_SET, TYPE_PAREN, TYPE_TUPLE];
+const TYPE_KINDS: &[quadra_syntax::SyntaxKind] = &[
+    TYPE_PATH,
+    TYPE_OPTIONAL,
+    TYPE_UNION,
+    TYPE_ENUM,
+    TYPE_LIST,
+    TYPE_SET,
+    TYPE_PAREN,
+    TYPE_TUPLE,
+];
 
 fn type_child(node: &SyntaxNode) -> Option<SyntaxNode> {
     node.children().find(|n| TYPE_KINDS.contains(&n.kind()))
@@ -1086,7 +1344,9 @@ fn is_member_name(node: &SyntaxNode) -> bool {
 }
 
 fn is_emit_callee(call: &SyntaxNode) -> bool {
-    call.parent().map_or(false, |p| p.kind() == KEYWORD_STMT && ast::ctx_keyword(&p).as_deref() == Some("emit"))
+    call.parent().map_or(false, |p| {
+        p.kind() == KEYWORD_STMT && ast::ctx_keyword(&p).as_deref() == Some("emit")
+    })
 }
 
 /// Subtrees that are deliberately wrong (`expect_compile_error`) or replace definitions
@@ -1114,5 +1374,7 @@ fn member_variants(member: &SyntaxNode) -> Vec<String> {
     if ty.kind() != TYPE_ENUM {
         return Vec::new();
     }
-    ast::children(&ty, VARIANT).filter_map(|v| ast::name_text(&v)).collect()
+    ast::children(&ty, VARIANT)
+        .filter_map(|v| ast::name_text(&v))
+        .collect()
 }

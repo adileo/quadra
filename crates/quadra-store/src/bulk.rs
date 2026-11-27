@@ -188,7 +188,10 @@ struct Mem {
 impl Mem {
     fn locate(&self, id: Id) -> Option<(usize, usize)> {
         // plans are in ascending order of ids
-        let p = self.plans.partition_point(|p| p.first <= id).checked_sub(1)?;
+        let p = self
+            .plans
+            .partition_point(|p| p.first <= id)
+            .checked_sub(1)?;
         let plan = &self.plans[p];
         let r = (id - plan.first) as usize;
         (r < plan.rows.len()).then_some((p, r))
@@ -197,7 +200,8 @@ impl Mem {
     fn build(&self, p: usize, r: usize) -> Record {
         let plan = &self.plans[p];
         let row = &plan.rows[r];
-        let mut fields = rustc_hash::FxHashMap::with_capacity_and_hasher(plan.fields.len(), Default::default());
+        let mut fields =
+            rustc_hash::FxHashMap::with_capacity_and_hasher(plan.fields.len(), Default::default());
         let mut pending = Vec::new();
         for (i, f) in plan.fields.iter().enumerate() {
             if row.pending & (1 << i) != 0 {
@@ -241,7 +245,10 @@ impl Mem {
             let mut ok = false;
             if let Some(p) = self.plans.iter().position(|p| p.entity == ent) {
                 let plan = &self.plans[p];
-                if let Some(i) = plan.field(field).filter(|i| plan.fields[*i].kind.target().is_some()) {
+                if let Some(i) = plan
+                    .field(field)
+                    .filter(|i| plan.fields[*i].kind.target().is_some())
+                {
                     ok = true;
                     for (r, row) in plan.rows.iter().enumerate() {
                         for t in ref_ids(&row.vals[i]) {
@@ -261,7 +268,10 @@ impl Mem {
                     }
                 }
             }
-            self.indexes.entry(ent.to_string()).or_default().insert(field.to_string(), ok.then(|| Index::Refs(map)));
+            self.indexes
+                .entry(ent.to_string())
+                .or_default()
+                .insert(field.to_string(), ok.then(|| Index::Refs(map)));
         }
         &self.indexes[ent][field]
     }
@@ -364,7 +374,13 @@ pub struct Import<'m> {
 
 impl<'m> Import<'m> {
     /// Over the database's current data (loaded in memory: meant for initial loads).
-    pub fn new(db: &mut Database, model: &'m Model, report: &'m Report, time: NaiveDateTime, label: &str) -> Result<Import<'m>, String> {
+    pub fn new(
+        db: &mut Database,
+        model: &'m Model,
+        report: &'m Report,
+        time: NaiveDateTime,
+        label: &str,
+    ) -> Result<Import<'m>, String> {
         let status = db.status()?;
         if !status.initialized {
             return Err("the database is not initialized (run `quadra db init`)".into());
@@ -375,23 +391,56 @@ impl<'m> Import<'m> {
         let store = db.load()?;
         let mut existing_ids: HashMap<String, Vec<Id>> = HashMap::new();
         for r in store.records.values() {
-            existing_ids.entry(r.ent.to_string()).or_default().push(r.id);
+            existing_ids
+                .entry(r.ent.to_string())
+                .or_default()
+                .push(r.id);
         }
-        let cause = Rc::new(Cause { desc: format!("bulk import {label}"), user: "system".into(), time, parent: None });
-        let mem = Mem { plans: Vec::new(), existing: store.records.clone().into_iter().collect(), existing_ids, counters: store.counters.clone(), base: store.tx, time, cause, indexes: HashMap::new(), created: false };
-        Ok(Import { model, report, mem, next_id: store.next_id, pending: Vec::new(), started: Instant::now(), records_per_commit: 250_000 })
+        let cause = Rc::new(Cause {
+            desc: format!("bulk import {label}"),
+            user: "system".into(),
+            time,
+            parent: None,
+        });
+        let mem = Mem {
+            plans: Vec::new(),
+            existing: store.records.clone().into_iter().collect(),
+            existing_ids,
+            counters: store.counters.clone(),
+            base: store.tx,
+            time,
+            cause,
+            indexes: HashMap::new(),
+            created: false,
+        };
+        Ok(Import {
+            model,
+            report,
+            mem,
+            next_id: store.next_id,
+            pending: Vec::new(),
+            started: Instant::now(),
+            records_per_commit: 250_000,
+        })
     }
 
     /// The rows of `entity` follow, with these columns (`id`: the key other rows refer to).
     /// `file`: where they come from, for messages.
     pub fn entity(&mut self, entity: &str, header: &[String], file: &str) -> Result<usize, String> {
         let model = self.model;
-        let e = model.entity(entity).filter(|e| e.kind == EntityKind::Entity && !e.temporary).ok_or_else(|| format!("{file}: unknown entity `{entity}`"))?;
+        let e = model
+            .entity(entity)
+            .filter(|e| e.kind == EntityKind::Entity && !e.temporary)
+            .ok_or_else(|| format!("{file}: unknown entity `{entity}`"))?;
         if e.is_ledger {
-            return Err(format!("{file}: `{entity}` is a ledger: its rows come from `post to`"));
+            return Err(format!(
+                "{file}: `{entity}` is a ledger: its rows come from `post to`"
+            ));
         }
         if !e.posts.is_empty() {
-            return Err(format!("{file}: `{entity}` posts to a ledger: the import does not compute postings yet"));
+            return Err(format!(
+                "{file}: `{entity}` posts to a ledger: the import does not compute postings yet"
+            ));
         }
         if self.mem.plans.iter().any(|p| p.entity == entity) {
             return Err(format!("{file}: the rows of `{entity}` were already given"));
@@ -401,14 +450,39 @@ impl<'m> Import<'m> {
             if f.formula.is_some() || f.per_company || schema::is_inverse(model, e, f) {
                 continue;
             }
-            let t = self.report.field_types.get(&(e.name.clone(), f.name.clone())).cloned().or_else(|| model.all_traits(e).iter().find_map(|tr| self.report.field_types.get(&(tr.name.clone(), f.name.clone())).cloned()));
+            let t = self
+                .report
+                .field_types
+                .get(&(e.name.clone(), f.name.clone()))
+                .cloned()
+                .or_else(|| {
+                    model.all_traits(e).iter().find_map(|tr| {
+                        self.report
+                            .field_types
+                            .get(&(tr.name.clone(), f.name.clone()))
+                            .cloned()
+                    })
+                });
             let kind = t.as_ref().and_then(|t| kind_of(model, t));
             match kind {
                 Some(kind) => {
-                    let optional = matches!(f.ty, Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None) || f.required_when.is_some();
-                    fields.push(FieldPlan { name: f.name.clone(), kind: Rc::new(kind), has_default: f.default.is_some(), required: !optional && f.kind == FieldKind::Stored })
+                    let optional = matches!(
+                        f.ty,
+                        Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None
+                    ) || f.required_when.is_some();
+                    fields.push(FieldPlan {
+                        name: f.name.clone(),
+                        kind: Rc::new(kind),
+                        has_default: f.default.is_some(),
+                        required: !optional && f.kind == FieldKind::Stored,
+                    })
                 }
-                None if header.iter().any(|h| h == &f.name) => return Err(format!("{file}: `{entity}.{}` has a type the import cannot read yet", f.name)),
+                None if header.iter().any(|h| h == &f.name) => {
+                    return Err(format!(
+                        "{file}: `{entity}.{}` has a type the import cannot read yet",
+                        f.name
+                    ))
+                }
                 None => {}
             }
         }
@@ -427,7 +501,9 @@ impl<'m> Import<'m> {
                 None => {
                     let why = match model.find_field(e, h) {
                         Some(f) if f.formula.is_some() => "is a formula: it is computed",
-                        Some(f) if f.per_company => "is per company: not supported by the import yet",
+                        Some(f) if f.per_company => {
+                            "is per company: not supported by the import yet"
+                        }
                         Some(_) => "is computed from the other side of the relation",
                         None => "is not a field",
                     };
@@ -435,8 +511,21 @@ impl<'m> Import<'m> {
                 }
             }
         }
-        let formulas: Vec<String> = materialized_formulas(&schema::build(model, self.report)).into_iter().filter(|(en, _)| en == entity).map(|(_, f)| f).collect();
-        self.mem.plans.push(Plan { entity: entity.to_string(), fields, formulas, first: self.next_id + 1, rows: Vec::new(), keys: HashMap::new(), columns, file: file.to_string() });
+        let formulas: Vec<String> = materialized_formulas(&schema::build(model, self.report))
+            .into_iter()
+            .filter(|(en, _)| en == entity)
+            .map(|(_, f)| f)
+            .collect();
+        self.mem.plans.push(Plan {
+            entity: entity.to_string(),
+            fields,
+            formulas,
+            first: self.next_id + 1,
+            rows: Vec::new(),
+            keys: HashMap::new(),
+            columns,
+            file: file.to_string(),
+        });
         Ok(self.mem.plans.len() - 1)
     }
 
@@ -445,7 +534,11 @@ impl<'m> Import<'m> {
     pub fn row(&mut self, h: usize, cells: &[&str], line: usize) -> Result<(), String> {
         let ncols = self.mem.plans[h].columns.len();
         if cells.len() != ncols {
-            return Err(format!("{} line {line}: {} cells, the header has {ncols}", self.mem.plans[h].file, cells.len()));
+            return Err(format!(
+                "{} line {line}: {} cells, the header has {ncols}",
+                self.mem.plans[h].file,
+                cells.len()
+            ));
         }
         let n = self.mem.plans[h].fields.len();
         let r = self.mem.plans[h].rows.len();
@@ -464,7 +557,12 @@ impl<'m> Import<'m> {
             }
             given |= 1 << i;
             let kind = self.mem.plans[h].fields[i].kind.clone();
-            let at = Cell { plan: h, row: r, field: i, line };
+            let at = Cell {
+                plan: h,
+                row: r,
+                field: i,
+                line,
+            };
             vals[i] = match &*kind {
                 Kind::Coll(inner, set) => {
                     let mut items: Vec<V> = Vec::new();
@@ -484,13 +582,28 @@ impl<'m> Import<'m> {
             };
         }
         let plan = &mut self.mem.plans[h];
-        let pending = plan.fields.iter().enumerate().filter(|(i, f)| f.has_default && given & (1 << i) == 0).fold(0u64, |m, (i, _)| m | 1 << i);
+        let pending = plan
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| f.has_default && given & (1 << i) == 0)
+            .fold(0u64, |m, (i, _)| m | 1 << i);
         if let Some(k) = key.filter(|k| !k.is_empty()) {
             if plan.keys.insert(Box::from(k), id).is_some() {
-                return Err(format!("{} line {line}: the key `{k}` is used twice", plan.file));
+                return Err(format!(
+                    "{} line {line}: the key `{k}` is used twice",
+                    plan.file
+                ));
             }
         }
-        plan.rows.push(Row { vals, pending, defaulted: pending, formulas: Vec::new(), warnings: Vec::new(), frozen: false });
+        plan.rows.push(Row {
+            vals,
+            pending,
+            defaulted: pending,
+            formulas: Vec::new(),
+            warnings: Vec::new(),
+            frozen: false,
+        });
         self.next_id = id;
         Ok(())
     }
@@ -501,7 +614,13 @@ impl<'m> Import<'m> {
         format!("{} line {}: {}", p.file, at.line, p.fields[at.field].name)
     }
 
-    fn value(&mut self, kind: &Kind, cell: &str, at: &Cell, elem: Option<usize>) -> Result<V, String> {
+    fn value(
+        &mut self,
+        kind: &Kind,
+        cell: &str,
+        at: &Cell,
+        elem: Option<usize>,
+    ) -> Result<V, String> {
         let bad = |s: &Self, what: &str| format!("{}: `{cell}` is not {what}", s.place(at));
         let dec = |s: &str| Decimal::from_str(s).ok();
         Ok(match kind {
@@ -512,15 +631,29 @@ impl<'m> Import<'m> {
             },
             Kind::Int => V::Int(cell.parse().map_err(|_| bad(self, "an integer"))?),
             Kind::Dec => V::Dec(dec(cell).ok_or_else(|| bad(self, "a number"))?),
-            Kind::Pct => V::Pct(cell.strip_suffix('%').and_then(|n| dec(n.trim())).ok_or_else(|| bad(self, "a percentage (`10%`)"))? / Decimal::from(100)),
+            Kind::Pct => V::Pct(
+                cell.strip_suffix('%')
+                    .and_then(|n| dec(n.trim()))
+                    .ok_or_else(|| bad(self, "a percentage (`10%`)"))?
+                    / Decimal::from(100),
+            ),
             Kind::Text => V::Text(Rc::from(cell)),
-            Kind::Date => V::Date(NaiveDate::from_str(cell).map_err(|_| bad(self, "a date (YYYY-MM-DD)"))?),
-            Kind::DateTime => {
-                V::DateTime(NaiveDateTime::parse_from_str(cell, "%Y-%m-%dT%H:%M:%S").or_else(|_| NaiveDateTime::parse_from_str(cell, "%Y-%m-%d %H:%M:%S")).map_err(|_| bad(self, "a date and time (YYYY-MM-DDTHH:MM:SS)"))?)
+            Kind::Date => {
+                V::Date(NaiveDate::from_str(cell).map_err(|_| bad(self, "a date (YYYY-MM-DD)"))?)
             }
+            Kind::DateTime => V::DateTime(
+                NaiveDateTime::parse_from_str(cell, "%Y-%m-%dT%H:%M:%S")
+                    .or_else(|_| NaiveDateTime::parse_from_str(cell, "%Y-%m-%d %H:%M:%S"))
+                    .map_err(|_| bad(self, "a date and time (YYYY-MM-DDTHH:MM:SS)"))?,
+            ),
             Kind::YearMonth => {
-                let (y, m) = cell.split_once('-').ok_or_else(|| bad(self, "a month (YYYY-MM)"))?;
-                V::YearMonth(y.parse().map_err(|_| bad(self, "a month (YYYY-MM)"))?, m.parse().map_err(|_| bad(self, "a month (YYYY-MM)"))?)
+                let (y, m) = cell
+                    .split_once('-')
+                    .ok_or_else(|| bad(self, "a month (YYYY-MM)"))?;
+                V::YearMonth(
+                    y.parse().map_err(|_| bad(self, "a month (YYYY-MM)"))?,
+                    m.parse().map_err(|_| bad(self, "a month (YYYY-MM)"))?,
+                )
             }
             Kind::Role => {
                 if !self.model.roles.iter().any(|x| x.name == cell) {
@@ -530,45 +663,99 @@ impl<'m> Import<'m> {
             }
             Kind::Variant(vs) => {
                 if !vs.iter().any(|v| v == cell) {
-                    return Err(format!("{}: `{cell}` is not one of {}", self.place(at), vs.join(", ")));
+                    return Err(format!(
+                        "{}: `{cell}` is not one of {}",
+                        self.place(at),
+                        vs.join(", ")
+                    ));
                 }
-                V::Variant { name: Rc::from(cell), fields: Rc::new(Vec::new()) }
+                V::Variant {
+                    name: Rc::from(cell),
+                    fields: Rc::new(Vec::new()),
+                }
             }
             Kind::Money(cur) => {
-                let (amt, c) = amount_unit(cell, cur).ok_or_else(|| bad(self, "an amount (`12.50 EUR`)"))?;
+                let (amt, c) =
+                    amount_unit(cell, cur).ok_or_else(|| bad(self, "an amount (`12.50 EUR`)"))?;
                 V::Money { amt, cur: c }
             }
             Kind::Qty(unit) => {
-                let (v, u) = amount_unit(cell, unit).ok_or_else(|| bad(self, "a quantity (`3 pcs`)"))?;
+                let (v, u) =
+                    amount_unit(cell, unit).ok_or_else(|| bad(self, "a quantity (`3 pcs`)"))?;
                 V::Qty { v, unit: u }
             }
             Kind::Price(cur, per) => {
-                let (amt, rest) = cell.split_once(char::is_whitespace).ok_or_else(|| bad(self, "a price (`1.50 EUR/pcs`)"))?;
-                let (c, p) = rest.trim().split_once('/').ok_or_else(|| bad(self, "a price (`1.50 EUR/pcs`)"))?;
+                let (amt, rest) = cell
+                    .split_once(char::is_whitespace)
+                    .ok_or_else(|| bad(self, "a price (`1.50 EUR/pcs`)"))?;
+                let (c, p) = rest
+                    .trim()
+                    .split_once('/')
+                    .ok_or_else(|| bad(self, "a price (`1.50 EUR/pcs`)"))?;
                 let amt = dec(amt).ok_or_else(|| bad(self, "a price (`1.50 EUR/pcs`)"))?;
                 for (given, expected) in [(c, cur), (p, per)] {
                     if expected.as_deref().is_some_and(|e| e != given) {
-                        return Err(format!("{}: `{cell}`: expected a price in {}/{}", self.place(at), cur.as_deref().unwrap_or("?"), per.as_deref().unwrap_or("?")));
+                        return Err(format!(
+                            "{}: `{cell}`: expected a price in {}/{}",
+                            self.place(at),
+                            cur.as_deref().unwrap_or("?"),
+                            per.as_deref().unwrap_or("?")
+                        ));
                     }
                 }
-                V::Price { amt, cur: Rc::from(c), per: Rc::from(p) }
+                V::Price {
+                    amt,
+                    cur: Rc::from(c),
+                    per: Rc::from(p),
+                }
             }
             Kind::Ref(target) => self.reference(target, cell, at, elem)?,
-            Kind::Coll(..) => return Err(format!("{}: nested collections are not supported", self.place(at))),
+            Kind::Coll(..) => {
+                return Err(format!(
+                    "{}: nested collections are not supported",
+                    self.place(at)
+                ))
+            }
         })
     }
 
     /// `#123` (a record already in the database), `key` (a row of the target entity) or
     /// `Entity:key` (a row of an entity implementing the target trait).
-    fn reference(&mut self, target: &str, cell: &str, at: &Cell, elem: Option<usize>) -> Result<V, String> {
-        let fits = |ent: &str| ent == target || self.model.entity(ent).is_some_and(|e| self.model.implements(e, target));
+    fn reference(
+        &mut self,
+        target: &str,
+        cell: &str,
+        at: &Cell,
+        elem: Option<usize>,
+    ) -> Result<V, String> {
+        let fits = |ent: &str| {
+            ent == target
+                || self
+                    .model
+                    .entity(ent)
+                    .is_some_and(|e| self.model.implements(e, target))
+        };
         if let Some(id) = cell.strip_prefix('#') {
-            let id: Id = id.parse().map_err(|_| format!("{}: `{cell}` is not a record id", self.place(at)))?;
-            let rec = self.mem.existing.get(&id).ok_or_else(|| format!("{}: there is no record #{id} in the database", self.place(at)))?;
+            let id: Id = id
+                .parse()
+                .map_err(|_| format!("{}: `{cell}` is not a record id", self.place(at)))?;
+            let rec = self.mem.existing.get(&id).ok_or_else(|| {
+                format!(
+                    "{}: there is no record #{id} in the database",
+                    self.place(at)
+                )
+            })?;
             if !fits(&rec.ent) {
-                return Err(format!("{}: #{id} is a {}, not a {target}", self.place(at), rec.ent));
+                return Err(format!(
+                    "{}: #{id} is a {}, not a {target}",
+                    self.place(at),
+                    rec.ent
+                ));
             }
-            return Ok(V::Ref { ent: rec.ent.clone(), id });
+            return Ok(V::Ref {
+                ent: rec.ent.clone(),
+                id,
+            });
         }
         let (ent, key) = match cell.split_once(':') {
             Some((e, k)) if self.model.entity(e).is_some() => (e.to_string(), k.to_string()),
@@ -577,18 +764,44 @@ impl<'m> Import<'m> {
         if !fits(&ent) {
             return Err(format!("{}: {ent} is not a {target}", self.place(at)));
         }
-        if let Some(id) = self.mem.plans.iter().find(|p| p.entity == ent).and_then(|p| p.keys.get(key.as_str())) {
-            return Ok(V::Ref { ent: Rc::from(ent.as_str()), id: *id });
+        if let Some(id) = self
+            .mem
+            .plans
+            .iter()
+            .find(|p| p.entity == ent)
+            .and_then(|p| p.keys.get(key.as_str()))
+        {
+            return Ok(V::Ref {
+                ent: Rc::from(ent.as_str()),
+                id: *id,
+            });
         }
         // a row given later: resolved at the end
         let place = self.place(at);
-        self.pending.push(Pending { plan: at.plan, row: at.row, field: at.field, elem, target: ent.clone(), key, place });
-        Ok(V::Ref { ent: Rc::from(ent.as_str()), id: 0 })
+        self.pending.push(Pending {
+            plan: at.plan,
+            row: at.row,
+            field: at.field,
+            elem,
+            target: ent.clone(),
+            key,
+            place,
+        });
+        Ok(V::Ref {
+            ent: Rc::from(ent.as_str()),
+            id: 0,
+        })
     }
 
     fn resolve(&mut self) -> Result<(), String> {
         for p in std::mem::take(&mut self.pending) {
-            let id = self.mem.plans.iter().find(|x| x.entity == p.target).and_then(|x| x.keys.get(p.key.as_str())).copied();
+            let id = self
+                .mem
+                .plans
+                .iter()
+                .find(|x| x.entity == p.target)
+                .and_then(|x| x.keys.get(p.key.as_str()))
+                .copied();
             let Some(id) = id else {
                 let given = self.mem.plans.iter().any(|x| x.entity == p.target);
                 return Err(if given {
@@ -598,7 +811,10 @@ impl<'m> Import<'m> {
                 });
             };
             let slot = &mut self.mem.plans[p.plan].rows[p.row].vals[p.field];
-            let r = V::Ref { ent: Rc::from(p.target.as_str()), id };
+            let r = V::Ref {
+                ent: Rc::from(p.target.as_str()),
+                id,
+            };
             match (p.elem, slot) {
                 (None, slot) => *slot = r,
                 (Some(i), V::Set(items) | V::List(items)) => Rc::make_mut(items)[i] = r,
@@ -609,7 +825,11 @@ impl<'m> Import<'m> {
     }
 
     /// Validate, compute and write. `progress` receives a line per phase.
-    pub fn run(mut self, mut db: Database, progress: &mut dyn FnMut(&str)) -> Result<ImportReport, String> {
+    pub fn run(
+        mut self,
+        mut db: Database,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<ImportReport, String> {
         let mut out = ImportReport::default();
         let mut t = self.started;
         self.resolve()?;
@@ -637,7 +857,12 @@ impl<'m> Import<'m> {
             }
         }
         out.records = self.mem.plans.iter().map(|p| p.rows.len()).sum();
-        out.entities = self.mem.plans.iter().map(|p| (p.entity.clone(), p.rows.len())).collect();
+        out.entities = self
+            .mem
+            .plans
+            .iter()
+            .map(|p| (p.entity.clone(), p.rows.len()))
+            .collect();
         if out.records == 0 {
             return Err("nothing to import: the files have no rows".into());
         }
@@ -669,7 +894,16 @@ impl<'m> Import<'m> {
                 }
                 Ok(())
             };
-            evaluate(model, self.report, &mem, time, &mut out, &mut t, progress, &mut hook)
+            evaluate(
+                model,
+                self.report,
+                &mem,
+                time,
+                &mut out,
+                &mut t,
+                progress,
+                &mut hook,
+            )
         };
         let (existing_formulas, existing_warnings) = match evaluated {
             Ok(x) => x,
@@ -689,9 +923,23 @@ impl<'m> Import<'m> {
             return Err("internal: the data is still in use".into());
         };
         let mem = cell.into_inner();
-        out.warnings = mem.plans.iter().flat_map(|p| p.rows.iter()).filter(|r| !r.warnings.is_empty()).count();
+        out.warnings = mem
+            .plans
+            .iter()
+            .flat_map(|p| p.rows.iter())
+            .filter(|r| !r.warnings.is_empty())
+            .count();
         let written = pipe.finish(&mut db, model, &mem);
-        finish_write(&mut db, model, &mem, &pipe.prep, written, &existing_formulas, &existing_warnings, &mut out)?;
+        finish_write(
+            &mut db,
+            model,
+            &mem,
+            &pipe.prep,
+            written,
+            &existing_formulas,
+            &existing_warnings,
+            &mut out,
+        )?;
         phase("write", &mut t, &mut out, progress);
         Ok(out)
     }
@@ -742,12 +990,20 @@ fn evaluate(
         Flow::Fail(m) => m,
         other => format!("{other:?}"),
     };
-    let plans: Vec<(String, Id, usize)> = mem.borrow().plans.iter().map(|p| (p.entity.clone(), p.first, p.rows.len())).collect();
+    let plans: Vec<(String, Id, usize)> = mem
+        .borrow()
+        .plans
+        .iter()
+        .map(|p| (p.entity.clone(), p.first, p.rows.len()))
+        .collect();
     let label = |ent: &str, first: Id, id: Id| format!("{ent} row {}", id - first + 1);
     let existing_ids = mem.borrow().existing_ids.clone();
     // every record of an entity: those already in the database, then the imported rows
     let records_of = |ent: &str| -> Vec<(Id, Option<(usize, usize)>)> {
-        let mut ids: Vec<(Id, Option<(usize, usize)>)> = existing_ids.get(ent).map(|v| v.iter().map(|id| (*id, None)).collect()).unwrap_or_default();
+        let mut ids: Vec<(Id, Option<(usize, usize)>)> = existing_ids
+            .get(ent)
+            .map(|v| v.iter().map(|id| (*id, None)).collect())
+            .unwrap_or_default();
         if let Some(p) = plans.iter().position(|(n, _, _)| n == ent) {
             ids.extend((0..plans[p].2).map(|r| (plans[p].1 + r as u64, Some((p, r)))));
         }
@@ -757,18 +1013,27 @@ fn evaluate(
     // 1. defaults, computed by the engine on the record as it is
     for (p, (ent, first, n)) in plans.iter().enumerate() {
         let mut ws = Working::new(&mut interp, &shared);
-        let names: Vec<String> = mem.borrow().plans[p].fields.iter().map(|f| f.name.clone()).collect();
+        let names: Vec<String> = mem.borrow().plans[p]
+            .fields
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
         for r in 0..*n {
             let pending = mem.borrow().plans[p].rows[r].pending;
             if pending == 0 {
                 continue;
             }
             let id = first + r as u64;
-            let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+            let rec = V::Ref {
+                ent: Rc::from(ent.as_str()),
+                id,
+            };
             let mut vals = Vec::new();
             for (i, name) in names.iter().enumerate() {
                 if pending & (1 << i) != 0 {
-                    let v = interp.get(&rec, name, None, None).map_err(|e| format!("{}: default of {name}: {}", label(ent, *first, id), fail(e)))?;
+                    let v = interp.get(&rec, name, None, None).map_err(|e| {
+                        format!("{}: default of {name}: {}", label(ent, *first, id), fail(e))
+                    })?;
                     vals.push((i, v));
                 }
             }
@@ -783,7 +1048,9 @@ fn evaluate(
         }
     }
     if !interp.store.counters.is_empty() {
-        return Err("a default numbers records (`next_number`): give the field in the file instead".into());
+        return Err(
+            "a default numbers records (`next_number`): give the field in the file instead".into(),
+        );
     }
     // the values the indexes were built from may have changed
     mem.borrow_mut().indexes.clear();
@@ -793,14 +1060,22 @@ fn evaluate(
         for (r, row) in p.rows.iter().enumerate() {
             for (i, f) in p.fields.iter().enumerate() {
                 if f.required && row.vals[i].is_none() && missing.len() <= 6 {
-                    missing.push(format!("{}.{} is required ({})", p.entity, f.name, label(&p.entity, p.first, p.first + r as u64)));
+                    missing.push(format!(
+                        "{}.{} is required ({})",
+                        p.entity,
+                        f.name,
+                        label(&p.entity, p.first, p.first + r as u64)
+                    ));
                 }
             }
         }
     }
     if !missing.is_empty() {
         let more = if missing.len() > 6 { "; …" } else { "" };
-        return Err(format!("{}{more}", missing.into_iter().take(6).collect::<Vec<_>>().join("; ")));
+        return Err(format!(
+            "{}{more}",
+            missing.into_iter().take(6).collect::<Vec<_>>().join("; ")
+        ));
     }
     phase("defaults", t, out, progress);
     hook(Hook::Defaults, &mem.borrow())?;
@@ -812,7 +1087,14 @@ fn evaluate(
     let targets = materialized_formulas(&schema::build(model, report));
     let field_names = |ent: &str| -> Vec<&str> {
         let e = model.entity(ent);
-        targets.iter().filter(|(en, _)| en == ent).filter_map(|(_, f)| e.and_then(|e| model.find_field(e, f)).map(|f| f.name.as_str())).collect()
+        targets
+            .iter()
+            .filter(|(en, _)| en == ent)
+            .filter_map(|(_, f)| {
+                e.and_then(|e| model.find_field(e, f))
+                    .map(|f| f.name.as_str())
+            })
+            .collect()
     };
     let mut order: Vec<String> = plans.iter().rev().map(|p| p.0.clone()).collect();
     for (ent, _) in &targets {
@@ -827,7 +1109,10 @@ fn evaluate(
         }
         let mut ws = Working::new(&mut interp, &shared);
         for (id, _) in records_of(ent) {
-            let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+            let rec = V::Ref {
+                ent: Rc::from(ent.as_str()),
+                id,
+            };
             for name in &names {
                 // as the engine materializes them: an error leaves the column empty
                 let _ = interp.get(&rec, name, None, None);
@@ -840,14 +1125,21 @@ fn evaluate(
     // the rows (the rules read them again from the memo): the projections are written while
     // the rules are checked. (A `frozen when` that fails is evaluated again where the rules
     // are, to fail there as it always did.)
-    let entities: Vec<&quadra_ir::Entity> = model.entities.iter().filter(|e| e.kind == EntityKind::Entity && !e.temporary && !e.is_ledger).collect();
+    let entities: Vec<&quadra_ir::Entity> = model
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Entity && !e.temporary && !e.is_ledger)
+        .collect();
     let mut frozen_failed: HashSet<Id> = HashSet::new();
     for e in entities.iter().filter(|e| e.frozen.is_some()) {
         let fr = e.frozen.as_ref().unwrap();
         let mut ws = Working::new(&mut interp, &shared);
         for (id, at) in records_of(&e.name) {
             let Some((p, r)) = at else { continue };
-            let rec = V::Ref { ent: Rc::from(e.name.as_str()), id };
+            let rec = V::Ref {
+                ent: Rc::from(e.name.as_str()),
+                id,
+            };
             match interp.eval(&fr.when, &mut record_ctx(&rec, &e.name)) {
                 Ok(v) => mem.borrow_mut().plans[p].rows[r].frozen = v.truthy(),
                 Err(_) => {
@@ -864,7 +1156,10 @@ fn evaluate(
             let names = field_names(&p.entity);
             for (r, row) in p.rows.iter_mut().enumerate() {
                 let id = p.first + r as u64;
-                row.formulas = names.iter().map(|n| memo.get(&(id, *n)).cloned().unwrap_or(V::None)).collect();
+                row.formulas = names
+                    .iter()
+                    .map(|n| memo.get(&(id, *n)).cloned().unwrap_or(V::None))
+                    .collect();
             }
         }
     }
@@ -883,26 +1178,59 @@ fn evaluate(
             continue;
         }
         let mut ws = Working::new(&mut interp, &shared);
-        let mut uniques: Vec<(Vec<String>, Option<&quadra_ir::Expr>)> = model.all_uniques(e).iter().map(|u| (u.fields.clone(), u.when.as_ref())).collect();
-        uniques.extend(model.all_fields(e).into_iter().filter(|f| f.unique).map(|f| (vec![f.name.clone()], None)));
+        let mut uniques: Vec<(Vec<String>, Option<&quadra_ir::Expr>)> = model
+            .all_uniques(e)
+            .iter()
+            .map(|u| (u.fields.clone(), u.when.as_ref()))
+            .collect();
+        uniques.extend(
+            model
+                .all_fields(e)
+                .into_iter()
+                .filter(|f| f.unique)
+                .map(|f| (vec![f.name.clone()], None)),
+        );
         for (id, at) in ids {
             let before = missing.len();
-            interp.check_record(e, id, &mut missing).map_err(|err| format!("{}: {}", at.map_or(format!("{}#{id}", e.name), |(p, _)| label(&e.name, plans[p].1, id)), fail(err)))?;
+            interp.check_record(e, id, &mut missing).map_err(|err| {
+                format!(
+                    "{}: {}",
+                    at.map_or(format!("{}#{id}", e.name), |(p, _)| label(
+                        &e.name, plans[p].1, id
+                    )),
+                    fail(err)
+                )
+            })?;
             for m in &mut missing[before..] {
                 if let Some((p, _)) = at {
                     m.1 = format!("{} ({})", m.1, label(&e.name, plans[p].1, id));
                 }
             }
-            let rec = V::Ref { ent: Rc::from(e.name.as_str()), id };
-            let warnings = interp.store.records.get(&id).map(|r| r.warnings.clone()).unwrap_or_default();
+            let rec = V::Ref {
+                ent: Rc::from(e.name.as_str()),
+                id,
+            };
+            let warnings = interp
+                .store
+                .records
+                .get(&id)
+                .map(|r| r.warnings.clone())
+                .unwrap_or_default();
             let frozen = match (&e.frozen, at) {
-                (Some(fr), Some(_)) if frozen_failed.contains(&id) => interp.eval(&fr.when, &mut record_ctx(&rec, &e.name)).map_err(|err| format!("{}: frozen when: {}", e.name, fail(err)))?.truthy(),
+                (Some(fr), Some(_)) if frozen_failed.contains(&id) => interp
+                    .eval(&fr.when, &mut record_ctx(&rec, &e.name))
+                    .map_err(|err| format!("{}: frozen when: {}", e.name, fail(err)))?
+                    .truthy(),
                 (Some(_), Some((p, r))) => mem.borrow().plans[p].rows[r].frozen,
                 _ => false,
             };
             for (fields, when) in &uniques {
                 if let Some(w) = when {
-                    if !interp.eval(w, &mut record_ctx(&rec, &e.name)).map_err(fail)?.truthy() {
+                    if !interp
+                        .eval(w, &mut record_ctx(&rec, &e.name))
+                        .map_err(fail)?
+                        .truthy()
+                    {
                         continue;
                     }
                 }
@@ -919,12 +1247,27 @@ fn evaluate(
                 if key.len() < fields.len() {
                     continue;
                 }
-                let seen = unique_seen.entry(format!("{}|{}|{}", e.name, fields.join(","), when.is_some())).or_default();
+                let seen = unique_seen
+                    .entry(format!(
+                        "{}|{}|{}",
+                        e.name,
+                        fields.join(","),
+                        when.is_some()
+                    ))
+                    .or_default();
                 if seen.insert(key.join("\u{1}"), id).is_some() {
                     return Err(if fields.len() == 1 && when.is_none() {
-                        format!("{}.{} must be unique: {} is given twice", e.name, fields[0], shown[0])
+                        format!(
+                            "{}.{} must be unique: {} is given twice",
+                            e.name, fields[0], shown[0]
+                        )
                     } else {
-                        format!("unique ({}): {} is given twice in {}", fields.join(", "), shown.join(", "), e.name)
+                        format!(
+                            "unique ({}): {} is given twice in {}",
+                            fields.join(", "),
+                            shown.join(", "),
+                            e.name
+                        )
                     });
                 }
             }
@@ -949,11 +1292,21 @@ fn evaluate(
     if !interp.violations.is_empty() {
         let report = interp.violations_report();
         let rest = report.split_once('\n').map(|(_, r)| r).unwrap_or("");
-        return Err(format!("the imported data breaks rules of the model:\n{rest}"));
+        return Err(format!(
+            "the imported data breaks rules of the model:\n{rest}"
+        ));
     }
     if !missing.is_empty() {
         let msgs: Vec<String> = missing.iter().map(|(_, m)| m.clone()).take(6).collect();
-        return Err(format!("{}{}", msgs.join("; "), if missing.len() > 6 { format!("; … {} more", missing.len() - 6) } else { String::new() }));
+        return Err(format!(
+            "{}{}",
+            msgs.join("; "),
+            if missing.len() > 6 {
+                format!("; … {} more", missing.len() - 6)
+            } else {
+                String::new()
+            }
+        ));
     }
     if mem.borrow().created {
         return Err("a default or a formula creates records: the import cannot do that".into());
@@ -967,7 +1320,10 @@ fn evaluate(
     for (ent, ids) in &existing_ids {
         for n in field_names(ent) {
             for id in ids {
-                existing_formulas.insert((*id, n.to_string()), memo.remove(&(*id, n)).unwrap_or(V::None));
+                existing_formulas.insert(
+                    (*id, n.to_string()),
+                    memo.remove(&(*id, n)).unwrap_or(V::None),
+                );
             }
         }
     }
@@ -988,7 +1344,10 @@ impl Working {
     fn new(interp: &mut Interp, shared: &SharedSource) -> Working {
         interp.store = Store::over(shared.clone());
         interp.store.untracked = true;
-        Working { limit: 5_000, evals: 0 }
+        Working {
+            limit: 5_000,
+            evals: 0,
+        }
     }
 
     fn after(&mut self, interp: &mut Interp, shared: &SharedSource) {
@@ -1005,7 +1364,13 @@ impl Working {
 }
 
 fn record_ctx(rec: &V, ent: &str) -> Ctx {
-    Ctx { this: Some(rec.clone()), entity: Some(ent.to_string()), scopes: vec![Default::default()], company: None, as_of: None }
+    Ctx {
+        this: Some(rec.clone()),
+        entity: Some(ent.to_string()),
+        scopes: vec![Default::default()],
+        company: None,
+        as_of: None,
+    }
 }
 
 /// `12.50 EUR`, `3 pcs`; the unit may be left out when the type fixes it.
@@ -1075,10 +1440,12 @@ fn prepare(db: &mut Database, mem: &Mem, per_commit: usize) -> Result<Prep, Stri
         // (64 MB: the pages beyond it go to the file while the writer inserts, not at the commit)
         let _ = db.conn.batch("PRAGMA cache_size = -65536");
     }
-    db.conn.batch(if sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" })?;
+    db.conn
+        .batch(if sqlite { "BEGIN IMMEDIATE" } else { "BEGIN" })?;
     let r = (|| -> Result<Prep, String> {
         if !sqlite {
-            db.conn.batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE")?;
+            db.conn
+                .batch("LOCK TABLE \"_quadra_commits\" IN EXCLUSIVE MODE")?;
         }
         let head = crate::source::head(&mut db.conn)?;
         if head != mem.base {
@@ -1087,8 +1454,15 @@ fn prepare(db: &mut Database, mem: &Mem, per_commit: usize) -> Result<Prep, Stri
         // an import larger than the database: its indexes are built once at the end of each
         // table (faster than kept up to date row by row), in the same transaction
         let total: usize = mem.plans.iter().map(|p| p.rows.len()).sum();
-        let existing = db.conn.query("SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_records\"", &[])?;
-        let existing: usize = existing.first().and_then(|r| r[0].as_deref()).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let existing = db.conn.query(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_records\"",
+            &[],
+        )?;
+        let existing: usize = existing
+            .first()
+            .and_then(|r| r[0].as_deref())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let rebuild_indexes = total > existing;
         let mut fk_dropped: Vec<String> = Vec::new();
         let mut pk_dropped: Vec<String> = Vec::new();
@@ -1098,7 +1472,8 @@ fn prepare(db: &mut Database, mem: &Mem, per_commit: usize) -> Result<Prep, Stri
                 // (no foreign key refers to them)
                 for t in ["_quadra_history", "_quadra_records"] {
                     for (name, _) in crate::deploy::pg_constraints(&mut db.conn, t, "p")? {
-                        db.conn.batch(&format!("ALTER TABLE \"{t}\" DROP CONSTRAINT \"{name}\""))?;
+                        db.conn
+                            .batch(&format!("ALTER TABLE \"{t}\" DROP CONSTRAINT \"{name}\""))?;
                         pk_dropped.push(t.to_string());
                     }
                 }
@@ -1110,9 +1485,24 @@ fn prepare(db: &mut Database, mem: &Mem, per_commit: usize) -> Result<Prep, Stri
                     db.conn.batch(&format!("DROP INDEX IF EXISTS \"{name}\""))?;
                 }
             }
-            let tables: BTreeSet<String> = mem.plans.iter().filter_map(|p| db.entity_tables.get(&p.entity).map(|i| db.schema.tables[*i].name.clone())).collect();
-            for i in db.schema.indexes.clone().iter().filter(|i| tables.contains(&i.table) && !(sqlite && i.fts)) {
-                db.conn.batch(&format!("DROP INDEX IF EXISTS \"{}\"", i.name))?;
+            let tables: BTreeSet<String> = mem
+                .plans
+                .iter()
+                .filter_map(|p| {
+                    db.entity_tables
+                        .get(&p.entity)
+                        .map(|i| db.schema.tables[*i].name.clone())
+                })
+                .collect();
+            for i in db
+                .schema
+                .indexes
+                .clone()
+                .iter()
+                .filter(|i| tables.contains(&i.table) && !(sqlite && i.fts))
+            {
+                db.conn
+                    .batch(&format!("DROP INDEX IF EXISTS \"{}\"", i.name))?;
             }
             if sqlite {
                 // the full-text search is filled once a table is complete, not by a trigger per row
@@ -1123,29 +1513,44 @@ fn prepare(db: &mut Database, mem: &Mem, per_commit: usize) -> Result<Prep, Stri
             if !sqlite {
                 // the foreign keys of what is written too: checked once at the end, by one query
                 // each, instead of a trigger per row
-                let imported: BTreeSet<String> = mem.plans.iter().map(|p| p.entity.clone()).collect();
+                let imported: BTreeSet<String> =
+                    mem.plans.iter().map(|p| p.entity.clone()).collect();
                 let names: Vec<String> = db
                     .schema
                     .tables
                     .iter()
                     .filter(|t| match &t.source {
-                        TableSource::Entity(e) | TableSource::Ledger(e) | TableSource::Join(e, _) | TableSource::PerCompany(e, _) => imported.contains(e),
+                        TableSource::Entity(e)
+                        | TableSource::Ledger(e)
+                        | TableSource::Join(e, _)
+                        | TableSource::PerCompany(e, _) => imported.contains(e),
                         TableSource::Trait(_) => true,
                     })
                     .map(|t| t.name.clone())
                     .collect();
                 for t in &names {
                     for (name, _) in crate::deploy::pg_constraints(&mut db.conn, t, "f")? {
-                        db.conn.batch(&format!("ALTER TABLE \"{t}\" DROP CONSTRAINT \"{name}\""))?;
+                        db.conn
+                            .batch(&format!("ALTER TABLE \"{t}\" DROP CONSTRAINT \"{name}\""))?;
                         fk_dropped.push(t.clone());
                     }
                 }
             }
         }
-        let seq = db.conn.query("SELECT CAST(MAX(\"seq\") AS TEXT) FROM \"_quadra_history\"", &[])?;
-        let seq: i64 = seq.first().and_then(|r| r[0].as_deref()).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let seq = db.conn.query(
+            "SELECT CAST(MAX(\"seq\") AS TEXT) FROM \"_quadra_history\"",
+            &[],
+        )?;
+        let seq: i64 = seq
+            .first()
+            .and_then(|r| r[0].as_deref())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let last = db.conn.query("SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1", &[])?;
-        let prev = last.first().and_then(|r| r[0].clone()).unwrap_or_else(|| "0".repeat(64));
+        let prev = last
+            .first()
+            .and_then(|r| r[0].clone())
+            .unwrap_or_else(|| "0".repeat(64));
         let per_commit = per_commit.max(1);
         let ncommits = total.div_ceil(per_commit).max(1);
         Ok(Prep {
@@ -1218,8 +1623,26 @@ struct Feeder {
 
 impl Feeder {
     fn new(db: &Database, mem: &Mem, pending: Arc<AtomicUsize>) -> Feeder {
-        let names = mem.plans.iter().map(|p| p.fields.iter().map(|f| Arc::from(f.name.as_str())).collect()).collect();
-        Feeder { plan: 0, row: 0, global: 0, tx: None, names, back: ReadBack::new(db, mem), done: false, pending }
+        let names = mem
+            .plans
+            .iter()
+            .map(|p| {
+                p.fields
+                    .iter()
+                    .map(|f| Arc::from(f.name.as_str()))
+                    .collect()
+            })
+            .collect();
+        Feeder {
+            plan: 0,
+            row: 0,
+            global: 0,
+            tx: None,
+            names,
+            back: ReadBack::new(db, mem),
+            done: false,
+            pending,
+        }
     }
 
     /// The next entries, about `max` of them (a record's are never split).
@@ -1242,7 +1665,10 @@ impl Feeder {
             }
             let row = &p.rows[self.row];
             let id = (p.first + self.row as u64) as i64;
-            out.push(HItem::Record(self.back.exact(self.plan, row), self.back.kinds(self.plan, p, row)));
+            out.push(HItem::Record(
+                self.back.exact(self.plan, row),
+                self.back.kinds(self.plan, p, row),
+            ));
             for (i, v) in row.vals.iter().enumerate() {
                 if v.is_none() && row.defaulted & (1 << i) == 0 {
                     continue;
@@ -1286,7 +1712,8 @@ impl HistoryIn<'_> {
     fn close(&mut self) {
         if let Some((tx, h)) = self.hasher.take() {
             let hash = h.finish();
-            self.hashes.push((tx, std::mem::replace(&mut self.prev, hash.clone()), hash));
+            self.hashes
+                .push((tx, std::mem::replace(&mut self.prev, hash.clone()), hash));
         }
     }
 }
@@ -1330,7 +1757,10 @@ impl HistoryIn<'_> {
                     HItem::Tx(tx) => {
                         self.close();
                         self.tx = tx;
-                        self.hasher = Some((tx, CommitHasher::new(&self.prev, tx, &self.at, None, &self.cause)));
+                        self.hasher = Some((
+                            tx,
+                            CommitHasher::new(&self.prev, tx, &self.at, None, &self.cause),
+                        ));
                     }
                     HItem::Entry(id, field, value) => {
                         // `["h",id,"field","value"]`, as `commit_hash` has it
@@ -1384,7 +1814,13 @@ impl Iterator for HistoryIn<'_> {
 
     fn next(&mut self) -> Option<Vec<Sql>> {
         let (seq, tx, id, field, value) = self.next_entry()?;
-        Some(vec![Sql::Int(seq), Sql::Int(tx as i64), Sql::Int(id), Sql::Text(field.to_string()), Sql::Text(value)])
+        Some(vec![
+            Sql::Int(seq),
+            Sql::Int(tx as i64),
+            Sql::Int(id),
+            Sql::Text(field.to_string()),
+            Sql::Text(value),
+        ])
     }
 }
 
@@ -1395,7 +1831,14 @@ type Written = (u64, Vec<(u64, String, String)>, Vec<String>, bool);
 /// The writer thread: the history, then the records' rows that do not wait for the formulas
 /// (`PlanMeta::late`), then the rows of each table as they come, each table's indexes once it
 /// is complete. It gives the connection back, inside the transaction.
-fn writer(conn: Conn, schema: Schema, prep: &Prep, jobs: Receiver<Job>, pending: Arc<AtomicUsize>, queued: Arc<AtomicUsize>) -> (Conn, Result<Written, String>) {
+fn writer(
+    conn: Conn,
+    schema: Schema,
+    prep: &Prep,
+    jobs: Receiver<Job>,
+    pending: Arc<AtomicUsize>,
+    queued: Arc<AtomicUsize>,
+) -> (Conn, Result<Written, String>) {
     let mut db = Database::with(Pooled::own(conn), Rc::new(schema));
     let rebuild = prep.rebuild_indexes;
     let pg = db.dialect() == Dialect::Postgres;
@@ -1404,12 +1847,27 @@ fn writer(conn: Conn, schema: Schema, prep: &Prep, jobs: Receiver<Job>, pending:
     let indexes = |db: &mut Database, table: &str| -> Result<(), String> {
         if rebuild {
             if prep.pk_dropped.iter().any(|t| t == table) {
-                let key = if table == "_quadra_history" { "seq" } else { "id" };
-                db.conn.batch(&format!("ALTER TABLE \"{table}\" ADD PRIMARY KEY (\"{key}\")"))?;
+                let key = if table == "_quadra_history" {
+                    "seq"
+                } else {
+                    "id"
+                };
+                db.conn.batch(&format!(
+                    "ALTER TABLE \"{table}\" ADD PRIMARY KEY (\"{key}\")"
+                ))?;
             }
             if table.starts_with("_quadra_") {
-                for (n, t, cols) in crate::db::SYSTEM_INDEXES.iter().filter(|(_, t, _)| *t == table) {
-                    db.conn.batch(&format!("CREATE INDEX IF NOT EXISTS \"{n}\" ON \"{t}\" ({})", cols.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ")))?;
+                for (n, t, cols) in crate::db::SYSTEM_INDEXES
+                    .iter()
+                    .filter(|(_, t, _)| *t == table)
+                {
+                    db.conn.batch(&format!(
+                        "CREATE INDEX IF NOT EXISTS \"{n}\" ON \"{t}\" ({})",
+                        cols.iter()
+                            .map(|c| format!("\"{c}\""))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))?;
                 }
             } else {
                 db.sync_indexes(Some(&BTreeSet::from([table.to_string()])), false)?;
@@ -1423,7 +1881,8 @@ fn writer(conn: Conn, schema: Schema, prep: &Prep, jobs: Receiver<Job>, pending:
                 // the history is read by its indexes only: a small sample tells the planner so
                 db.conn.batch("SET LOCAL default_statistics_target = 10")?;
                 db.conn.batch("ANALYZE \"_quadra_history\"")?;
-                db.conn.batch("SET LOCAL default_statistics_target TO DEFAULT")?;
+                db.conn
+                    .batch("SET LOCAL default_statistics_target TO DEFAULT")?;
             } else {
                 db.conn.batch(&format!("ANALYZE \"{table}\""))?;
             }
@@ -1455,18 +1914,26 @@ fn writer(conn: Conn, schema: Schema, prep: &Prep, jobs: Receiver<Job>, pending:
         let n = if pg {
             // COPY text written straight from the entries
             let mut n = 0u64;
-            db.conn.copy_text("_quadra_history", &["seq", "tx", "record_id", "field", "value"], &mut |buf| {
-                for _ in 0..1000 {
-                    if !hist.next_text(buf) {
-                        return Ok(false);
+            db.conn.copy_text(
+                "_quadra_history",
+                &["seq", "tx", "record_id", "field", "value"],
+                &mut |buf| {
+                    for _ in 0..1000 {
+                        if !hist.next_text(buf) {
+                            return Ok(false);
+                        }
+                        n += 1;
                     }
-                    n += 1;
-                }
-                Ok(true)
-            })?;
+                    Ok(true)
+                },
+            )?;
             n
         } else {
-            db.conn.bulk_insert("_quadra_history", &["seq", "tx", "record_id", "field", "value"], &mut hist)?
+            db.conn.bulk_insert(
+                "_quadra_history",
+                &["seq", "tx", "record_id", "field", "value"],
+                &mut hist,
+            )?
         };
         if hist.cancelled {
             return Err("cancelled".into());
@@ -1491,7 +1958,8 @@ fn writer(conn: Conn, schema: Schema, prep: &Prep, jobs: Receiver<Job>, pending:
             let job = jobs.recv();
             if matches!(job, Ok(Job::Rows { .. } | Job::Done(_) | Job::ForeignKeys)) {
                 // (the records' jobs, sent at the end, are not counted)
-                let _ = queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+                let _ =
+                    queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
             }
             match job {
                 Ok(Job::Rows { table, cols, rows }) => {
@@ -1570,15 +2038,24 @@ impl ReadBack {
             .plans
             .iter()
             .map(|p| {
-                let t = db.schema.entity_table(&p.entity).filter(|_| db.schema.readable.contains(&p.entity))?;
+                let t = db
+                    .schema
+                    .entity_table(&p.entity)
+                    .filter(|_| db.schema.readable.contains(&p.entity))?;
                 let sets = db.schema.sets.get(&p.entity);
                 Some(
                     p.fields
                         .iter()
-                        .map(|f| match sets.and_then(|s| s.iter().find(|m| m.field == f.name)) {
-                            Some(sm) => Some(Back::Refs(sm.clone())),
-                            None => t.fields.iter().find(|fm| fm.field == f.name && !fm.formula).map(|fm| Back::Cols(fm.decode.clone())),
-                        })
+                        .map(
+                            |f| match sets.and_then(|s| s.iter().find(|m| m.field == f.name)) {
+                                Some(sm) => Some(Back::Refs(sm.clone())),
+                                None => t
+                                    .fields
+                                    .iter()
+                                    .find(|fm| fm.field == f.name && !fm.formula)
+                                    .map(|fm| Back::Cols(fm.decode.clone())),
+                            },
+                        )
                         .collect(),
                 )
             })
@@ -1588,24 +2065,39 @@ impl ReadBack {
             .iter()
             .map(|p| {
                 let t = db.schema.entity_table(&p.entity);
-                p.fields.iter().map(|f| t.and_then(|t| t.fields.iter().find(|fm| fm.field == f.name && !fm.formula)).map(|fm| fm.decode.clone())).collect()
+                p.fields
+                    .iter()
+                    .map(|f| {
+                        t.and_then(|t| t.fields.iter().find(|fm| fm.field == f.name && !fm.formula))
+                            .map(|fm| fm.decode.clone())
+                    })
+                    .collect()
             })
             .collect();
-        ReadBack { decodes, col_decodes }
+        ReadBack {
+            decodes,
+            col_decodes,
+        }
     }
 
     /// Whether the projection row of a record of plan `pi` reads back exactly.
     fn exact(&self, pi: usize, row: &Row) -> bool {
         self.decodes[pi].as_ref().is_some_and(|ds| {
-            row.vals.iter().zip(ds.iter()).enumerate().all(|(i, (v, d))| {
-                // (a field without a value is not in the record: `Feeder`)
-                (v.is_none() && row.defaulted & (1 << i) == 0)
-                    || match d {
-                        None => true,
-                        Some(Back::Cols(d)) => crate::db::fits(d, v) || crate::db::kind_note(d, v).is_some(),
-                        Some(Back::Refs(sm)) => crate::db::fits_refs(sm, v),
-                    }
-            })
+            row.vals
+                .iter()
+                .zip(ds.iter())
+                .enumerate()
+                .all(|(i, (v, d))| {
+                    // (a field without a value is not in the record: `Feeder`)
+                    (v.is_none() && row.defaulted & (1 << i) == 0)
+                        || match d {
+                            None => true,
+                            Some(Back::Cols(d)) => {
+                                crate::db::fits(d, v) || crate::db::kind_note(d, v).is_some()
+                            }
+                            Some(Back::Refs(sm)) => crate::db::fits_refs(sm, v),
+                        }
+                })
         })
     }
 
@@ -1617,7 +2109,10 @@ impl ReadBack {
                 continue;
             }
             if let Some(n) = d.as_ref().and_then(|d| crate::db::kind_note(d, v)) {
-                out.insert(p.fields[i].name.clone(), serde_json::Value::String(n.to_string()));
+                out.insert(
+                    p.fields[i].name.clone(),
+                    serde_json::Value::String(n.to_string()),
+                );
             }
         }
         (!out.is_empty()).then(|| serde_json::Value::Object(out).to_string())
@@ -1627,7 +2122,13 @@ impl ReadBack {
 /// The writer: the rows of `_quadra_records` of the plans that are not late (`frozen` None:
 /// none is frozen) or of the late ones (`frozen`: by position in the import), without warnings
 /// (`fix_records` adds them). `exact` and `kinds` by position, as the history brought them.
-fn write_records(db: &mut Database, prep: &Prep, exact: &[bool], kinds: &HashMap<usize, String>, frozen: Option<&[bool]>) -> Result<u64, String> {
+fn write_records(
+    db: &mut Database,
+    prep: &Prep,
+    exact: &[bool],
+    kinds: &HashMap<usize, String>,
+    frozen: Option<&[bool]>,
+) -> Result<u64, String> {
     let late = frozen.is_some();
     let mut offset = 0usize;
     let parts: Vec<(usize, &PlanMeta)> = prep
@@ -1643,24 +2144,51 @@ fn write_records(db: &mut Database, prep: &Prep, exact: &[bool], kinds: &HashMap
     if parts.is_empty() {
         return Ok(0);
     }
-    let mut rows = parts.into_iter().flat_map(|(o, p)| (0..p.len).map(move |r| (o + r, p, r))).map(|(g, p, r)| {
-        let tx = prep.tx_of(g) as i64;
-        let is_frozen = frozen.is_some_and(|f| f.get(g).copied().unwrap_or(false));
-        vec![
-            Sql::Int((p.first + r as u64) as i64),
-            Sql::Text(p.entity.clone()),
-            Sql::Int(tx),
-            Sql::Text(prep.at.clone()),
-            Sql::Null,
-            if is_frozen { Sql::Int(prep.last_tx as i64) } else { Sql::Null },
-            Sql::Text(prep.cause_json.clone()),
-            Sql::Text("[]".into()),
-            Sql::Int(tx),
-            Sql::Int(if exact.get(g).copied().unwrap_or(false) { tx } else { 0 }),
-            kinds.get(&g).map_or(Sql::Null, |k| Sql::Text(k.clone())),
-        ]
-    });
-    db.conn.bulk_insert("_quadra_records", &["id", "entity", "created_tx", "created_at", "created_by", "frozen_tx", "cause", "warnings", "last_tx", "version_tx", "kinds"], &mut rows)
+    let mut rows = parts
+        .into_iter()
+        .flat_map(|(o, p)| (0..p.len).map(move |r| (o + r, p, r)))
+        .map(|(g, p, r)| {
+            let tx = prep.tx_of(g) as i64;
+            let is_frozen = frozen.is_some_and(|f| f.get(g).copied().unwrap_or(false));
+            vec![
+                Sql::Int((p.first + r as u64) as i64),
+                Sql::Text(p.entity.clone()),
+                Sql::Int(tx),
+                Sql::Text(prep.at.clone()),
+                Sql::Null,
+                if is_frozen {
+                    Sql::Int(prep.last_tx as i64)
+                } else {
+                    Sql::Null
+                },
+                Sql::Text(prep.cause_json.clone()),
+                Sql::Text("[]".into()),
+                Sql::Int(tx),
+                Sql::Int(if exact.get(g).copied().unwrap_or(false) {
+                    tx
+                } else {
+                    0
+                }),
+                kinds.get(&g).map_or(Sql::Null, |k| Sql::Text(k.clone())),
+            ]
+        });
+    db.conn.bulk_insert(
+        "_quadra_records",
+        &[
+            "id",
+            "entity",
+            "created_tx",
+            "created_at",
+            "created_by",
+            "frozen_tx",
+            "cause",
+            "warnings",
+            "last_tx",
+            "version_tx",
+            "kinds",
+        ],
+        &mut rows,
+    )
 }
 
 /// The writer: the rows of `_quadra_records` whose `frozen_tx` or warnings the rules changed,
@@ -1675,8 +2203,14 @@ fn fix_records(db: &mut Database, fix: &[(i64, Option<i64>, String)]) -> Result<
         }
     };
     for chunk in fix.chunks(10_000) {
-        let rows: Vec<serde_json::Value> = chunk.iter().map(|(id, f, w)| serde_json::json!({ "id": id, "f": f, "w": w })).collect();
-        db.conn.exec(sql, &[Sql::Text(serde_json::Value::Array(rows).to_string())])?;
+        let rows: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|(id, f, w)| serde_json::json!({ "id": id, "f": f, "w": w }))
+            .collect();
+        db.conn.exec(
+            sql,
+            &[Sql::Text(serde_json::Value::Array(rows).to_string())],
+        )?;
     }
     Ok(())
 }
@@ -1684,7 +2218,9 @@ fn fix_records(db: &mut Database, fix: &[(i64, Option<i64>, String)]) -> Result<
 /// A part of the projection rows of the import: the rows of one table for one plan.
 enum Seg {
     /// the entity table: (stored field or formula index, column) per column
-    Entity { cols: Vec<(Option<(bool, usize)>, schema::Column)> },
+    Entity {
+        cols: Vec<(Option<(bool, usize)>, schema::Column)>,
+    },
     /// a join table: the index of the set field
     Join(usize),
     /// a trait table
@@ -1718,10 +2254,26 @@ impl Projections {
                 continue;
             };
             let table = &db.schema.tables[ti];
-            let mut names: Vec<String> = ["id", "_created_tx", "_created_at", "_created_by", "_frozen_tx"].iter().map(|s| s.to_string()).collect();
+            let mut names: Vec<String> = [
+                "id",
+                "_created_tx",
+                "_created_at",
+                "_created_by",
+                "_frozen_tx",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
             let mut cols = Vec::new();
             for fm in &table.fields {
-                let src = if fm.formula { p.formulas.iter().position(|f| *f == fm.field).map(|i| (true, i)) } else { p.field(&fm.field).map(|i| (false, i)) };
+                let src = if fm.formula {
+                    p.formulas
+                        .iter()
+                        .position(|f| *f == fm.field)
+                        .map(|i| (true, i))
+                } else {
+                    p.field(&fm.field).map(|i| (false, i))
+                };
                 for c in &fm.columns {
                     names.push(c.name.clone());
                     cols.push((src, c.clone()));
@@ -1729,16 +2281,29 @@ impl Projections {
             }
             segs.push((pi, table.name.clone(), names, Seg::Entity { cols }));
             segs.push((pi, table.name.clone(), Vec::new(), Seg::Done));
-            for t in db.schema.tables.iter().filter(|t| matches!(&t.source, TableSource::Join(e, _) if *e == p.entity)) {
+            for t in db
+                .schema
+                .tables
+                .iter()
+                .filter(|t| matches!(&t.source, TableSource::Join(e, _) if *e == p.entity))
+            {
                 let TableSource::Join(_, field) = &t.source else {
                     continue;
                 };
                 let Some(i) = p.field(field) else { continue };
-                segs.push((pi, t.name.clone(), vec!["owner_id".into(), "target_id".into(), "ord".into()], Seg::Join(i)));
+                segs.push((
+                    pi,
+                    t.name.clone(),
+                    vec!["owner_id".into(), "target_id".into(), "ord".into()],
+                    Seg::Join(i),
+                ));
                 segs.push((pi, t.name.clone(), Vec::new(), Seg::Done));
             }
             let mut traits: Vec<String> = Vec::new();
-            let mut stack: Vec<String> = model.entity(&p.entity).map(|e| e.traits.clone()).unwrap_or_default();
+            let mut stack: Vec<String> = model
+                .entity(&p.entity)
+                .map(|e| e.traits.clone())
+                .unwrap_or_default();
             while let Some(tr) = stack.pop() {
                 if let Some(te) = model.entity(&tr) {
                     stack.extend(te.traits.iter().cloned());
@@ -1747,8 +2312,17 @@ impl Projections {
             }
             for tr in traits {
                 let tname = schema::snake(&tr);
-                if db.schema.table(&tname).is_some_and(|x| matches!(x.source, TableSource::Trait(_))) {
-                    segs.push((pi, tname.clone(), vec!["id".into(), "entity".into()], Seg::Trait));
+                if db
+                    .schema
+                    .table(&tname)
+                    .is_some_and(|x| matches!(x.source, TableSource::Trait(_)))
+                {
+                    segs.push((
+                        pi,
+                        tname.clone(),
+                        vec!["id".into(), "entity".into()],
+                        Seg::Trait,
+                    ));
                     traits_written.insert(tname);
                 }
             }
@@ -1757,7 +2331,13 @@ impl Projections {
         for t in traits_written {
             segs.push((0, t, Vec::new(), Seg::Done));
         }
-        Projections { segs, offsets, seg: 0, row: 0, created_at: mem.time.format("%Y-%m-%d %H:%M:%S").to_string() }
+        Projections {
+            segs,
+            offsets,
+            seg: 0,
+            row: 0,
+            created_at: mem.time.format("%Y-%m-%d %H:%M:%S").to_string(),
+        }
     }
 
     /// The next job: up to 10 000 rows of a table, or a table complete.
@@ -1785,7 +2365,11 @@ impl Projections {
                         Sql::Int(prep.tx_of(self.offsets[*pi] + r) as i64),
                         Sql::Text(self.created_at.clone()),
                         Sql::Null,
-                        if row.frozen { Sql::Int(prep.last_tx as i64) } else { Sql::Null },
+                        if row.frozen {
+                            Sql::Int(prep.last_tx as i64)
+                        } else {
+                            Sql::Null
+                        },
                     ]);
                     for (src, c) in cols {
                         let val = match src {
@@ -1808,10 +2392,25 @@ impl Projections {
                         last.insert(*t, n);
                     }
                     let mut seen = BTreeSet::new();
-                    ids.into_iter().filter(move |t| seen.insert(*t)).map(move |t| vec![Sql::Int(owner), Sql::Int(t as i64), Sql::Int(last[&t] as i64)])
+                    ids.into_iter()
+                        .filter(move |t| seen.insert(*t))
+                        .map(move |t| {
+                            vec![
+                                Sql::Int(owner),
+                                Sql::Int(t as i64),
+                                Sql::Int(last[&t] as i64),
+                            ]
+                        })
                 })
                 .collect(),
-            Seg::Trait => (start..end).map(|r| vec![Sql::Int((p.first + r as u64) as i64), Sql::Text(p.entity.clone())]).collect(),
+            Seg::Trait => (start..end)
+                .map(|r| {
+                    vec![
+                        Sql::Int((p.first + r as u64) as i64),
+                        Sql::Text(p.entity.clone()),
+                    ]
+                })
+                .collect(),
         };
         if end >= p.rows.len() {
             self.seg += 1;
@@ -1819,7 +2418,11 @@ impl Projections {
         } else {
             self.row = end;
         }
-        Some(Job::Rows { table: table.clone(), cols: cols.clone(), rows })
+        Some(Job::Rows {
+            table: table.clone(),
+            cols: cols.clone(),
+            rows,
+        })
     }
 }
 
@@ -1888,9 +2491,21 @@ fn finish_write(
                 &[Sql::Int(*tx as i64), Sql::Text(prep.at.clone()), Sql::Null, Sql::Text(prep.cause_text.clone()), Sql::Text(prev.clone()), Sql::Text(hash.clone())],
             )?;
         }
-        let next_id = mem.plans.last().map(|p| p.first + p.rows.len() as u64 - 1).unwrap_or(0);
-        let stored_next = db.meta("state")?.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|s| s["next_id"].as_u64()).unwrap_or(0);
-        db.set_meta("state", &serde_json::json!({ "next_id": stored_next.max(next_id), "tx": prep.last_tx }).to_string())?;
+        let next_id = mem
+            .plans
+            .last()
+            .map(|p| p.first + p.rows.len() as u64 - 1)
+            .unwrap_or(0);
+        let stored_next = db
+            .meta("state")?
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|s| s["next_id"].as_u64())
+            .unwrap_or(0);
+        db.set_meta(
+            "state",
+            &serde_json::json!({ "next_id": stored_next.max(next_id), "tx": prep.last_tx })
+                .to_string(),
+        )?;
         out.commits = hashes.iter().map(|(tx, _, _)| *tx).collect();
         Ok(())
     })();
@@ -1906,8 +2521,19 @@ fn finish_write(
         // statistics for the planner, which has none for rows loaded in bulk (it would scan
         // the history in order instead of using its indexes): the tables the import wrote
         // got theirs in its transaction (the writer), the others now
-        let written: BTreeSet<String> = ["_quadra_history", "_quadra_records"].iter().map(|s| s.to_string()).chain(analyzed.iter().cloned()).collect();
-        let list: Vec<String> = db.schema.tables.iter().map(|t| t.name.clone()).filter(|t| !written.contains(t)).map(|t| format!("\"{t}\"")).collect();
+        let written: BTreeSet<String> = ["_quadra_history", "_quadra_records"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain(analyzed.iter().cloned())
+            .collect();
+        let list: Vec<String> = db
+            .schema
+            .tables
+            .iter()
+            .map(|t| t.name.clone())
+            .filter(|t| !written.contains(t))
+            .map(|t| format!("\"{t}\""))
+            .collect();
         if !list.is_empty() {
             let _ = db.conn.batch(&format!("ANALYZE {}", list.join(", ")));
         }
@@ -1937,10 +2563,28 @@ struct Pipeline {
 const HISTORY_AHEAD: usize = 1_000_000;
 
 impl Pipeline {
-    fn start(db: &mut Database, model: &Model, mem: &Mem, per_commit: usize) -> Result<Pipeline, String> {
+    fn start(
+        db: &mut Database,
+        model: &Model,
+        mem: &Mem,
+        per_commit: usize,
+    ) -> Result<Pipeline, String> {
         let mut prep = prepare(db, mem, per_commit)?;
-        prep.plans = mem.plans.iter().map(|p| PlanMeta { first: p.first, entity: p.entity.clone(), len: p.rows.len(), late: model.entity(&p.entity).is_some_and(|e| e.frozen.is_some()) }).collect();
-        let flusher = db.url.as_deref().filter(|_| db.dialect() == Dialect::Postgres).and_then(WalFlusher::start);
+        prep.plans = mem
+            .plans
+            .iter()
+            .map(|p| PlanMeta {
+                first: p.first,
+                entity: p.entity.clone(),
+                len: p.rows.len(),
+                late: model.entity(&p.entity).is_some_and(|e| e.frozen.is_some()),
+            })
+            .collect();
+        let flusher = db
+            .url
+            .as_deref()
+            .filter(|_| db.dialect() == Dialect::Postgres)
+            .and_then(WalFlusher::start);
         let conn = db.conn.take_conn().expect("the import's connection");
         let schema = (*db.schema).clone();
         let pending = Arc::new(AtomicUsize::new(0));
@@ -1958,9 +2602,22 @@ impl Pipeline {
         };
         let pend = pending.clone();
         let taken = queued.clone();
-        let thread = std::thread::Builder::new().name("quadra-import-writer".into()).spawn(move || writer(conn, schema, &wp, rx, pend, taken)).map_err(|e| e.to_string())?;
+        let thread = std::thread::Builder::new()
+            .name("quadra-import-writer".into())
+            .spawn(move || writer(conn, schema, &wp, rx, pend, taken))
+            .map_err(|e| e.to_string())?;
         let feeder = Feeder::new(db, mem, pending);
-        Ok(Pipeline { _flusher: flusher, history_sent: false, rows: None, frozen_sent: None, queued, prep, feeder, jobs: Some(jobs), thread: Some(thread) })
+        Ok(Pipeline {
+            _flusher: flusher,
+            history_sent: false,
+            rows: None,
+            frozen_sent: None,
+            queued,
+            prep,
+            feeder,
+            jobs: Some(jobs),
+            thread: Some(thread),
+        })
     }
 
     /// More history for the writer when it is close to running out, more projection rows once
@@ -1992,10 +2649,12 @@ impl Pipeline {
         let jobs = self.jobs.as_ref().expect("the jobs");
         while !self.feeder.done {
             let items = self.feeder.produce(mem, &self.prep, HISTORY_AHEAD / 4);
-            jobs.send(Job::History(items)).map_err(|_| "the import's writer stopped".to_string())?;
+            jobs.send(Job::History(items))
+                .map_err(|_| "the import's writer stopped".to_string())?;
         }
         if !self.history_sent {
-            jobs.send(Job::HistoryEnd).map_err(|_| "the import's writer stopped".to_string())?;
+            jobs.send(Job::HistoryEnd)
+                .map_err(|_| "the import's writer stopped".to_string())?;
             self.history_sent = true;
         }
         Ok(())
@@ -2016,9 +2675,14 @@ impl Pipeline {
         if self.frozen_sent.is_some() {
             return Ok(());
         }
-        let frozen: Vec<bool> = mem.plans.iter().flat_map(|p| p.rows.iter().map(|r| r.frozen)).collect();
+        let frozen: Vec<bool> = mem
+            .plans
+            .iter()
+            .flat_map(|p| p.rows.iter().map(|r| r.frozen))
+            .collect();
         let jobs = self.jobs.as_ref().expect("the jobs");
-        jobs.send(Job::Frozen(frozen.clone())).map_err(|_| "the import's writer stopped".to_string())?;
+        jobs.send(Job::Frozen(frozen.clone()))
+            .map_err(|_| "the import's writer stopped".to_string())?;
         self.frozen_sent = Some(frozen);
         Ok(())
     }
@@ -2045,11 +2709,15 @@ impl Pipeline {
         let r = (|| -> Result<(), String> {
             self.end_history(mem)?;
             self.send_frozen(mem)?;
-            let mut rows = self.rows.take().unwrap_or_else(|| Projections::new(db, model, mem));
+            let mut rows = self
+                .rows
+                .take()
+                .unwrap_or_else(|| Projections::new(db, model, mem));
             let jobs = self.jobs.as_ref().expect("the jobs");
             while let Some(job) = rows.next_job(mem, &self.prep) {
                 self.queued.fetch_add(1, Ordering::Relaxed);
-                jobs.send(job).map_err(|_| "the import's writer stopped".to_string())?;
+                jobs.send(job)
+                    .map_err(|_| "the import's writer stopped".to_string())?;
             }
             // the records' rows the rules changed: their warnings, `frozen when` evaluated again
             let sent = self.frozen_sent.as_deref().unwrap_or(&[]);
@@ -2059,17 +2727,25 @@ impl Pipeline {
                 for (r, row) in p.rows.iter().enumerate() {
                     let written = meta.late && sent.get(g).copied().unwrap_or(false);
                     if written != row.frozen || !row.warnings.is_empty() {
-                        let warnings = serde_json::to_string(&row.warnings).unwrap_or_else(|_| "[]".into());
-                        fix.push(((p.first + r as u64) as i64, row.frozen.then_some(self.prep.last_tx as i64), warnings));
+                        let warnings =
+                            serde_json::to_string(&row.warnings).unwrap_or_else(|_| "[]".into());
+                        fix.push((
+                            (p.first + r as u64) as i64,
+                            row.frozen.then_some(self.prep.last_tx as i64),
+                            warnings,
+                        ));
                     }
                     g += 1;
                 }
             }
             if !fix.is_empty() {
-                jobs.send(Job::RecordsFix(fix)).map_err(|_| "the import's writer stopped".to_string())?;
+                jobs.send(Job::RecordsFix(fix))
+                    .map_err(|_| "the import's writer stopped".to_string())?;
             }
-            jobs.send(Job::Done("_quadra_records".into())).map_err(|_| "the import's writer stopped".to_string())?;
-            jobs.send(Job::Finish).map_err(|_| "the import's writer stopped".to_string())?;
+            jobs.send(Job::Done("_quadra_records".into()))
+                .map_err(|_| "the import's writer stopped".to_string())?;
+            jobs.send(Job::Finish)
+                .map_err(|_| "the import's writer stopped".to_string())?;
             Ok(())
         })();
         let jobs = self.jobs.take();
@@ -2086,7 +2762,8 @@ impl Pipeline {
 
     fn join(&mut self) -> (Conn, Result<Written, String>) {
         let t = self.thread.take().expect("the writer");
-        t.join().unwrap_or_else(|_| panic!("the import's writer panicked"))
+        t.join()
+            .unwrap_or_else(|_| panic!("the import's writer panicked"))
     }
 
     /// The evaluation failed: the writer stops, the transaction is rolled back.
@@ -2139,7 +2816,10 @@ impl WalFlusher {
                 }
             })
             .ok()?;
-        Some(WalFlusher { stop, thread: Some(thread) })
+        Some(WalFlusher {
+            stop,
+            thread: Some(thread),
+        })
     }
 }
 
@@ -2158,7 +2838,8 @@ impl Drop for WalFlusher {
 /// first. Returns the entities found.
 pub fn read_dir(import: &mut Import, dir: &Path) -> Result<Vec<String>, String> {
     let mut found: Vec<(String, std::path::PathBuf)> = Vec::new();
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for e in entries.flatten() {
         let path = e.path();
         if path.extension().and_then(|x| x.to_str()) != Some("csv") {
@@ -2194,9 +2875,19 @@ pub fn order(model: &Model, report: &Report, names: &[String]) -> Vec<String> {
             .all_fields(e)
             .into_iter()
             .filter(|f| f.formula.is_none() && !schema::is_inverse(model, e, f))
-            .filter_map(|f| report.field_types.get(&(e.name.clone(), f.name.clone())).and_then(|t| kind_of(model, t)).and_then(|k| k.target().map(str::to_string)))
+            .filter_map(|f| {
+                report
+                    .field_types
+                    .get(&(e.name.clone(), f.name.clone()))
+                    .and_then(|t| kind_of(model, t))
+                    .and_then(|k| k.target().map(str::to_string))
+            })
             .flat_map(|t| match model.entity(&t) {
-                Some(te) if te.kind == EntityKind::Trait => model.implementors(&t).iter().map(|x| x.name.clone()).collect::<Vec<_>>(),
+                Some(te) if te.kind == EntityKind::Trait => model
+                    .implementors(&t)
+                    .iter()
+                    .map(|x| x.name.clone())
+                    .collect::<Vec<_>>(),
                 _ => vec![t],
             })
             .filter(|t| t != n && names.contains(t))
@@ -2205,7 +2896,10 @@ pub fn order(model: &Model, report: &Report, names: &[String]) -> Vec<String> {
     let mut left: Vec<String> = names.to_vec();
     let mut out = Vec::new();
     while !left.is_empty() {
-        let next = left.iter().position(|n| deps(n).iter().all(|d| out.contains(d))).unwrap_or(0);
+        let next = left
+            .iter()
+            .position(|n| deps(n).iter().all(|d| out.contains(d)))
+            .unwrap_or(0);
         out.push(left.remove(next));
     }
     out
@@ -2213,7 +2907,8 @@ pub fn order(model: &Model, report: &Report, names: &[String]) -> Vec<String> {
 
 fn read_csv(import: &mut Import, entity: &str, path: &Path) -> Result<(), String> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let shown = path.display().to_string();
     let mut lines = std::io::BufReader::with_capacity(1 << 20, file).lines();
     let mut handle = None;
@@ -2282,7 +2977,15 @@ pub fn csv_cell(s: &str) -> String {
 }
 
 /// `quadra db import <dir>`: open, read the files, validate, write.
-pub fn import_dir(url: &str, model: &Model, report: &Report, dir: &Path, time: NaiveDateTime, per_commit: Option<usize>, progress: &mut dyn FnMut(&str)) -> Result<ImportReport, String> {
+pub fn import_dir(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    dir: &Path,
+    time: NaiveDateTime,
+    per_commit: Option<usize>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<ImportReport, String> {
     let mut db = Database::open(url, model, report)?;
     let mut import = Import::new(&mut db, model, report, time, &dir.display().to_string())?;
     if let Some(n) = per_commit {

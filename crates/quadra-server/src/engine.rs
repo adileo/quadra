@@ -75,14 +75,20 @@ pub struct Engines {
 impl Default for Engines {
     /// Two readers and a writer.
     fn default() -> Self {
-        Engines { readers: 2, writers: 1 }
+        Engines {
+            readers: 2,
+            writers: 1,
+        }
     }
 }
 
 impl Engines {
     /// A single engine: it reads and writes.
     pub fn one() -> Engines {
-        Engines { readers: 0, writers: 1 }
+        Engines {
+            readers: 0,
+            writers: 1,
+        }
     }
 }
 
@@ -114,7 +120,15 @@ pub struct Limits {
 impl Limits {
     /// No limits: the engine runs in the process of a command of one's own.
     pub fn none() -> Limits {
-        Limits { job: None, background: None, max_rows: None, max_list: None, max_queue: None, max_bytes: None, max_users: None }
+        Limits {
+            job: None,
+            background: None,
+            max_rows: None,
+            max_list: None,
+            max_queue: None,
+            max_bytes: None,
+            max_users: None,
+        }
     }
 }
 
@@ -122,7 +136,15 @@ impl Default for Limits {
     /// For a server of one's own: two minutes per request, an hour for the long operations,
     /// no caps on rows and lists, at most 1000 requests waiting, no limit on the size.
     fn default() -> Self {
-        Limits { job: Some(std::time::Duration::from_secs(120)), background: Some(std::time::Duration::from_secs(3600)), max_rows: None, max_list: None, max_queue: Some(1000), max_bytes: None, max_users: None }
+        Limits {
+            job: Some(std::time::Duration::from_secs(120)),
+            background: Some(std::time::Duration::from_secs(3600)),
+            max_rows: None,
+            max_list: None,
+            max_queue: Some(1000),
+            max_bytes: None,
+            max_users: None,
+        }
     }
 }
 
@@ -138,15 +160,24 @@ fn committed_late(e: quadra_runtime::CommitError) -> Reply {
     match e {
         quadra_runtime::CommitError::Conflict(c) => {
             let list: Vec<J> = c.iter().map(|x| json!({ "tx": x.tx, "at": x.at, "user": x.user, "cause": x.cause, "what": x.what })).collect();
-            reply(409, json!({ "error": "changed by others while it was being saved: try again", "conflicts": list }))
+            reply(
+                409,
+                json!({ "error": "changed by others while it was being saved: try again", "conflicts": list }),
+            )
         }
-        quadra_runtime::CommitError::Failed(m) if m.starts_with("too large:") => error(422, m.lines().next().unwrap_or(&m).to_string()),
+        quadra_runtime::CommitError::Failed(m) if m.starts_with("too large:") => {
+            error(422, m.lines().next().unwrap_or(&m).to_string())
+        }
         quadra_runtime::CommitError::Failed(m) => error(500, format!("database: {m}")),
     }
 }
 
 fn reply(status: u16, body: J) -> Reply {
-    Reply { status, body, session: None }
+    Reply {
+        status,
+        body,
+        session: None,
+    }
 }
 
 /// How long a session made by the sign-in by email lasts.
@@ -247,24 +278,40 @@ impl Job {
 impl Job {
     /// A write of the project's data: any engine may run it, the sequencer orders the commits.
     pub(crate) fn writes_data(&self) -> bool {
-        matches!(self, Job::Call { req: Req::Tx { .. } | Req::Views { .. }, .. })
+        matches!(
+            self,
+            Job::Call {
+                req: Req::Tx { .. } | Req::Views { .. },
+                ..
+            }
+        )
     }
 }
 
 impl Req {
     fn reads(&self) -> bool {
         match self {
-            Req::Me | Req::Model | Req::Query(_) | Req::Record { .. } | Req::History { .. } | Req::Search { .. } => true,
+            Req::Me
+            | Req::Model
+            | Req::Query(_)
+            | Req::Record { .. }
+            | Req::History { .. }
+            | Req::Search { .. } => true,
             // formulas evaluated as the caller and completions are reads sent as `POST`
-            Req::Views { method, path, .. } => method == "GET" || path == "/v1/eval" || path == "/v1/complete",
+            Req::Views { method, path, .. } => {
+                method == "GET" || path == "/v1/eval" || path == "/v1/complete"
+            }
             // the editor keeps its state on the first engine
             _ => false,
         }
     }
 
     /// The editor's operations that may take long: they get the background limit.
-    fn is_long(&self) -> bool {
-        matches!(self, Req::DevTest { .. } | Req::DevCommit { .. } | Req::DevSchema { .. })
+    pub(crate) fn is_long(&self) -> bool {
+        matches!(
+            self,
+            Req::DevTest { .. } | Req::DevCommit { .. } | Req::DevSchema { .. }
+        )
     }
 }
 
@@ -294,6 +341,11 @@ pub enum Job {
         reply: oneshot::Sender<Reply>,
     },
     /// the host (a console): the roles of the project and its users
+    /// when the next sweep is needed (`Host::next_sweep`): `Err(())` periodic, `Ok(None)`
+    /// never, `Ok(Some(at))` at that instant
+    NextSweep {
+        reply: oneshot::Sender<Result<Option<chrono::NaiveDateTime>, ()>>,
+    },
     People {
         reply: oneshot::Sender<Reply>,
     },
@@ -334,7 +386,10 @@ pub enum Job {
 }
 
 fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
-    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic".into())
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".into())
 }
 
 /// The stack of an engine's thread. A user's function may call itself up to the
@@ -399,13 +454,21 @@ pub struct Engine {
     /// commits of the request being served handed to the sequencer without waiting: its client
     /// is answered once they are durable, while the engine serves the next request
     tickets: Rc<RefCell<Vec<std::sync::Arc<quadra_store::sequencer::Ticket>>>>,
+    /// wrote outside the hash chain before the sequencer was there (interface files, views
+    /// checked at the start): the log gets it with a snapshot once it is (`set_sequencer`)
+    unlogged: bool,
+    /// the interface files installed changed something
+    pub(crate) installed_any: bool,
 }
 
 type Fail = (u16, String);
 
 /// The interface files of a project, as `quadra dev` compares them.
 fn interface_texts(project: &Project) -> Vec<(PathBuf, String)> {
-    project.interface_files().map(|f| (f.path.clone(), f.text.clone())).collect()
+    project
+        .interface_files()
+        .map(|f| (f.path.clone(), f.text.clone()))
+        .collect()
 }
 
 impl Engine {
@@ -421,17 +484,42 @@ impl Engine {
     }
 
     fn open(cfg: &Config, first: bool) -> Result<Engine, String> {
-        let project = Project::load(&cfg.root).map_err(|e| format!("cannot read the project: {e}"))?;
-        let files: Vec<(PathBuf, String)> = project.user_files().map(|f| (f.path.clone(), f.text.clone())).collect();
-        let modules = project.files().map(|f| (f.id, if f.kind == quadra_sema::FileKind::Std { "std".to_string() } else { f.module.clone() })).collect();
+        let project =
+            Project::load(&cfg.root).map_err(|e| format!("cannot read the project: {e}"))?;
+        let files: Vec<(PathBuf, String)> = project
+            .user_files()
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
+        let modules = project
+            .files()
+            .map(|f| {
+                (
+                    f.id,
+                    if f.kind == quadra_sema::FileKind::Std {
+                        "std".to_string()
+                    } else {
+                        f.module.clone()
+                    },
+                )
+            })
+            .collect();
         let checked = quadra_analysis::check(&project);
         let Some(model) = &checked.model else {
             return Err("the project has errors: run `quadra check`".into());
         };
         // the interface files are part of a version: one that does not check is not served
-        let interface_errors = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error && project.file(d.file).kind == quadra_sema::FileKind::Interface).count();
+        let interface_errors = checked
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity == quadra_sema::Severity::Error
+                    && project.file(d.file).kind == quadra_sema::FileKind::Interface
+            })
+            .count();
         if interface_errors > 0 {
-            return Err(format!("the interface files have {interface_errors} error(s): run `quadra check`"));
+            return Err(format!(
+                "the interface files have {interface_errors} error(s): run `quadra check`"
+            ));
         }
         let mut db = Database::open(&cfg.url, model, &checked.report)?;
         let status = db.status()?;
@@ -460,9 +548,14 @@ impl Engine {
                 eprintln!("statistics: {e}");
             }
         }
-        let cache = Rc::new(RefCell::new(Cache::new(cfg.cache_mb << 20, std::time::Duration::from_secs(600))));
+        let cache = Rc::new(RefCell::new(Cache::new(
+            cfg.cache_mb << 20,
+            std::time::Duration::from_secs(600),
+        )));
         if let Some(days) = cfg.prewarm_days {
-            let n = cache.borrow_mut().prewarm(&mut conn, now() - chrono::Duration::days(days))?;
+            let n = cache
+                .borrow_mut()
+                .prewarm(&mut conn, now() - chrono::Duration::days(days))?;
             eprintln!("cache: {n} recent records loaded");
         }
         let seen = files.clone();
@@ -497,12 +590,16 @@ impl Engine {
             sequencer: None,
             statics: Vec::new(),
             tickets: Rc::new(RefCell::new(Vec::new())),
+            unlogged: false,
+            installed_any: false,
         };
         if first {
             // the apps and views of the interface files, as the files say
             engine.install_interfaces(&project)?;
             // saved views checked against this model (renames of the migrations applied)
-            engine.revalidate_views();
+            let changed = engine.revalidate_views();
+            // written here before the sequencer is there: the log gets them with a snapshot
+            engine.unlogged = changed > 0 || engine.installed_any;
         }
         engine.seen_interfaces = Some(interface_texts(&project));
         Ok(engine)
@@ -514,7 +611,10 @@ impl Engine {
         if let Some((_, s)) = self.statics.iter().find(|(c, _)| is(c)) {
             return s.clone();
         }
-        let owner = std::iter::once(&self.checked).chain(self.overlays.values()).find(|c| is(c)).cloned();
+        let owner = std::iter::once(&self.checked)
+            .chain(self.overlays.values())
+            .find(|c| is(c))
+            .cloned();
         let s = Rc::new(quadra_runtime::Statics::default());
         if let Some(c) = owner {
             if self.statics.len() >= 8 {
@@ -526,13 +626,20 @@ impl Engine {
     }
 
     pub fn set_sequencer(&mut self, s: Option<quadra_store::Sequencer>) {
+        if let (Some(s), true) = (&s, self.unlogged) {
+            s.snapshot_soon(std::time::Duration::ZERO);
+            self.unlogged = false;
+        }
         self.sequencer = s;
     }
 
     /// A change of the tables outside the hash chain (sessions, tokens, sign-in codes, saved
     /// views, apps, folders, teams): through the tenant's sequencer when there is one, so that it
     /// is in the log with the data and survives the machine; on this connection otherwise.
-    pub(crate) fn side<T: Send + 'static>(&mut self, f: impl FnOnce(&mut quadra_store::Conn) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    pub(crate) fn side<T: Send + 'static>(
+        &mut self,
+        f: impl FnOnce(&mut quadra_store::Conn) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
         match &self.sequencer {
             Some(s) => s.side(f),
             None => f(&mut self.conn),
@@ -540,17 +647,35 @@ impl Engine {
     }
 
     /// Where an interpreter's commits go: the tenant's sequencer, or the database directly.
-    pub(crate) fn sink<'m>(&self, db: Database, model: &'m quadra_ir::Model) -> Box<dyn quadra_runtime::CommitSink + 'm> {
+    pub(crate) fn sink<'m>(
+        &self,
+        db: Database,
+        model: &'m quadra_ir::Model,
+    ) -> Box<dyn quadra_runtime::CommitSink + 'm> {
         match &self.sequencer {
-            Some(s) => Box::new(quadra_store::SequencedSink { db, model, sequencer: s.clone(), tickets: None }),
+            Some(s) => Box::new(quadra_store::SequencedSink {
+                db,
+                model,
+                sequencer: s.clone(),
+                tickets: None,
+            }),
             None => Box::new(Sink { db, model }),
         }
     }
 
     /// `sink`, without waiting for durability: the request's answer waits instead (`tickets`).
-    pub(crate) fn sink_then<'m>(&self, db: Database, model: &'m quadra_ir::Model) -> Box<dyn quadra_runtime::CommitSink + 'm> {
+    pub(crate) fn sink_then<'m>(
+        &self,
+        db: Database,
+        model: &'m quadra_ir::Model,
+    ) -> Box<dyn quadra_runtime::CommitSink + 'm> {
         match &self.sequencer {
-            Some(s) => Box::new(quadra_store::SequencedSink { db, model, sequencer: s.clone(), tickets: Some(self.tickets.clone()) }),
+            Some(s) => Box::new(quadra_store::SequencedSink {
+                db,
+                model,
+                sequencer: s.clone(),
+                tickets: Some(self.tickets.clone()),
+            }),
             None => Box::new(Sink { db, model }),
         }
     }
@@ -578,15 +703,26 @@ impl Engine {
                 Job::Call { req, .. } => req.is_long(),
                 _ => false,
             };
-            let limit = if long { self.limits.background } else { self.limits.job };
-            let _limits = limits::begin(limits::Limits { deadline: limit.map(|d| std::time::Instant::now() + d), max_rows: self.limits.max_rows, max_list: self.limits.max_list, max_users: self.limits.max_users });
+            let limit = if long {
+                self.limits.background
+            } else {
+                self.limits.job
+            };
+            let _limits = limits::begin(limits::Limits {
+                deadline: limit.map(|d| std::time::Instant::now() + d),
+                max_rows: self.limits.max_rows,
+                max_list: self.limits.max_list,
+                max_users: self.limits.max_users,
+            });
             let request = matches!(job, Job::Call { .. });
             // a request's or a sweep's work is the tenant's; the rest (sign-in, the stream of
             // commits) is the host's bookkeeping
             let counted = request || matches!(job, Job::Sweep { .. });
             let started = std::time::Instant::now();
             // a bug met by one request: it fails, the engine goes on serving the others
-            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(job))) {
+            if let Err(panic) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(job)))
+            {
                 eprintln!("engine: a request failed with an internal error ({}): caches and connections are reset", panic_message(&*panic));
                 self.reset();
             }
@@ -610,13 +746,21 @@ impl Engine {
 
     /// Whether something of the model changes with time alone (it needs the periodic sweep).
     pub fn reads_clock(&self) -> bool {
-        self.checked.model.as_ref().is_some_and(quadra_analysis::reads_clock)
+        self.checked
+            .model
+            .as_ref()
+            .is_some_and(quadra_analysis::reads_clock)
     }
 
     /// After an internal error: what a request may have left half done is thrown away (the
     /// record cache, connections with a transaction open). The model does not change.
     fn reset(&mut self) {
-        self.cache = Rc::new(RefCell::new(Cache::new(self.cache_mb << 20, std::time::Duration::from_secs(600))));
+        // the commits handed over by the request that failed are not the next one's
+        self.tickets.borrow_mut().clear();
+        self.cache = Rc::new(RefCell::new(Cache::new(
+            self.cache_mb << 20,
+            std::time::Duration::from_secs(600),
+        )));
         self.pool.borrow_mut().clear();
         match Conn::open(&self.url) {
             Ok(c) => self.conn = c,
@@ -648,14 +792,20 @@ impl Engine {
                 Job::People { reply } => {
                     let _ = reply.send(self.people());
                 }
-                Job::AddUser { email, roles, reply } => {
+                Job::AddUser {
+                    email,
+                    roles,
+                    reply,
+                } => {
                     let _ = reply.send(self.add_user(&email, &roles));
                 }
                 Job::Logout { secret } => {
-                    let _ = self.side(move |c| auth::revoke(c, &secret));
+                    let _ = self.side(move |c| auth::revoke_secret(c, &secret));
                 }
                 Job::Call { who, req, reply } => {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(&who, req))) {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.call(&who, req)
+                    })) {
                         Ok(r) => {
                             let tickets = std::mem::take(&mut *self.tickets.borrow_mut());
                             match tickets.last() {
@@ -672,7 +822,10 @@ impl Engine {
                             }
                         }
                         Err(panic) => {
-                            let _ = reply.send(error(500, "internal error: the request could not be completed"));
+                            let _ = reply.send(error(
+                                500,
+                                "internal error: the request could not be completed",
+                            ));
                             std::panic::resume_unwind(panic);
                         }
                     }
@@ -695,9 +848,27 @@ impl Engine {
                     let _ = reply.send(ev);
                 }
                 Job::Stop { .. } => unreachable!("handled by `run`"),
+                Job::NextSweep { reply } => {
+                    let _ = reply.send(self.next_sweep());
+                }
                 Job::Sweep { reply } => {
                     let checked = self.checked.clone();
-                    let r = quadra_store::ops::sweep_with(&self.url, checked.model.as_ref().unwrap(), &checked.report, now(), self.sequencer.as_ref());
+                    // only thresholds read the clock and none passed: no need to read every record
+                    // (`quadra_analysis::clock`); at least one sweep a day all the same
+                    if reply.is_none()
+                        && self
+                            .next_sweep()
+                            .is_ok_and(|at| at.is_some_and(|at| at > now()))
+                    {
+                        return;
+                    }
+                    let r = quadra_store::ops::sweep_with(
+                        &self.url,
+                        checked.model.as_ref().unwrap(),
+                        &checked.report,
+                        now(),
+                        self.sequencer.as_ref(),
+                    );
                     if let Err(e) = &r {
                         eprintln!("sweep: {e}");
                     }
@@ -706,6 +877,28 @@ impl Engine {
                     }
                 }
             }
+        }
+    }
+
+    /// When the next sweep is needed: `Err(())` periodically (the clock is read in a way only a
+    /// periodic sweep follows), `Ok(None)` never, `Ok(Some(at))` at the nearest threshold not
+    /// passed at the last sweep, a day after the last sweep at the latest.
+    fn next_sweep(&mut self) -> Result<Option<chrono::NaiveDateTime>, ()> {
+        let checked = self.checked.clone();
+        let (Some(model), report) = (checked.model.as_ref(), &checked.report) else {
+            return Err(());
+        };
+        let n = now();
+        match quadra_store::ops::next_due(&self.url, model, report, n) {
+            Ok(quadra_store::ops::Due::Never) => Ok(None),
+            Ok(quadra_store::ops::Due::At(at)) => {
+                let last = quadra_store::ops::last_sweep(&self.url, model, report)
+                    .ok()
+                    .flatten();
+                let net = last.map_or(n, |l| l + chrono::Duration::hours(24));
+                Ok(Some(at.map_or(net, |a| a.min(net))))
+            }
+            Ok(quadra_store::ops::Due::Periodic) | Err(_) => Err(()),
         }
     }
 
@@ -719,8 +912,18 @@ impl Engine {
             Req::Model => self.model(&who),
             Req::Query(q) => self.query(&who, &q),
             Req::Record { entity, id, base } => self.record(&who, &entity, id, base),
-            Req::History { entity, id, limit, before } => self.history(&who, &entity, id, limit, before),
-            Req::Search { entity, q, limit, after } => self.search(&who, &entity, &q, limit, after.as_deref()),
+            Req::History {
+                entity,
+                id,
+                limit,
+                before,
+            } => self.history(&who, &entity, id, limit, before),
+            Req::Search {
+                entity,
+                q,
+                limit,
+                after,
+            } => self.search(&who, &entity, &q, limit, after.as_deref()),
             Req::Tx { body, key } => self.tx(&who, &body, &key),
             Req::DevFiles => self.dev_files(&who),
             Req::DevRead { path } => self.dev_read(&who, &path),
@@ -736,8 +939,16 @@ impl Engine {
             Req::DevMkdir { path } => self.dev_mkdir(&who, &path),
             Req::DevRmdir { path } => self.dev_rmdir(&who, &path),
             Req::DevSchema { body } => self.dev_schema(&who, &body),
-            Req::DevLive => Ok(self::reply(200, json!({ "watching": self.watch, "problems": self.problems }))),
-            Req::Views { method, path, query, body } => self.views_api(&who, &method, &path, &query, &body),
+            Req::DevLive => Ok(self::reply(
+                200,
+                json!({ "watching": self.watch, "problems": self.problems }),
+            )),
+            Req::Views {
+                method,
+                path,
+                query,
+                body,
+            } => self.views_api(&who, &method, &path, &query, &body),
             #[cfg(test)]
             Req::Panic => panic!("a test of the recovery"),
         };
@@ -750,7 +961,12 @@ impl Engine {
     }
 
     /// An interpreter over the database as of `base` (default: the latest commit).
-    fn interp<'m>(&mut self, model: &'m Model, who: Option<&Principal>, base: Option<u64>) -> Result<Interp<'m>, Fail> {
+    fn interp<'m>(
+        &mut self,
+        model: &'m Model,
+        who: Option<&Principal>,
+        base: Option<u64>,
+    ) -> Result<Interp<'m>, Fail> {
         let e500 = |e: String| (500, e);
         let mut conn = Pooled::take(&self.pool, &self.url).map_err(e500)?;
         // a read sees one moment, even while other engines commit: its SQL queries can then be
@@ -763,9 +979,15 @@ impl Engine {
             let latest = head(&mut conn).map_err(e500)?;
             let base = base.unwrap_or(latest);
             if base > latest {
-                return Err((400, format!("base {base} is ahead of the latest commit ({latest})")));
+                return Err((
+                    400,
+                    format!("base {base} is ahead of the latest commit ({latest})"),
+                ));
             }
-            let renamed = quadra_runtime::limits::without_row_cap(|| self.cache.borrow_mut().sync(&mut conn, base)).map_err(e500)?;
+            let renamed = quadra_runtime::limits::without_row_cap(|| {
+                self.cache.borrow_mut().sync(&mut conn, base)
+            })
+            .map_err(e500)?;
             if renamed || self.renames.is_none() {
                 self.renames = Some(load_renames(&mut conn).map_err(e500)?);
                 self.units = None;
@@ -782,7 +1004,14 @@ impl Engine {
         })?;
         let current = base == latest;
         let renames = self.renames.clone().unwrap_or_default();
-        let mut src = DbSource::with_renames(conn, base, self.schema.clone(), Some(self.cache.clone()), renames).map_err(e500)?;
+        let mut src = DbSource::with_renames(
+            conn,
+            base,
+            self.schema.clone(),
+            Some(self.cache.clone()),
+            renames,
+        )
+        .map_err(e500)?;
         // ids come from the sequencer: no write of the engine's own
         src.sequencer = self.sequencer.clone();
         let mut i = Interp::new(model);
@@ -808,7 +1037,11 @@ impl Engine {
 
     fn login_of(&mut self, model: &Model, user: u64) -> String {
         match self.interp(model, None, None) {
-            Ok(mut i) => i.store.read(user, "login", None).map(|v| v.to_string()).unwrap_or_default(),
+            Ok(mut i) => i
+                .store
+                .read(user, "login", None)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             Err(_) => String::new(),
         }
     }
@@ -826,13 +1059,32 @@ impl Engine {
         let users = i.ids("User", None);
         // `quadra dev`: signed in without asking, as the first user (`dev`)
         let auto = login.is_empty() && self.watch;
-        let Some(user) = users.into_iter().find(|id| auto || i.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login)) else {
+        let Some(user) = users.into_iter().find(|id| {
+            auto || i
+                .store
+                .read(*id, "login", None)
+                .map_or(false, |v| v.to_string() == login)
+        }) else {
             return error(401, "unknown user");
         };
         drop(i);
         let name = format!("dev login {login}");
-        match self.side(move |c| auth::create(c, "session", user, &name, false, now(), Some(now() + chrono::Duration::hours(12)))) {
-            Ok((secret, csrf)) => Reply { status: 200, body: json!({ "user": if auto { self.login_of(model, user) } else { login.to_string() }, "csrf": csrf }), session: Some(secret) },
+        match self.side(move |c| {
+            auth::create(
+                c,
+                "session",
+                user,
+                &name,
+                false,
+                now(),
+                Some(now() + chrono::Duration::hours(12)),
+            )
+        }) {
+            Ok((secret, csrf)) => Reply {
+                status: 200,
+                body: json!({ "user": if auto { self.login_of(model, user) } else { login.to_string() }, "csrf": csrf }),
+                session: Some(secret),
+            },
             Err(e) => error(500, e),
         }
     }
@@ -844,12 +1096,27 @@ impl Engine {
         if key.is_empty() {
             return None;
         }
-        let has_email = model.entity("User").is_some_and(|e| e.fields.iter().any(|f| f.name == "email"));
+        let has_email = model
+            .entity("User")
+            .is_some_and(|e| e.fields.iter().any(|f| f.name == "email"));
         let mut i = self.interp(model, None, None).ok()?;
         for id in i.ids("User", None) {
-            let login = i.store.read(id, "login", None).map(|v| v.to_string()).unwrap_or_default();
-            let email = if has_email { i.store.read(id, "email", None).filter(|v| !v.is_none()).map(|v| v.to_string()) } else { None };
-            if login.to_lowercase() == key || email.as_deref().is_some_and(|e| e.to_lowercase() == key) {
+            let login = i
+                .store
+                .read(id, "login", None)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let email = if has_email {
+                i.store
+                    .read(id, "email", None)
+                    .filter(|v| !v.is_none())
+                    .map(|v| v.to_string())
+            } else {
+                None
+            };
+            if login.to_lowercase() == key
+                || email.as_deref().is_some_and(|e| e.to_lowercase() == key)
+            {
                 let to = email.or_else(|| login.contains('@').then(|| login.clone()));
                 return Some((id, login, to));
             }
@@ -862,7 +1129,9 @@ impl Engine {
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let roles: Vec<&str> = model.roles.iter().map(|r| r.name.as_str()).collect();
-        let has_email = model.entity("User").is_some_and(|e| e.fields.iter().any(|f| f.name == "email"));
+        let has_email = model
+            .entity("User")
+            .is_some_and(|e| e.fields.iter().any(|f| f.name == "email"));
         let mut i = match self.interp(model, None, None) {
             Ok(i) => i,
             Err((s, m)) => return error(s, m),
@@ -873,37 +1142,64 @@ impl Engine {
             .into_iter()
             .take(1000)
             .map(|id| {
-                let login = i.store.read(id, "login", None).map(|v| v.to_string()).unwrap_or_default();
-                let email = if has_email { i.store.read(id, "email", None).filter(|v| !v.is_none()).map(|v| v.to_string()) } else { None };
+                let login = i
+                    .store
+                    .read(id, "login", None)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                let email = if has_email {
+                    i.store
+                        .read(id, "email", None)
+                        .filter(|v| !v.is_none())
+                        .map(|v| v.to_string())
+                } else {
+                    None
+                };
                 let roles: Vec<String> = match i.store.read(id, "roles", None) {
-                    Some(V::Set(items)) => items.iter().map(|r| match r {
-                        V::Role(n) => n.to_string(),
-                        other => other.to_string(),
-                    }).collect(),
+                    Some(V::Set(items)) => items
+                        .iter()
+                        .map(|r| match r {
+                            V::Role(n) => n.to_string(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
                     _ => vec![],
                 };
                 json!({ "id": id, "login": login, "email": email, "roles": roles })
             })
             .collect();
-        reply(200, json!({ "roles": roles, "users": users, "total": total }))
+        reply(
+            200,
+            json!({ "roles": roles, "users": users, "total": total }),
+        )
     }
 
     /// The host adds a user with these roles, their login the address, and asks to invite them.
     /// A user who has that login or email already is invited again, unchanged.
     fn add_user(&mut self, email: &str, roles: &[String]) -> Reply {
         let email = email.trim().to_lowercase();
-        let valid = email.len() <= 254 && !email.contains(char::is_whitespace) && email.split_once('@').is_some_and(|(a, d)| !a.is_empty() && d.contains('.') && !d.starts_with('.') && !d.ends_with('.'));
+        let valid = email.len() <= 254
+            && !email.contains(char::is_whitespace)
+            && email.split_once('@').is_some_and(|(a, d)| {
+                !a.is_empty() && d.contains('.') && !d.starts_with('.') && !d.ends_with('.')
+            });
         if !valid {
             return error(400, "Not an email address.");
         }
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
-        if let Some(r) = roles.iter().find(|r| !model.roles.iter().any(|m| &m.name == *r)) {
+        if let Some(r) = roles
+            .iter()
+            .find(|r| !model.roles.iter().any(|m| &m.name == *r))
+        {
             return error(400, format!("This project has no role `{r}`."));
         }
         if let Some((id, login, to)) = self.user_by(model, &email) {
             let send = to.map(|to| json!({ "to": to, "invite": true, "login": login }));
-            return reply(200, json!({ "id": id, "login": login, "created": false, "_send": send }));
+            return reply(
+                200,
+                json!({ "id": id, "login": login, "created": false, "_send": send }),
+            );
         }
         let mut i = match self.interp(model, None, None) {
             Ok(i) => i,
@@ -917,18 +1213,30 @@ impl Engine {
         i.materialize = materialized_formulas(&db.schema);
         i.sink = Some(self.sink(db, model));
         i.system += 1;
-        let set: Vec<V> = roles.iter().map(|r| V::Role(Rc::from(r.as_str()))).collect();
+        let set: Vec<V> = roles
+            .iter()
+            .map(|r| V::Role(Rc::from(r.as_str())))
+            .collect();
         let created = RefCell::new(0u64);
         let r = i.with_cause(format!("added by the host: user {email}"), |i| {
             i.transaction(|i| {
-                if let V::Ref { id, .. } = i.create("User", vec![("login".to_string(), V::Text(Rc::from(email.as_str()))), ("roles".to_string(), V::Set(Rc::new(set)))])? {
+                if let V::Ref { id, .. } = i.create(
+                    "User",
+                    vec![
+                        ("login".to_string(), V::Text(Rc::from(email.as_str()))),
+                        ("roles".to_string(), V::Set(Rc::new(set))),
+                    ],
+                )? {
                     *created.borrow_mut() = id;
                 }
                 Ok(())
             })
         });
         match r {
-            Ok(()) => reply(200, json!({ "id": created.into_inner(), "login": email, "created": true, "_send": { "to": email, "invite": true, "login": email } })),
+            Ok(()) => reply(
+                200,
+                json!({ "id": created.into_inner(), "login": email, "created": true, "_send": { "to": email, "invite": true, "login": email } }),
+            ),
             Err(e) => error(422, describe(e)),
         }
     }
@@ -939,11 +1247,25 @@ impl Engine {
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let Some((user, _, Some(to))) = self.user_by(model, login) else {
-            return Reply { status: 200, body: json!({ "login_id": auth::random_hex(16), "expires_in": auth::CODE_MINUTES * 60 }), session: None };
+            return Reply {
+                status: 200,
+                body: json!({ "login_id": auth::random_hex(16), "expires_in": auth::CODE_MINUTES * 60 }),
+                session: None,
+            };
         };
         match self.side(move |c| auth::code_start(c, user, now())) {
-            Ok(Ok((id, code))) => Reply { status: 200, body: json!({ "login_id": id, "expires_in": auth::CODE_MINUTES * 60, "_send": { "to": to, "code": code } }), session: None },
-            Ok(Err(_)) => error(429, "Too many codes asked for this user. Wait 15 minutes, or use the last one you received."),
+            Ok(Ok((id, code))) => Reply {
+                status: 200,
+                body: json!({ "login_id": id, "expires_in": auth::CODE_MINUTES * 60, "_send": { "to": to, "code": code } }),
+                session: None,
+            },
+            // too many codes for this user: the same answer as for an unknown login (no email),
+            // so that the answer does not tell which logins exist; the last code still works
+            Ok(Err(_)) => Reply {
+                status: 200,
+                body: json!({ "login_id": auth::random_hex(16), "expires_in": auth::CODE_MINUTES * 60 }),
+                session: None,
+            },
             Err(e) => error(500, e),
         }
     }
@@ -956,20 +1278,43 @@ impl Engine {
                 let model = checked.model.as_ref().unwrap();
                 let login = self.login_of(model, user);
                 let name = format!("email code {login}");
-                match self.side(move |c| auth::create(c, "session", user, &name, false, now(), Some(now() + chrono::Duration::days(SESSION_DAYS)))) {
-                    Ok((secret, csrf)) => Reply { status: 200, body: json!({ "user": login, "csrf": csrf }), session: Some(secret) },
+                match self.side(move |c| {
+                    auth::create(
+                        c,
+                        "session",
+                        user,
+                        &name,
+                        false,
+                        now(),
+                        Some(now() + chrono::Duration::days(SESSION_DAYS)),
+                    )
+                }) {
+                    Ok((secret, csrf)) => Reply {
+                        status: 200,
+                        body: json!({ "user": login, "csrf": csrf }),
+                        session: Some(secret),
+                    },
                     Err(e) => error(500, e),
                 }
             }
             Ok(Err((why, left))) => {
                 let msg = match why {
-                    "wrong" => format!("Wrong code. {left} attempt{} left.", if left == 1 { "" } else { "s" }),
+                    "wrong" => format!(
+                        "Wrong code. {left} attempt{} left.",
+                        if left == 1 { "" } else { "s" }
+                    ),
                     "locked" => "Too many wrong attempts with this code. Ask for a new one.".into(),
                     "used" => "This code was used already. Ask for a new one.".into(),
-                    "expired" => "This code has expired, or a newer one was sent. Ask for a new one.".into(),
+                    "expired" => {
+                        "This code has expired, or a newer one was sent. Ask for a new one.".into()
+                    }
                     _ => "This sign-in request is not known. Ask for a new code.".into(),
                 };
-                Reply { status: 400, body: json!({ "error": msg, "code": why }), session: None }
+                Reply {
+                    status: 400,
+                    body: json!({ "error": msg, "code": why }),
+                    session: None,
+                }
             }
             Err(e) => error(500, e),
         }
@@ -991,8 +1336,15 @@ impl Engine {
             return error(404, "No such user.");
         }
         match self.user_by(model, &login) {
-            Some((_, login, Some(to))) => Reply { status: 200, body: json!({ "invited": login, "_send": { "to": to, "invite": true, "login": login } }), session: None },
-            _ => error(400, "This user has no email address: give them an `email`, or a login that is one."),
+            Some((_, login, Some(to))) => Reply {
+                status: 200,
+                body: json!({ "invited": login, "_send": { "to": to, "invite": true, "login": login } }),
+                session: None,
+            },
+            _ => error(
+                400,
+                "This user has no email address: give them an `email`, or a login that is one.",
+            ),
         }
     }
 
@@ -1000,7 +1352,10 @@ impl Engine {
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let login = self.login_of(model, who.user_id);
-        Ok(reply(200, json!({ "user": login, "user_id": who.user_id, "read_only": who.read_only, "csrf": who.csrf, "kind": who.kind })))
+        Ok(reply(
+            200,
+            json!({ "user": login, "user_id": who.user_id, "read_only": who.read_only, "csrf": who.csrf, "kind": who.kind }),
+        ))
     }
 
     // ---- model --------------------------------------------------------------------------
@@ -1011,8 +1366,13 @@ impl Engine {
         let model = checked.model.as_ref().unwrap();
         let mut i = self.interp(model, Some(who), None)?;
         let modules = &self.modules;
-        let entities = quadra_api::model_json(&mut i, model, &checked.report, &|s| modules.get(&s.file).cloned().unwrap_or_default());
-        Ok(reply(200, json!({ "entities": entities, "base": i.store.base })))
+        let entities = quadra_api::model_json(&mut i, model, &checked.report, &|s| {
+            modules.get(&s.file).cloned().unwrap_or_default()
+        });
+        Ok(reply(
+            200,
+            json!({ "entities": entities, "base": i.store.base }),
+        ))
     }
 
     // ---- expressions written by users ---------------------------------------------------
@@ -1023,7 +1383,14 @@ impl Engine {
         if items.is_empty() {
             return Ok(self.checked.clone());
         }
-        let key = format!("{entity}\u{1}{}", items.iter().map(|(n, e)| format!("{n}\u{2}{e}")).collect::<Vec<_>>().join("\u{1}"));
+        let key = format!(
+            "{entity}\u{1}{}",
+            items
+                .iter()
+                .map(|(n, e)| format!("{n}\u{2}{e}"))
+                .collect::<Vec<_>>()
+                .join("\u{1}")
+        );
         if let Some(c) = self.overlays.get(&key) {
             return Ok(c.clone());
         }
@@ -1033,12 +1400,23 @@ impl Engine {
         sources.push((path.clone(), src));
         let project = Project::from_sources(&self.root, sources);
         let checked = quadra_analysis::check(&project);
-        let errors: Vec<String> = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
+        let errors: Vec<String> = checked
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == quadra_sema::Severity::Error)
+            .map(|d| d.message.clone())
+            .collect();
         if !errors.is_empty() || checked.model.is_none() {
-            return Err(reply(400, json!({ "error": "the expression does not check", "diagnostics": errors })));
+            return Err(reply(
+                400,
+                json!({ "error": "the expression does not check", "diagnostics": errors }),
+            ));
         }
         // the only difference allowed: these formulas on this entity
-        let (base, over) = (self.checked.model.as_ref().unwrap(), checked.model.as_ref().unwrap());
+        let (base, over) = (
+            self.checked.model.as_ref().unwrap(),
+            checked.model.as_ref().unwrap(),
+        );
         let same_shape = quadra_api::same_shape(base, over, entity, items);
         if !same_shape {
             return Err(error(400, "an expression must be a single value"));
@@ -1058,7 +1436,14 @@ impl Engine {
 
     fn query(&mut self, who: &Principal, q: &J) -> Result<Reply, Fail> {
         let (entity, items, columns) = quadra_api::query_items(q)?;
-        if self.checked.model.as_ref().unwrap().entity(&entity).map_or(true, |e| e.kind != EntityKind::Entity || e.temporary) {
+        if self
+            .checked
+            .model
+            .as_ref()
+            .unwrap()
+            .entity(&entity)
+            .map_or(true, |e| e.kind != EntityKind::Entity || e.temporary)
+        {
             return Err((404, format!("unknown entity `{entity}`")));
         }
         let checked = match self.overlay(&entity, &items) {
@@ -1068,33 +1453,77 @@ impl Engine {
         let model = checked.model.as_ref().unwrap();
         let base = q["base"].as_u64();
         let mut i = self.interp(model, Some(who), base)?;
-        Ok(reply(200, quadra_api::query_rows(&mut i, model, &entity, q, &items, &columns)?))
+        // expressions of the caller (columns, `where`): evaluated as that user, as an app's
+        // cells are: rows they may read, hidden fields and records refused
+        if !columns.is_empty() || !q["where"].is_null() {
+            i.viewer = true;
+        }
+        Ok(reply(
+            200,
+            quadra_api::query_rows(&mut i, model, &entity, q, &items, &columns)?,
+        ))
     }
 
-    fn record(&mut self, who: &Principal, entity: &str, id: u64, base: Option<u64>) -> Result<Reply, Fail> {
+    fn record(
+        &mut self,
+        who: &Principal,
+        entity: &str,
+        id: u64,
+        base: Option<u64>,
+    ) -> Result<Reply, Fail> {
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let mut i = self.interp(model, Some(who), base)?;
-        Ok(reply(200, quadra_api::record_json(&mut i, model, entity, id)?))
+        Ok(reply(
+            200,
+            quadra_api::record_json(&mut i, model, entity, id)?,
+        ))
     }
 
-    fn search(&mut self, who: &Principal, entity: &str, q: &str, limit: usize, after: Option<&str>) -> Result<Reply, Fail> {
+    fn search(
+        &mut self,
+        who: &Principal,
+        entity: &str,
+        q: &str,
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<Reply, Fail> {
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let mut i = self.interp(model, Some(who), None)?;
-        Ok(reply(200, quadra_api::search_rows(&mut i, model, entity, q, limit, after)?))
+        Ok(reply(
+            200,
+            quadra_api::search_rows(&mut i, model, entity, q, limit, after)?,
+        ))
     }
 
     /// The history of a record, newest first in pages (`limit`, `before`: the `seq` of the
     /// oldest entry of the previous page), or all of it in order.
-    fn history(&mut self, who: &Principal, entity: &str, id: u64, limit: Option<usize>, before: Option<u64>) -> Result<Reply, Fail> {
+    fn history(
+        &mut self,
+        who: &Principal,
+        entity: &str,
+        id: u64,
+        limit: Option<usize>,
+        before: Option<u64>,
+    ) -> Result<Reply, Fail> {
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let mut i = self.interp(model, Some(who), None)?;
-        let actual = i.store.get(id).map(|r| r.ent.to_string()).ok_or((404, format!("{entity}#{id} not found")))?;
-        let rec = V::Ref { ent: Rc::from(actual.as_str()), id };
+        let actual = i
+            .store
+            .get(id)
+            .map(|r| r.ent.to_string())
+            .ok_or((404, format!("{entity}#{id} not found")))?;
+        let rec = V::Ref {
+            ent: Rc::from(actual.as_str()),
+            id,
+        };
         if !i.can("read", &actual, None, Some(&rec)) || !i.can_read_history(&actual) {
-            return Err((403, format!("permission denied: cannot read the history of {actual}#{id}")));
+            return Err((
+                403,
+                format!("permission denied: cannot read the history of {actual}#{id}"),
+            ));
         }
         let renames = quadra_store::source::load_renames(&mut self.conn).map_err(|e| (500, e))?;
         let rows = self
@@ -1117,7 +1546,10 @@ impl Engine {
         if more {
             rows.pop();
         }
-        let oldest: Option<u64> = rows.last().and_then(|r| r[6].as_deref()).and_then(|s| s.parse().ok());
+        let oldest: Option<u64> = rows
+            .last()
+            .and_then(|r| r[6].as_deref())
+            .and_then(|s| s.parse().ok());
         if limit.is_some() {
             rows.reverse();
         }
@@ -1130,14 +1562,29 @@ impl Engine {
             if i.hidden(&actual, &base) {
                 continue;
             }
-            let v = quadra_store::codec::from_json(&serde_json::from_str(r[2].as_deref().unwrap_or("null")).unwrap_or(J::Null));
+            let v = quadra_store::codec::from_json(
+                &serde_json::from_str(r[2].as_deref().unwrap_or("null")).unwrap_or(J::Null),
+            );
             let user = match r[4].as_deref().and_then(|u| u.parse::<u64>().ok()) {
-                Some(u) => Some(logins.entry(u).or_insert_with(|| i.store.read(u, "login", None).map(|v| v.to_string()).unwrap_or_default()).clone()),
+                Some(u) => Some(
+                    logins
+                        .entry(u)
+                        .or_insert_with(|| {
+                            i.store
+                                .read(u, "login", None)
+                                .map(|v| v.to_string())
+                                .unwrap_or_default()
+                        })
+                        .clone(),
+                ),
                 None => None,
             };
             out.push(json!({ "tx": tx, "at": r[3], "user": user, "cause": r[5], "field": field, "value": cell(&mut i, &v) }));
         }
-        Ok(reply(200, json!({ "entity": actual, "id": id, "entries": out, "before": if more { oldest } else { None } })))
+        Ok(reply(
+            200,
+            json!({ "entity": actual, "id": id, "entries": out, "before": if more { oldest } else { None } }),
+        ))
     }
 
     // ---- writing --------------------------------------------------------------------------
@@ -1146,20 +1593,42 @@ impl Engine {
         if who.read_only {
             return Err((403, "this token is read-only".into()));
         }
-        if key.is_empty() || key.len() > 100 || !key.chars().all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c)) {
-            return Err((400, "Idempotency-Key: 1 to 100 characters among letters, digits, - _ : .".into()));
+        if key.is_empty()
+            || key.len() > 100
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c))
+        {
+            return Err((
+                400,
+                "Idempotency-Key: 1 to 100 characters among letters, digits, - _ : .".into(),
+            ));
         }
         let hash = auth::sha256_hex(&body.to_string());
-        if let Some((h, resp, tx)) = auth::idempotent(&mut self.conn, who.user_id, key).map_err(|e| (500, e))? {
+        if let Some((h, resp, tx)) =
+            auth::idempotent(&mut self.conn, who.user_id, key).map_err(|e| (500, e))?
+        {
             if h != hash {
-                return Err((422, "this Idempotency-Key was already used for a different request".into()));
+                return Err((
+                    422,
+                    "this Idempotency-Key was already used for a different request".into(),
+                ));
+            }
+            // the first request's commit is in the database: confirmed again only once it is
+            // durable (under a strict rule, in the destinations too)
+            if let Some(s) = &self.sequencer {
+                if s.durable().map_or(true, |d| d < tx) {
+                    return Err((503, "the first request with this Idempotency-Key is not kept yet: send it again in a moment".into()));
+                }
             }
             let mut r: J = serde_json::from_str(&resp).unwrap_or(json!({}));
             r["tx"] = json!(tx);
             r["replayed"] = json!(true);
             return Ok(reply(200, r));
         }
-        let ops = body["ops"].as_array().ok_or((400, "`ops` is required".to_string()))?;
+        let ops = body["ops"]
+            .as_array()
+            .ok_or((400, "`ops` is required".to_string()))?;
         if ops.is_empty() || ops.len() > 200 {
             return Err((400, "1 to 200 operations per transaction".into()));
         }
@@ -1176,12 +1645,22 @@ impl Engine {
         if let Some(b) = base {
             let latest = head(&mut self.conn).map_err(|e| (500, e))?;
             if b > latest {
-                return Err((400, format!("base {b} is ahead of the latest commit ({latest})")));
+                return Err((
+                    400,
+                    format!("base {b} is ahead of the latest commit ({latest})"),
+                ));
             }
-            let targets: Vec<u64> = ops.iter().filter(|o| o["op"] != json!("create")).filter_map(|o| o["id"].as_u64()).collect();
+            let targets: Vec<u64> = ops
+                .iter()
+                .filter(|o| o["op"] != json!("create"))
+                .filter_map(|o| o["id"].as_u64())
+                .collect();
             let conflicts = self.changed_since(model, &targets, b)?;
             if !conflicts.is_empty() {
-                return Ok(reply(409, json!({ "error": "changed by others since you read it: review their changes and try again", "conflicts": conflicts })));
+                return Ok(reply(
+                    409,
+                    json!({ "error": "changed by others since you read it: review their changes and try again", "conflicts": conflicts }),
+                ));
             }
         }
         // a commit of another engine (PostgreSQL) may land while this one runs: then it runs
@@ -1199,24 +1678,35 @@ impl Engine {
             let r = i.with_cause(format!("API request {key}"), |i| {
                 i.transaction(|i| {
                     *created.borrow_mut() = quadra_api::apply_ops(i, model, ops)?;
-                    let response = json!({ "created": J::Object(created.borrow().clone()) }).to_string();
+                    let response =
+                        json!({ "created": J::Object(created.borrow().clone()) }).to_string();
                     i.store.idempotency = Some((user, key.to_string(), hash.clone(), response));
                     Ok(())
                 })
             });
             return match r {
-                Ok(()) => Ok(reply(200, json!({ "tx": i.store.tx, "base": i.store.tx, "created": J::Object(created.into_inner()) }))),
+                Ok(()) => Ok(reply(
+                    200,
+                    json!({ "tx": i.store.tx, "base": i.store.tx, "created": J::Object(created.into_inner()) }),
+                )),
                 Err(Flow::Conflict(_)) if attempt < 5 => continue,
                 Err(Flow::Conflict(c)) => {
                     let list: Vec<J> = c.iter().map(|x| json!({ "tx": x.tx, "at": x.at, "user": x.user, "cause": x.cause, "what": x.what })).collect();
-                    Ok(reply(409, json!({ "error": "changed by others while it was being saved, several times: try again", "conflicts": list })))
+                    Ok(reply(
+                        409,
+                        json!({ "error": "changed by others while it was being saved, several times: try again", "conflicts": list }),
+                    ))
                 }
                 Err(Flow::Fail(m)) if m.contains("_quadra_idempotency") => {
                     // the same key committed by another process at the same time
                     drop(i);
                     self.tx(who, body, key)
                 }
-                Err(Flow::Fail(m)) if m.starts_with("permission denied") || m.contains(": permission denied") => Err((403, m)),
+                Err(Flow::Fail(m))
+                    if m.starts_with("permission denied") || m.contains(": permission denied") =>
+                {
+                    Err((403, m))
+                }
                 Err(other) => Err((422, describe(other))),
             };
         }
@@ -1234,7 +1724,11 @@ impl Engine {
                 return Ok(Vec::new());
             }
         }
-        let ids = records.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
+        let ids = records
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         let rows = self
             .conn
             .query(
@@ -1246,19 +1740,34 @@ impl Engine {
             return Ok(Vec::new());
         }
         let mut i = self.interp(model, None, None)?;
-        let mut commits: std::collections::BTreeMap<u64, (J, Option<String>, J, Vec<String>)> = std::collections::BTreeMap::new();
+        let mut commits: std::collections::BTreeMap<u64, (J, Option<String>, J, Vec<String>)> =
+            std::collections::BTreeMap::new();
         let num = |s: &Option<String>| s.as_deref().and_then(|v| v.parse::<u64>().ok());
         for r in rows {
-            let (Some(tx), Some(id)) = (num(&r[0]), num(&r[1])) else { continue };
+            let (Some(tx), Some(id)) = (num(&r[0]), num(&r[1])) else {
+                continue;
+            };
             let field = r[2].clone().unwrap_or_default();
-            let Some(ent) = i.store.get(id).map(|x| x.ent.to_string()) else { continue };
+            let Some(ent) = i.store.get(id).map(|x| x.ent.to_string()) else {
+                continue;
+            };
             let name = field.split(['@', '#']).next().unwrap_or("");
-            let computed = model.entity(&ent).and_then(|e| model.find_field(e, name)).map_or(false, |f| f.formula.is_some());
+            let computed = model
+                .entity(&ent)
+                .and_then(|e| model.find_field(e, name))
+                .map_or(false, |f| f.formula.is_some());
             if computed {
                 continue;
             }
-            let user = num(&r[4]).map(|u| i.store.read(u, "login", None).map(|v| v.to_string()).unwrap_or_default());
-            let e = commits.entry(tx).or_insert_with(|| (json!(r[3]), user, json!(r[5]), Vec::new()));
+            let user = num(&r[4]).map(|u| {
+                i.store
+                    .read(u, "login", None)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            });
+            let e = commits
+                .entry(tx)
+                .or_insert_with(|| (json!(r[3]), user, json!(r[5]), Vec::new()));
             let what = format!("{ent}#{id}.{field}");
             if !e.3.contains(&what) {
                 e.3.push(what);
@@ -1321,7 +1830,13 @@ mod limit_tests {
     }
 
     fn who() -> Principal {
-        Principal { user_id: 1, read_only: false, kind: "token".into(), csrf: None, name: "test".into() }
+        Principal {
+            user_id: 1,
+            read_only: false,
+            kind: "token".into(),
+            csrf: None,
+            name: "test".into(),
+        }
     }
 
     /// An engine with `items` records of `Item`, running its loop on a thread of its own.
@@ -1334,14 +1849,42 @@ mod limit_tests {
         let url = format!("sqlite:{}", dir.join("data.db").display());
         let project = Project::load(&dir).unwrap();
         let checked = quadra_analysis::check(&project);
-        let errors: Vec<_> = checked.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error).map(|d| d.message.clone()).collect();
+        let errors: Vec<_> = checked
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == quadra_sema::Severity::Error)
+            .map(|d| d.message.clone())
+            .collect();
         assert!(errors.is_empty(), "{errors:?}");
-        quadra_store::ops::init(&url, checked.model.as_ref().unwrap(), &checked.report, now()).unwrap();
-        let cfg = Config { root: dir.clone(), url, port: 0, dev_login: false, secure_cookies: false, cache_mb: 16, prewarm_days: None, web: None, sweep_every: 0, editors: vec![], watch: false, limits: Limits::none(), engines: Engines::one() };
+        quadra_store::ops::init(
+            &url,
+            checked.model.as_ref().unwrap(),
+            &checked.report,
+            now(),
+        )
+        .unwrap();
+        let cfg = Config {
+            root: dir.clone(),
+            url,
+            port: 0,
+            dev_login: false,
+            secure_cookies: false,
+            cache_mb: 16,
+            prewarm_days: None,
+            web: None,
+            sweep_every: 0,
+            editors: vec![],
+            watch: false,
+            limits: Limits::none(),
+            engines: Engines::one(),
+        };
         // the records first, without limits
         let (jobs, rx) = mpsc::channel();
         let (ready_tx, ready) = mpsc::channel();
-        let run_cfg = Config { limits, ..cfg.clone() };
+        let run_cfg = Config {
+            limits,
+            ..cfg.clone()
+        };
         std::thread::Builder::new().stack_size(ENGINE_STACK).spawn(move || {
             let mut setup = Engine::new(&cfg).unwrap();
             for n in 0..items {
@@ -1359,7 +1902,13 @@ mod limit_tests {
 
     fn call(r: &Running, req: Req) -> Reply {
         let (tx, rx) = oneshot::channel();
-        r.jobs.send(Job::Call { who: who(), req, reply: tx }).unwrap();
+        r.jobs
+            .send(Job::Call {
+                who: who(),
+                req,
+                reply: tx,
+            })
+            .unwrap();
         rx.blocking_recv().expect("an answer")
     }
 
@@ -1370,12 +1919,23 @@ mod limit_tests {
     #[test]
     fn a_request_past_its_time_limit_fails_and_the_next_one_is_served() {
         let limit = Duration::from_millis(400);
-        let r = start("timeout", 1, Limits { job: Some(limit), ..Limits::none() });
+        let r = start(
+            "timeout",
+            1,
+            Limits {
+                job: Some(limit),
+                ..Limits::none()
+            },
+        );
         let t = Instant::now();
         let a = call(&r, items(json!({ "x": "burn(190)" })));
         let took = t.elapsed();
         assert_eq!(a.status, 422, "{}", a.body);
-        assert!(a.body["error"].as_str().unwrap().starts_with("timeout"), "{}", a.body);
+        assert!(
+            a.body["error"].as_str().unwrap().starts_with("timeout"),
+            "{}",
+            a.body
+        );
         assert!(took < limit + limit / 10, "answered after {took:?}");
         let b = call(&r, items(json!({ "x": "burn(3)" })));
         assert_eq!(b.status, 200, "{}", b.body);
@@ -1387,9 +1947,20 @@ mod limit_tests {
         let r = start("deep", 1, Limits::default());
         let a = call(&r, items(json!({ "x": "deep(100000)" })));
         assert_eq!(a.status, 200, "{}", a.body);
-        assert!(a.body["rows"][0]["cells"]["x"].to_string().contains("recursion too deep"), "{}", a.body);
+        assert!(
+            a.body["rows"][0]["cells"]["x"]
+                .to_string()
+                .contains("recursion too deep"),
+            "{}",
+            a.body
+        );
         let b = call(&r, items(json!({ "x": "deep(150)" })));
-        assert_eq!(b.body["rows"][0]["cells"]["x"]["d"], json!("0"), "{}", b.body);
+        assert_eq!(
+            b.body["rows"][0]["cells"]["x"]["d"],
+            json!("0"),
+            "{}",
+            b.body
+        );
     }
 
     #[test]
@@ -1404,22 +1975,63 @@ mod limit_tests {
 
     #[test]
     fn a_request_that_reads_too_many_rows_fails() {
-        let r = start("rows", 20, Limits { max_rows: Some(10), ..Limits::none() });
+        let r = start(
+            "rows",
+            20,
+            Limits {
+                max_rows: Some(10),
+                ..Limits::none()
+            },
+        );
         let a = call(&r, items(json!({})));
         assert_eq!(a.status, 422, "{}", a.body);
-        assert!(a.body["error"].as_str().unwrap().starts_with("too many rows"), "{}", a.body);
+        assert!(
+            a.body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("too many rows"),
+            "{}",
+            a.body
+        );
         // a request that reads few rows is served
-        let b = call(&r, Req::Query(json!({ "entity": "Item", "fields": ["n"], "where": "n < 3" })));
+        let b = call(
+            &r,
+            Req::Query(json!({ "entity": "Item", "fields": ["n"], "where": "n < 3" })),
+        );
         assert_eq!(b.status, 200, "{}", b.body);
     }
 
     #[test]
     fn a_list_beyond_the_cap_fails_while_it_grows() {
-        let r = start("list", 20, Limits { max_list: Some(100), ..Limits::none() });
-        let a = call(&r, Req::Query(json!({ "entity": "Item", "fields": ["n"], "where": "n == 0", "columns": { "x": "Item.flat_map(a => Item.map(b => b.n)).count()" } })));
+        let r = start(
+            "list",
+            20,
+            Limits {
+                max_list: Some(100),
+                ..Limits::none()
+            },
+        );
+        let a = call(
+            &r,
+            Req::Query(
+                json!({ "entity": "Item", "fields": ["n"], "where": "n == 0", "columns": { "x": "Item.flat_map(a => Item.map(b => b.n)).count()" } }),
+            ),
+        );
         assert_eq!(a.status, 422, "{}", a.body);
-        assert!(a.body["error"].as_str().unwrap().starts_with("too many elements"), "{}", a.body);
-        let b = call(&r, Req::Query(json!({ "entity": "Item", "fields": ["n"], "where": "n == 0", "columns": { "x": "Item.map(b => b.n).count()" } })));
+        assert!(
+            a.body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("too many elements"),
+            "{}",
+            a.body
+        );
+        let b = call(
+            &r,
+            Req::Query(
+                json!({ "entity": "Item", "fields": ["n"], "where": "n == 0", "columns": { "x": "Item.map(b => b.n).count()" } }),
+            ),
+        );
         assert_eq!(b.status, 200, "{}", b.body);
         assert_eq!(b.body["rows"][0]["cells"]["x"]["d"], json!("20"));
     }

@@ -13,7 +13,8 @@ use serde_json::Value as J;
 /// An identifier as Quadra's lexer reads one: a letter or `_`, then letters, digits and `_`.
 pub fn is_ident(s: &str) -> bool {
     let mut cs = s.chars();
-    matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_') && cs.all(|c| c.is_alphanumeric() || c == '_')
+    matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
+        && cs.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// `customer.region`: identifiers joined by dots.
@@ -24,7 +25,12 @@ pub fn is_path(s: &str) -> bool {
 /// `2026-11-21`, exactly (the lexer reads it as one date token).
 pub fn is_date(s: &str) -> bool {
     let b = s.as_bytes();
-    b.len() == 10 && b[4] == b'-' && b[7] == b'-' && b.iter().enumerate().all(|(k, c)| k == 4 || k == 7 || c.is_ascii_digit())
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(k, c)| k == 4 || k == 7 || c.is_ascii_digit())
 }
 
 /// Words that a data literal reads as something other than a string.
@@ -46,7 +52,9 @@ pub fn quote(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -100,7 +108,10 @@ pub fn unescape(s: &str) -> String {
 
 /// Can `s` be written as a text block (it has line breaks, and nothing a block cannot hold)?
 pub fn block_ok(s: &str) -> bool {
-    s.contains('\n') && !s.chars().any(|c| c == '\r' || ((c as u32) < 0x20 && c != '\n' && c != '\t') || c as u32 == 0x7f)
+    s.contains('\n')
+        && !s
+            .chars()
+            .any(|c| c == '\r' || ((c as u32) < 0x20 && c != '\n' && c != '\t') || c as u32 == 0x7f)
 }
 
 /// A text block at `indent` spaces: the lines of the opening `"""`, the text, the closing `"""`.
@@ -145,7 +156,11 @@ pub fn text_block(s: &str, indent: usize) -> String {
 /// The text of a string token (`"…"` or a text block starting at column `col`).
 pub fn string_value(tok: &str, col: usize) -> String {
     if let Some(rest) = tok.strip_prefix("\"\"\"") {
-        let inner = if tok.len() >= 6 && tok.ends_with("\"\"\"") { &tok[3..tok.len() - 3] } else { rest };
+        let inner = if tok.len() >= 6 && tok.ends_with("\"\"\"") {
+            &tok[3..tok.len() - 3]
+        } else {
+            rest
+        };
         let Some(inner) = inner.strip_prefix('\n') else {
             return unescape(inner);
         };
@@ -163,7 +178,11 @@ pub fn string_value(tok: &str, col: usize) -> String {
             .collect();
         return unescape(&lines.join("\n"));
     }
-    let inner = if tok.len() >= 2 && tok.ends_with('"') { &tok[1..tok.len() - 1] } else { tok.get(1..).unwrap_or("") };
+    let inner = if tok.len() >= 2 && tok.ends_with('"') {
+        &tok[1..tok.len() - 1]
+    } else {
+        tok.get(1..).unwrap_or("")
+    };
     unescape(inner)
 }
 
@@ -181,7 +200,13 @@ pub fn data(v: &J) -> String {
             }
         }
         J::Array(a) => format!("[{}]", a.iter().map(data).collect::<Vec<_>>().join(", ")),
-        J::Object(o) => format!("{{{}}}", o.iter().map(|(k, v)| format!("{}: {}", key(k), data(v))).collect::<Vec<_>>().join(", ")),
+        J::Object(o) => format!(
+            "{{{}}}",
+            o.iter()
+                .map(|(k, v)| format!("{}: {}", key(k), data(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -199,13 +224,20 @@ pub fn names(list: &[String]) -> String {
     if !list.is_empty() && list.iter().all(|s| is_path(s)) {
         list.join(", ")
     } else {
-        data(&J::Array(list.iter().map(|s| J::String(s.clone())).collect()))
+        data(&J::Array(
+            list.iter().map(|s| J::String(s.clone())).collect(),
+        ))
     }
 }
 
 /// A key of a list of pairs (`widths: number 120`): a path or a row number, bare.
 pub fn pair_key(k: &str) -> String {
-    if is_path(k) || (!k.is_empty() && k.len() < 10 && k.chars().all(|c| c.is_ascii_digit()) && !k.starts_with('0')) {
+    if is_path(k)
+        || (!k.is_empty()
+            && k.len() < 10
+            && k.chars().all(|c| c.is_ascii_digit())
+            && !k.starts_with('0'))
+    {
         k.to_string()
     } else {
         quote(k)
@@ -218,7 +250,16 @@ mod tests {
 
     #[test]
     fn strings() {
-        for s in ["a", "a\"b", "x\\y", "tab\there", "nl\nx", "\u{1}", "{=x}", "é ×"] {
+        for s in [
+            "a",
+            "a\"b",
+            "x\\y",
+            "tab\there",
+            "nl\nx",
+            "\u{1}",
+            "{=x}",
+            "é ×",
+        ] {
             let q = quote(s);
             assert_eq!(string_value(&q, 0), s, "{q}");
         }
@@ -226,7 +267,13 @@ mod tests {
 
     #[test]
     fn blocks() {
-        for s in ["## A\nb", "\nlead", "trail\n", "a\n\n  indented\nq\"\"\"q", "x\\y\n\"\""] {
+        for s in [
+            "## A\nb",
+            "\nlead",
+            "trail\n",
+            "a\n\n  indented\nq\"\"\"q",
+            "x\\y\n\"\"",
+        ] {
             let b = text_block(s, 8);
             let tok = b.trim_start();
             assert_eq!(string_value(tok, 8), s, "{b}");
@@ -235,6 +282,11 @@ mod tests {
 
     #[test]
     fn data_literals() {
-        assert_eq!(data(&serde_json::json!([1, "Confirmed", "2026-01-01", "a b", null, true, {"k": "v", "x y": 2.5}])), "[1, Confirmed, 2026-01-01, \"a b\", none, true, {k: v, \"x y\": 2.5}]");
+        assert_eq!(
+            data(
+                &serde_json::json!([1, "Confirmed", "2026-01-01", "a b", null, true, {"k": "v", "x y": 2.5}])
+            ),
+            "[1, Confirmed, 2026-01-01, \"a b\", none, true, {k: v, \"x y\": 2.5}]"
+        );
     }
 }

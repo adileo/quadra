@@ -3,6 +3,7 @@
 
 mod crash;
 mod deploy;
+mod due;
 mod hints;
 mod import;
 mod limits;

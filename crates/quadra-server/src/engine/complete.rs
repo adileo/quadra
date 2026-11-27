@@ -59,7 +59,14 @@ struct Item {
 impl Item {
     fn new(label: impl Into<String>, kind: &'static str, detail: impl Into<String>) -> Item {
         let label = label.into();
-        Item { insert: label.clone(), label, kind, detail: detail.into(), doc: None, first: false }
+        Item {
+            insert: label.clone(),
+            label,
+            kind,
+            detail: detail.into(),
+            doc: None,
+            first: false,
+        }
     }
 
     fn doc(mut self, doc: Option<String>) -> Item {
@@ -82,16 +89,50 @@ const TEXT_METHODS: &[(&str, &str, &str)] = &[
     ("trim", "trim()", "without the spaces around"),
     ("take", "take(n)", "the first `n` characters"),
     ("initials", "initials()", "the first letter of each word"),
-    ("starts_with", "starts_with(text)", "the text starts with `text`"),
+    (
+        "starts_with",
+        "starts_with(text)",
+        "the text starts with `text`",
+    ),
     ("ends_with", "ends_with(text)", "the text ends with `text`"),
     ("contains", "contains(text)", "`text` is in the text"),
 ];
-const NUMBER_METHODS: &[(&str, &str, &str)] = &[("round", "round()", "rounded (an amount: to its currency's decimals)"), ("abs", "abs()", "the absolute value")];
-const DATE_METHODS: &[(&str, &str, &str)] = &[("start_of_month", "start_of_month()", "the first day of its month"), ("end_of_month", "end_of_month()", "the last day of its month")];
-const RANGE_METHODS: &[(&str, &str, &str)] = &[("contains", "contains(date)", "the date is in the range")];
+const NUMBER_METHODS: &[(&str, &str, &str)] = &[
+    (
+        "round",
+        "round()",
+        "rounded (an amount: to its currency's decimals)",
+    ),
+    ("abs", "abs()", "the absolute value"),
+];
+const DATE_METHODS: &[(&str, &str, &str)] = &[
+    (
+        "start_of_month",
+        "start_of_month()",
+        "the first day of its month",
+    ),
+    (
+        "end_of_month",
+        "end_of_month()",
+        "the last day of its month",
+    ),
+];
+const RANGE_METHODS: &[(&str, &str, &str)] =
+    &[("contains", "contains(date)", "the date is in the range")];
 /// Functions of the language that formulas use.
-const BUILTINS: &[(&str, &str, &str)] = &[("today", "today()", "today's date"), ("now", "now()", "the date and time now"), ("DateRange", "DateRange(from, to)", "the dates from `from` to `to`, both included")];
-const KEYWORDS: &[&str] = &["if", "else", "and", "or", "not", "is", "in", "none", "true", "false", "match", "when", "current"];
+const BUILTINS: &[(&str, &str, &str)] = &[
+    ("today", "today()", "today's date"),
+    ("now", "now()", "the date and time now"),
+    (
+        "DateRange",
+        "DateRange(from, to)",
+        "the dates from `from` to `to`, both included",
+    ),
+];
+const KEYWORDS: &[&str] = &[
+    "if", "else", "and", "or", "not", "is", "in", "none", "true", "false", "match", "when",
+    "current",
+];
 const MAX_TEXT: usize = 20_000;
 const MAX_ITEMS: usize = 100;
 
@@ -103,14 +144,19 @@ fn ident_char(c: char) -> bool {
 /// the caret is not in one (a cell holding a value, a text outside `{= … }`).
 fn region(text: &str, byte: usize, kind: &str) -> Option<(usize, usize)> {
     match kind {
-        "formula" => text.starts_with('=').then_some((1, text.len())).filter(|_| byte >= 1),
+        "formula" => text
+            .starts_with('=')
+            .then_some((1, text.len()))
+            .filter(|_| byte >= 1),
         "template" => {
             let before = &text[..byte];
             let open = before.rfind("{=")?;
             if before[open..].contains(['}', '\n']) {
                 return None;
             }
-            let end = text[byte..].find(['}', '\n']).map_or(text.len(), |k| byte + k);
+            let end = text[byte..]
+                .find(['}', '\n'])
+                .map_or(text.len(), |k| byte + k);
             Some((open + 2, end))
         }
         _ => Some((0, text.len())),
@@ -127,7 +173,11 @@ struct Scan {
 
 fn scan(s: &str) -> Scan {
     let ch: Vec<(usize, char)> = s.char_indices().collect();
-    let mut out = Scan { open: Vec::new(), in_text: false, quote: None };
+    let mut out = Scan {
+        open: Vec::new(),
+        in_text: false,
+        quote: None,
+    };
     let mut k = 0;
     while k < ch.len() {
         let (i, c) = ch[k];
@@ -266,9 +316,21 @@ fn lambda_param(s: &str) -> Option<String> {
     // `x =>` or `by=x =>`
     let at = arg.find("=>")?;
     let head = arg[..at].trim_end();
-    let name: String = head.chars().rev().take_while(|c| ident_char(*c)).collect::<Vec<_>>().into_iter().rev().collect();
+    let name: String = head
+        .chars()
+        .rev()
+        .take_while(|c| ident_char(*c))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     let rest = head[..head.len() - name.len()].trim();
-    let ok = !name.is_empty() && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && (rest.is_empty() || rest.ends_with('='));
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && (rest.is_empty() || rest.ends_with('='));
     ok.then_some(name)
 }
 
@@ -317,14 +379,31 @@ fn t_of_text(model: &Model, s: &str) -> T {
         return list(t_of_text(model, inner));
     }
     if let Some(inner) = s.strip_prefix('{').and_then(|x| x.strip_suffix('}')) {
-        return T::Coll { elem: Box::new(t_of_text(model, inner)), set: true, facts: Vec::new() };
+        return T::Coll {
+            elem: Box::new(t_of_text(model, inner)),
+            set: true,
+            facts: Vec::new(),
+        };
     }
     if let Some(inner) = s.strip_prefix("enum(").and_then(|x| x.strip_suffix(')')) {
-        let variants = inner.split(',').map(|v| v.trim().split('(').next().unwrap_or("").to_string()).filter(|v| !v.is_empty()).collect();
-        return T::Enum { name: "enum".into(), variants };
+        let variants = inner
+            .split(',')
+            .map(|v| v.trim().split('(').next().unwrap_or("").to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
+        return T::Enum {
+            name: "enum".into(),
+            variants,
+        };
     }
     let (name, args) = match s.split_once('<') {
-        Some((n, rest)) => (n.trim(), rest.trim_end_matches('>').split(',').map(|a| a.trim().to_string()).collect::<Vec<_>>()),
+        Some((n, rest)) => (
+            n.trim(),
+            rest.trim_end_matches('>')
+                .split(',')
+                .map(|a| a.trim().to_string())
+                .collect::<Vec<_>>(),
+        ),
         None => (s, Vec::new()),
     };
     let unit = |k: usize| match args.get(k) {
@@ -346,13 +425,26 @@ fn t_of_text(model: &Model, s: &str) -> T {
         "Code" => T::Text("Code"),
         "Email" => T::Text("Email"),
         "Phone" => T::Text("Phone"),
-        "Money" => T::Money { cur: unit(0), exact: false },
-        "Qty" => T::Qty { unit: unit(0), exact: false },
-        "Price" => T::Price { cur: unit(0), per: unit(1), exact: false },
+        "Money" => T::Money {
+            cur: unit(0),
+            exact: false,
+        },
+        "Qty" => T::Qty {
+            unit: unit(0),
+            exact: false,
+        },
+        "Price" => T::Price {
+            cur: unit(0),
+            per: unit(1),
+            exact: false,
+        },
         "Exact" => t_of_text(model, args.join(", ").as_str()).with_exact(true),
         n if model.entity(n).is_some() => T::Ent(n.to_string()),
         n => match model.enum_def(n) {
-            Some(e) => T::Enum { name: e.name.clone(), variants: e.variants.iter().map(|v| v.name.clone()).collect() },
+            Some(e) => T::Enum {
+                name: e.name.clone(),
+                variants: e.variants.iter().map(|v| v.name.clone()).collect(),
+            },
             None => T::Unknown,
         },
     }
@@ -363,17 +455,27 @@ fn t_of_ty(model: &Model, t: &quadra_ir::Ty) -> T {
 }
 
 fn signature(name: &str, params: &[quadra_ir::Param], ret: Option<&quadra_ir::Ty>) -> String {
-    let ps: Vec<String> = params.iter().map(|p| match &p.ty {
-        Some(t) => format!("{}: {}", p.name, quadra_ir::print::ty(t)),
-        None => p.name.clone(),
-    }).collect();
-    let ret = ret.map(|t| format!(" -> {}", quadra_ir::print::ty(t))).unwrap_or_default();
+    let ps: Vec<String> = params
+        .iter()
+        .map(|p| match &p.ty {
+            Some(t) => format!("{}: {}", p.name, quadra_ir::print::ty(t)),
+            None => p.name.clone(),
+        })
+        .collect();
+    let ret = ret
+        .map(|t| format!(" -> {}", quadra_ir::print::ty(t)))
+        .unwrap_or_default();
     format!("{name}({}){ret}", ps.join(", "))
 }
 
 /// The names a bare `Q1` means instead of a cell (as `/v1/eval` reads it).
 fn taken(model: &Model, n: &str) -> bool {
-    model.entity(n).is_some() || model.variant(n).is_some() || model.function(n).is_some() || model.enum_def(n).is_some() || model.consts.iter().any(|c| c.name == n) || model.metrics.iter().any(|m| m.name == n)
+    model.entity(n).is_some()
+        || model.variant(n).is_some()
+        || model.function(n).is_some()
+        || model.enum_def(n).is_some()
+        || model.consts.iter().any(|c| c.name == n)
+        || model.metrics.iter().any(|m| m.name == n)
 }
 
 /// `__c_0_2_3` → its cell; `__r_…` → its rectangle; `__sp_…` → the cell whose spill it is.
@@ -384,18 +486,42 @@ enum Named {
 }
 
 fn named(n: &str) -> Option<Named> {
-    let nums = |rest: &str| rest.split('_').map(|x| x.parse::<u64>().ok()).collect::<Option<Vec<u64>>>();
+    let nums = |rest: &str| {
+        rest.split('_')
+            .map(|x| x.parse::<u64>().ok())
+            .collect::<Option<Vec<u64>>>()
+    };
     if let Some(rest) = n.strip_prefix("__c_") {
         let v = nums(rest)?;
-        return (v.len() == 3).then(|| Named::Cell(Addr { s: v[0] as usize, r: v[1] as u32, c: v[2] as u32 }));
+        return (v.len() == 3).then(|| {
+            Named::Cell(Addr {
+                s: v[0] as usize,
+                r: v[1] as u32,
+                c: v[2] as u32,
+            })
+        });
     }
     if let Some(rest) = n.strip_prefix("__sp_") {
         let v = nums(rest)?;
-        return (v.len() == 3).then(|| Named::Spill(Addr { s: v[0] as usize, r: v[1] as u32, c: v[2] as u32 }));
+        return (v.len() == 3).then(|| {
+            Named::Spill(Addr {
+                s: v[0] as usize,
+                r: v[1] as u32,
+                c: v[2] as u32,
+            })
+        });
     }
     if let Some(rest) = n.strip_prefix("__r_") {
         let v = nums(rest)?;
-        return (v.len() == 5).then(|| Named::Range(v[0] as usize, v[1] as u32, v[2] as u32, v[3] as u32, v[4] as u32));
+        return (v.len() == 5).then(|| {
+            Named::Range(
+                v[0] as usize,
+                v[1] as u32,
+                v[2] as u32,
+                v[3] as u32,
+                v[4] as u32,
+            )
+        });
     }
     None
 }
@@ -423,7 +549,14 @@ impl Typer<'_, '_> {
             return T::Unknown;
         };
         let model = self.model;
-        let Ok((text, _)) = rewrite(&src, here, &Sheets { names: &self.book.names }, &|n| taken(model, n)) else {
+        let Ok((text, _)) = rewrite(
+            &src,
+            here,
+            &Sheets {
+                names: &self.book.names,
+            },
+            &|n| taken(model, n),
+        ) else {
             return T::Unknown;
         };
         match quadra_syntax::parse_expr(&text) {
@@ -434,8 +567,14 @@ impl Typer<'_, '_> {
 
     fn field(&self, ent: &str, name: &str) -> T {
         let m = self.model;
-        let Some(e) = m.entity(ent) else { return T::Unknown };
-        if let Some(t) = self.report.field_types.get(&(ent.to_string(), name.to_string())) {
+        let Some(e) = m.entity(ent) else {
+            return T::Unknown;
+        };
+        if let Some(t) = self
+            .report
+            .field_types
+            .get(&(ent.to_string(), name.to_string()))
+        {
             return t.clone();
         }
         if let Some(f) = m.find_field(e, name) {
@@ -443,7 +582,11 @@ impl Typer<'_, '_> {
                 return t_of_ty(m, ty);
             }
             for t in m.all_traits(e) {
-                if let Some(x) = self.report.field_types.get(&(t.name.clone(), name.to_string())) {
+                if let Some(x) = self
+                    .report
+                    .field_types
+                    .get(&(t.name.clone(), name.to_string()))
+                {
                     return x.clone();
                 }
             }
@@ -475,12 +618,18 @@ impl Typer<'_, '_> {
                 },
                 _ => T::Unknown,
             },
-            T::Tuple(items) => items.iter().find(|(n, _)| n.as_deref() == Some(name)).map(|(_, t)| t.clone()).unwrap_or(T::Unknown),
+            T::Tuple(items) => items
+                .iter()
+                .find(|(n, _)| n.as_deref() == Some(name))
+                .map(|(_, t)| t.clone())
+                .unwrap_or(T::Unknown),
             T::Date | T::DateTime if name == "month" => T::YearMonth,
             T::Date | T::DateTime if name == "year" => T::Num(Num::Int),
             T::DateTime if name == "date" => T::Date,
             T::Money { .. } if name == "currency" => T::Ent("Currency".into()),
-            T::Money { .. } | T::Price { .. } | T::Qty { .. } | T::Num(_) if name == "raw" => T::Num(Num::Decimal),
+            T::Money { .. } | T::Price { .. } | T::Qty { .. } | T::Num(_) if name == "raw" => {
+                T::Num(Num::Decimal)
+            }
             T::Current => match name {
                 "user" => T::Ent("User".into()),
                 "company" => T::Ent("Company".into()),
@@ -496,7 +645,13 @@ impl Typer<'_, '_> {
         let arg = arg?;
         let e = arg.children().find(|c| c.kind() != NAME)?;
         if e.kind() == LAMBDA_EXPR {
-            let names: Vec<String> = ast::child(&e, PARAM_LIST).map(|l| ast::children(&l, PARAM).filter_map(|p| ast::name_text(&p)).collect()).unwrap_or_default();
+            let names: Vec<String> = ast::child(&e, PARAM_LIST)
+                .map(|l| {
+                    ast::children(&l, PARAM)
+                        .filter_map(|p| ast::name_text(&p))
+                        .collect()
+                })
+                .unwrap_or_default();
             let body = e.children().filter(|c| c.kind() != PARAM_LIST).last()?;
             let n = self.locals.len();
             for p in names {
@@ -517,12 +672,21 @@ impl Typer<'_, '_> {
                 T::Table(_) => list(elem.clone()),
                 t => t.clone(),
             };
-            let lit_number = args.first().and_then(|a| a.children().next()).is_some_and(|e| e.kind() == LITERAL);
+            let lit_number = args
+                .first()
+                .and_then(|a| a.children().next())
+                .is_some_and(|e| e.kind() == LITERAL);
             return match name {
-                "where" | "filter" | "sort_by" | "distinct" | "all" if !(name == "all" && !args.is_empty()) => coll,
+                "where" | "filter" | "sort_by" | "distinct" | "all"
+                    if !(name == "all" && !args.is_empty()) =>
+                {
+                    coll
+                }
                 "all" | "any" | "none" | "contains" | "is_contiguous" => T::Bool,
                 "first" | "last" if lit_number => coll,
-                "first" | "last" | "find" | "single" | "last_by" | "min_by" | "max_by" => T::opt(elem),
+                "first" | "last" | "find" | "single" | "last_by" | "min_by" | "max_by" => {
+                    T::opt(elem)
+                }
                 "count" => T::Num(Num::Int),
                 "map" => list(self.arg_body(args.first(), &elem).unwrap_or(T::Unknown)),
                 "flat_map" => match self.arg_body(args.first(), &elem) {
@@ -531,8 +695,17 @@ impl Typer<'_, '_> {
                     Some(t) => list(t),
                     None => list(T::Unknown),
                 },
-                "sum" | "avg" => self.arg_body(args.first(), &elem).unwrap_or(elem).unopt().clone(),
-                "min" | "max" => T::opt(self.arg_body(args.first(), &elem).unwrap_or(elem).unopt().clone()),
+                "sum" | "avg" => self
+                    .arg_body(args.first(), &elem)
+                    .unwrap_or(elem)
+                    .unopt()
+                    .clone(),
+                "min" | "max" => T::opt(
+                    self.arg_body(args.first(), &elem)
+                        .unwrap_or(elem)
+                        .unopt()
+                        .clone(),
+                ),
                 "group_by" => {
                     let key = self.arg_body(args.first(), &elem).unwrap_or(T::Unknown);
                     let mut items = vec![(Some("key".to_string()), key)];
@@ -562,12 +735,17 @@ impl Typer<'_, '_> {
             T::Date | T::DateTime if matches!(name, "start_of_month" | "end_of_month") => b.clone(),
             T::DateRange if name == "contains" => T::Bool,
             T::Ent(e) => {
-                let Some(ent) = self.model.entity(e) else { return T::Unknown };
+                let Some(ent) = self.model.entity(e) else {
+                    return T::Unknown;
+                };
                 if name == "closure" {
                     return list(T::Ent(e.clone()));
                 }
                 match ent.methods.iter().find(|f| f.name == name) {
-                    Some(f) => f.ret.as_ref().map_or(T::Unknown, |t| t_of_ty(self.model, t)),
+                    Some(f) => f
+                        .ret
+                        .as_ref()
+                        .map_or(T::Unknown, |t| t_of_ty(self.model, t)),
                     None => T::Unknown,
                 }
             }
@@ -580,14 +758,21 @@ impl Typer<'_, '_> {
             return t.clone();
         }
         if let Some(p) = self.params.iter().find(|p| p.var == n) {
-            return p.ty.as_deref().map_or(T::Unknown, |t| t_of_text(self.model, t));
+            return p
+                .ty
+                .as_deref()
+                .map_or(T::Unknown, |t| t_of_text(self.model, t));
         }
         if let Some(r) = named(n) {
             return self.named(r);
         }
         let m = self.model;
         if let Some(e) = m.entity(n) {
-            return if e.kind == EntityKind::Entity { T::Table(n.to_string()) } else { T::Unknown };
+            return if e.kind == EntityKind::Entity {
+                T::Table(n.to_string())
+            } else {
+                T::Unknown
+            };
         }
         if let Some(c) = m.constant(n) {
             return c.ty.as_ref().map_or(T::Unknown, |t| t_of_ty(m, t));
@@ -602,11 +787,19 @@ impl Typer<'_, '_> {
 
     /// A cell's value: typed by the value it holds, or by its formula.
     fn cell(&mut self, a: Addr) -> T {
-        let Some(raw) = self.book.cells.get(a.s).and_then(|c| c.get(&(a.r, a.c))).cloned() else {
+        let Some(raw) = self
+            .book
+            .cells
+            .get(a.s)
+            .and_then(|c| c.get(&(a.r, a.c)))
+            .cloned()
+        else {
             return T::Unknown;
         };
         match classify(self.i, &raw) {
-            Some(Input::Value(v)) => type_text(&v).map_or(T::Unknown, |t| t_of_text(self.model, &t)),
+            Some(Input::Value(v)) => {
+                type_text(&v).map_or(T::Unknown, |t| t_of_text(self.model, &t))
+            }
             Some(Input::Formula(f)) => {
                 if self.visiting.len() > 8 || !self.visiting.insert(a) {
                     return T::Unknown;
@@ -627,7 +820,11 @@ impl Typer<'_, '_> {
             Named::Cell(a) | Named::Spill(a) => self.cell(a),
             Named::Range(s, r1, c1, r2, c2) => {
                 // the type of its first cell holding something
-                let first = self.book.cells.get(s).and_then(|cs| cs.range((r1, 0)..=(r2.min(MAX_ROWS), u32::MAX)).find(|((_, c), _)| *c >= c1 && *c <= c2).map(|((r, c), _)| (*r, *c)));
+                let first = self.book.cells.get(s).and_then(|cs| {
+                    cs.range((r1, 0)..=(r2.min(MAX_ROWS), u32::MAX))
+                        .find(|((_, c), _)| *c >= c1 && *c <= c2)
+                        .map(|((r, c), _)| (*r, *c))
+                });
                 match first {
                     Some((r, c)) => list(self.cell(Addr { s, r, c }).unopt().clone()),
                     None => list(T::Unknown),
@@ -637,13 +834,23 @@ impl Typer<'_, '_> {
     }
 
     fn infer(&mut self, n: &SyntaxNode) -> T {
-        let exprs: Vec<SyntaxNode> = n.children().filter(|c| !matches!(c.kind(), ARG_LIST | NAME | PARAM_LIST | UNIT)).collect();
+        let exprs: Vec<SyntaxNode> = n
+            .children()
+            .filter(|c| !matches!(c.kind(), ARG_LIST | NAME | PARAM_LIST | UNIT))
+            .collect();
         match n.kind() {
             NAME_REF => {
-                let t = ast::token(n, IDENT).map(|t| t.text().to_string()).unwrap_or_default();
+                let t = ast::token(n, IDENT)
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default();
                 self.name(&t)
             }
-            LITERAL => match n.children_with_tokens().filter_map(|t| t.into_token()).find(|t| !t.kind().is_trivia()).map(|t| t.kind()) {
+            LITERAL => match n
+                .children_with_tokens()
+                .filter_map(|t| t.into_token())
+                .find(|t| !t.kind().is_trivia())
+                .map(|t| t.kind())
+            {
                 Some(STRING | FSTRING) => T::text(),
                 Some(NUMBER) => {
                     if n.text().to_string().contains('.') {
@@ -661,39 +868,82 @@ impl Typer<'_, '_> {
                 _ => T::Unknown,
             },
             QUANTITY => {
-                let units: Vec<String> = ast::child(n, UNIT).map(|u| u.children_with_tokens().filter_map(|t| t.into_token()).filter(|t| t.kind() == IDENT).map(|t| t.text().to_string()).collect()).unwrap_or_default();
+                let units: Vec<String> = ast::child(n, UNIT)
+                    .map(|u| {
+                        u.children_with_tokens()
+                            .filter_map(|t| t.into_token())
+                            .filter(|t| t.kind() == IDENT)
+                            .map(|t| t.text().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let u = units.first().cloned().unwrap_or_default();
                 let currency = u.len() == 3 && u.chars().all(|c| c.is_ascii_uppercase());
                 if quadra_types::duration_unit(&u).is_some() {
                     T::Duration
                 } else if let Some(per) = units.get(1) {
-                    T::Price { cur: Unit::Const(u), per: Unit::Const(per.clone()), exact: false }
+                    T::Price {
+                        cur: Unit::Const(u),
+                        per: Unit::Const(per.clone()),
+                        exact: false,
+                    }
                 } else if currency {
-                    T::Money { cur: Unit::Const(u), exact: false }
+                    T::Money {
+                        cur: Unit::Const(u),
+                        exact: false,
+                    }
                 } else {
-                    T::Qty { unit: Unit::Const(u), exact: false }
+                    T::Qty {
+                        unit: Unit::Const(u),
+                        exact: false,
+                    }
                 }
             }
             PAREN_EXPR => exprs.first().map_or(T::Unknown, |e| self.infer(e)),
             FIELD_EXPR => {
-                let Some(base) = exprs.first() else { return T::Unknown };
-                let name = n.children().filter(|c| c.kind() == NAME_REF).last().and_then(|c| ast::token(&c, IDENT)).map(|t| t.text().to_string()).unwrap_or_default();
+                let Some(base) = exprs.first() else {
+                    return T::Unknown;
+                };
+                let name = n
+                    .children()
+                    .filter(|c| c.kind() == NAME_REF)
+                    .last()
+                    .and_then(|c| ast::token(&c, IDENT))
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default();
                 let bt = self.infer(base);
                 self.member(&bt, &name)
             }
             CALL_EXPR => {
-                let args: Vec<SyntaxNode> = ast::child(n, ARG_LIST).map(|l| ast::children(&l, ARG).collect()).unwrap_or_default();
-                let Some(callee) = exprs.first() else { return T::Unknown };
+                let args: Vec<SyntaxNode> = ast::child(n, ARG_LIST)
+                    .map(|l| ast::children(&l, ARG).collect())
+                    .unwrap_or_default();
+                let Some(callee) = exprs.first() else {
+                    return T::Unknown;
+                };
                 match callee.kind() {
                     FIELD_EXPR => {
-                        let parts: Vec<SyntaxNode> = callee.children().filter(|c| !matches!(c.kind(), NAME)).collect();
-                        let Some(base) = parts.first() else { return T::Unknown };
-                        let name = callee.children().filter(|c| c.kind() == NAME_REF).last().and_then(|c| ast::token(&c, IDENT)).map(|t| t.text().to_string()).unwrap_or_default();
+                        let parts: Vec<SyntaxNode> = callee
+                            .children()
+                            .filter(|c| !matches!(c.kind(), NAME))
+                            .collect();
+                        let Some(base) = parts.first() else {
+                            return T::Unknown;
+                        };
+                        let name = callee
+                            .children()
+                            .filter(|c| c.kind() == NAME_REF)
+                            .last()
+                            .and_then(|c| ast::token(&c, IDENT))
+                            .map(|t| t.text().to_string())
+                            .unwrap_or_default();
                         let bt = self.infer(base);
                         self.method(&bt, &name, &args)
                     }
                     NAME_REF => {
-                        let name = ast::token(callee, IDENT).map(|t| t.text().to_string()).unwrap_or_default();
+                        let name = ast::token(callee, IDENT)
+                            .map(|t| t.text().to_string())
+                            .unwrap_or_default();
                         let m = self.model;
                         if let Some(f) = m.function(&name) {
                             return f.ret.as_ref().map_or(T::Unknown, |t| t_of_ty(m, t));
@@ -712,7 +962,11 @@ impl Typer<'_, '_> {
                     _ => T::Unknown,
                 }
             }
-            INDEX_EXPR => exprs.first().map(|e| self.infer(e)).and_then(|t| elem_of(&t)).unwrap_or(T::Unknown),
+            INDEX_EXPR => exprs
+                .first()
+                .map(|e| self.infer(e))
+                .and_then(|t| elem_of(&t))
+                .unwrap_or(T::Unknown),
             PREFIX_EXPR => {
                 if ast::token(n, NOT_KW).is_some() {
                     T::Bool
@@ -721,9 +975,25 @@ impl Typer<'_, '_> {
                 }
             }
             BIN_EXPR => {
-                let ops: Vec<quadra_syntax::SyntaxKind> = n.children_with_tokens().filter_map(|t| t.into_token()).map(|t| t.kind()).filter(|k| !k.is_trivia()).collect();
+                let ops: Vec<quadra_syntax::SyntaxKind> = n
+                    .children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .map(|t| t.kind())
+                    .filter(|k| !k.is_trivia())
+                    .collect();
                 let has = |k| ops.contains(&k);
-                if has(IS_KW) || has(IN_KW) || has(AND_KW) || has(OR_KW) || has(EQ2) || has(NEQ) || has(LT) || has(LE) || has(GT) || has(GE) || has(NOT_KW) {
+                if has(IS_KW)
+                    || has(IN_KW)
+                    || has(AND_KW)
+                    || has(OR_KW)
+                    || has(EQ2)
+                    || has(NEQ)
+                    || has(LT)
+                    || has(LE)
+                    || has(GT)
+                    || has(GE)
+                    || has(NOT_KW)
+                {
                     return T::Bool;
                 }
                 if has(QUESTION2) {
@@ -738,12 +1008,23 @@ impl Typer<'_, '_> {
                 match (unopt(&l), unopt(&r)) {
                     (T::Date | T::DateTime, T::Duration) => unopt(&l).clone(),
                     (T::Date, T::Date) if has(MINUS) => T::Duration,
-                    (T::Num(_), x @ (T::Money { .. } | T::Qty { .. } | T::Price { .. })) if has(STAR) => x.clone(),
+                    (T::Num(_), x @ (T::Money { .. } | T::Qty { .. } | T::Price { .. }))
+                        if has(STAR) =>
+                    {
+                        x.clone()
+                    }
                     (T::Qty { .. }, p @ T::Price { cur, .. }) if has(STAR) => {
                         let _ = p;
-                        T::Money { cur: cur.clone(), exact: true }
+                        T::Money {
+                            cur: cur.clone(),
+                            exact: true,
+                        }
                     }
-                    (T::Money { .. } | T::Qty { .. }, T::Money { .. } | T::Qty { .. }) if has(SLASH) => T::Num(Num::Decimal),
+                    (T::Money { .. } | T::Qty { .. }, T::Money { .. } | T::Qty { .. })
+                        if has(SLASH) =>
+                    {
+                        T::Num(Num::Decimal)
+                    }
                     (x, _) => x.clone(),
                 }
             }
@@ -753,7 +1034,11 @@ impl Typer<'_, '_> {
                 for c in n.children() {
                     if c.kind() == NAMED_ITEM {
                         let name = ast::name_text(&c);
-                        let v = c.children().filter(|x| x.kind() != NAME).last().map_or(T::Unknown, |e| self.infer(&e));
+                        let v = c
+                            .children()
+                            .filter(|x| x.kind() != NAME)
+                            .last()
+                            .map_or(T::Unknown, |e| self.infer(&e));
                         items.push((name, v));
                     } else if c.kind() != NAME {
                         items.push((None, self.infer(&c)));
@@ -764,7 +1049,10 @@ impl Typer<'_, '_> {
             LIST_EXPR => {
                 let first = n.children().next();
                 let t = match first {
-                    Some(a) if a.kind() == ARG => a.children().find(|c| c.kind() != NAME).map_or(T::Unknown, |e| self.infer(&e)),
+                    Some(a) if a.kind() == ARG => a
+                        .children()
+                        .find(|c| c.kind() != NAME)
+                        .map_or(T::Unknown, |e| self.infer(&e)),
                     Some(e) => self.infer(&e),
                     None => T::Unknown,
                 };
@@ -772,7 +1060,11 @@ impl Typer<'_, '_> {
             }
             SET_EXPR => {
                 let t = exprs.first().map_or(T::Unknown, |e| self.infer(e));
-                T::Coll { elem: Box::new(t), set: true, facts: Vec::new() }
+                T::Coll {
+                    elem: Box::new(t),
+                    set: true,
+                    facts: Vec::new(),
+                }
             }
             _ => T::Unknown,
         }
@@ -797,22 +1089,58 @@ fn members_of(t: &T, typer: &Typer, perms: &Perms, docs: &Docs, out: &mut Vec<It
                 (T::Coll { .. }, true) | (_, false) => ft.to_string(),
                 (_, true) => format!("[{ft}]"),
             };
-            let doc = docs.members.get(&(e.to_string(), f.name.clone())).or_else(|| model.all_traits(ent).iter().find_map(|t| docs.members.get(&(t.name.clone(), f.name.clone()))));
+            let doc = docs
+                .members
+                .get(&(e.to_string(), f.name.clone()))
+                .or_else(|| {
+                    model
+                        .all_traits(ent)
+                        .iter()
+                        .find_map(|t| docs.members.get(&(t.name.clone(), f.name.clone())))
+                });
             let doc = doc.map(|(h, d)| match d {
                 Some(d) => format!("`{h}`\n\n{d}"),
                 None => format!("`{h}`"),
             });
-            out.push(Item::new(f.name.clone(), if f.formula.is_some() { "formula" } else { "field" }, shown).doc(doc));
+            out.push(
+                Item::new(
+                    f.name.clone(),
+                    if f.formula.is_some() {
+                        "formula"
+                    } else {
+                        "field"
+                    },
+                    shown,
+                )
+                .doc(doc),
+            );
         }
         if !together {
             for m in &ent.methods {
                 let sig = signature(&m.name, &m.params, m.ret.as_ref());
-                let doc = docs.members.get(&(e.to_string(), m.name.clone())).and_then(|(_, d)| d.clone());
-                out.push(Item::new(m.name.clone(), "method", sig).doc(doc).insert(format!("{}(", m.name)));
+                let doc = docs
+                    .members
+                    .get(&(e.to_string(), m.name.clone()))
+                    .and_then(|(_, d)| d.clone());
+                out.push(
+                    Item::new(m.name.clone(), "method", sig)
+                        .doc(doc)
+                        .insert(format!("{}(", m.name)),
+                );
             }
-            for (n, t) in [("id", "Text"), ("created_at", "DateTime"), ("updated_at", "DateTime"), ("created_by", "User"), ("updated_by", "User"), ("version", "Int")] {
+            for (n, t) in [
+                ("id", "Text"),
+                ("created_at", "DateTime"),
+                ("updated_at", "DateTime"),
+                ("created_by", "User"),
+                ("updated_by", "User"),
+                ("version", "Int"),
+            ] {
                 if !out.iter().any(|i| i.label == n) {
-                    out.push(Item::new(n, "field", t).doc(Some("kept by Quadra for every record".into())));
+                    out.push(
+                        Item::new(n, "field", t)
+                            .doc(Some("kept by Quadra for every record".into())),
+                    );
                 }
             }
         }
@@ -820,10 +1148,20 @@ fn members_of(t: &T, typer: &Typer, perms: &Perms, docs: &Docs, out: &mut Vec<It
     let methods = |list: &[(&str, &str, &str)], out: &mut Vec<Item>| {
         for (n, sig, doc) in list {
             let no_args = sig.split(" · ").all(|s| s.ends_with("()"));
-            out.push(Item::new(*n, "method", format!(".{sig}")).doc(Some(doc.to_string())).insert(if no_args { format!("{n}()") } else { format!("{n}(") }));
+            out.push(
+                Item::new(*n, "method", format!(".{sig}"))
+                    .doc(Some(doc.to_string()))
+                    .insert(if no_args {
+                        format!("{n}()")
+                    } else {
+                        format!("{n}(")
+                    }),
+            );
         }
     };
-    let value_field = |n: &str, ty: &str, doc: &str, out: &mut Vec<Item>| out.push(Item::new(n, "field", ty).doc(Some(doc.to_string())));
+    let value_field = |n: &str, ty: &str, doc: &str, out: &mut Vec<Item>| {
+        out.push(Item::new(n, "field", ty).doc(Some(doc.to_string())))
+    };
     match unopt(t) {
         T::Ent(e) => fields(e, false, out),
         T::Table(e) => {
@@ -856,7 +1194,11 @@ fn members_of(t: &T, typer: &Typer, perms: &Perms, docs: &Docs, out: &mut Vec<It
         T::Num(k) => {
             methods(NUMBER_METHODS, out);
             if *k != Num::Percent {
-                out.push(Item::new("as_percent", "method", ".as_percent()").doc(Some("the number as a percentage (0.25 → 25%)".into())).insert("as_percent()"));
+                out.push(
+                    Item::new("as_percent", "method", ".as_percent()")
+                        .doc(Some("the number as a percentage (0.25 → 25%)".into()))
+                        .insert("as_percent()"),
+                );
             }
         }
         T::Money { .. } => {
@@ -887,7 +1229,11 @@ fn members_of(t: &T, typer: &Typer, perms: &Perms, docs: &Docs, out: &mut Vec<It
 
 /// The signature of a method of a value of type `t`: (label, doc).
 fn method_signature(t: &T, name: &str, model: &Model, docs: &Docs) -> Option<(String, String)> {
-    let find = |list: &[(&str, &str, &str)]| list.iter().find(|m| m.0 == name).map(|(_, s, d)| (s.to_string(), d.to_string()));
+    let find = |list: &[(&str, &str, &str)]| {
+        list.iter()
+            .find(|m| m.0 == name)
+            .map(|(_, s, d)| (s.to_string(), d.to_string()))
+    };
     match unopt(t) {
         T::Table(_) | T::Coll { .. } => find(METHODS),
         T::Text(_) => find(TEXT_METHODS),
@@ -897,7 +1243,11 @@ fn method_signature(t: &T, name: &str, model: &Model, docs: &Docs) -> Option<(St
         T::Ent(e) => {
             let ent = model.entity(e)?;
             let m = ent.methods.iter().find(|f| f.name == name)?;
-            let doc = docs.members.get(&(e.clone(), name.to_string())).and_then(|(_, d)| d.clone()).unwrap_or_default();
+            let doc = docs
+                .members
+                .get(&(e.clone(), name.to_string()))
+                .and_then(|(_, d)| d.clone())
+                .unwrap_or_default();
             Some((signature(&m.name, &m.params, m.ret.as_ref()), doc))
         }
         _ => None,
@@ -911,7 +1261,10 @@ fn pick_form(sig: &str, active: usize) -> (String, Vec<String>) {
         .split(" · ")
         .map(|f| {
             let f = f.trim().trim_start_matches('.');
-            let inner = f.find('(').and_then(|a| f.rfind(')').map(|b| &f[a + 1..b])).unwrap_or("");
+            let inner = f
+                .find('(')
+                .and_then(|a| f.rfind(')').map(|b| &f[a + 1..b]))
+                .unwrap_or("");
             let mut params = Vec::new();
             let mut level = 0;
             let mut cur = String::new();
@@ -933,15 +1286,23 @@ fn pick_form(sig: &str, active: usize) -> (String, Vec<String>) {
             (f.to_string(), params)
         })
         .collect();
-    forms.iter().find(|(_, p)| p.len() > active).or_else(|| forms.iter().max_by_key(|(_, p)| p.len())).cloned().unwrap_or_default()
+    forms
+        .iter()
+        .find(|(_, p)| p.len() > active)
+        .or_else(|| forms.iter().max_by_key(|(_, p)| p.len()))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn metric_doc(m: &quadra_ir::Metric) -> String {
     let get = |k: &str| {
-        m.meta.iter().find(|(n, _)| n == k).and_then(|(_, e)| match &e.kind {
-            quadra_ir::ExprKind::Lit(quadra_ir::Lit::Str(s)) => Some(s.trim().to_string()),
-            _ => None,
-        })
+        m.meta
+            .iter()
+            .find(|(n, _)| n == k)
+            .and_then(|(_, e)| match &e.kind {
+                quadra_ir::ExprKind::Lit(quadra_ir::Lit::Str(s)) => Some(s.trim().to_string()),
+                _ => None,
+            })
     };
     let mut parts = Vec::new();
     if let Some(l) = get("label") {
@@ -966,14 +1327,22 @@ impl Engine {
         let mut decls = HashMap::new();
         let mut members = HashMap::new();
         for (k, d) in analysis.decls.iter().enumerate() {
-            decls.entry(d.name.clone()).or_insert((d.header.clone(), d.doc.clone()));
+            decls
+                .entry(d.name.clone())
+                .or_insert((d.header.clone(), d.doc.clone()));
             if let Some(ms) = analysis.members.get(&quadra_sema::DeclId(k as u32)) {
                 for m in ms {
-                    members.entry((d.name.clone(), m.name.clone())).or_insert((m.header.clone(), m.doc.clone()));
+                    members
+                        .entry((d.name.clone(), m.name.clone()))
+                        .or_insert((m.header.clone(), m.doc.clone()));
                 }
             }
         }
-        let docs = Rc::new(Docs { checked: self.checked.clone(), decls, members });
+        let docs = Rc::new(Docs {
+            checked: self.checked.clone(),
+            decls,
+            members,
+        });
         self.sheets.complete_docs = Some(docs.clone());
         docs
     }
@@ -999,7 +1368,12 @@ impl Engine {
                 }
             }
         }
-        let p = Rc::new(Perms { checked: self.checked.clone(), base, read, hidden });
+        let p = Rc::new(Perms {
+            checked: self.checked.clone(),
+            base,
+            read,
+            hidden,
+        });
         if self.sheets.complete_perms.len() > 1000 {
             self.sheets.complete_perms.clear();
         }
@@ -1009,7 +1383,9 @@ impl Engine {
 
     pub(super) fn formula_complete(&mut self, who: &Principal, body: &J) -> Result<Reply, Fail> {
         let started = std::time::Instant::now();
-        let text = body["text"].as_str().ok_or_else(|| (400, "`text`: the formula, as typed".to_string()))?;
+        let text = body["text"]
+            .as_str()
+            .ok_or_else(|| (400, "`text`: the formula, as typed".to_string()))?;
         if text.len() > MAX_TEXT {
             return Err((400, format!("`text`: at most {MAX_TEXT} characters")));
         }
@@ -1019,17 +1395,46 @@ impl Engine {
         }
         let pos = match &body["pos"] {
             J::Null => utf16(text, text.len()),
-            p => p.as_u64().ok_or_else(|| (400, "`pos`: the caret, in UTF-16 code units".to_string()))? as usize,
+            p => p
+                .as_u64()
+                .ok_or_else(|| (400, "`pos`: the caret, in UTF-16 code units".to_string()))?
+                as usize,
         };
         let byte = byte_at(text, pos);
-        let empty = |from: usize| reply(200, json!({ "from": utf16(text, from), "to": utf16(text, from), "items": [], "signature": null }));
+        let empty = |from: usize| {
+            reply(
+                200,
+                json!({ "from": utf16(text, from), "to": utf16(text, from), "items": [], "signature": null }),
+            )
+        };
         let Some((start, end)) = region(text, byte, kind) else {
             return Ok(empty(byte));
         };
         // the workbook: sheets with their cells (as `/v1/eval` reads them), or just their names
-        let sheets: Vec<J> = body["sheets"].as_array().map(|a| a.iter().map(|s| if let Some(n) = s.as_str() { json!({ "name": n }) } else { s.clone() }).collect()).unwrap_or_default();
+        let sheets: Vec<J> = body["sheets"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|s| {
+                        if let Some(n) = s.as_str() {
+                            json!({ "name": n })
+                        } else {
+                            s.clone()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let book = Book::from_json(&json!({ "sheets": sheets }))?;
-        let here = body["sheet"].as_str().and_then(|s| book.ids.iter().position(|x| x == s).or_else(|| book.names.iter().position(|x| x.eq_ignore_ascii_case(s)))).unwrap_or(0);
+        let here = body["sheet"]
+            .as_str()
+            .and_then(|s| {
+                book.ids
+                    .iter()
+                    .position(|x| x == s)
+                    .or_else(|| book.names.iter().position(|x| x.eq_ignore_ascii_case(s)))
+            })
+            .unwrap_or(0);
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
         let docs = self.complete_docs();
@@ -1050,18 +1455,36 @@ impl Engine {
                     .collect()
             })
             .unwrap_or_default();
-        let (params, params_error) = match super::params::params_of(&mut i, model, &json!({ "params": stripped })) {
-            Ok(p) => (p.list, None),
-            Err((_, m)) => (Vec::new(), Some(m)),
+        let (params, params_error) =
+            match super::params::params_of(&mut i, model, &json!({ "params": stripped })) {
+                Ok(p) => (p.list, None),
+                Err((_, m)) => (Vec::new(), Some(m)),
+            };
+        let mut typer = Typer {
+            model,
+            report: &checked.report,
+            i: &mut i,
+            params: &params,
+            book: &book,
+            locals: Vec::new(),
+            visiting: HashSet::new(),
         };
-        let mut typer = Typer { model, report: &checked.report, i: &mut i, params: &params, book: &book, locals: Vec::new(), visiting: HashSet::new() };
 
         let src = &text[start..end];
         let at = byte - start;
         let before = &src[..at];
         let sc = scan(before);
-        let after_ident = src[at..].chars().take_while(|c| ident_char(*c)).map(char::len_utf8).sum::<usize>();
-        let prefix_len = before.chars().rev().take_while(|c| ident_char(*c)).map(char::len_utf8).sum::<usize>();
+        let after_ident = src[at..]
+            .chars()
+            .take_while(|c| ident_char(*c))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let prefix_len = before
+            .chars()
+            .rev()
+            .take_while(|c| ident_char(*c))
+            .map(char::len_utf8)
+            .sum::<usize>();
         let pstart = at - prefix_len;
         let prefix = &before[pstart..];
         let mut from = start + pstart;
@@ -1075,7 +1498,9 @@ impl Engine {
             if c != '(' {
                 continue;
             }
-            let Some(param) = lambda_param(&before[p + 1..]) else { continue };
+            let Some(param) = lambda_param(&before[p + 1..]) else {
+                continue;
+            };
             let cs = chain_start(before, p);
             let (recv, method) = split_callee(&before[cs..p]);
             let t = if recv.is_empty() {
@@ -1097,7 +1522,10 @@ impl Engine {
             from = start + q;
             filter = before[q + 1..].to_string();
             for n in &book.names {
-                items.push(Item::new(n.clone(), "sheet", "sheet").insert(format!("'{}'!", n.replace('\'', "''"))));
+                items.push(
+                    Item::new(n.clone(), "sheet", "sheet")
+                        .insert(format!("'{}'!", n.replace('\'', "''"))),
+                );
             }
         } else if before[..pstart].ends_with('@') {
             from -= 1;
@@ -1107,7 +1535,11 @@ impl Engine {
         } else if before[..pstart].ends_with('.') && !before[..pstart].ends_with("..") {
             // after a dot: what the value before it has
             let dot = pstart - 1;
-            let recv_end = if before[..dot].ends_with('?') { dot - 1 } else { dot };
+            let recv_end = if before[..dot].ends_with('?') {
+                dot - 1
+            } else {
+                dot
+            };
             let cs = chain_start(before, recv_end);
             let chain = &before[cs..recv_end];
             if !chain.is_empty() && !chain.chars().all(|c| c.is_ascii_digit()) {
@@ -1134,22 +1566,53 @@ impl Engine {
                 items.push(it);
             }
             for (n, t) in typer.locals.iter().rev() {
-                items.push(Item::new(n.clone(), "variable", if matches!(t, T::Unknown) { String::new() } else { t.to_string() }).doc(Some("lambda parameter".into())));
+                items.push(
+                    Item::new(
+                        n.clone(),
+                        "variable",
+                        if matches!(t, T::Unknown) {
+                            String::new()
+                        } else {
+                            t.to_string()
+                        },
+                    )
+                    .doc(Some("lambda parameter".into())),
+                );
             }
             for p in params.iter().filter(|p| !p.name.ends_with("__on")) {
                 items.push(param_item(p, body));
             }
             for n in &book.names {
-                let insert = if n.chars().all(ident_char) && n.chars().next().is_some_and(|c| c.is_alphabetic()) { format!("{n}!") } else { format!("'{}'!", n.replace('\'', "''")) };
+                let insert = if n.chars().all(ident_char)
+                    && n.chars().next().is_some_and(|c| c.is_alphabetic())
+                {
+                    format!("{n}!")
+                } else {
+                    format!("'{}'!", n.replace('\'', "''"))
+                };
                 let doc = format!("a cell of this sheet: `{insert}A1`, a range: `{insert}A1:B9`");
-                items.push(Item::new(n.clone(), "sheet", "sheet").insert(insert).doc(Some(doc)));
+                items.push(
+                    Item::new(n.clone(), "sheet", "sheet")
+                        .insert(insert)
+                        .doc(Some(doc)),
+                );
             }
             for e in &model.entities {
-                if e.kind != EntityKind::Entity || e.name.starts_with("__") || !perms.read.contains(&e.name) {
+                if e.kind != EntityKind::Entity
+                    || e.name.starts_with("__")
+                    || !perms.read.contains(&e.name)
+                {
                     continue;
                 }
                 let doc = docs.decls.get(&e.name).and_then(|(_, d)| d.clone());
-                items.push(Item::new(e.name.clone(), "entity", if e.is_ledger { "ledger" } else { "entity" }).doc(doc));
+                items.push(
+                    Item::new(
+                        e.name.clone(),
+                        "entity",
+                        if e.is_ledger { "ledger" } else { "entity" },
+                    )
+                    .doc(doc),
+                );
             }
             for e in &model.enums {
                 let doc = docs.decls.get(&e.name).and_then(|(_, d)| d.clone());
@@ -1158,19 +1621,50 @@ impl Engine {
                     items.push(Item::new(v.name.clone(), "variant", e.name.clone()));
                 }
             }
-            for f in model.fns.iter().filter(|f| !f.builtin && !f.name.starts_with("__")) {
+            for f in model
+                .fns
+                .iter()
+                .filter(|f| !f.builtin && !f.name.starts_with("__"))
+            {
                 let doc = docs.decls.get(&f.name).and_then(|(_, d)| d.clone());
-                items.push(Item::new(f.name.clone(), "function", signature(&f.name, &f.params, f.ret.as_ref())).doc(doc).insert(format!("{}(", f.name)));
+                items.push(
+                    Item::new(
+                        f.name.clone(),
+                        "function",
+                        signature(&f.name, &f.params, f.ret.as_ref()),
+                    )
+                    .doc(doc)
+                    .insert(format!("{}(", f.name)),
+                );
             }
             for m in model.metrics.iter().filter(|m| !m.control) {
-                items.push(Item::new(m.name.clone(), "metric", signature(&m.name, &m.params, m.ret.as_ref())).doc(Some(metric_doc(m))).insert(format!("{}(", m.name)));
+                items.push(
+                    Item::new(
+                        m.name.clone(),
+                        "metric",
+                        signature(&m.name, &m.params, m.ret.as_ref()),
+                    )
+                    .doc(Some(metric_doc(m)))
+                    .insert(format!("{}(", m.name)),
+                );
             }
             for c in &model.consts {
                 let t = c.ty.as_ref().map(quadra_ir::print::ty).unwrap_or_default();
-                items.push(Item::new(c.name.clone(), "constant", t).doc(docs.decls.get(&c.name).and_then(|(_, d)| d.clone())));
+                items.push(
+                    Item::new(c.name.clone(), "constant", t)
+                        .doc(docs.decls.get(&c.name).and_then(|(_, d)| d.clone())),
+                );
             }
             for (n, sig, doc) in BUILTINS {
-                items.push(Item::new(*n, "function", *sig).doc(Some(doc.to_string())).insert(if sig.ends_with("()") { format!("{n}()") } else { format!("{n}(") }));
+                items.push(
+                    Item::new(*n, "function", *sig)
+                        .doc(Some(doc.to_string()))
+                        .insert(if sig.ends_with("()") {
+                            format!("{n}()")
+                        } else {
+                            format!("{n}(")
+                        }),
+                );
             }
             for k in KEYWORDS {
                 items.push(Item::new(*k, "keyword", ""));
@@ -1178,7 +1672,11 @@ impl Engine {
         }
 
         // signature help: the call whose arguments the caret is in
-        let signature = if sc.in_text { None } else { self_signature(before, &sc, &mut typer, here, model, &docs) };
+        let signature = if sc.in_text {
+            None
+        } else {
+            self_signature(before, &sc, &mut typer, here, model, &docs)
+        };
 
         // the typed prefix first, then names with a part starting with it, then containing it
         let p = filter.to_lowercase();
@@ -1215,7 +1713,9 @@ impl Engine {
             })
             .collect();
         scored.sort_by_key(|a| (a.0, a.1, a.2));
-        let exact_only = scored.len() == 1 && scored[0].3.label.trim_start_matches('@') == prefix && !prefix.is_empty();
+        let exact_only = scored.len() == 1
+            && scored[0].3.label.trim_start_matches('@') == prefix
+            && !prefix.is_empty();
         let list: Vec<J> = if exact_only {
             Vec::new()
         } else {
@@ -1242,11 +1742,19 @@ impl Engine {
 fn param_item(p: &Param, body: &J) -> Item {
     // the request's definition: `{name, entity, field, widget}` (`_min`/`_max` of a range)
     let base = p.name.trim_end_matches("_min").trim_end_matches("_max");
-    let def = body["params"].as_array().and_then(|a| a.iter().find(|d| d["name"] == json!(p.name) || d["name"] == json!(base)));
+    let def = body["params"].as_array().and_then(|a| {
+        a.iter()
+            .find(|d| d["name"] == json!(p.name) || d["name"] == json!(base))
+    });
     let doc = def.map(|d| {
         let entity = d["entity"].as_str().unwrap_or("");
-        let what = match (d["widget"].as_str().unwrap_or("select"), d["field"].as_str()) {
-            ("record", _) => format!("the {entity} selected in a view of the app (none: no row selected)"),
+        let what = match (
+            d["widget"].as_str().unwrap_or("select"),
+            d["field"].as_str(),
+        ) {
+            ("record", _) => {
+                format!("the {entity} selected in a view of the app (none: no row selected)")
+            }
             (w, Some(f)) => format!("the app's {w} filter on {entity}.{f}"),
             (w, None) => format!("the app's {w} filter on {entity}"),
         };
@@ -1255,22 +1763,42 @@ fn param_item(p: &Param, body: &J) -> Item {
             None => what,
         }
     });
-    Item::new(format!("@{}", p.name), "param", p.ty.clone().unwrap_or_default()).doc(doc)
+    Item::new(
+        format!("@{}", p.name),
+        "param",
+        p.ty.clone().unwrap_or_default(),
+    )
+    .doc(doc)
 }
 
 /// The values of the enum a comparison before the caret expects: `o.state is `, `== `, `!= `,
 /// `in {Confirmed, `.
-fn expected_variants(before: &str, pstart: usize, sc: &Scan, typer: &mut Typer, here: usize) -> Vec<(String, String)> {
+fn expected_variants(
+    before: &str,
+    pstart: usize,
+    sc: &Scan,
+    typer: &mut Typer,
+    here: usize,
+) -> Vec<(String, String)> {
     let head = before[..pstart].trim_end();
-    let lhs_end = if let Some(h) = head.strip_suffix(" is not").or_else(|| head.strip_suffix(" is")).or_else(|| head.strip_suffix("==")).or_else(|| head.strip_suffix("!=")) {
+    let lhs_end = if let Some(h) = head
+        .strip_suffix(" is not")
+        .or_else(|| head.strip_suffix(" is"))
+        .or_else(|| head.strip_suffix("=="))
+        .or_else(|| head.strip_suffix("!="))
+    {
         Some(h.trim_end().len())
     } else if let Some(&(b, '{')) = sc.open.last() {
         let h = before[..b].trim_end();
-        h.strip_suffix(" in").or_else(|| h.strip_suffix(" not in")).map(|x| x.trim_end().len())
+        h.strip_suffix(" in")
+            .or_else(|| h.strip_suffix(" not in"))
+            .map(|x| x.trim_end().len())
     } else {
         None
     };
-    let Some(end) = lhs_end else { return Vec::new() };
+    let Some(end) = lhs_end else {
+        return Vec::new();
+    };
     let cs = chain_start(before, end);
     if cs == end {
         return Vec::new();
@@ -1283,14 +1811,33 @@ fn expected_variants(before: &str, pstart: usize, sc: &Scan, typer: &mut Typer, 
 }
 
 /// The signature of the call whose arguments the caret is in: `{label, params, active, doc}`.
-fn self_signature(before: &str, sc: &Scan, typer: &mut Typer, here: usize, model: &Model, docs: &Docs) -> Option<J> {
+fn self_signature(
+    before: &str,
+    sc: &Scan,
+    typer: &mut Typer,
+    here: usize,
+    model: &Model,
+    docs: &Docs,
+) -> Option<J> {
     // the innermost call (a `(` grouping an expression is not one)
-    let (p, callee) = sc.open.iter().rev().filter(|(_, c)| *c == '(').map(|&(p, _)| (p, &before[chain_start(before, p)..p])).find(|(_, callee)| !callee.is_empty())?;
+    let (p, callee) = sc
+        .open
+        .iter()
+        .rev()
+        .filter(|(_, c)| *c == '(')
+        .map(|&(p, _)| (p, &before[chain_start(before, p)..p]))
+        .find(|(_, callee)| !callee.is_empty())?;
     let active = arg_index(&before[p + 1..]);
     let (recv, name) = split_callee(callee);
     let (sig, doc) = if recv.is_empty() {
         if let Some(f) = model.function(name).filter(|f| !f.builtin) {
-            (signature(&f.name, &f.params, f.ret.as_ref()), docs.decls.get(name).and_then(|(_, d)| d.clone()).unwrap_or_default())
+            (
+                signature(&f.name, &f.params, f.ret.as_ref()),
+                docs.decls
+                    .get(name)
+                    .and_then(|(_, d)| d.clone())
+                    .unwrap_or_default(),
+            )
         } else if let Some(m) = model.metrics.iter().find(|m| m.name == name) {
             (signature(&m.name, &m.params, m.ret.as_ref()), metric_doc(m))
         } else if let Some((_, s, d)) = BUILTINS.iter().find(|b| b.0 == name) {
@@ -1325,7 +1872,10 @@ mod tests {
         assert_eq!(scan("'My sh").quote, Some(0));
         assert_eq!(scan("'My sheet'!A1 + 1").quote, None);
         let t = "x + Order.where(o => o.total > 3).first().customer";
-        assert_eq!(&t[chain_start(t, t.len())..], "Order.where(o => o.total > 3).first().customer");
+        assert_eq!(
+            &t[chain_start(t, t.len())..],
+            "Order.where(o => o.total > 3).first().customer"
+        );
         let t = "1 + 'My sheet'!B2:B9";
         assert_eq!(&t[chain_start(t, t.len())..], "'My sheet'!B2:B9");
         assert_eq!(lambda_param("o => o.total > 1 and o."), Some("o".into()));
@@ -1333,9 +1883,18 @@ mod tests {
         assert_eq!(lambda_param("total, by=x => x."), Some("x".into()));
         assert_eq!(lambda_param("a == b"), None);
         assert_eq!(arg_index("o => f(a, b), \"x,y\", "), 2);
-        assert_eq!(split_callee("Order.where(o => o.x).sum"), ("Order.where(o => o.x)", "sum"));
+        assert_eq!(
+            split_callee("Order.where(o => o.x).sum"),
+            ("Order.where(o => o.x)", "sum")
+        );
         assert_eq!(split_callee("revenue"), ("", "revenue"));
-        assert_eq!(pick_form("sum() · sum(x => v)", 0), ("sum(x => v)".to_string(), vec!["x => v".to_string()]));
-        assert_eq!(pick_form("allocate(total, by=x => weight)", 1).1, vec!["total".to_string(), "by=x => weight".to_string()]);
+        assert_eq!(
+            pick_form("sum() · sum(x => v)", 0),
+            ("sum(x => v)".to_string(), vec!["x => v".to_string()])
+        );
+        assert_eq!(
+            pick_form("allocate(total, by=x => weight)", 1).1,
+            vec!["total".to_string(), "by=x => weight".to_string()]
+        );
     }
 }

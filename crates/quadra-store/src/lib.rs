@@ -23,7 +23,7 @@ pub mod writer;
 pub use conn::{Conn, Dialect};
 pub mod ops;
 pub use db::{materialized_formulas, Database, OutboxEvent, Sink, Status};
-pub use sequencer::{Sequencer, SequencedSink};
+pub use sequencer::{SequencedSink, Sequencer};
 pub use source::{Cache, DbSource};
 
 mod testing;

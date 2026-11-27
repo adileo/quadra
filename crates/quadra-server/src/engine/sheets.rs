@@ -143,7 +143,12 @@ impl Sheets<'_> {
 /// A formula with its references replaced by names: the text and the references, or why it
 /// cannot be read. `here`: the sheet of the cell; `taken`: the names the model defines, which
 /// a bare `Q1` means instead of a cell (`$Q$1` is the cell).
-pub fn rewrite(src: &str, here: usize, sheets: &Sheets, taken: &dyn Fn(&str) -> bool) -> Result<(String, Vec<Ref>), (String, &'static str)> {
+pub fn rewrite(
+    src: &str,
+    here: usize,
+    sheets: &Sheets,
+    taken: &dyn Fn(&str) -> bool,
+) -> Result<(String, Vec<Ref>), (String, &'static str)> {
     let ch: Vec<char> = src.chars().collect();
     let n = ch.len();
     let mut out = String::with_capacity(src.len() + 16);
@@ -152,7 +157,9 @@ pub fn rewrite(src: &str, here: usize, sheets: &Sheets, taken: &dyn Fn(&str) -> 
     while i < n {
         let c = ch[i];
         // strings (and f-strings) are copied as they are
-        if c == '"' || (c == 'f' && i + 1 < n && ch[i + 1] == '"' && (i == 0 || !ident_char(ch[i - 1]))) {
+        if c == '"'
+            || (c == 'f' && i + 1 < n && ch[i + 1] == '"' && (i == 0 || !ident_char(ch[i - 1])))
+        {
             let start = i;
             if c == 'f' {
                 i += 1;
@@ -173,7 +180,10 @@ pub fn rewrite(src: &str, here: usize, sheets: &Sheets, taken: &dyn Fn(&str) -> 
         }
         if c == '#' {
             if src[byte_at(&ch, i)..].starts_with("#REF!") {
-                return Err(("a reference to cells that were deleted (#REF!)".into(), "#REF"));
+                return Err((
+                    "a reference to cells that were deleted (#REF!)".into(),
+                    "#REF",
+                ));
             }
             // a comment: the rest of the line
             break;
@@ -207,7 +217,13 @@ fn byte_at(ch: &[char], i: usize) -> usize {
 }
 
 /// A reference starting at `i`: its length and what it is; None when there is none there.
-fn reference(ch: &[char], i: usize, here: usize, sheets: &Sheets, taken: &dyn Fn(&str) -> bool) -> Result<Option<(usize, Ref)>, (String, &'static str)> {
+fn reference(
+    ch: &[char],
+    i: usize,
+    here: usize,
+    sheets: &Sheets,
+    taken: &dyn Fn(&str) -> bool,
+) -> Result<Option<(usize, Ref)>, (String, &'static str)> {
     let n = ch.len();
     let mut j = i;
     let mut sheet = here;
@@ -236,7 +252,9 @@ fn reference(ch: &[char], i: usize, here: usize, sheets: &Sheets, taken: &dyn Fn
             return Ok(None);
         }
         j += 1;
-        sheet = sheets.find(&name).ok_or_else(|| (format!("no sheet named `{name}`"), "#REF"))?;
+        sheet = sheets
+            .find(&name)
+            .ok_or_else(|| (format!("no sheet named `{name}`"), "#REF"))?;
         prefixed = true;
     } else if ch[j].is_ascii_alphabetic() || ch[j] == '_' {
         let mut k = j;
@@ -245,7 +263,9 @@ fn reference(ch: &[char], i: usize, here: usize, sheets: &Sheets, taken: &dyn Fn
         }
         if k < n && ch[k] == '!' && !(k + 1 < n && ch[k + 1] == '=') {
             let name: String = ch[j..k].iter().collect();
-            sheet = sheets.find(&name).ok_or_else(|| (format!("no sheet named `{name}`"), "#REF"))?;
+            sheet = sheets
+                .find(&name)
+                .ok_or_else(|| (format!("no sheet named `{name}`"), "#REF"))?;
             j = k + 1;
             prefixed = true;
         }
@@ -293,7 +313,16 @@ fn reference(ch: &[char], i: usize, here: usize, sheets: &Sheets, taken: &dyn Fn
                 if let Some((k2, c2, None, _)) = cell(k + 1) {
                     if follows_ok(k2) {
                         let (a, b) = (c1.min(c2), c1.max(c2));
-                        return Ok(Some((k2 - i, Ref::Range { s: sheet, r1: 1, c1: a, r2: MAX_ROWS, c2: b })));
+                        return Ok(Some((
+                            k2 - i,
+                            Ref::Range {
+                                s: sheet,
+                                r1: 1,
+                                c1: a,
+                                r2: MAX_ROWS,
+                                c2: b,
+                            },
+                        )));
                     }
                 }
             }
@@ -304,14 +333,27 @@ fn reference(ch: &[char], i: usize, here: usize, sheets: &Sheets, taken: &dyn Fn
             if k < n && ch[k] == ':' {
                 if let Some((k2, c2, Some(r2), _)) = cell(k + 1) {
                     if follows_ok(k2) {
-                        let r = Ref::Range { s: sheet, r1: r1.min(r2), c1: c1.min(c2), r2: r1.max(r2), c2: c1.max(c2) };
+                        let r = Ref::Range {
+                            s: sheet,
+                            r1: r1.min(r2),
+                            c1: c1.min(c2),
+                            r2: r1.max(r2),
+                            c2: c1.max(c2),
+                        };
                         return Ok(Some((k2 - i, r)));
                     }
                 }
             }
             // `A1#`
             if k < n && ch[k] == '#' {
-                return Ok(Some((k + 1 - i, Ref::Spill(Addr { s: sheet, r: r1, c: c1 }))));
+                return Ok(Some((
+                    k + 1 - i,
+                    Ref::Spill(Addr {
+                        s: sheet,
+                        r: r1,
+                        c: c1,
+                    }),
+                )));
             }
             if !follows_ok(k) {
                 return Ok(None);
@@ -320,7 +362,14 @@ fn reference(ch: &[char], i: usize, here: usize, sheets: &Sheets, taken: &dyn Fn
             if !prefixed && !dollar1 && taken(&text) {
                 return Ok(None);
             }
-            Ok(Some((k - i, Ref::Cell(Addr { s: sheet, r: r1, c: c1 }))))
+            Ok(Some((
+                k - i,
+                Ref::Cell(Addr {
+                    s: sheet,
+                    r: r1,
+                    c: c1,
+                }),
+            )))
         }
     }
 }
@@ -357,7 +406,10 @@ pub fn classify(i: &mut Interp, raw: &str) -> Option<Input> {
             return Some(Input::Value(V::Int(n)));
         }
     }
-    let lit = t.len() <= 100 && t.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-');
+    let lit = t.len() <= 100
+        && t.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '-');
     if lit {
         if let Ok(v) = quadra_api::json::literal(i, t) {
             return Some(Input::Value(v.normalized()));
@@ -413,19 +465,39 @@ impl Book {
         if sheets.len() > MAX_SHEETS {
             return Err(bad(format!("at most {MAX_SHEETS} sheets")));
         }
-        let mut book = Book { names: Vec::new(), ids: Vec::new(), cells: Vec::new(), exprs: Vec::new(), timeout_ms: body["timeout_ms"].as_u64(), params: json!({ "params": body["params"], "bind": body["bind"] }) };
+        let mut book = Book {
+            names: Vec::new(),
+            ids: Vec::new(),
+            cells: Vec::new(),
+            exprs: Vec::new(),
+            timeout_ms: body["timeout_ms"].as_u64(),
+            params: json!({ "params": body["params"], "bind": body["bind"] }),
+        };
         let mut total = 0;
         for (k, s) in sheets.iter().enumerate() {
-            let id = s["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("s{}", k + 1));
-            let name = s["name"].as_str().map(str::to_string).unwrap_or_else(|| id.clone());
-            if book.names.iter().any(|n: &String| n.eq_ignore_ascii_case(&name)) || book.ids.contains(&id) {
+            let id = s["id"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("s{}", k + 1));
+            let name = s["name"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| id.clone());
+            if book
+                .names
+                .iter()
+                .any(|n: &String| n.eq_ignore_ascii_case(&name))
+                || book.ids.contains(&id)
+            {
                 return Err(bad(format!("two sheets named `{name}`")));
             }
             let mut cells = BTreeMap::new();
             if let Some(o) = s["cells"].as_object() {
                 total += o.len();
                 if total > MAX_CELLS {
-                    return Err(bad(format!("at most {MAX_CELLS} cells with something in them")));
+                    return Err(bad(format!(
+                        "at most {MAX_CELLS} cells with something in them"
+                    )));
                 }
                 for (addr, c) in o {
                     let raw = match c {
@@ -442,7 +514,8 @@ impl Book {
                     if raw.trim().is_empty() {
                         continue;
                     }
-                    let (r, c) = parse_a1(addr).ok_or_else(|| bad(format!("`{addr}` is not a cell")))?;
+                    let (r, c) =
+                        parse_a1(addr).ok_or_else(|| bad(format!("`{addr}` is not a cell")))?;
                     cells.insert((r, c), raw);
                 }
             }
@@ -452,7 +525,8 @@ impl Book {
         }
         if let Some(o) = body["exprs"].as_object() {
             for (k, e) in o.iter().take(200) {
-                book.exprs.push((k.clone(), e.as_str().unwrap_or("").to_string()));
+                book.exprs
+                    .push((k.clone(), e.as_str().unwrap_or("").to_string()));
             }
         }
         Ok(book)
@@ -460,7 +534,11 @@ impl Book {
 
     /// The sheet and cell of an address in answers: `s1!B2`.
     fn key(&self, a: Addr) -> String {
-        format!("{}!{}", self.ids.get(a.s).map(String::as_str).unwrap_or("?"), a1(a.r, a.c))
+        format!(
+            "{}!{}",
+            self.ids.get(a.s).map(String::as_str).unwrap_or("?"),
+            a1(a.r, a.c)
+        )
     }
 }
 
@@ -535,14 +613,20 @@ impl Engine {
     pub(super) fn sheet_eval(&mut self, who: &Principal, body: &J) -> Result<Reply, Fail> {
         let started = std::time::Instant::now();
         let book = Book::from_json(body)?;
-        let changed: Option<Vec<String>> = body["changed"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+        let changed: Option<Vec<String>> = body["changed"].as_array().map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        });
         let (outs, reads, base, spills) = self.eval_book(who, &book)?;
         // with `changed`: those cells and the cells that use them, through any chain
         let keep: Option<HashSet<Addr>> = changed.map(|list| {
             let mut set: HashSet<Addr> = HashSet::new();
             for k in list {
                 if let Some((sid, a)) = k.split_once('!') {
-                    if let (Some(s), Some((r, c))) = (book.ids.iter().position(|x| x == sid), parse_a1(a)) {
+                    if let (Some(s), Some((r, c))) =
+                        (book.ids.iter().position(|x| x == sid), parse_a1(a))
+                    {
                         set.insert(Addr { s, r, c });
                     }
                 }
@@ -575,7 +659,11 @@ impl Engine {
                         j["spill"] = spill_json(&mut i, &sp);
                     }
                 }
-                let key = book.exprs.get((a.r - 1) as usize).map(|e| e.0.clone()).unwrap_or_default();
+                let key = book
+                    .exprs
+                    .get((a.r - 1) as usize)
+                    .map(|e| e.0.clone())
+                    .unwrap_or_default();
                 exprs.insert(key, j);
             } else {
                 cells.insert(book.key(*a), j);
@@ -583,15 +671,37 @@ impl Engine {
         }
         let mut reads: Vec<String> = reads.into_iter().collect();
         reads.sort();
-        Ok(reply(200, json!({ "base": base, "ms": started.elapsed().as_millis() as u64, "reads": reads, "partial": keep.is_some(), "cells": cells, "exprs": exprs })))
+        Ok(reply(
+            200,
+            json!({ "base": base, "ms": started.elapsed().as_millis() as u64, "reads": reads, "partial": keep.is_some(), "cells": cells, "exprs": exprs }),
+        ))
     }
 
     /// The formulas of a workbook evaluated as the user: (results, the formulas each one
     /// uses, certified metrics, the formulas reading the database), the entities read, the
     /// transaction, the spills.
     #[allow(clippy::type_complexity)]
-    pub(super) fn eval_book(&mut self, who: &Principal, book: &Book) -> Result<((BTreeMap<Addr, Out>, Vec<(Addr, Vec<Ref>)>, HashMap<Addr, String>, HashSet<Addr>), HashSet<String>, u64, HashMap<Addr, Spilled>), Fail> {
-        let limit = book.timeout_ms.map_or(DEADLINE_SECS * 1000, |t| t.min(DEADLINE_SECS * 1000));
+    pub(super) fn eval_book(
+        &mut self,
+        who: &Principal,
+        book: &Book,
+    ) -> Result<
+        (
+            (
+                BTreeMap<Addr, Out>,
+                Vec<(Addr, Vec<Ref>)>,
+                HashMap<Addr, String>,
+                HashSet<Addr>,
+            ),
+            HashSet<String>,
+            u64,
+            HashMap<Addr, Spilled>,
+        ),
+        Fail,
+    > {
+        let limit = book
+            .timeout_ms
+            .map_or(DEADLINE_SECS * 1000, |t| t.min(DEADLINE_SECS * 1000));
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(limit);
         let checked = self.checked.clone();
         let model = checked.model.as_ref().unwrap();
@@ -613,8 +723,21 @@ impl Engine {
             };
             let sheets = Sheets { names: &book.names };
             let mut formulas = 0;
-            let all = book.cells.iter().enumerate().flat_map(|(s, cells)| cells.iter().map(move |((r, c), raw)| (Addr { s, r: *r, c: *c }, raw.clone())));
-            let extra = book.exprs.iter().enumerate().map(|(k, (_, e))| (Addr { s: book.names.len(), r: k as u32 + 1, c: 1 }, format!("={e}")));
+            let all = book.cells.iter().enumerate().flat_map(|(s, cells)| {
+                cells
+                    .iter()
+                    .map(move |((r, c), raw)| (Addr { s, r: *r, c: *c }, raw.clone()))
+            });
+            let extra = book.exprs.iter().enumerate().map(|(k, (_, e))| {
+                (
+                    Addr {
+                        s: book.names.len(),
+                        r: k as u32 + 1,
+                        c: 1,
+                    },
+                    format!("={e}"),
+                )
+            });
             for (a, raw) in all.chain(extra) {
                 match classify(&mut i, &raw) {
                     None => {}
@@ -627,8 +750,17 @@ impl Engine {
                             return Err((400, format!("at most {MAX_FORMULAS} formulas")));
                         }
                         let here = if a.s >= book.names.len() { 0 } else { a.s };
-                        if f.len() > MAX_FORMULA || f.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
-                            outs.insert(a, Out::Err { code: "#ERROR", msg: format!("a formula is one line of at most {MAX_FORMULA} characters") });
+                        if f.len() > MAX_FORMULA || f.contains(['\n', '\r', '\u{2028}', '\u{2029}'])
+                        {
+                            outs.insert(
+                                a,
+                                Out::Err {
+                                    code: "#ERROR",
+                                    msg: format!(
+                                        "a formula is one line of at most {MAX_FORMULA} characters"
+                                    ),
+                                },
+                            );
                             continue;
                         }
                         let f = match super::params::rewrite_params(&f, &params.list) {
@@ -642,16 +774,34 @@ impl Engine {
                             Ok((text, refs)) => {
                                 let text = super::params::rewrite_scopes(&text, &params.scopes);
                                 if text.trim().is_empty() {
-                                    outs.insert(a, Out::Err { code: "#ERROR", msg: "an empty formula".into() });
+                                    outs.insert(
+                                        a,
+                                        Out::Err {
+                                            code: "#ERROR",
+                                            msg: "an empty formula".into(),
+                                        },
+                                    );
                                     continue;
                                 }
                                 // a formula the parser reads on its own, as one expression
-                                let p = quadra_syntax::parse(&format!("fn __f():\n    let __x = {text}\n"));
+                                let p = quadra_syntax::parse(&format!(
+                                    "fn __f():\n    let __x = {text}\n"
+                                ));
                                 if let Some(e) = p.errors.first() {
-                                    outs.insert(a, Out::Err { code: "#ERROR", msg: e.message.clone() });
+                                    outs.insert(
+                                        a,
+                                        Out::Err {
+                                            code: "#ERROR",
+                                            msg: e.message.clone(),
+                                        },
+                                    );
                                     continue;
                                 }
-                                nodes.push(Node { addr: a, text, refs });
+                                nodes.push(Node {
+                                    addr: a,
+                                    text,
+                                    refs,
+                                });
                             }
                             Err((msg, code)) => {
                                 outs.insert(a, Out::Err { code, msg });
@@ -661,7 +811,8 @@ impl Engine {
                 }
             }
         }
-        let index: HashMap<Addr, usize> = nodes.iter().enumerate().map(|(k, n)| (n.addr, k)).collect();
+        let index: HashMap<Addr, usize> =
+            nodes.iter().enumerate().map(|(k, n)| (n.addr, k)).collect();
         // formulas that cannot be read: those using them have their error
         let pre_err: BTreeMap<Addr, Out> = outs.clone();
         // the formulas each formula uses (directly; ranges: the formulas inside them)
@@ -679,7 +830,11 @@ impl Engine {
                         if let Some(cells) = book.cells.get(*s) {
                             for ((r, c), _) in cells.range((*r1, 0)..=(*r2, u32::MAX)) {
                                 if c >= c1 && c <= c2 {
-                                    if let Some(&d) = index.get(&Addr { s: *s, r: *r, c: *c }) {
+                                    if let Some(&d) = index.get(&Addr {
+                                        s: *s,
+                                        r: *r,
+                                        c: *c,
+                                    }) {
                                         deps.push(d);
                                     }
                                 }
@@ -699,8 +854,20 @@ impl Engine {
         for &k in &left {
             let cycle = on_cycle(k, &uses, &placed);
             let out = match cycle {
-                Some(path) => Out::Err { code: "#CYCLE", msg: format!("circular reference: {}", path.iter().map(|&x| a1(nodes[x].addr.r, nodes[x].addr.c)).collect::<Vec<_>>().join(" → ")) },
-                None => Out::Err { code: "#CYCLE", msg: "uses a cell of a circular reference".into() },
+                Some(path) => Out::Err {
+                    code: "#CYCLE",
+                    msg: format!(
+                        "circular reference: {}",
+                        path.iter()
+                            .map(|&x| a1(nodes[x].addr.r, nodes[x].addr.c))
+                            .collect::<Vec<_>>()
+                            .join(" → ")
+                    ),
+                },
+                None => Out::Err {
+                    code: "#CYCLE",
+                    msg: "uses a cell of a circular reference".into(),
+                },
             };
             outs.insert(nodes[k].addr, out);
         }
@@ -722,7 +889,16 @@ impl Engine {
             // the source: parameters for values and for what is known only when evaluating
             let mut tries = 0;
             let (over, plan) = loop {
-                let plan = Plan::build(&nodes, &order, &values, &area, &bad_types, &demoted, book, &params.list);
+                let plan = Plan::build(
+                    &nodes,
+                    &order,
+                    &values,
+                    &area,
+                    &bad_types,
+                    &demoted,
+                    book,
+                    &params.list,
+                );
                 let over = self.sheet_check(&plan.source)?;
                 // a value whose type the model does not know (`3 XYZ`): text, and again
                 let mut again = false;
@@ -778,9 +954,20 @@ impl Engine {
                 let v = match p {
                     Ref::Cell(a) => match values.get(a) {
                         Some(v) if !demoted.contains(a) => v.clone(),
-                        Some(_) => V::Text(Rc::from(book.cells.get(a.s).and_then(|c| c.get(&(a.r, a.c))).map(String::as_str).unwrap_or(""))),
+                        Some(_) => V::Text(Rc::from(
+                            book.cells
+                                .get(a.s)
+                                .and_then(|c| c.get(&(a.r, a.c)))
+                                .map(String::as_str)
+                                .unwrap_or(""),
+                        )),
                         None => match area.get(a) {
-                            Some((anchor, dr, dc)) => spills.get(anchor).and_then(|sp| sp.rows.get(*dr)).and_then(|row| row.get(*dc)).cloned().unwrap_or(V::None),
+                            Some((anchor, dr, dc)) => spills
+                                .get(anchor)
+                                .and_then(|sp| sp.rows.get(*dr))
+                                .and_then(|row| row.get(*dc))
+                                .cloned()
+                                .unwrap_or(V::None),
                             None => index
                                 .get(a)
                                 .and_then(|k| match results.get(k) {
@@ -792,8 +979,19 @@ impl Engine {
                     },
                     Ref::Range { s, r1, c1, r2, c2 } => {
                         let mut items = Vec::new();
-                        let mut cells: Vec<(u32, u32)> = book.cells.get(*s).map(|cs| cs.range((*r1, 0)..=(*r2, u32::MAX)).filter(|((_, c), _)| c >= c1 && c <= c2).map(|(k, _)| *k).collect()).unwrap_or_default();
-                        for (a, _) in area.iter().filter(|(a, _)| a.s == *s && a.r >= *r1 && a.r <= *r2 && a.c >= *c1 && a.c <= *c2) {
+                        let mut cells: Vec<(u32, u32)> = book
+                            .cells
+                            .get(*s)
+                            .map(|cs| {
+                                cs.range((*r1, 0)..=(*r2, u32::MAX))
+                                    .filter(|((_, c), _)| c >= c1 && c <= c2)
+                                    .map(|(k, _)| *k)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (a, _) in area.iter().filter(|(a, _)| {
+                            a.s == *s && a.r >= *r1 && a.r <= *r2 && a.c >= *c1 && a.c <= *c2
+                        }) {
                             cells.push((a.r, a.c));
                         }
                         cells.sort();
@@ -808,7 +1006,12 @@ impl Engine {
                                     _ => V::None,
                                 }
                             } else if let Some((anchor, dr, dc)) = area.get(&a) {
-                                spills.get(anchor).and_then(|sp| sp.rows.get(*dr)).and_then(|row| row.get(*dc)).cloned().unwrap_or(V::None)
+                                spills
+                                    .get(anchor)
+                                    .and_then(|sp| sp.rows.get(*dr))
+                                    .and_then(|row| row.get(*dc))
+                                    .cloned()
+                                    .unwrap_or(V::None)
                             } else {
                                 V::None
                             };
@@ -830,7 +1033,13 @@ impl Engine {
             }
             // formulas that do not check: their error
             for (k, (msg, code)) in &bad_types {
-                results.insert(*k, Out::Err { code, msg: msg.clone() });
+                results.insert(
+                    *k,
+                    Out::Err {
+                        code,
+                        msg: msg.clone(),
+                    },
+                );
             }
             // the formulas, in order
             for step in &plan.steps {
@@ -862,9 +1071,15 @@ impl Engine {
                                 })
                             });
                         let out = if let Some((msg, code)) = bad_types.get(&k) {
-                            Out::Err { code, msg: msg.clone() }
+                            Out::Err {
+                                code,
+                                msg: msg.clone(),
+                            }
                         } else if let Some((d, code)) = failed {
-                            Out::Err { code, msg: format!("uses {}, which has an error", a1(d.r, d.c)) }
+                            Out::Err {
+                                code,
+                                msg: format!("uses {}, which has an error", a1(d.r, d.c)),
+                            }
                         } else if let Some(e) = lets.get(&name) {
                             if let Some(m) = metric_of(e, omodel) {
                                 certified.insert(node.addr, m);
@@ -873,18 +1088,33 @@ impl Engine {
                             if !reads.is_empty() {
                                 db.insert(node.addr);
                             }
-                            let mut out = self.eval_cell(&mut i, e, &mut ctx, node, &reads, who.user_id, base, &params.list);
+                            let mut out = self.eval_cell(
+                                &mut i,
+                                e,
+                                &mut ctx,
+                                node,
+                                &reads,
+                                who.user_id,
+                                base,
+                                &params.list,
+                            );
                             reads_of.insert(k, reads);
                             if let Out::Ok(v) = &out {
                                 raw.insert(k, v.clone());
                                 // its spill is blocked: those using it see the error
                                 if let Some(msg) = blocked.get(&k) {
-                                    out = Out::Err { code: "#SPILL", msg: msg.clone() };
+                                    out = Out::Err {
+                                        code: "#SPILL",
+                                        msg: msg.clone(),
+                                    };
                                 }
                             }
                             out
                         } else {
-                            Out::Err { code: "#ERROR", msg: "internal: a formula was not checked".into() }
+                            Out::Err {
+                                code: "#ERROR",
+                                msg: "internal: a formula was not checked".into(),
+                            }
                         };
                         ctx.bind(
                             &name,
@@ -925,7 +1155,11 @@ impl Engine {
                         if dr == 0 && dc == 0 {
                             continue;
                         }
-                        let b = Addr { s: a.s, r: a.r + dr as u32, c: a.c + dc as u32 };
+                        let b = Addr {
+                            s: a.s,
+                            r: a.r + dr as u32,
+                            c: a.c + dc as u32,
+                        };
                         if b.r > MAX_ROWS || b.c > MAX_COLS {
                             block_at = Some("the edge of the sheet".to_string());
                             break 'scan;
@@ -941,7 +1175,13 @@ impl Engine {
                     if blocked.insert(k, msg.clone()).as_ref() != Some(&msg) {
                         newly = true;
                     }
-                    results.insert(k, Out::Err { code: "#SPILL", msg });
+                    results.insert(
+                        k,
+                        Out::Err {
+                            code: "#SPILL",
+                            msg,
+                        },
+                    );
                     continue;
                 }
                 if blocked.remove(&k).is_some() {
@@ -951,7 +1191,14 @@ impl Engine {
                 for dr in 0..h {
                     for dc in 0..w {
                         if dr + dc > 0 {
-                            area.insert(Addr { s: a.s, r: a.r + dr as u32, c: a.c + dc as u32 }, (a, dr, dc));
+                            area.insert(
+                                Addr {
+                                    s: a.s,
+                                    r: a.r + dr as u32,
+                                    c: a.c + dc as u32,
+                                },
+                                (a, dr, dc),
+                            );
                         }
                     }
                 }
@@ -962,7 +1209,10 @@ impl Engine {
             let uses_spill = nodes.iter().any(|n| {
                 n.refs.iter().any(|r| match r {
                     Ref::Cell(a) => now.contains(a) || before.contains(a),
-                    Ref::Range { s, r1, c1, r2, c2 } => now.iter().chain(before.iter()).any(|a| a.s == *s && a.r >= *r1 && a.r <= *r2 && a.c >= *c1 && a.c <= *c2),
+                    Ref::Range { s, r1, c1, r2, c2 } => now
+                        .iter()
+                        .chain(before.iter())
+                        .any(|a| a.s == *s && a.r >= *r1 && a.r <= *r2 && a.c >= *c1 && a.c <= *c2),
                     Ref::Spill(_) => false,
                 })
             });
@@ -978,14 +1228,27 @@ impl Engine {
             outs.insert(nodes[k].addr, out);
         }
         // the formulas with their references, those using others after them
-        let mut graph: Vec<(Addr, Vec<Ref>)> = order.iter().map(|&k| (nodes[k].addr, nodes[k].refs.clone())).collect();
+        let mut graph: Vec<(Addr, Vec<Ref>)> = order
+            .iter()
+            .map(|&k| (nodes[k].addr, nodes[k].refs.clone()))
+            .collect();
         graph.extend(left.iter().map(|&k| (nodes[k].addr, nodes[k].refs.clone())));
         Ok(((outs, graph, certified, db), all_reads, base, spills))
     }
 
     /// A formula's value: kept from an earlier request while nothing it reads changed.
     #[allow(clippy::too_many_arguments)]
-    fn eval_cell(&mut self, i: &mut Interp, e: &Expr, ctx: &mut Ctx, node: &Node, reads: &[String], user: u64, base: u64, params: &[super::params::Param]) -> Out {
+    fn eval_cell(
+        &mut self,
+        i: &mut Interp,
+        e: &Expr,
+        ctx: &mut Ctx,
+        node: &Node,
+        reads: &[String],
+        user: u64,
+        base: u64,
+        params: &[super::params::Param],
+    ) -> Out {
         let key = if reads.is_empty() {
             None
         } else {
@@ -1015,16 +1278,32 @@ impl Engine {
             Ok(v) => Out::Ok(v),
             Err(f) => {
                 let msg = quadra_api::json::describe(f);
-                Out::Err { code: error_code(&msg), msg }
+                Out::Err {
+                    code: error_code(&msg),
+                    msg,
+                }
             }
         };
         if let Some(k) = key {
             // a timeout is not kept: the next request may be luckier
-            if !matches!(&out, Out::Err { code: "#TIMEOUT", .. }) {
+            if !matches!(
+                &out,
+                Out::Err {
+                    code: "#TIMEOUT",
+                    ..
+                }
+            ) {
                 if self.sheets.kept.len() > 20_000 {
                     self.sheets.kept.clear();
                 }
-                self.sheets.kept.insert(k, Kept { out: out.clone(), reads: reads.to_vec(), tx: base });
+                self.sheets.kept.insert(
+                    k,
+                    Kept {
+                        out: out.clone(),
+                        reads: reads.to_vec(),
+                        tx: base,
+                    },
+                );
             }
         }
         out
@@ -1047,7 +1326,9 @@ impl Engine {
         if !self.sheet_changes(since, base) {
             return false;
         }
-        let stale = reads.iter().any(|e| self.sheets.changed.get(e).is_some_and(|t| *t > since));
+        let stale = reads
+            .iter()
+            .any(|e| self.sheets.changed.get(e).is_some_and(|t| *t > since));
         if stale {
             self.sheets.kept.remove(&key);
             return false;
@@ -1089,7 +1370,10 @@ impl Engine {
             };
             let st = &mut self.sheets;
             for r in rows {
-                if let (Some(e), Some(t)) = (r[0].clone(), r[1].as_deref().and_then(|t| t.parse::<u64>().ok())) {
+                if let (Some(e), Some(t)) = (
+                    r[0].clone(),
+                    r[1].as_deref().and_then(|t| t.parse::<u64>().ok()),
+                ) {
                     let cur = st.changed.entry(e).or_insert(0);
                     *cur = (*cur).max(t);
                 }
@@ -1102,7 +1386,10 @@ impl Engine {
     /// The workbook's function checked with the project: the checked project (None when it
     /// does not check at all) and the errors by line of the source.
     #[allow(clippy::type_complexity)]
-    fn sheet_check(&mut self, src: &str) -> Result<(Option<Rc<quadra_analysis::Checked>>, Vec<(usize, String)>), Fail> {
+    fn sheet_check(
+        &mut self,
+        src: &str,
+    ) -> Result<(Option<Rc<quadra_analysis::Checked>>, Vec<(usize, String)>), Fail> {
         let path = self.root.join("tests/__sheet__.qd");
         let c = match self.sheets.checks.get(src) {
             Some(c) => c.clone(),
@@ -1122,9 +1409,17 @@ impl Engine {
                 c
             }
         };
-        let project_file = c.model.as_ref().and_then(|m| m.sources.iter().position(|(p, _)| p.ends_with("__sheet__.qd")));
+        let project_file = c.model.as_ref().and_then(|m| {
+            m.sources
+                .iter()
+                .position(|(p, _)| p.ends_with("__sheet__.qd"))
+        });
         let mut errors = Vec::new();
-        for d in c.diagnostics.iter().filter(|d| d.severity == quadra_sema::Severity::Error) {
+        for d in c
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == quadra_sema::Severity::Error)
+        {
             let line = if Some(d.file.0 as usize) == project_file || project_file.is_none() {
                 let from = usize::from(d.range.start());
                 if from <= src.len() {
@@ -1168,14 +1463,31 @@ struct Plan {
 
 impl Plan {
     #[allow(clippy::too_many_arguments)]
-    fn build(nodes: &[Node], order: &[usize], values: &HashMap<Addr, V>, area: &HashMap<Addr, (Addr, usize, usize)>, bad: &HashMap<usize, (String, &'static str)>, demoted: &HashSet<Addr>, book: &Book, app_params: &[super::params::Param]) -> Plan {
-        let index: HashMap<Addr, usize> = nodes.iter().enumerate().map(|(k, n)| (n.addr, k)).collect();
-        let in_order: HashSet<usize> = order.iter().copied().filter(|k| !bad.contains_key(k)).collect();
+    fn build(
+        nodes: &[Node],
+        order: &[usize],
+        values: &HashMap<Addr, V>,
+        area: &HashMap<Addr, (Addr, usize, usize)>,
+        bad: &HashMap<usize, (String, &'static str)>,
+        demoted: &HashSet<Addr>,
+        book: &Book,
+        app_params: &[super::params::Param],
+    ) -> Plan {
+        let index: HashMap<Addr, usize> =
+            nodes.iter().enumerate().map(|(k, n)| (n.addr, k)).collect();
+        let in_order: HashSet<usize> = order
+            .iter()
+            .copied()
+            .filter(|k| !bad.contains_key(k))
+            .collect();
         let mut params: Vec<(Ref, Option<String>)> = Vec::new();
         let mut seen: HashSet<Ref> = HashSet::new();
         let mut lets: Vec<(String, String, Line, Step)> = Vec::new();
         let mut defined: HashSet<String> = HashSet::new();
-        let param = |r: Ref, ty: Option<String>, params: &mut Vec<(Ref, Option<String>)>, seen: &mut HashSet<Ref>| {
+        let param = |r: Ref,
+                     ty: Option<String>,
+                     params: &mut Vec<(Ref, Option<String>)>,
+                     seen: &mut HashSet<Ref>| {
             if seen.insert(r.clone()) {
                 params.push((r, ty));
             }
@@ -1191,14 +1503,23 @@ impl Plan {
                         if index.get(a).is_some_and(|d| in_order.contains(d)) {
                             continue;
                         }
-                        let ty = values.get(a).filter(|_| !demoted.contains(a)).and_then(type_text).or_else(|| demoted.contains(a).then(|| "Text".to_string()));
+                        let ty = values
+                            .get(a)
+                            .filter(|_| !demoted.contains(a))
+                            .and_then(type_text)
+                            .or_else(|| demoted.contains(a).then(|| "Text".to_string()));
                         param(r.clone(), ty, &mut params, &mut seen);
                     }
                     Ref::Spill(a) => {
                         let name = r.name();
                         if index.get(a).is_some_and(|d| in_order.contains(d)) {
                             if defined.insert(name.clone()) {
-                                lets.push((name.clone(), Ref::Cell(*a).name(), Line::Other, Step::Spill(name)));
+                                lets.push((
+                                    name.clone(),
+                                    Ref::Cell(*a).name(),
+                                    Line::Other,
+                                    Step::Spill(name),
+                                ));
                             }
                         } else {
                             param(r.clone(), None, &mut params, &mut seen);
@@ -1210,8 +1531,19 @@ impl Plan {
                             continue;
                         }
                         // the cells: typed when few, all known, none filled by a spill
-                        let cells: Vec<(u32, u32)> = book.cells.get(*s).map(|cs| cs.range((*r1, 0)..=(*r2, u32::MAX)).filter(|((_, c), _)| c >= c1 && c <= c2).map(|(k, _)| *k).collect()).unwrap_or_default();
-                        let spilled = area.keys().any(|a| a.s == *s && a.r >= *r1 && a.r <= *r2 && a.c >= *c1 && a.c <= *c2);
+                        let cells: Vec<(u32, u32)> = book
+                            .cells
+                            .get(*s)
+                            .map(|cs| {
+                                cs.range((*r1, 0)..=(*r2, u32::MAX))
+                                    .filter(|((_, c), _)| c >= c1 && c <= c2)
+                                    .map(|(k, _)| *k)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let spilled = area.keys().any(|a| {
+                            a.s == *s && a.r >= *r1 && a.r <= *r2 && a.c >= *c1 && a.c <= *c2
+                        });
                         let typed = !spilled && cells.len() <= TYPED_RANGE && *r2 != MAX_ROWS;
                         if !typed {
                             param(r.clone(), None, &mut params, &mut seen);
@@ -1219,7 +1551,11 @@ impl Plan {
                         }
                         let mut items = Vec::new();
                         for (rr, cc) in cells {
-                            let a = Addr { s: *s, r: rr, c: cc };
+                            let a = Addr {
+                                s: *s,
+                                r: rr,
+                                c: cc,
+                            };
                             let cr = Ref::Cell(a);
                             match index.get(&a) {
                                 Some(d) if in_order.contains(d) => {}
@@ -1228,18 +1564,34 @@ impl Plan {
                                     param(cr.clone(), None, &mut params, &mut seen);
                                 }
                                 None => {
-                                    let ty = values.get(&a).filter(|_| !demoted.contains(&a)).and_then(type_text).or_else(|| demoted.contains(&a).then(|| "Text".to_string()));
+                                    let ty = values
+                                        .get(&a)
+                                        .filter(|_| !demoted.contains(&a))
+                                        .and_then(type_text)
+                                        .or_else(|| {
+                                            demoted.contains(&a).then(|| "Text".to_string())
+                                        });
                                     param(cr.clone(), ty, &mut params, &mut seen);
                                 }
                             }
                             items.push(cr.name());
                         }
                         defined.insert(name.clone());
-                        lets.push((name.clone(), format!("[{}]", items.join(", ")), Line::Other, Step::Range(name)));
+                        lets.push((
+                            name.clone(),
+                            format!("[{}]", items.join(", ")),
+                            Line::Other,
+                            Step::Range(name),
+                        ));
                     }
                 }
             }
-            lets.push((Ref::Cell(n.addr).name(), n.text.clone(), Line::Formula(k), Step::Formula(k)));
+            lets.push((
+                Ref::Cell(n.addr).name(),
+                n.text.clone(),
+                Line::Formula(k),
+                Step::Formula(k),
+            ));
         }
         // formulas not in the function (errors, cycles) are parameters of those using them
         let mut src = String::from("fn __sheet(\n");
@@ -1271,7 +1623,12 @@ impl Plan {
             steps.push(step);
         }
         src.push_str("    return none\n");
-        Plan { source: src, lines, params: params.into_iter().map(|p| p.0).collect(), steps }
+        Plan {
+            source: src,
+            lines,
+            params: params.into_iter().map(|p| p.0).collect(),
+            steps,
+        }
     }
 }
 
@@ -1340,10 +1697,24 @@ fn on_cycle(k: usize, uses: &[Vec<usize>], placed: &HashSet<usize>) -> Option<Ve
 
 /// The cells using any of `set`, through any chain (directly, in a range, in a spill), with
 /// `set`. `graph`: the formulas, each after those it uses.
-fn dependents(graph: &[(Addr, Vec<Ref>)], spills: &HashMap<Addr, Spilled>, set: &HashSet<Addr>) -> HashSet<Addr> {
+fn dependents(
+    graph: &[(Addr, Vec<Ref>)],
+    spills: &HashMap<Addr, Spilled>,
+    set: &HashSet<Addr>,
+) -> HashSet<Addr> {
     let mut out = set.clone();
     // the rectangles of the spills of affected formulas
-    let rect = |a: &Addr| spills.get(a).map(|sp| (a.s, a.r, a.c, a.r + sp.rows.len() as u32 - 1, a.c + sp.width as u32 - 1));
+    let rect = |a: &Addr| {
+        spills.get(a).map(|sp| {
+            (
+                a.s,
+                a.r,
+                a.c,
+                a.r + sp.rows.len() as u32 - 1,
+                a.c + sp.width as u32 - 1,
+            )
+        })
+    };
     let mut rects: Vec<(usize, u32, u32, u32, u32)> = set.iter().filter_map(rect).collect();
     for (a, refs) in graph {
         if out.contains(a) {
@@ -1352,12 +1723,20 @@ fn dependents(graph: &[(Addr, Vec<Ref>)], spills: &HashMap<Addr, Spilled>, set: 
             }
             continue;
         }
-        let inside = |s: usize, r: u32, c: u32| rects.iter().any(|(rs, r1, c1, r2, c2)| *rs == s && r >= *r1 && r <= *r2 && c >= *c1 && c <= *c2);
+        let inside = |s: usize, r: u32, c: u32| {
+            rects.iter().any(|(rs, r1, c1, r2, c2)| {
+                *rs == s && r >= *r1 && r <= *r2 && c >= *c1 && c <= *c2
+            })
+        };
         let hit = refs.iter().any(|r| match r {
             Ref::Cell(x) => out.contains(x) || inside(x.s, x.r, x.c),
             Ref::Spill(x) => out.contains(x),
             Ref::Range { s, r1, c1, r2, c2 } => {
-                out.iter().any(|x| x.s == *s && x.r >= *r1 && x.r <= *r2 && x.c >= *c1 && x.c <= *c2) || rects.iter().any(|(rs, a1, b1, a2, b2)| rs == s && a1 <= r2 && a2 >= r1 && b1 <= c2 && b2 >= c1)
+                out.iter()
+                    .any(|x| x.s == *s && x.r >= *r1 && x.r <= *r2 && x.c >= *c1 && x.c <= *c2)
+                    || rects.iter().any(|(rs, a1, b1, a2, b2)| {
+                        rs == s && a1 <= r2 && a2 >= r1 && b1 <= c2 && b2 >= c1
+                    })
             }
         });
         if hit {
@@ -1388,7 +1767,13 @@ fn metric_of(e: &Expr, m: &Model) -> Option<String> {
 fn expr_reads(e: &Expr, m: &Model, schema: &quadra_store::schema::Schema) -> Vec<String> {
     let mut named: HashSet<String> = HashSet::new();
     let mut fns_seen: HashSet<String> = HashSet::new();
-    fn walk(e: &Expr, m: &Model, named: &mut HashSet<String>, fns: &mut HashSet<String>, depth: usize) {
+    fn walk(
+        e: &Expr,
+        m: &Model,
+        named: &mut HashSet<String>,
+        fns: &mut HashSet<String>,
+        depth: usize,
+    ) {
         match &e.kind {
             ExprKind::Name(n) => {
                 if m.entity(n).is_some() {
@@ -1432,7 +1817,10 @@ fn expr_reads(e: &Expr, m: &Model, schema: &quadra_store::schema::Schema) -> Vec
         if let Some(en) = m.entity(&n) {
             for f in m.all_fields(en) {
                 let mut t = f.ty.as_ref();
-                while let Some(quadra_ir::Ty::Optional(i) | quadra_ir::Ty::List(i) | quadra_ir::Ty::Set(i)) = t {
+                while let Some(
+                    quadra_ir::Ty::Optional(i) | quadra_ir::Ty::List(i) | quadra_ir::Ty::Set(i),
+                ) = t
+                {
                     t = Some(i);
                 }
                 if let Some(quadra_ir::Ty::Path { segments, .. }) = t {
@@ -1451,7 +1839,11 @@ fn expr_reads(e: &Expr, m: &Model, schema: &quadra_store::schema::Schema) -> Vec
     let _ = schema;
     // who may read what may depend on other records (the user's roles, a team…)
     out.insert("User".into());
-    for r in m.rules.iter().chain(m.roles.iter().flat_map(|r| r.rules.iter())) {
+    for r in m
+        .rules
+        .iter()
+        .chain(m.roles.iter().flat_map(|r| r.rules.iter()))
+    {
         if let Some(c) = &r.condition {
             let mut more = HashSet::new();
             walk(c, m, &mut more, &mut HashSet::new(), 6);
@@ -1466,8 +1858,17 @@ fn expr_reads(e: &Expr, m: &Model, schema: &quadra_store::schema::Schema) -> Vec
 fn stmt_exprs(s: &quadra_ir::Stmt, f: &mut dyn FnMut(&Expr)) {
     match &s.kind {
         StmtKind::Let { value, .. } => f(value),
-        StmtKind::Return(Some(e)) | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Expect(e) | StmtKind::Emit(e) => f(e),
-        StmtKind::If { cond, then, otherwise, .. } => {
+        StmtKind::Return(Some(e))
+        | StmtKind::Expr(e)
+        | StmtKind::Fail(e)
+        | StmtKind::Expect(e)
+        | StmtKind::Emit(e) => f(e),
+        StmtKind::If {
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
             f(cond);
             for x in then {
                 stmt_exprs(x, f);
@@ -1497,28 +1898,50 @@ fn stmt_exprs(s: &quadra_ir::Stmt, f: &mut dyn FnMut(&Expr)) {
 pub fn spill_of(v: &V) -> Option<Spilled> {
     let row = |x: &V| -> Vec<V> {
         match x {
-            V::Tuple(items) => items.iter().map(|(_, v)| v.clone()).take(SPILL_COLS).collect(),
+            V::Tuple(items) => items
+                .iter()
+                .map(|(_, v)| v.clone())
+                .take(SPILL_COLS)
+                .collect(),
             V::List(items) | V::Set(items) => items.iter().take(SPILL_COLS).cloned().collect(),
             other => vec![other.clone()],
         }
     };
     let (rows, total) = match v {
-        V::List(items) | V::Set(items) => (items.iter().take(SPILL_ROWS).map(row).collect::<Vec<_>>(), items.len()),
+        V::List(items) | V::Set(items) => (
+            items.iter().take(SPILL_ROWS).map(row).collect::<Vec<_>>(),
+            items.len(),
+        ),
         V::Tuple(_) => (vec![row(v)], 1),
         _ => return None,
     };
     let width = rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
-    let rows = if rows.is_empty() { vec![vec![V::None]] } else { rows };
+    let rows = if rows.is_empty() {
+        vec![vec![V::None]]
+    } else {
+        rows
+    };
     let first = match v {
         V::List(items) | V::Set(items) => items.first(),
         t @ V::Tuple(_) => Some(t),
         _ => None,
     };
     let header = match first {
-        Some(V::Tuple(items)) if items.iter().all(|(n, _)| n.is_some()) => Some(items.iter().take(SPILL_COLS).map(|(n, _)| n.clone().unwrap_or_default()).collect()),
+        Some(V::Tuple(items)) if items.iter().all(|(n, _)| n.is_some()) => Some(
+            items
+                .iter()
+                .take(SPILL_COLS)
+                .map(|(n, _)| n.clone().unwrap_or_default())
+                .collect(),
+        ),
         _ => None,
     };
-    Some(Spilled { rows, total, width, header })
+    Some(Spilled {
+        rows,
+        total,
+        width,
+        header,
+    })
 }
 
 fn kind_name(v: &V) -> &'static str {
@@ -1573,7 +1996,16 @@ fn spill_json(i: &mut Interp, sp: &Spilled) -> J {
         .rows
         .iter()
         .map(|r| {
-            let mut cells: Vec<J> = r.iter().map(|v| if v.is_none() { J::Null } else { value_json(i, &v.clone().normalized()) }).collect();
+            let mut cells: Vec<J> = r
+                .iter()
+                .map(|v| {
+                    if v.is_none() {
+                        J::Null
+                    } else {
+                        value_json(i, &v.clone().normalized())
+                    }
+                })
+                .collect();
             cells.resize(sp.width, J::Null);
             J::Array(cells)
         })
@@ -1587,7 +2019,11 @@ fn spill_json(i: &mut Interp, sp: &Spilled) -> J {
 
 /// The evaluated workbook for an export: per sheet, (row, col) → value or error, spills
 /// included.
-pub fn grid_of(book: &Book, outs: &BTreeMap<Addr, Out>, spills: &HashMap<Addr, Spilled>) -> Vec<BTreeMap<(u32, u32), Out>> {
+pub fn grid_of(
+    book: &Book,
+    outs: &BTreeMap<Addr, Out>,
+    spills: &HashMap<Addr, Spilled>,
+) -> Vec<BTreeMap<(u32, u32), Out>> {
     let mut out: Vec<BTreeMap<(u32, u32), Out>> = vec![BTreeMap::new(); book.names.len()];
     for (a, o) in outs {
         if a.s < out.len() {
@@ -1613,7 +2049,11 @@ mod tests {
     use super::*;
 
     fn rw(s: &str) -> Result<(String, Vec<Ref>), (String, &'static str)> {
-        let names = vec!["Sheet1".to_string(), "My sheet".to_string(), "Sales".to_string()];
+        let names = vec![
+            "Sheet1".to_string(),
+            "My sheet".to_string(),
+            "Sales".to_string(),
+        ];
         rewrite(s, 0, &Sheets { names: &names }, &|n| n == "Q1")
     }
 
@@ -1623,9 +2063,15 @@ mod tests {
         assert_eq!(t, "__c_0_1_1 * 2 + __c_0_3_2");
         assert_eq!(r.len(), 2);
         let (t, _) = rw("B2:B20.sum() + 'My sheet'!A1:C3.count() + Sales!B2").unwrap();
-        assert_eq!(t, "__r_0_2_2_20_2.sum() + __r_1_1_1_3_3.count() + __c_2_2_2");
+        assert_eq!(
+            t,
+            "__r_0_2_2_20_2.sum() + __r_1_1_1_3_3.count() + __c_2_2_2"
+        );
         let (t, _) = rw("A:C.count() + A1#.count()").unwrap();
-        assert_eq!(t, format!("__r_0_1_1_{MAX_ROWS}_3.count() + __sp_0_1_1.count()"));
+        assert_eq!(
+            t,
+            format!("__r_0_1_1_{MAX_ROWS}_3.count() + __sp_0_1_1.count()")
+        );
         // strings, names, fields and calls are not references
         let (t, r) = rw("\"A1\" + o.B2 + Order2 + F(1) + Q1 + $Q$1").unwrap();
         assert_eq!(t, "\"A1\" + o.B2 + Order2 + F(1) + Q1 + __c_0_1_17");

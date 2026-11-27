@@ -21,7 +21,8 @@ const SESSION_FILE: &str = "tests/__session__.qd";
 const SESSION_TEST: &str = "__session__";
 
 fn project(files: &str) -> Result<Project, String> {
-    let map: serde_json::Map<String, J> = serde_json::from_str(files).map_err(|e| format!("files: {e}"))?;
+    let map: serde_json::Map<String, J> =
+        serde_json::from_str(files).map_err(|e| format!("files: {e}"))?;
     let root = Path::new(ROOT);
     let sources = map
         .into_iter()
@@ -32,7 +33,10 @@ fn project(files: &str) -> Result<Project, String> {
 }
 
 fn rel(project: &Project, path: &Path) -> String {
-    path.strip_prefix(&project.root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+    path.strip_prefix(&project.root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn utf16(text: &str, byte: usize) -> usize {
@@ -89,10 +93,17 @@ pub fn check(files: &str) -> String {
         let fixtures: Vec<J> = checked
             .model
             .as_ref()
-            .map(|m| m.fixtures.iter().map(|f| json!({ "name": f.name, "module": project.file(f.span.file).module })).collect())
+            .map(|m| {
+                m.fixtures
+                    .iter()
+                    .map(|f| json!({ "name": f.name, "module": project.file(f.span.file).module }))
+                    .collect()
+            })
             .unwrap_or_default();
         let tests = checked.model.as_ref().map_or(0, |m| m.tests.len());
-        Ok(json!({ "diagnostics": diagnostics(&project, &checked.diagnostics), "fixtures": fixtures, "tests": tests, "ok": checked.model.is_some() }))
+        Ok(
+            json!({ "diagnostics": diagnostics(&project, &checked.diagnostics), "fixtures": fixtures, "tests": tests, "ok": checked.model.is_some() }),
+        )
     })())
 }
 
@@ -102,7 +113,9 @@ pub fn test(files: &str) -> String {
     answer((|| {
         let project = project(files)?;
         match quadra_runtime::run_tests(&project, None) {
-            Ok(results) => Ok(json!({ "results": results.iter().filter(|r| r.name != SESSION_TEST).map(|r| json!({ "name": r.name, "location": r.location, "passed": r.passed, "message": r.message })).collect::<Vec<_>>() })),
+            Ok(results) => Ok(
+                json!({ "results": results.iter().filter(|r| r.name != SESSION_TEST).map(|r| json!({ "name": r.name, "location": r.location, "passed": r.passed, "message": r.message })).collect::<Vec<_>>() }),
+            ),
             Err(diags) => Ok(json!({ "diagnostics": diagnostics(&project, &diags) })),
         }
     })())
@@ -115,7 +128,9 @@ pub fn ide(files: &str, path: &str, offset: usize) -> String {
         let project = project(files)?;
         let analysis = project.analyze();
         let abs = Path::new(ROOT).join(path);
-        let Some(f) = project.files().find(|f| f.path == abs) else { return Err(format!("{path}: not a file of the project")) };
+        let Some(f) = project.files().find(|f| f.path == abs) else {
+            return Err(format!("{path}: not a file of the project"));
+        };
         let at = TextSize::from(byte_at(&f.text, offset) as u32);
         let hover = quadra_sema::ide::hover(&project, &analysis, f.id, at).map(|(range, md)| json!({ "from": utf16(&f.text, usize::from(range.start())), "to": utf16(&f.text, usize::from(range.end())), "markdown": md }));
         let definition = quadra_sema::ide::definition(&project, &analysis, f.id, at).and_then(|t| {
@@ -144,7 +159,10 @@ fn session_source(fixture: Option<(&str, &str)>, statements: &[String]) -> (Stri
         starts.push(line);
         let lines: Vec<&str> = s.trim_end().lines().collect();
         // several writes made together (a form saved in the app): one transaction
-        let together = lines.len() > 1 && lines.iter().all(|l| !l.starts_with(' ') && !l.starts_with("let ") && !l.ends_with(':'));
+        let together = lines.len() > 1
+            && lines
+                .iter()
+                .all(|l| !l.starts_with(' ') && !l.starts_with("let ") && !l.ends_with(':'));
         let indent = if together {
             src.push_str("    if true:\n");
             line += 1;
@@ -179,20 +197,36 @@ fn display(i: &mut Interp, v: &V) -> J {
 #[wasm_bindgen]
 pub fn session(files: &str, fixture: &str, statements: &str) -> String {
     answer((|| {
-        let statements: Vec<String> = serde_json::from_str(statements).map_err(|e| format!("statements: {e}"))?;
-        let fixture = fixture.rsplit_once('.').filter(|(m, n)| !m.is_empty() && !n.is_empty());
+        let statements: Vec<String> =
+            serde_json::from_str(statements).map_err(|e| format!("statements: {e}"))?;
+        let fixture = fixture
+            .rsplit_once('.')
+            .filter(|(m, n)| !m.is_empty() && !n.is_empty());
         let (src, starts) = session_source(fixture, &statements);
-        let mut map: serde_json::Map<String, J> = serde_json::from_str(files).map_err(|e| format!("files: {e}"))?;
+        let mut map: serde_json::Map<String, J> =
+            serde_json::from_str(files).map_err(|e| format!("files: {e}"))?;
         map.insert(SESSION_FILE.into(), json!(src));
         let project = project(&J::Object(map).to_string())?;
         let result = quadra_runtime::run_session(&project, SESSION_TEST, |model, _, i, _| {
             let mut entities = Vec::new();
-            for e in model.entities.iter().filter(|e| e.kind == quadra_ir::EntityKind::Entity && !e.temporary && !e.is_ledger) {
-                let fields: Vec<String> = model.all_fields(e).iter().filter(|f| !f.name.starts_with("__")).map(|f| f.name.clone()).collect();
+            for e in model
+                .entities
+                .iter()
+                .filter(|e| e.kind == quadra_ir::EntityKind::Entity && !e.temporary && !e.is_ledger)
+            {
+                let fields: Vec<String> = model
+                    .all_fields(e)
+                    .iter()
+                    .filter(|f| !f.name.starts_with("__"))
+                    .map(|f| f.name.clone())
+                    .collect();
                 let ids = i.ids(&e.name, None);
                 let mut rows = Vec::new();
                 for id in ids.iter().take(500) {
-                    let rec = V::Ref { ent: std::rc::Rc::from(e.name.as_str()), id: *id };
+                    let rec = V::Ref {
+                        ent: std::rc::Rc::from(e.name.as_str()),
+                        id: *id,
+                    };
                     let cells: Vec<J> = fields
                         .iter()
                         .map(|f| match i.get(&rec, f, None, None) {
@@ -210,17 +244,32 @@ pub fn session(files: &str, fixture: &str, statements: &str) -> String {
         match result {
             Err(diags) => {
                 // errors in the session itself point to the statement that caused them
-                let in_session: Vec<J> = diagnostics(&project, &diags).into_iter().filter(|d| d["path"] == json!(SESSION_FILE)).collect();
-                let failed_at = in_session.first().and_then(|d| d["line"].as_u64()).map(|l| starts.iter().rposition(|s| *s as u64 <= l).unwrap_or(0));
-                Ok(json!({ "diagnostics": diagnostics(&project, &diags), "failed_at": failed_at, "compile_error": true }))
+                let in_session: Vec<J> = diagnostics(&project, &diags)
+                    .into_iter()
+                    .filter(|d| d["path"] == json!(SESSION_FILE))
+                    .collect();
+                let failed_at = in_session
+                    .first()
+                    .and_then(|d| d["line"].as_u64())
+                    .map(|l| starts.iter().rposition(|s| *s as u64 <= l).unwrap_or(0));
+                Ok(
+                    json!({ "diagnostics": diagnostics(&project, &diags), "failed_at": failed_at, "compile_error": true }),
+                )
             }
             Ok((failure, entities)) => {
                 let failed_at = failure.as_ref().and_then(|m| {
                     let i = m.find("__session__.qd:")? + "__session__.qd:".len();
-                    let line: usize = m[i..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
+                    let line: usize = m[i..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                        .parse()
+                        .ok()?;
                     starts.iter().rposition(|s| *s <= line)
                 });
-                Ok(json!({ "error_message": failure, "failed_at": failed_at, "entities": entities }))
+                Ok(
+                    json!({ "error_message": failure, "failed_at": failed_at, "entities": entities }),
+                )
             }
         }
     })())
@@ -235,7 +284,14 @@ mod tests {
         let p = Project::load(&root).unwrap();
         let mut m = serde_json::Map::new();
         for f in p.user_files() {
-            m.insert(f.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned(), json!(f.text));
+            m.insert(
+                f.path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                json!(f.text),
+            );
         }
         J::Object(m).to_string()
     }
@@ -245,19 +301,61 @@ mod tests {
         let fs = files();
         let c: J = serde_json::from_str(&check(&fs)).unwrap();
         assert_eq!(c["ok"], json!(true), "{c}");
-        assert!(c["fixtures"].as_array().unwrap().iter().any(|f| f["name"] == json!("italy")), "{c}");
+        assert!(
+            c["fixtures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["name"] == json!("italy")),
+            "{c}"
+        );
         let t: J = serde_json::from_str(&test(&fs)).unwrap();
-        assert!(t["results"].as_array().unwrap().iter().all(|r| r["passed"] == json!(true)), "{t}");
-        let s: J = serde_json::from_str(&session(&fs, "tests.fixtures.italy", &json!(["let so = SalesOrder(customer=rossi, lines=[SalesLine(product=widget, qty=3 pcs)])", "so.confirm()"]).to_string())).unwrap();
+        assert!(
+            t["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["passed"] == json!(true)),
+            "{t}"
+        );
+        let s: J = serde_json::from_str(&session(
+            &fs,
+            "tests.fixtures.italy",
+            &json!([
+                "let so = SalesOrder(customer=rossi, lines=[SalesLine(product=widget, qty=3 pcs)])",
+                "so.confirm()"
+            ])
+            .to_string(),
+        ))
+        .unwrap();
         assert_eq!(s["error_message"], J::Null, "{}", s["error_message"]);
-        let so = s["entities"].as_array().unwrap().iter().find(|e| e["name"] == json!("SalesOrder")).unwrap();
+        let so = s["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == json!("SalesOrder"))
+            .unwrap();
         assert_eq!(so["count"], json!(1));
         // a failing statement is pointed at
-        let s: J = serde_json::from_str(&session(&fs, "tests.fixtures.italy", &json!(["let a = 1", "fail \"no\"", "let b = 2"]).to_string())).unwrap();
+        let s: J = serde_json::from_str(&session(
+            &fs,
+            "tests.fixtures.italy",
+            &json!(["let a = 1", "fail \"no\"", "let b = 2"]).to_string(),
+        ))
+        .unwrap();
         assert_eq!(s["failed_at"], json!(1), "{s}");
         // an unknown name: a compile error in the session, on its statement
-        let s: J = serde_json::from_str(&session(&fs, "", &json!(["let a = 1", "let b = Nope()"]).to_string())).unwrap();
-        assert_eq!((s["compile_error"].clone(), s["failed_at"].clone()), (json!(true), json!(1)), "{s}");
+        let s: J = serde_json::from_str(&session(
+            &fs,
+            "",
+            &json!(["let a = 1", "let b = Nope()"]).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(
+            (s["compile_error"].clone(), s["failed_at"].clone()),
+            (json!(true), json!(1)),
+            "{s}"
+        );
     }
 }
 

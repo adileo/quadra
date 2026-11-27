@@ -36,7 +36,10 @@ pub fn place_page<'a>(body: &'a [Block], diags: &mut Vec<Diag>) -> Vec<(&'a Comp
                     }
                     out.push((&**c, [x, cy, w, h]));
                 }
-                None => diags.push(Diag::new("a component of a page is in a `row`, or placed with `at`", c.span)),
+                None => diags.push(Diag::new(
+                    "a component of a page is in a `row`, or placed with `at`",
+                    c.span,
+                )),
             },
             Block::Column(c) => diags.push(Diag::new("a column is in a row", c.span)),
         }
@@ -84,13 +87,26 @@ fn shares(left: i64, n: usize) -> Option<Vec<u32>> {
     Some((0..n as u32).map(|k| base + u32::from(k < rem)).collect())
 }
 
-fn place_row<'a>(r: &'a Row, x0: u32, width: u32, y: u32, out: &mut Vec<(&'a Component, [u32; 4])>, diags: &mut Vec<Diag>) -> u32 {
+fn place_row<'a>(
+    r: &'a Row,
+    x0: u32,
+    width: u32,
+    y: u32,
+    out: &mut Vec<(&'a Component, [u32; 4])>,
+    diags: &mut Vec<Diag>,
+) -> u32 {
     let Some(h) = natural_row(r) else {
-        diags.push(Diag::new("a row needs a `height` (or children with one)", r.span));
+        diags.push(Diag::new(
+            "a row needs a `height` (or children with one)",
+            r.span,
+        ));
         return 0;
     };
     if h == 0 || h > MAX_HEIGHT {
-        diags.push(Diag::new(format!("a row is 1 to {MAX_HEIGHT} grid rows high"), r.span));
+        diags.push(Diag::new(
+            format!("a row is 1 to {MAX_HEIGHT} grid rows high"),
+            r.span,
+        ));
     }
     let sizes: Vec<Option<u32>> = r
         .children
@@ -107,7 +123,17 @@ fn place_row<'a>(r: &'a Row, x0: u32, width: u32, y: u32, out: &mut Vec<(&'a Com
     let parts = match shares(width as i64 - fixed, unknown) {
         Some(p) if fixed <= width as i64 => p,
         _ => {
-            diags.push(Diag::new(format!("the row is {width} columns wide: its parts take {fixed}{}", if unknown > 0 { format!(", and {unknown} more need at least one each") } else { String::new() }), r.span));
+            diags.push(Diag::new(
+                format!(
+                    "the row is {width} columns wide: its parts take {fixed}{}",
+                    if unknown > 0 {
+                        format!(", and {unknown} more need at least one each")
+                    } else {
+                        String::new()
+                    }
+                ),
+                r.span,
+            ));
             // placed anyway, for the problems of what is in it
             vec![1; unknown]
         }
@@ -121,7 +147,10 @@ fn place_row<'a>(r: &'a Row, x0: u32, width: u32, y: u32, out: &mut Vec<(&'a Com
             Block::Component(c) => {
                 let ch = c.height.unwrap_or(h);
                 if ch == 0 || ch > h {
-                    diags.push(Diag::new(format!("the component is {ch} high, in a row {h} high"), c.span));
+                    diags.push(Diag::new(
+                        format!("the component is {ch} high, in a row {h} high"),
+                        c.span,
+                    ));
                 }
                 if w == 0 {
                     diags.push(Diag::new("a component is at least 1 column wide", c.span));
@@ -136,7 +165,15 @@ fn place_row<'a>(r: &'a Row, x0: u32, width: u32, y: u32, out: &mut Vec<(&'a Com
     h
 }
 
-fn place_column<'a>(col: &'a Column, x: u32, width: u32, y0: u32, height: u32, out: &mut Vec<(&'a Component, [u32; 4])>, diags: &mut Vec<Diag>) {
+fn place_column<'a>(
+    col: &'a Column,
+    x: u32,
+    width: u32,
+    y0: u32,
+    height: u32,
+    out: &mut Vec<(&'a Component, [u32; 4])>,
+    diags: &mut Vec<Diag>,
+) {
     let sizes: Vec<Option<u32>> = col
         .children
         .iter()
@@ -152,7 +189,17 @@ fn place_column<'a>(col: &'a Column, x: u32, width: u32, y0: u32, height: u32, o
     let parts = match shares(height as i64 - fixed, unknown) {
         Some(p) if fixed <= height as i64 => p,
         _ => {
-            diags.push(Diag::new(format!("the column is {height} high: its parts take {fixed}{}", if unknown > 0 { format!(", and {unknown} more need at least one each") } else { String::new() }), col.span));
+            diags.push(Diag::new(
+                format!(
+                    "the column is {height} high: its parts take {fixed}{}",
+                    if unknown > 0 {
+                        format!(", and {unknown} more need at least one each")
+                    } else {
+                        String::new()
+                    }
+                ),
+                col.span,
+            ));
             return;
         }
     };
@@ -164,7 +211,10 @@ fn place_column<'a>(col: &'a Column, x: u32, width: u32, y0: u32, height: u32, o
             Block::Space(..) => y += h,
             Block::Component(c) => {
                 if c.width.is_some_and(|w| w != width) {
-                    diags.push(Diag::new(format!("a component in a column is as wide as the column ({width})"), c.span));
+                    diags.push(Diag::new(
+                        format!("a component in a column is as wide as the column ({width})"),
+                        c.span,
+                    ));
                 }
                 out.push((&**c, [x, y, width, h]));
                 y += h;
@@ -182,19 +232,33 @@ fn place_column<'a>(col: &'a Column, x: u32, width: u32, y0: u32, height: u32, o
 /// A page cut into rows and columns; components by their index.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cut {
-    Row { height: u32, children: Vec<Cut> },
-    Column { width: u32, children: Vec<Cut> },
+    Row {
+        height: u32,
+        children: Vec<Cut>,
+    },
+    Column {
+        width: u32,
+        children: Vec<Cut>,
+    },
     Space(u32),
     /// in a row: its width, its height when lower than the row's; in a column: its height;
     /// on the page: `at`
-    Comp { idx: usize, width: Option<u32>, height: Option<u32>, at: Option<[u32; 4]> },
+    Comp {
+        idx: usize,
+        width: Option<u32>,
+        height: Option<u32>,
+        at: Option<[u32; 4]>,
+    },
 }
 
 type Item = (usize, [u32; 4]);
 
 /// Groups of items whose spans (`span(item) = (start, end)`) do not cross from one group to
 /// the next, in order.
-fn groups(mut items: Vec<Item>, span: impl Fn(&[u32; 4]) -> (u32, u32)) -> Vec<(u32, u32, Vec<Item>)> {
+fn groups(
+    mut items: Vec<Item>,
+    span: impl Fn(&[u32; 4]) -> (u32, u32),
+) -> Vec<(u32, u32, Vec<Item>)> {
     items.sort_by_key(|(i, r)| (span(r).0, r[1], r[0], *i));
     let mut out: Vec<(u32, u32, Vec<Item>)> = Vec::new();
     for it in items {
@@ -221,10 +285,18 @@ pub fn cut_page(items: &[Item]) -> Vec<Cut> {
             out.push(Cut::Space(top - y));
         }
         match cut_row(&band, 0, COLUMNS, top, bottom - top) {
-            Some(children) => out.push(Cut::Row { height: bottom - top, children }),
+            Some(children) => out.push(Cut::Row {
+                height: bottom - top,
+                children,
+            }),
             None => {
                 for (idx, r) in &band {
-                    out.push(Cut::Comp { idx: *idx, width: None, height: None, at: Some(*r) });
+                    out.push(Cut::Comp {
+                        idx: *idx,
+                        width: None,
+                        height: None,
+                        at: Some(*r),
+                    });
                 }
                 out.push(Cut::Space(bottom - top));
             }
@@ -243,9 +315,17 @@ fn cut_row(items: &[Item], x0: u32, _width: u32, top: u32, height: u32) -> Optio
         }
         if g.len() == 1 && g[0].1[1] == top {
             let (idx, r) = g[0];
-            out.push(Cut::Comp { idx, width: Some(r[2]), height: (r[3] != height).then_some(r[3]), at: None });
+            out.push(Cut::Comp {
+                idx,
+                width: Some(r[2]),
+                height: (r[3] != height).then_some(r[3]),
+                at: None,
+            });
         } else {
-            out.push(Cut::Column { width: right - left, children: cut_column(&g, left, right - left, top, height)? });
+            out.push(Cut::Column {
+                width: right - left,
+                children: cut_column(&g, left, right - left, top, height)?,
+            });
         }
         x = right;
     }
@@ -265,14 +345,25 @@ fn cut_column(items: &[Item], x0: u32, width: u32, top: u32, _height: u32) -> Op
         }
         if band.len() == 1 && band[0].1[0] == x0 && band[0].1[2] == width {
             let (idx, r) = band[0];
-            out.push(Cut::Comp { idx, width: None, height: Some(r[3]), at: None });
+            out.push(Cut::Comp {
+                idx,
+                width: None,
+                height: Some(r[3]),
+                at: None,
+            });
         } else {
             let children = cut_row(&band, x0, width, t, b - t)?;
             // a band of one group as wide as the column, that the row cannot split: no progress
-            if children.len() == 1 && matches!(children[0], Cut::Column { .. }) && band.len() == items.len() {
+            if children.len() == 1
+                && matches!(children[0], Cut::Column { .. })
+                && band.len() == items.len()
+            {
                 return None;
             }
-            out.push(Cut::Row { height: b - t, children });
+            out.push(Cut::Row {
+                height: b - t,
+                children,
+            });
         }
         y = b;
     }
@@ -283,7 +374,15 @@ fn cut_column(items: &[Item], x0: u32, width: u32, top: u32, _height: u32) -> Op
 mod tests {
     use super::*;
 
-    fn rects(cuts: &[Cut], x0: u32, y0: u32, w: u32, h: u32, row: bool, out: &mut Vec<(usize, [u32; 4])>) -> u32 {
+    fn rects(
+        cuts: &[Cut],
+        x0: u32,
+        y0: u32,
+        w: u32,
+        h: u32,
+        row: bool,
+        out: &mut Vec<(usize, [u32; 4])>,
+    ) -> u32 {
         // the inverse of cutting, on the cut tree directly (the parser's placing is tested
         // through files)
         let mut x = x0;
@@ -297,7 +396,12 @@ mod tests {
                         y += n
                     }
                 }
-                Cut::Comp { idx, width, height, at } => {
+                Cut::Comp {
+                    idx,
+                    width,
+                    height,
+                    at,
+                } => {
                     if let Some(a) = at {
                         out.push((*idx, *a));
                     } else if row {
@@ -354,17 +458,36 @@ mod tests {
             (12, [0, 23, 24, 8]),
         ]);
         assert_eq!(cuts.len(), 6);
-        assert!(matches!(&cuts[4], Cut::Row { height: 9, children } if matches!(&children[1], Cut::Column { width: 8, .. })));
+        assert!(
+            matches!(&cuts[4], Cut::Row { height: 9, children } if matches!(&children[1], Cut::Column { width: 8, .. }))
+        );
     }
 
     #[test]
     fn holes_offsets_and_overlaps() {
-        roundtrip(vec![(0, [2, 3, 4, 2]), (1, [10, 4, 4, 6]), (2, [0, 12, 6, 2])]);
+        roundtrip(vec![
+            (0, [2, 3, 4, 2]),
+            (1, [10, 4, 4, 6]),
+            (2, [0, 12, 6, 2]),
+        ]);
         // a pinwheel cannot be cut: placed
-        let cuts = roundtrip(vec![(0, [0, 0, 8, 2]), (1, [8, 0, 2, 8]), (2, [2, 8, 8, 2]), (3, [0, 2, 2, 8]), (4, [2, 2, 6, 6])]);
-        assert!(cuts.iter().any(|c| matches!(c, Cut::Comp { at: Some(_), .. })));
+        let cuts = roundtrip(vec![
+            (0, [0, 0, 8, 2]),
+            (1, [8, 0, 2, 8]),
+            (2, [2, 8, 8, 2]),
+            (3, [0, 2, 2, 8]),
+            (4, [2, 2, 6, 6]),
+        ]);
+        assert!(cuts
+            .iter()
+            .any(|c| matches!(c, Cut::Comp { at: Some(_), .. })));
         roundtrip(vec![(0, [0, 0, 6, 4]), (1, [3, 2, 6, 4])]);
         // nested: a column holding a row of two
-        roundtrip(vec![(0, [0, 0, 12, 6]), (1, [12, 0, 12, 2]), (2, [12, 2, 6, 4]), (3, [18, 2, 6, 4])]);
+        roundtrip(vec![
+            (0, [0, 0, 12, 6]),
+            (1, [12, 0, 12, 2]),
+            (2, [12, 2, 6, 4]),
+            (3, [18, 2, 6, 4]),
+        ]);
     }
 }

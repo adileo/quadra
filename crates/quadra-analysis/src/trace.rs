@@ -7,7 +7,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 fn location(project: &Project, span: Span) -> String {
     let f = project.file(span.file);
-    let line = f.text[..usize::from(span.range.start()).min(f.text.len())].matches('\n').count() + 1;
+    let line = f.text[..usize::from(span.range.start()).min(f.text.len())]
+        .matches('\n')
+        .count()
+        + 1;
     let rel = f.path.strip_prefix(&project.root).unwrap_or(&f.path);
     format!("{}:{line}", rel.display())
 }
@@ -28,10 +31,13 @@ fn describe(model: &Model, n: &Node) -> String {
             .entities
             .iter()
             .flat_map(|e| {
-                e.posts.iter().filter(|p| p.ledger == n.0).map(move |p| match &p.when {
-                    Some(w) => format!("{} when {}", e.name, print::expr(w)),
-                    None => e.name.clone(),
-                })
+                e.posts
+                    .iter()
+                    .filter(|p| p.ledger == n.0)
+                    .map(move |p| match &p.when {
+                        Some(w) => format!("{} when {}", e.name, print::expr(w)),
+                        None => e.name.clone(),
+                    })
             })
             .collect();
         return format!("← posted by {}", posters.join(", "));
@@ -39,12 +45,17 @@ fn describe(model: &Model, n: &Node) -> String {
     if n.0 == "metric" {
         return String::new();
     }
-    let Some(f) = model.entity(&n.0).and_then(|e| model.find_field(e, n.1.trim_end_matches("#default"))) else {
+    let Some(f) = model
+        .entity(&n.0)
+        .and_then(|e| model.find_field(e, n.1.trim_end_matches("#default")))
+    else {
         return "built-in".into();
     };
     match (&f.formula, &f.default, f.kind) {
         (Some(x), _, _) => format!("= {}", print::expr(x)),
-        (_, _, FieldKind::LedgerKey | FieldKind::LedgerMeasure | FieldKind::LedgerAttr) => "ledger column".into(),
+        (_, _, FieldKind::LedgerKey | FieldKind::LedgerMeasure | FieldKind::LedgerAttr) => {
+            "ledger column".into()
+        }
         (_, Some(d), _) => format!("stored · default {}", print::expr(d)),
         _ => "stored".into(),
     }
@@ -59,10 +70,21 @@ fn is_derived(model: &Model, n: &Node) -> bool {
             .map_or(false, |f| f.formula.is_some())
 }
 
-pub fn trace(project: &Project, model: &Model, report: &Report, target: &str) -> Result<String, String> {
-    let (ent, field) = target.split_once('.').ok_or_else(|| format!("expected Entity.field, got `{target}`"))?;
-    let e = model.entity(ent).ok_or_else(|| format!("unknown entity `{ent}`"))?;
-    let f = model.find_field(e, field).ok_or_else(|| format!("`{ent}` has no field `{field}`"))?;
+pub fn trace(
+    project: &Project,
+    model: &Model,
+    report: &Report,
+    target: &str,
+) -> Result<String, String> {
+    let (ent, field) = target
+        .split_once('.')
+        .ok_or_else(|| format!("expected Entity.field, got `{target}`"))?;
+    let e = model
+        .entity(ent)
+        .ok_or_else(|| format!("unknown entity `{ent}`"))?;
+    let f = model
+        .find_field(e, field)
+        .ok_or_else(|| format!("`{ent}` has no field `{field}`"))?;
     let root: Node = (ent.to_string(), field.to_string());
     let mut out = String::new();
 
@@ -71,8 +93,14 @@ pub fn trace(project: &Project, model: &Model, report: &Report, target: &str) ->
         FieldKind::Stored => "stored field",
         _ => "ledger column",
     };
-    let ty = f.ty.as_ref().map(print::ty).unwrap_or_else(|| "(inferred)".into());
-    out.push_str(&format!("{target} : {ty}    {kind} · {}\n", location(project, f.span)));
+    let ty =
+        f.ty.as_ref()
+            .map(print::ty)
+            .unwrap_or_else(|| "(inferred)".into());
+    out.push_str(&format!(
+        "{target} : {ty}    {kind} · {}\n",
+        location(project, f.span)
+    ));
     if let Some(x) = &f.formula {
         out.push_str(&format!("  = {}\n", print::expr(x)));
     }
@@ -87,29 +115,57 @@ pub fn trace(project: &Project, model: &Model, report: &Report, target: &str) ->
     let mut constraints = Vec::new();
     if let Some(w) = &f.where_ {
         constraints.push(match w {
-            quadra_ir::Where::Compare(op, x) => format!("where {} {}", print::binop(*op), print::expr(x)),
+            quadra_ir::Where::Compare(op, x) => {
+                format!("where {} {}", print::binop(*op), print::expr(x))
+            }
             quadra_ir::Where::Expr(x) => format!("where {}", print::expr(x)),
         });
     }
     if let Some(r) = &f.required_when {
         constraints.push(format!("required when {}", print::expr(r)));
     }
-    let word = |s: &str| s.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == field);
+    let word = |s: &str| {
+        s.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == field)
+    };
     for c in &e.checks {
         let text = print::expr(&c.cond);
         if word(&text) {
-            constraints.push(format!("{} {}    {}", if c.warn { "warn" } else { "check" }, text, location(project, c.span)));
+            constraints.push(format!(
+                "{} {}    {}",
+                if c.warn { "warn" } else { "check" },
+                text,
+                location(project, c.span)
+            ));
         }
     }
     // the lines of a frozen document are frozen with it
-    if let Some((owner, fr)) = model.frozen_owner(e).and_then(|o| o.frozen.as_ref().map(|fr| (o, fr))) {
-        let live = e.frozen.as_ref().map_or(false, |own| own.live.iter().any(|l| l == field)) || e.live_decls.iter().any(|(l, _)| l == field);
+    if let Some((owner, fr)) = model
+        .frozen_owner(e)
+        .and_then(|o| o.frozen.as_ref().map(|fr| (o, fr)))
+    {
+        let live = e
+            .frozen
+            .as_ref()
+            .map_or(false, |own| own.live.iter().any(|l| l == field))
+            || e.live_decls.iter().any(|(l, _)| l == field);
         let when = if owner.name == e.name {
             format!("frozen when {}", print::expr(&fr.when))
         } else {
-            format!("frozen with its {} (frozen when {})", owner.name, print::expr(&fr.when))
+            format!(
+                "frozen with its {} (frozen when {})",
+                owner.name,
+                print::expr(&fr.when)
+            )
         };
-        constraints.push(format!("{when}{}", if live { "  (this formula stays live)" } else { "" }));
+        constraints.push(format!(
+            "{when}{}",
+            if live {
+                "  (this formula stays live)"
+            } else {
+                ""
+            }
+        ));
     }
     if !constraints.is_empty() {
         out.push_str("\nConstraints\n");
@@ -135,10 +191,16 @@ pub fn trace(project: &Project, model: &Model, report: &Report, target: &str) ->
         for n in &stored {
             let mut writers: BTreeMap<String, String> = BTreeMap::new();
             for (ctx, span) in report.writes.get(n).map(Vec::as_slice).unwrap_or(&[]) {
-                if ctx.starts_with("test ") || ctx.starts_with("fixture ") || ctx == "seed" || ctx.is_empty() {
+                if ctx.starts_with("test ")
+                    || ctx.starts_with("fixture ")
+                    || ctx == "seed"
+                    || ctx.is_empty()
+                {
                     continue;
                 }
-                writers.entry(ctx.clone()).or_insert_with(|| location(project, *span));
+                writers
+                    .entry(ctx.clone())
+                    .or_insert_with(|| location(project, *span));
             }
             let flow_governed = model
                 .entity(&n.0)
@@ -178,8 +240,20 @@ pub fn trace(project: &Project, model: &Model, report: &Report, target: &str) ->
     Ok(out)
 }
 
-fn tree(model: &Model, report: &Report, n: &Node, depth: usize, seen: &mut HashSet<Node>, stored: &mut BTreeSet<Node>, out: &mut String) {
-    let mut kids: Vec<Node> = report.reads.get(n).map(|v| v.iter().map(|(t, _)| t.clone()).collect()).unwrap_or_default();
+fn tree(
+    model: &Model,
+    report: &Report,
+    n: &Node,
+    depth: usize,
+    seen: &mut HashSet<Node>,
+    stored: &mut BTreeSet<Node>,
+    out: &mut String,
+) {
+    let mut kids: Vec<Node> = report
+        .reads
+        .get(n)
+        .map(|v| v.iter().map(|(t, _)| t.clone()).collect())
+        .unwrap_or_default();
     kids.sort();
     kids.dedup();
     for k in kids {

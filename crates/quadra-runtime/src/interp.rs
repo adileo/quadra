@@ -2,9 +2,9 @@
 //! constraints and permissions.
 
 use crate::store::{Cause, LedgerRow, Record, Store};
+use crate::time;
 use crate::value::{list, text, Closure, Id, V};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
-use crate::time;
 use quadra_ir::*;
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
@@ -14,7 +14,9 @@ use std::rc::Rc;
 use quadra_analysis::deps;
 mod incr;
 mod rollup;
-pub use rollup::{COMPUTED as FORMULAS_COMPUTED, DELTAS as FORMULAS_BY_DELTA, STORED as FORMULAS_STORED};
+pub use rollup::{
+    COMPUTED as FORMULAS_COMPUTED, DELTAS as FORMULAS_BY_DELTA, STORED as FORMULAS_STORED,
+};
 mod grouping;
 mod query;
 mod scripts;
@@ -46,7 +48,15 @@ pub struct Conflict {
 
 impl std::fmt::Display for Conflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "transaction {} by {} at {} ({}): {}", self.tx, self.user.as_deref().unwrap_or("system"), self.at, self.cause, self.what.join(", "))
+        write!(
+            f,
+            "transaction {} by {} at {} ({}): {}",
+            self.tx,
+            self.user.as_deref().unwrap_or("system"),
+            self.at,
+            self.cause,
+            self.what.join(", ")
+        )
     }
 }
 
@@ -101,7 +111,13 @@ impl Ctx {
     }
 
     fn for_record(r: &V, entity: &str) -> Ctx {
-        Ctx { this: Some(r.clone()), entity: Some(entity.to_string()), scopes: vec![Default::default()], company: None, as_of: None }
+        Ctx {
+            this: Some(r.clone()),
+            entity: Some(entity.to_string()),
+            scopes: vec![Default::default()],
+            company: None,
+            as_of: None,
+        }
     }
 }
 
@@ -134,6 +150,11 @@ pub struct Statics {
     pub(crate) trusted: std::cell::RefCell<HashMap<(String, String), bool>>,
     pub(crate) trusted_ptr: std::cell::RefCell<HashMap<(usize, usize), bool>>,
 }
+
+/// The most elements a list made at once holds (a range), whatever the job's own limit.
+pub const MAX_VALUES: usize = 10_000_000;
+/// The longest text a concatenation makes.
+pub const MAX_TEXT: usize = 64 << 20;
 
 pub struct Interp<'m> {
     /// Persistence of committed transactions (None = in memory only).
@@ -244,7 +265,12 @@ pub struct RuleSel {
 
 impl RuleSel {
     pub fn is_empty(&self) -> bool {
-        !self.all && self.required.is_empty() && self.wheres.is_empty() && self.records.is_empty() && self.checks.is_empty() && !self.warnings
+        !self.all
+            && self.required.is_empty()
+            && self.wheres.is_empty()
+            && self.records.is_empty()
+            && self.checks.is_empty()
+            && !self.warnings
     }
 
     pub fn merge(&mut self, o: &RuleSel) {
@@ -285,7 +311,10 @@ fn hundred() -> Decimal {
 
 impl<'m> Interp<'m> {
     pub fn new(m: &'m Model) -> Interp<'m> {
-        let clock = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let clock = NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
         Interp {
             sink: None,
             materialize: Vec::new(),
@@ -294,7 +323,12 @@ impl<'m> Interp<'m> {
             clock,
             user: None,
             company: None,
-            cause: Rc::new(Cause { desc: "setup".into(), user: "system".into(), time: clock, parent: None }),
+            cause: Rc::new(Cause {
+                desc: "setup".into(),
+                user: "system".into(),
+                time: clock,
+                parent: None,
+            }),
             system: 0,
             script: 0,
             ctor_depth: 0,
@@ -343,14 +377,22 @@ impl<'m> Interp<'m> {
 
     /// The entity of a record ("" when there is none).
     fn ent_of(&mut self, id: Id) -> Rc<str> {
-        self.store.get(id).map(|r| r.ent.clone()).unwrap_or_else(|| Rc::from(""))
+        self.store
+            .get(id)
+            .map(|r| r.ent.clone())
+            .unwrap_or_else(|| Rc::from(""))
     }
 
     /// Records of an entity (or of the implementors of a trait).
     pub fn ids(&mut self, ent: &str, as_of: Option<u64>) -> Vec<Id> {
         let mut out: Vec<Id> = Vec::new();
         let names: Vec<String> = match self.m.entity(ent) {
-            Some(e) if e.kind == EntityKind::Trait => self.m.implementors(ent).iter().map(|e| e.name.clone()).collect(),
+            Some(e) if e.kind == EntityKind::Trait => self
+                .m
+                .implementors(ent)
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
             _ => vec![ent.to_string()],
         };
         for n in names {
@@ -368,12 +410,20 @@ impl<'m> Interp<'m> {
         if let Some(u) = self.user {
             self.store.load_as(u, "User");
         }
-        self.user.and_then(|u| self.store.read(u, "login", None)).map(|v| v.to_string()).unwrap_or_else(|| "system".into())
+        self.user
+            .and_then(|u| self.store.read(u, "login", None))
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "system".into())
     }
 
     pub fn with_cause<T>(&mut self, desc: String, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
         let parent = self.cause.clone();
-        self.cause = Rc::new(Cause { desc, user: self.user_name(), time: self.clock, parent: Some(parent.clone()) });
+        self.cause = Rc::new(Cause {
+            desc,
+            user: self.user_name(),
+            time: self.clock,
+            parent: Some(parent.clone()),
+        });
         let r = f(self);
         self.cause = parent;
         r
@@ -386,21 +436,52 @@ impl<'m> Interp<'m> {
     pub fn set_clock(&mut self, t: NaiveDateTime) {
         self.clock = t;
         if self.cause.parent.is_none() && self.cause.desc == "setup" {
-            self.cause = Rc::new(Cause { desc: "setup".into(), user: "system".into(), time: t, parent: None });
+            self.cause = Rc::new(Cause {
+                desc: "setup".into(),
+                user: "system".into(),
+                time: t,
+                parent: None,
+            });
         }
     }
 
     pub fn load_units(&mut self) {
         for id in self.ids("Uom", None) {
-            let code = self.store.read(id, "code", None).map(|v| v.to_string()).unwrap_or_default();
-            let factor = self.store.read(id, "factor", None).and_then(|v| v.num()).unwrap_or(Decimal::ONE);
-            let precision = self.store.read(id, "precision", None).and_then(|v| v.num()).unwrap_or(parse_dec("0.001"));
-            let cat = self.store.read(id, "category", None).and_then(|v| v.as_ref_id()).unwrap_or(0);
-            self.units.insert(code, (factor, cat.to_string(), precision));
+            let code = self
+                .store
+                .read(id, "code", None)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let factor = self
+                .store
+                .read(id, "factor", None)
+                .and_then(|v| v.num())
+                .unwrap_or(Decimal::ONE);
+            let precision = self
+                .store
+                .read(id, "precision", None)
+                .and_then(|v| v.num())
+                .unwrap_or(parse_dec("0.001"));
+            let cat = self
+                .store
+                .read(id, "category", None)
+                .and_then(|v| v.as_ref_id())
+                .unwrap_or(0);
+            self.units
+                .insert(code, (factor, cat.to_string(), precision));
         }
         for id in self.ids("Currency", None) {
-            let code = self.store.read(id, "code", None).map(|v| v.to_string()).unwrap_or_default();
-            let dec = self.store.read(id, "decimals", None).and_then(|v| v.num()).and_then(|n| n.to_u32()).unwrap_or(2);
+            let code = self
+                .store
+                .read(id, "code", None)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let dec = self
+                .store
+                .read(id, "decimals", None)
+                .and_then(|v| v.num())
+                .and_then(|n| n.to_u32())
+                .unwrap_or(2);
             self.currencies.insert(code.clone(), dec);
             self.currency_ids.insert(code, id);
         }
@@ -408,7 +489,11 @@ impl<'m> Interp<'m> {
 
     /// The units and currencies loaded (`load_units`).
     pub fn units(&self) -> Units {
-        Units { units: self.units.clone(), currencies: self.currencies.clone(), currency_ids: self.currency_ids.clone() }
+        Units {
+            units: self.units.clone(),
+            currencies: self.currencies.clone(),
+            currency_ids: self.currency_ids.clone(),
+        }
     }
 
     /// Units and currencies read before (instead of `load_units`).
@@ -448,7 +533,11 @@ impl<'m> Interp<'m> {
 
     /// The rounding mode of a currency (`Currency.rounding`): half-even unless it says otherwise.
     fn rounding(&mut self, cur: &str) -> RoundingStrategy {
-        let mode = self.currency_ids.get(cur).copied().and_then(|id| self.store.read(id, "rounding", None));
+        let mode = self
+            .currency_ids
+            .get(cur)
+            .copied()
+            .and_then(|id| self.store.read(id, "rounding", None));
         match mode {
             Some(V::Variant { name, .. }) => match &*name {
                 "HalfUp" => RoundingStrategy::MidpointAwayFromZero,
@@ -462,7 +551,11 @@ impl<'m> Interp<'m> {
 
     fn code_of(&mut self, v: &V) -> R<String> {
         match v {
-            V::Ref { id, .. } => Ok(self.store.read(*id, "code", None).map(|c| c.to_string()).unwrap_or_default()),
+            V::Ref { id, .. } => Ok(self
+                .store
+                .read(*id, "code", None)
+                .map(|c| c.to_string())
+                .unwrap_or_default()),
             V::Text(t) => Ok(t.to_string()),
             other => fail(format!("expected a unit or currency, found {other}")),
         }
@@ -470,7 +563,12 @@ impl<'m> Interp<'m> {
 
     /// The zero `z` stands for (`0 EUR`, `0 pcs`, `0 EUR/pcs`), its currency and unit read
     /// from `this` and the locals of `ctx`; `None` when one of them is not known (yet).
-    fn typed_zero(&mut self, z: &quadra_ir::Zero, this: Option<&V>, ctx: Option<&Ctx>) -> Option<V> {
+    fn typed_zero(
+        &mut self,
+        z: &quadra_ir::Zero,
+        this: Option<&V>,
+        ctx: Option<&Ctx>,
+    ) -> Option<V> {
         let mut codes = Vec::new();
         for u in &z.units {
             let code = match u {
@@ -482,7 +580,10 @@ impl<'m> Interp<'m> {
                         "current" => V::Current,
                         _ => match ctx.and_then(|c| c.local(root)).cloned() {
                             Some(v) => v,
-                            None if root == "company" => V::Ref { ent: Rc::from("Company"), id: ctx.and_then(|c| c.company).or(self.company)? },
+                            None if root == "company" => V::Ref {
+                                ent: Rc::from("Company"),
+                                id: ctx.and_then(|c| c.company).or(self.company)?,
+                            },
                             None => return None,
                         },
                     };
@@ -493,7 +594,9 @@ impl<'m> Interp<'m> {
                         cur = self.get(&cur, seg, None, None).ok()?;
                     }
                     match cur {
-                        V::Ref { .. } | V::Text(_) => self.code_of(&cur).ok().filter(|c| !c.is_empty())?,
+                        V::Ref { .. } | V::Text(_) => {
+                            self.code_of(&cur).ok().filter(|c| !c.is_empty())?
+                        }
                         _ => return None,
                     }
                 }
@@ -501,9 +604,19 @@ impl<'m> Interp<'m> {
             codes.push(Rc::<str>::from(code.as_str()));
         }
         Some(match z.kind {
-            ZeroKind::Money => V::Money { amt: Decimal::ZERO, cur: codes[0].clone() },
-            ZeroKind::Qty => V::Qty { v: Decimal::ZERO, unit: codes[0].clone() },
-            ZeroKind::Price => V::Price { amt: Decimal::ZERO, cur: codes[0].clone(), per: codes.get(1)?.clone() },
+            ZeroKind::Money => V::Money {
+                amt: Decimal::ZERO,
+                cur: codes[0].clone(),
+            },
+            ZeroKind::Qty => V::Qty {
+                v: Decimal::ZERO,
+                unit: codes[0].clone(),
+            },
+            ZeroKind::Price => V::Price {
+                amt: Decimal::ZERO,
+                cur: codes[0].clone(),
+                per: codes.get(1)?.clone(),
+            },
         })
     }
 
@@ -519,7 +632,17 @@ impl<'m> Interp<'m> {
     }
 
     fn by_code(&mut self, ent: &str, code: &str) -> Option<V> {
-        self.ids(ent, None).into_iter().find(|id| self.store.read(*id, "code", None).map_or(false, |c| c.to_string() == code)).map(|id| V::Ref { ent: Rc::from(ent), id })
+        self.ids(ent, None)
+            .into_iter()
+            .find(|id| {
+                self.store
+                    .read(*id, "code", None)
+                    .map_or(false, |c| c.to_string() == code)
+            })
+            .map(|id| V::Ref {
+                ent: Rc::from(ent),
+                id,
+            })
     }
 
     // ---- reading members --------------------------------------------------------------
@@ -529,14 +652,30 @@ impl<'m> Interp<'m> {
     pub fn get(&mut self, rec: &V, name: &str, company: Option<Id>, as_of: Option<u64>) -> R<V> {
         match rec {
             V::Ref { ent, id } => self.get_ref(ent, *id, name, company, as_of),
-            V::Rec { fields, .. } => Ok(fields.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()).unwrap_or(V::None)),
+            V::Rec { fields, .. } => Ok(fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(V::None)),
             V::Tuple(items) => match items.iter().find(|(n, _)| n.as_deref() == Some(name)) {
                 Some((_, v)) => Ok(v.clone()),
                 None => fail(format!("no field `{name}` in {rec}")),
             },
             V::Current => Ok(match name {
-                "user" => self.user.map(|id| V::Ref { ent: Rc::from("User"), id }).unwrap_or(V::None),
-                "company" => self.company.map(|id| V::Ref { ent: Rc::from("Company"), id }).unwrap_or(V::None),
+                "user" => self
+                    .user
+                    .map(|id| V::Ref {
+                        ent: Rc::from("User"),
+                        id,
+                    })
+                    .unwrap_or(V::None),
+                "company" => self
+                    .company
+                    .map(|id| V::Ref {
+                        ent: Rc::from("Company"),
+                        id,
+                    })
+                    .unwrap_or(V::None),
                 _ => V::None,
             }),
             V::Money { amt, cur } => match name {
@@ -573,7 +712,19 @@ impl<'m> Interp<'m> {
         }
     }
 
-    fn get_ref(&mut self, ent: &str, id: Id, name: &str, company: Option<Id>, as_of: Option<u64>) -> R<V> {
+    fn get_ref(
+        &mut self,
+        ent: &str,
+        id: Id,
+        name: &str,
+        company: Option<Id>,
+        as_of: Option<u64>,
+    ) -> R<V> {
+        // a column a caller wrote (`/v1/query`): evaluated as that caller, never with the rights
+        // of the model's own formulas
+        if name.starts_with("__col_") {
+            return self.get_ref_inner(ent, id, name, company, as_of);
+        }
         // a record's own formulas read what they read, whoever looks at them
         self.viewer_pause += 1;
         let r = self.get_ref_inner(ent, id, name, company, as_of);
@@ -581,7 +732,14 @@ impl<'m> Interp<'m> {
         r
     }
 
-    fn get_ref_inner(&mut self, ent: &str, id: Id, name: &str, company: Option<Id>, as_of: Option<u64>) -> R<V> {
+    fn get_ref_inner(
+        &mut self,
+        ent: &str,
+        id: Id,
+        name: &str,
+        company: Option<Id>,
+        as_of: Option<u64>,
+    ) -> R<V> {
         let e = self.entity(ent)?;
         if e.is_ledger {
             let Some(row) = self.store.ledger_row(id) else {
@@ -612,7 +770,13 @@ impl<'m> Interp<'m> {
             return Ok(match name {
                 "id" => text(&id.to_string()),
                 "created_at" => rec.map(|r| V::DateTime(r.created_at)).unwrap_or(V::None),
-                "created_by" => rec.and_then(|r| r.created_by).map(|u| V::Ref { ent: Rc::from("User"), id: u }).unwrap_or(V::None),
+                "created_by" => rec
+                    .and_then(|r| r.created_by)
+                    .map(|u| V::Ref {
+                        ent: Rc::from("User"),
+                        id: u,
+                    })
+                    .unwrap_or(V::None),
                 // the last transaction that wrote the record: when and by whom
                 "updated_at" | "updated_by" => {
                     let Some(r) = rec else { return Ok(V::None) };
@@ -629,16 +793,28 @@ impl<'m> Interp<'m> {
                     if name == "updated_at" {
                         V::DateTime(at)
                     } else {
-                        by.map(|u| V::Ref { ent: Rc::from("User"), id: u }).unwrap_or(V::None)
+                        by.map(|u| V::Ref {
+                            ent: Rc::from("User"),
+                            id: u,
+                        })
+                        .unwrap_or(V::None)
                     }
                 }
                 "version" => {
                     // the whole history (a record read from its projection row has only its last values)
                     self.store.history_from(id, 0);
-                    V::Int(self.store.records.get(&id).map(|r| r.history.len() as i64).unwrap_or(0))
+                    V::Int(
+                        self.store
+                            .records
+                            .get(&id)
+                            .map(|r| r.history.len() as i64)
+                            .unwrap_or(0),
+                    )
                 }
                 "warnings" => {
-                    let mut out: Vec<V> = rec.map(|r| r.warnings.iter().map(|w| text(w)).collect()).unwrap_or_default();
+                    let mut out: Vec<V> = rec
+                        .map(|r| r.warnings.iter().map(|w| text(w)).collect())
+                        .unwrap_or_default();
                     for ce in &self.m.entities {
                         let Some(pf) = ce.fields.iter().find(|f| f.parent) else {
                             continue;
@@ -654,8 +830,15 @@ impl<'m> Interp<'m> {
                 _ => return fail(format!("`{actual}` has no field `{name}`")),
             });
         };
-        let this = V::Ref { ent: actual.clone(), id };
-        let company = if f.per_company { company.or(self.company) } else { None };
+        let this = V::Ref {
+            ent: actual.clone(),
+            id,
+        };
+        let company = if f.per_company {
+            company.or(self.company)
+        } else {
+            None
+        };
         if let Some(formula) = &f.formula {
             // before the transaction (a rollup's old contributions): its stored value
             if self.inc.old_view {
@@ -663,8 +846,16 @@ impl<'m> Interp<'m> {
             }
             // frozen records, and the lines of a frozen document, read the world as of the
             // moment it was frozen; `live` formulas keep following the data
-            let live = e.frozen.as_ref().map_or(false, |fr| fr.live.iter().any(|l| l == name)) || e.live_decls.iter().any(|(l, _)| l == name);
-            let frozen = if live { None } else { self.frozen_owner(id).map(|(_, t)| t) };
+            let live = e
+                .frozen
+                .as_ref()
+                .map_or(false, |fr| fr.live.iter().any(|l| l == name))
+                || e.live_decls.iter().any(|(l, _)| l == name);
+            let frozen = if live {
+                None
+            } else {
+                self.frozen_owner(id).map(|(_, t)| t)
+            };
             let view = match frozen {
                 Some(t) => Some(as_of.map_or(t, |a| a.min(t))),
                 None => as_of,
@@ -677,7 +868,10 @@ impl<'m> Interp<'m> {
                 (Some(_), None) => false,
             };
             // (a bulk import or a deploy keeps the values it computes: `formula_memo`)
-            let trusted = company.is_none() && self.store.lazy() && self.formula_memo.is_none() && self.trusted_field(e, f);
+            let trusted = company.is_none()
+                && self.store.lazy()
+                && self.formula_memo.is_none()
+                && self.trusted_field(e, f);
             if trusted && current {
                 let settled = frozen.is_some_and(|t| t < self.store.tx);
                 if let Some(v) = self.stored_formula(&actual, f, id, settled)? {
@@ -686,7 +880,11 @@ impl<'m> Interp<'m> {
             }
             let memo = view.is_none() && company.is_none() && self.formula_memo.is_some();
             if memo {
-                if let Some(v) = self.formula_memo.as_ref().and_then(|m| m.get(&(id, f.name.as_str()))) {
+                if let Some(v) = self
+                    .formula_memo
+                    .as_ref()
+                    .and_then(|m| m.get(&(id, f.name.as_str())))
+                {
                     return Ok(v.clone());
                 }
             }
@@ -695,7 +893,13 @@ impl<'m> Interp<'m> {
             ctx.company = company;
             if f.per_company {
                 if let Some(c) = company {
-                    ctx.bind("company", V::Ref { ent: Rc::from("Company"), id: c });
+                    ctx.bind(
+                        "company",
+                        V::Ref {
+                            ent: Rc::from("Company"),
+                            id: c,
+                        },
+                    );
                 }
             }
             self.depth += 1;
@@ -714,7 +918,10 @@ impl<'m> Interp<'m> {
             }
             return r;
         }
-        if self.inc.old_view && matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_))) && inverse_field(self.m, e, f) {
+        if self.inc.old_view
+            && matches!(f.ty, Some(Ty::List(_)) | Some(Ty::Set(_)))
+            && inverse_field(self.m, e, f)
+        {
             return fail("no collection before the transaction");
         }
         // the snapshot applies to formulas; the record's own stored fields are read as asked
@@ -744,7 +951,12 @@ impl<'m> Interp<'m> {
             return Ok(v);
         }
         // default not computed yet
-        if self.store.records.get(&id).map_or(false, |r| r.pending_defaults.iter().any(|p| p == name)) {
+        if self
+            .store
+            .records
+            .get(&id)
+            .map_or(false, |r| r.pending_defaults.iter().any(|p| p == name))
+        {
             return self.compute_default(&actual, id, name);
         }
         Ok(match &f.ty {
@@ -762,17 +974,29 @@ impl<'m> Interp<'m> {
             return Ok(V::None);
         };
         // an override in the entity (`number default …`) wins over the trait's default
-        let expr = e.fields.iter().find(|f| f.name == name && f.default.is_some()).and_then(|f| f.default.as_ref()).or_else(|| self.m.find_field(e, name).and_then(|f| f.default.as_ref()));
+        let expr = e
+            .fields
+            .iter()
+            .find(|f| f.name == name && f.default.is_some())
+            .and_then(|f| f.default.as_ref())
+            .or_else(|| self.m.find_field(e, name).and_then(|f| f.default.as_ref()));
         let Some(expr) = expr else { return Ok(V::None) };
         let per_company = self.m.find_field(e, name).map_or(false, |f| f.per_company);
-        let this = V::Ref { ent: Rc::from(ent), id };
+        let this = V::Ref {
+            ent: Rc::from(ent),
+            id,
+        };
         let mut ctx = Ctx::for_record(&this, ent);
         let v = self.eval(expr, &mut ctx)?;
         let v = match self.m.find_field(e, name) {
             Some(f) => self.zero_for(f.span, v, Some(&this), Some(&ctx)),
             None => v,
         };
-        let key = if per_company { format!("{name}@{}", self.company.unwrap_or(0)) } else { name.to_string() };
+        let key = if per_company {
+            format!("{name}@{}", self.company.unwrap_or(0))
+        } else {
+            name.to_string()
+        };
         self.store.write(id, &key, v.clone());
         Ok(v)
     }
@@ -781,7 +1005,12 @@ impl<'m> Interp<'m> {
     /// lookup with storage on demand, every record otherwise. Callers still filter.
     fn referencing(&mut self, ent: &str, field: &str, id: Id) -> Vec<Id> {
         let names: Vec<String> = match self.m.entity(ent) {
-            Some(e) if e.kind == EntityKind::Trait => self.m.implementors(ent).iter().map(|e| e.name.clone()).collect(),
+            Some(e) if e.kind == EntityKind::Trait => self
+                .m
+                .implementors(ent)
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
             _ => vec![ent.to_string()],
         };
         if !self.store.lazy() {
@@ -794,7 +1023,10 @@ impl<'m> Interp<'m> {
             out.dedup();
             return out;
         }
-        let target = V::Ref { ent: Rc::from(""), id };
+        let target = V::Ref {
+            ent: Rc::from(""),
+            id,
+        };
         let mut out = Vec::new();
         for n in names {
             match self.store.find(&n, field, &target) {
@@ -813,13 +1045,25 @@ impl<'m> Interp<'m> {
         if !self.store.lazy() || ctx.as_of.is_some() {
             return None;
         }
-        let Some(Arg { value: Expr { kind: ExprKind::Lambda { params, body }, .. }, .. }) = args.first() else {
+        let Some(Arg {
+            value:
+                Expr {
+                    kind: ExprKind::Lambda { params, body },
+                    ..
+                },
+            ..
+        }) = args.first()
+        else {
             return None;
         };
         let p = params.first()?;
         fn conjuncts(e: &Expr) -> Vec<&Expr> {
             match &e.kind {
-                ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+                ExprKind::Binary {
+                    op: BinOp::And,
+                    lhs,
+                    rhs,
+                } => {
                     let mut v = conjuncts(lhs);
                     v.extend(conjuncts(rhs));
                     v
@@ -831,7 +1075,12 @@ impl<'m> Interp<'m> {
             format!("{:?}", e.kind).contains(&format!("Name(\"{p}\")"))
         }
         for c in conjuncts(body) {
-            let ExprKind::Binary { op: BinOp::Eq, lhs, rhs } = &c.kind else {
+            let ExprKind::Binary {
+                op: BinOp::Eq,
+                lhs,
+                rhs,
+            } = &c.kind
+            else {
                 continue;
             };
             for (side, other) in [(lhs, rhs), (rhs, lhs)] {
@@ -875,15 +1124,32 @@ impl<'m> Interp<'m> {
             let Some(te) = self.m.entity(through) else {
                 return Ok(None);
             };
-            let back = te.fields.iter().find(|x| ty_names(x.ty.as_ref()) == Some(owner.name.clone())).map(|x| x.name.clone());
-            let fwd = te.fields.iter().find(|x| ty_names(x.ty.as_ref()).as_deref() == Some(child)).map(|x| x.name.clone());
+            let back = te
+                .fields
+                .iter()
+                .find(|x| ty_names(x.ty.as_ref()) == Some(owner.name.clone()))
+                .map(|x| x.name.clone());
+            let fwd = te
+                .fields
+                .iter()
+                .find(|x| ty_names(x.ty.as_ref()).as_deref() == Some(child))
+                .map(|x| x.name.clone());
             let (Some(back), Some(fwd)) = (back, fwd) else {
                 return Ok(None);
             };
             let mut out = Vec::new();
-            let candidates = if as_of.is_none() { self.referencing(through, &back, id) } else { self.ids(through, as_of) };
+            let candidates = if as_of.is_none() {
+                self.referencing(through, &back, id)
+            } else {
+                self.ids(through, as_of)
+            };
             for tid in candidates {
-                if self.store.read(tid, &back, as_of).and_then(|v| v.as_ref_id()) == Some(id) {
+                if self
+                    .store
+                    .read(tid, &back, as_of)
+                    .and_then(|v| v.as_ref_id())
+                    == Some(id)
+                {
                     if let Some(v) = self.store.read(tid, &fwd, as_of) {
                         if !out.contains(&v) {
                             out.push(v);
@@ -898,32 +1164,50 @@ impl<'m> Interp<'m> {
                 .iter()
                 .find(|x| {
                     let n = ty_names(x.ty.as_ref());
-                    n.as_deref() == Some(owner.name.as_str()) || n.map_or(false, |n| owner.traits.contains(&n))
+                    n.as_deref() == Some(owner.name.as_str())
+                        || n.map_or(false, |n| owner.traits.contains(&n))
                 })
                 .map(|x| x.name.clone())
         });
         let Some(back) = back else { return Ok(None) };
         // many-to-many inverse: `partners: {Partner} via tags` where tags is a set
-        let back_is_set = self.field(child, &back).and_then(|bf| bf.ty.as_ref()).map_or(false, |t| matches!(t, Ty::Set(_)));
+        let back_is_set = self
+            .field(child, &back)
+            .and_then(|bf| bf.ty.as_ref())
+            .map_or(false, |t| matches!(t, Ty::Set(_)));
         let back_is_parent = self.field(child, &back).map_or(false, |bf| bf.parent);
         // the records pointing to this one now are those that pointed to it then, when nothing
         // could move since: the lines of a document frozen at or before `as_of` (a frozen
         // document's lines change only with it); otherwise every record is a candidate
         let now_is_then = match as_of {
             None => true,
-            Some(t) => back_is_parent && self.frozen_owner(id).map_or(false, |(_, frozen)| frozen <= t),
+            Some(t) => {
+                back_is_parent
+                    && self
+                        .frozen_owner(id)
+                        .map_or(false, |(_, frozen)| frozen <= t)
+            }
         };
         let mut out = Vec::new();
-        let candidates = if now_is_then { self.referencing(child, &back, id) } else { self.ids(child, as_of) };
+        let candidates = if now_is_then {
+            self.referencing(child, &back, id)
+        } else {
+            self.ids(child, as_of)
+        };
         for cid in candidates {
             let v = self.store.read(cid, &back, as_of);
             let hit = match &v {
                 Some(V::Ref { id: x, .. }) => *x == id,
-                Some(V::Set(items)) | Some(V::List(items)) if back_is_set => items.iter().any(|i| i.as_ref_id() == Some(id)),
+                Some(V::Set(items)) | Some(V::List(items)) if back_is_set => {
+                    items.iter().any(|i| i.as_ref_id() == Some(id))
+                }
                 _ => false,
             };
             if hit {
-                out.push(V::Ref { ent: self.ent_of(cid), id: cid });
+                out.push(V::Ref {
+                    ent: self.ent_of(cid),
+                    id: cid,
+                });
             }
         }
         Ok(Some(if set { V::Set(Rc::new(out)) } else { list(out) }))
@@ -952,8 +1236,13 @@ impl<'m> Interp<'m> {
             // `except` fields still change; the field of a flow only in a migration or change
             Some((owner, _)) if owner == *id => {
                 if let Some(fr) = &e.frozen {
-                    if !fr.except.iter().any(|x| x == name) && !e.flows.iter().any(|fl| fl.field == name) {
-                        return fail(format!("{actual} is frozen ({}): `{name}` cannot change", print::expr(&fr.when)));
+                    if !fr.except.iter().any(|x| x == name)
+                        && !e.flows.iter().any(|fl| fl.field == name)
+                    {
+                        return fail(format!(
+                            "{actual} is frozen ({}): `{name}` cannot change",
+                            print::expr(&fr.when)
+                        ));
                     }
                 }
             }
@@ -961,7 +1250,10 @@ impl<'m> Interp<'m> {
             Some((owner, _)) => {
                 let pe = self.ent_of(owner);
                 if let Some(fr) = self.m.entity(&pe).and_then(|x| x.frozen.as_ref()) {
-                    return fail(format!("{pe} is frozen ({}): its {actual} lines cannot change", print::expr(&fr.when)));
+                    return fail(format!(
+                        "{pe} is frozen ({}): its {actual} lines cannot change",
+                        print::expr(&fr.when)
+                    ));
                 }
             }
             None => {}
@@ -974,7 +1266,14 @@ impl<'m> Interp<'m> {
             self.store.prefetch_refs(&[*id], 3);
         }
         // a change setting the state of a flow back out of the frozen states unfreezes now
-        if e.flows.iter().any(|fl| fl.field == name) && self.store.records.get(id).map_or(false, |r| r.frozen_at.is_some()) && !self.frozen_holds(*id, None)? {
+        if e.flows.iter().any(|fl| fl.field == name)
+            && self
+                .store
+                .records
+                .get(id)
+                .map_or(false, |r| r.frozen_at.is_some())
+            && !self.frozen_holds(*id, None)?
+        {
             self.thaw(*id);
         }
         Ok(())
@@ -990,8 +1289,14 @@ impl<'m> Interp<'m> {
                 return Some((cur, t));
             }
             let ce = self.ent_of(cur);
-            let pf = self.m.entity(&ce).and_then(|x| x.fields.iter().find(|f| f.parent))?;
-            cur = self.store.read(cur, &pf.name, None).and_then(|v| v.as_ref_id())?;
+            let pf = self
+                .m
+                .entity(&ce)
+                .and_then(|x| x.fields.iter().find(|f| f.parent))?;
+            cur = self
+                .store
+                .read(cur, &pf.name, None)
+                .and_then(|v| v.as_ref_id())?;
         }
         None
     }
@@ -1013,9 +1318,16 @@ impl<'m> Interp<'m> {
         let frozen_at = r.frozen_at.take();
         // what is computed meanwhile is for this moment only
         self.store.epoch += 1;
-        let before = state.as_ref().map(|(f, v)| (f.to_string(), r.fields.insert(f.to_string(), v.clone())));
-        let rec = V::Ref { ent: ent.clone(), id };
-        let holds = self.eval(&fr.when, &mut Ctx::for_record(&rec, &ent)).map(|v| v.truthy());
+        let before = state
+            .as_ref()
+            .map(|(f, v)| (f.to_string(), r.fields.insert(f.to_string(), v.clone())));
+        let rec = V::Ref {
+            ent: ent.clone(),
+            id,
+        };
+        let holds = self
+            .eval(&fr.when, &mut Ctx::for_record(&rec, &ent))
+            .map(|v| v.truthy());
         self.store.epoch += 1;
         if let Some(r) = self.store.records.get_mut(&id) {
             r.frozen_at = frozen_at;
@@ -1040,7 +1352,10 @@ impl<'m> Interp<'m> {
         // the document and its lines read the current world again: for what depends on them,
         // as if every field of theirs were written
         if self.store.lazy() && !self.store.untracked {
-            let thawed = std::mem::replace(&mut self.store.thawed, std::collections::BTreeSet::from([id]));
+            let thawed = std::mem::replace(
+                &mut self.store.thawed,
+                std::collections::BTreeSet::from([id]),
+            );
             let family = self.thawed_family();
             self.store.thawed = thawed;
             for x in family {
@@ -1052,7 +1367,17 @@ impl<'m> Interp<'m> {
     /// The records unfrozen in this transaction and the lines of those documents (up to ten
     /// levels of lines).
     fn thawed_family(&mut self) -> Vec<Id> {
-        let lines: Vec<(String, String)> = self.m.entities.iter().filter_map(|e| e.fields.iter().find(|f| f.parent).map(|f| (e.name.clone(), f.name.clone()))).collect();
+        let lines: Vec<(String, String)> = self
+            .m
+            .entities
+            .iter()
+            .filter_map(|e| {
+                e.fields
+                    .iter()
+                    .find(|f| f.parent)
+                    .map(|f| (e.name.clone(), f.name.clone()))
+            })
+            .collect();
         let mut family: Vec<Id> = self.store.thawed.iter().copied().collect();
         let mut next = family.clone();
         for _ in 0..10 {
@@ -1060,7 +1385,10 @@ impl<'m> Interp<'m> {
             for doc in &next {
                 for (le, pf) in &lines {
                     for cid in self.referencing(le, pf, *doc) {
-                        if self.store.read(cid, pf, None).and_then(|v| v.as_ref_id()) == Some(*doc) && !family.contains(&cid) && !found.contains(&cid) {
+                        if self.store.read(cid, pf, None).and_then(|v| v.as_ref_id()) == Some(*doc)
+                            && !family.contains(&cid)
+                            && !found.contains(&cid)
+                        {
                             found.push(cid);
                         }
                     }
@@ -1093,33 +1421,60 @@ impl<'m> Interp<'m> {
     }
 
     fn write_field(&mut self, ent: &str, id: Id, f: &Field, v: V, company: Option<Id>) -> R<()> {
-        let key = if f.per_company { format!("{}@{}", f.name, company.or(self.company).unwrap_or(0)) } else { f.name.clone() };
-        let creating = self.store.records.get(&id).map_or(false, |r| r.created_tx == self.store.tx && Rc::ptr_eq(&r.cause, &self.cause));
+        let key = if f.per_company {
+            format!("{}@{}", f.name, company.or(self.company).unwrap_or(0))
+        } else {
+            f.name.clone()
+        };
+        let creating = self.store.records.get(&id).map_or(false, |r| {
+            r.created_tx == self.store.tx && Rc::ptr_eq(&r.cause, &self.cause)
+        });
         if let Some(r) = self.store.records.get_mut(&id) {
             r.pending_defaults.retain(|p| p != &f.name);
         }
         if let (Some(r), false) = (self.store.records.get_mut(&id), creating) {
-            r.cause = Rc::new(Cause { desc: format!("{ent}.{} changed by {}", f.name, self.cause.desc), user: self.cause.user.clone(), time: self.clock, parent: self.cause.parent.clone() });
+            r.cause = Rc::new(Cause {
+                desc: format!("{ent}.{} changed by {}", f.name, self.cause.desc),
+                user: self.cause.user.clone(),
+                time: self.clock,
+                parent: self.cause.parent.clone(),
+            });
         }
         // children given as a collection: point their back-reference to this record
         if let Some(Ty::List(inner) | Ty::Set(inner)) = &f.ty {
             if let (Some(child), None) = (ty_names(Some(inner)), &f.through) {
-                if let Some(ce) = self.m.entity(&child).filter(|ce| ce.kind != EntityKind::Record) {
+                if let Some(ce) = self
+                    .m
+                    .entity(&child)
+                    .filter(|ce| ce.kind != EntityKind::Record)
+                {
                     let owner = self.entity(ent)?;
                     let back = f.via.clone().or_else(|| {
                         ce.fields
                             .iter()
                             .find(|x| {
                                 let n = ty_names(x.ty.as_ref());
-                                n.as_deref() == Some(owner.name.as_str()) || n.map_or(false, |n| owner.traits.contains(&n))
+                                n.as_deref() == Some(owner.name.as_str())
+                                    || n.map_or(false, |n| owner.traits.contains(&n))
                             })
                             .map(|x| x.name.clone())
                     });
-                    let back_is_set = back.as_ref().and_then(|b| self.field(&child, b)).and_then(|bf| bf.ty.as_ref()).map_or(false, |t| matches!(t, Ty::Set(_)));
+                    let back_is_set = back
+                        .as_ref()
+                        .and_then(|b| self.field(&child, b))
+                        .and_then(|bf| bf.ty.as_ref())
+                        .map_or(false, |t| matches!(t, Ty::Set(_)));
                     if let (Some(back), false) = (back, back_is_set) {
                         for item in v.items().unwrap_or(&[]).to_vec() {
                             if let V::Ref { id: cid, .. } = item {
-                                self.store.write(cid, &back, V::Ref { ent: Rc::from(ent), id });
+                                self.store.write(
+                                    cid,
+                                    &back,
+                                    V::Ref {
+                                        ent: Rc::from(ent),
+                                        id,
+                                    },
+                                );
                             }
                         }
                         return Ok(());
@@ -1128,13 +1483,25 @@ impl<'m> Interp<'m> {
             }
         }
         let v = match self.m.find_field(self.entity(ent)?, &f.name) {
-            Some(tf) => self.zero_for(tf.span, v, Some(&V::Ref { ent: Rc::from(ent), id }), None),
+            Some(tf) => self.zero_for(
+                tf.span,
+                v,
+                Some(&V::Ref {
+                    ent: Rc::from(ent),
+                    id,
+                }),
+                None,
+            ),
             None => v,
         };
         self.store.write(id, &key, v);
         // a real value replaces a provisional one
         let marker = format!("{key}#provisional");
-        if self.store.read(id, &marker, None).map_or(false, |m| !m.is_none()) {
+        if self
+            .store
+            .read(id, &marker, None)
+            .map_or(false, |m| !m.is_none())
+        {
             self.store.write(id, &marker, V::None);
         }
         Ok(())
@@ -1152,7 +1519,9 @@ impl<'m> Interp<'m> {
             }
         }
         if self.viewing() && e.kind != EntityKind::Record {
-            return fail(format!("{ent}(…): a record cannot be created in a formula of an app (it only reads)"));
+            return fail(format!(
+                "{ent}(…): a record cannot be created in a formula of an app (it only reads)"
+            ));
         }
         if e.kind == EntityKind::Record {
             let mut fields: Vec<(String, V)> = args.clone();
@@ -1165,14 +1534,25 @@ impl<'m> Interp<'m> {
                     fields.push((f.name.clone(), v));
                 }
             }
-            return Ok(V::Rec { ent: Rc::from(ent), fields: Rc::new(fields) });
+            return Ok(V::Rec {
+                ent: Rc::from(ent),
+                fields: Rc::new(fields),
+            });
         }
         if e.kind == EntityKind::Trait {
-            return fail(format!("`{ent}` is a trait: create one of its entities instead"));
+            return fail(format!(
+                "`{ent}` is a trait: create one of its entities instead"
+            ));
         }
         let id = self.store.new_id();
-        let pending: Vec<String> =
-            self.m.all_fields(e).into_iter().chain(e.fields.iter().filter(|f| f.default_override)).filter(|f| f.default.is_some() && !args.iter().any(|(n, _)| n == &f.name)).map(|f| f.name.clone()).collect();
+        let pending: Vec<String> = self
+            .m
+            .all_fields(e)
+            .into_iter()
+            .chain(e.fields.iter().filter(|f| f.default_override))
+            .filter(|f| f.default.is_some() && !args.iter().any(|(n, _)| n == &f.name))
+            .map(|f| f.name.clone())
+            .collect();
         self.store.insert(Record {
             ent: Rc::from(ent),
             id,
@@ -1199,7 +1579,9 @@ impl<'m> Interp<'m> {
                 return fail(format!("`{name}` is a formula: it cannot be set"));
             }
             // a new record starts in the initial state of its flows
-            if let (0, Some(initial), V::Variant { name: st, .. }) = (self.script, self.m.initial_state(e, &name), &v) {
+            if let (0, Some(initial), V::Variant { name: st, .. }) =
+                (self.script, self.m.initial_state(e, &name), &v)
+            {
                 if **st != *initial {
                     return fail(format!("`{ent}.{name}` changes only through its flow: a new {ent} starts in {initial}"));
                 }
@@ -1209,18 +1591,35 @@ impl<'m> Interp<'m> {
         if self.store.lazy() {
             self.store.prefetch_refs(&[id], 3);
         }
-        Ok(V::Ref { ent: Rc::from(ent), id })
+        Ok(V::Ref {
+            ent: Rc::from(ent),
+            id,
+        })
     }
 
     /// Compute every pending default (end of statement).
     pub fn flush_defaults(&mut self) -> R<()> {
         loop {
-            let pending: Vec<(Id, String, String)> = self.store.records.values().flat_map(|r| r.pending_defaults.iter().map(move |p| (r.id, r.ent.to_string(), p.clone()))).collect();
+            let pending: Vec<(Id, String, String)> = self
+                .store
+                .records
+                .values()
+                .flat_map(|r| {
+                    r.pending_defaults
+                        .iter()
+                        .map(move |p| (r.id, r.ent.to_string(), p.clone()))
+                })
+                .collect();
             if pending.is_empty() {
                 return Ok(());
             }
             for (id, ent, name) in pending {
-                if self.store.records.get(&id).map_or(false, |r| r.pending_defaults.contains(&name)) {
+                if self
+                    .store
+                    .records
+                    .get(&id)
+                    .map_or(false, |r| r.pending_defaults.contains(&name))
+                {
                     self.compute_default(&ent, id, &name)?;
                 }
             }
@@ -1251,7 +1650,10 @@ impl<'m> Interp<'m> {
     }
 
     fn rule_matches(rule: &Rule, verb: &str, ent: &str, member: Option<&str>) -> bool {
-        let verb_ok = rule.verbs.iter().any(|v| v == verb || v == "all" || (verb == "create" && v == "edit" && false));
+        let verb_ok = rule
+            .verbs
+            .iter()
+            .any(|v| v == verb || v == "all" || (verb == "create" && v == "edit" && false));
         verb_ok
             && rule.targets.iter().any(|t| match t.as_slice() {
                 [s] if s == "*" => true,
@@ -1271,7 +1673,10 @@ impl<'m> Interp<'m> {
         let r = match &cond.kind {
             ExprKind::Lambda { params, body } => {
                 let mut ctx = Ctx::default();
-                ctx.bind(params.first().map(String::as_str).unwrap_or("_"), rec.clone());
+                ctx.bind(
+                    params.first().map(String::as_str).unwrap_or("_"),
+                    rec.clone(),
+                );
                 self.eval(body, &mut ctx).map(|v| v.truthy())
             }
             _ => Ok(true),
@@ -1320,26 +1725,64 @@ impl<'m> Interp<'m> {
             first.clone(),
         ) {
             let nv = match kind {
-                "Money" => V::Money { amt: n, cur: Rc::from(e.as_str()) },
-                "Qty" => V::Qty { v: n, unit: Rc::from(e.as_str()) },
+                "Money" => V::Money {
+                    amt: n,
+                    cur: Rc::from(e.as_str()),
+                },
+                "Qty" => V::Qty {
+                    v: n,
+                    unit: Rc::from(e.as_str()),
+                },
                 _ => match expected.get(1).cloned().flatten() {
-                    Some(per) => V::Price { amt: n, cur: Rc::from(e.as_str()), per: Rc::from(per.as_str()) },
-                    None => return fail(format!("{ent}.{field}: write the price with its unit, e.g. 10 {e}/pcs")),
+                    Some(per) => V::Price {
+                        amt: n,
+                        cur: Rc::from(e.as_str()),
+                        per: Rc::from(per.as_str()),
+                    },
+                    None => {
+                        return fail(format!(
+                            "{ent}.{field}: write the price with its unit, e.g. 10 {e}/pcs"
+                        ))
+                    }
                 },
             };
             let company = self.company;
             return self.set(rec, field, nv, company);
         }
         let fixed = match (&v, first) {
-            (V::Money { cur, .. }, Some(e)) if **cur != *e => return fail(format!("{ent}.{field}: expected an amount in {e}, not {cur}")),
-            (V::Price { cur, .. }, Some(e)) if **cur != *e => return fail(format!("{ent}.{field}: expected a price in {e}, not {cur}")),
-            (V::Price { per, .. }, _) if expected.get(1).cloned().flatten().map_or(false, |u| *u != **per) => {
-                return fail(format!("{ent}.{field}: expected a price per {}, not per {per}", expected[1].clone().unwrap()));
+            (V::Money { cur, .. }, Some(e)) if **cur != *e => {
+                return fail(format!(
+                    "{ent}.{field}: expected an amount in {e}, not {cur}"
+                ))
             }
-            (V::Qty { v: q, unit }, Some(e)) if **unit != *e => match self.convert_qty(*q, unit, &e) {
-                Ok(c) => Some(V::Qty { v: c, unit: Rc::from(e.as_str()) }),
-                Err(_) => return fail(format!("{ent}.{field}: expected a quantity in {e}, not {unit}")),
-            },
+            (V::Price { cur, .. }, Some(e)) if **cur != *e => {
+                return fail(format!("{ent}.{field}: expected a price in {e}, not {cur}"))
+            }
+            (V::Price { per, .. }, _)
+                if expected
+                    .get(1)
+                    .cloned()
+                    .flatten()
+                    .map_or(false, |u| *u != **per) =>
+            {
+                return fail(format!(
+                    "{ent}.{field}: expected a price per {}, not per {per}",
+                    expected[1].clone().unwrap()
+                ));
+            }
+            (V::Qty { v: q, unit }, Some(e)) if **unit != *e => {
+                match self.convert_qty(*q, unit, &e) {
+                    Ok(c) => Some(V::Qty {
+                        v: c,
+                        unit: Rc::from(e.as_str()),
+                    }),
+                    Err(_) => {
+                        return fail(format!(
+                            "{ent}.{field}: expected a quantity in {e}, not {unit}"
+                        ))
+                    }
+                }
+            }
             _ => None,
         };
         if let Some(nv) = fixed {
@@ -1358,14 +1801,22 @@ impl<'m> Interp<'m> {
                 expected.push(None);
                 continue;
             };
-            if p.len() == 1 && (self.currencies.contains_key(&p[0]) || self.units.contains_key(&p[0])) {
+            if p.len() == 1
+                && (self.currencies.contains_key(&p[0]) || self.units.contains_key(&p[0]))
+            {
                 expected.push(Some(p[0].clone()));
                 continue;
             }
-            let mut cur = if p.first().map(String::as_str) == Some("current") { None } else { Some(rec.clone()) };
+            let mut cur = if p.first().map(String::as_str) == Some("current") {
+                None
+            } else {
+                Some(rec.clone())
+            };
             for seg in p.iter().filter(|s| *s != "self") {
                 cur = match cur {
-                    Some(c @ V::Ref { .. }) => self.get(&c, seg, None, None).ok().filter(|v| !v.is_none()),
+                    Some(c @ V::Ref { .. }) => {
+                        self.get(&c, seg, None, None).ok().filter(|v| !v.is_none())
+                    }
                     _ => None,
                 };
             }
@@ -1405,7 +1856,10 @@ impl<'m> Interp<'m> {
                 let Some(V::Qty { v, unit }) = self.store.read(id, &f.name, None) else {
                     continue;
                 };
-                let rec = V::Ref { ent: ent.clone(), id };
+                let rec = V::Ref {
+                    ent: ent.clone(),
+                    id,
+                };
                 let Some(Some(to)) = self.expected_units(&rec, args).into_iter().next() else {
                     continue;
                 };
@@ -1414,7 +1868,14 @@ impl<'m> Interp<'m> {
                 }
                 // another kind of unit is refused by its own check
                 if let Ok(c) = self.convert_qty(v, &unit, &to) {
-                    self.store.write(id, &f.name, V::Qty { v: c, unit: Rc::from(to.as_str()) });
+                    self.store.write(
+                        id,
+                        &f.name,
+                        V::Qty {
+                            v: c,
+                            unit: Rc::from(to.as_str()),
+                        },
+                    );
                 }
             }
         }
@@ -1434,37 +1895,75 @@ impl<'m> Interp<'m> {
             return false;
         }
         let roles = self.roles_of(user);
-        let traits: Vec<String> = self.m.entity(ent).map(|e| self.m.all_traits(e).iter().map(|t| t.name.clone()).collect()).unwrap_or_default();
+        let traits: Vec<String> = self
+            .m
+            .entity(ent)
+            .map(|e| {
+                self.m
+                    .all_traits(e)
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let covers = |rule: &Rule| {
             rule.targets.iter().any(|t| match t.as_slice() {
                 [e, f, ..] => (e == ent || traits.contains(e)) && f == field,
                 _ => false,
             })
         };
-        let rules: Vec<&Rule> = roles.iter().filter_map(|r| self.m.role(r)).flat_map(|r| r.rules.iter()).collect();
-        rules.iter().any(|r| r.effect == "hide" && covers(r)) && !rules.iter().any(|r| r.effect == "show" && covers(r))
+        let rules: Vec<&Rule> = roles
+            .iter()
+            .filter_map(|r| self.m.role(r))
+            .flat_map(|r| r.rules.iter())
+            .collect();
+        rules.iter().any(|r| r.effect == "hide" && covers(r))
+            && !rules.iter().any(|r| r.effect == "show" && covers(r))
     }
 
     /// `read history`: versions and causes of records of `ent`.
     pub fn can_read_history(&mut self, ent: &str) -> bool {
         let Some(user) = self.user else { return true };
         let roles = self.roles_of(user);
-        let grants = |rule: &Rule| (rule.history || rule.verbs.iter().any(|v| v == "all")) && Self::rule_matches(rule, "read", ent, None);
-        let rules: Vec<&Rule> = roles.iter().filter_map(|r| self.m.role(r)).flat_map(|r| r.rules.iter()).chain(self.m.rules.iter()).collect();
-        if rules.iter().any(|r| r.effect == "deny" && r.history && Self::rule_matches(r, "read", ent, None)) {
+        let grants = |rule: &Rule| {
+            (rule.history || rule.verbs.iter().any(|v| v == "all"))
+                && Self::rule_matches(rule, "read", ent, None)
+        };
+        let rules: Vec<&Rule> = roles
+            .iter()
+            .filter_map(|r| self.m.role(r))
+            .flat_map(|r| r.rules.iter())
+            .chain(self.m.rules.iter())
+            .collect();
+        if rules
+            .iter()
+            .any(|r| r.effect == "deny" && r.history && Self::rule_matches(r, "read", ent, None))
+        {
             return false;
         }
         rules.iter().any(|r| r.effect == "allow" && grants(r))
     }
 
-    pub fn check_permission(&mut self, verb: &str, ent: &str, member: Option<&str>, rec: Option<&V>) -> R<()> {
+    pub fn check_permission(
+        &mut self,
+        verb: &str,
+        ent: &str,
+        member: Option<&str>,
+        rec: Option<&V>,
+    ) -> R<()> {
         self.viewer_pause += 1;
         let r = self.check_permission_inner(verb, ent, member, rec);
         self.viewer_pause -= 1;
         r
     }
 
-    fn check_permission_inner(&mut self, verb: &str, ent: &str, member: Option<&str>, rec: Option<&V>) -> R<()> {
+    fn check_permission_inner(
+        &mut self,
+        verb: &str,
+        ent: &str,
+        member: Option<&str>,
+        rec: Option<&V>,
+    ) -> R<()> {
         let Some(user) = self.user else { return Ok(()) };
         if self.system > 0 {
             return Ok(());
@@ -1474,13 +1973,24 @@ impl<'m> Interp<'m> {
         // `deny` rules: those at the top level apply to everybody, those of a role to its
         // users (and to the users of the roles that inherit it); they win over any `allow`
         let m = self.m;
-        let own: Vec<&Rule> = roles.iter().filter_map(|r| m.role(r)).flat_map(|r| r.rules.iter()).collect();
+        let own: Vec<&Rule> = roles
+            .iter()
+            .filter_map(|r| m.role(r))
+            .flat_map(|r| r.rules.iter())
+            .collect();
         for rule in m.rules.iter().chain(own.iter().copied()) {
             // (`deny read history X` refuses only the history: see `can_read_history`)
             // (without a record — may the user ever do this? — a `deny … where` depends on the
             // record: it is checked on each one, it does not refuse the whole entity)
-            if rule.effect == "deny" && !rule.history && Self::rule_matches(rule, verb, ent, member) && (rec.is_some() || rule.condition.is_none()) && self.rule_condition(rule, rec)? {
-                let target = member.map(|m| format!("{ent}.{m}")).unwrap_or(ent.to_string());
+            if rule.effect == "deny"
+                && !rule.history
+                && Self::rule_matches(rule, verb, ent, member)
+                && (rec.is_some() || rule.condition.is_none())
+                && self.rule_condition(rule, rec)?
+            {
+                let target = member
+                    .map(|m| format!("{ent}.{m}"))
+                    .unwrap_or(ent.to_string());
                 return fail(format!("permission denied: deny {verb} {target} ({login})"));
             }
         }
@@ -1498,16 +2008,27 @@ impl<'m> Interp<'m> {
                 return Ok(());
             }
             // `read, create, edit SalesOrder` also allows editing its fields
-            if verb == "edit" && member.is_some() && Self::rule_matches(rule, "edit", ent, None) && self.rule_condition(rule, rec)? {
+            if verb == "edit"
+                && member.is_some()
+                && Self::rule_matches(rule, "edit", ent, None)
+                && self.rule_condition(rule, rec)?
+            {
                 return Ok(());
             }
         }
         // lines of a document (`parent` field) follow the document: reading or changing a
         // line is reading or changing its document
-        if let Some(pf) = self.m.entity(ent).and_then(|e| e.fields.iter().find(|f| f.parent)) {
+        if let Some(pf) = self
+            .m
+            .entity(ent)
+            .and_then(|e| e.fields.iter().find(|f| f.parent))
+        {
             let parent_ent = ty_names(pf.ty.as_ref()).unwrap_or_default();
             let parent = match rec {
-                Some(V::Ref { id, .. }) => self.store.read(*id, &pf.name, None).filter(|v| !v.is_none()),
+                Some(V::Ref { id, .. }) => self
+                    .store
+                    .read(*id, &pf.name, None)
+                    .filter(|v| !v.is_none()),
                 _ => None,
             };
             let pverb = match verb {
@@ -1516,12 +2037,17 @@ impl<'m> Interp<'m> {
                 _ => "",
             };
             if !pverb.is_empty() && !parent_ent.is_empty() && (parent.is_some() || rec.is_none()) {
-                if self.check_permission(pverb, &parent_ent, None, parent.as_ref()).is_ok() {
+                if self
+                    .check_permission(pverb, &parent_ent, None, parent.as_ref())
+                    .is_ok()
+                {
                     return Ok(());
                 }
             }
         }
-        let target = member.map(|m| format!("{ent}.{m}")).unwrap_or(ent.to_string());
+        let target = member
+            .map(|m| format!("{ent}.{m}"))
+            .unwrap_or(ent.to_string());
         fail(format!("permission denied: {login} cannot {verb} {target}"))
     }
 
@@ -1593,32 +2119,60 @@ impl<'m> Interp<'m> {
                     return Ok(V::Duration((v * d(secs)).trunc().to_i64().unwrap_or(0)));
                 }
                 if let Some(p) = per {
-                    return Ok(V::Price { amt: v, cur: Rc::from(unit.as_str()), per: Rc::from(p.as_str()) });
+                    return Ok(V::Price {
+                        amt: v,
+                        cur: Rc::from(unit.as_str()),
+                        per: Rc::from(p.as_str()),
+                    });
                 }
                 // ISO 4217 codes are three capital letters: no unit of measure looks like that,
                 // and seeds run before the currency table is loaded
                 let iso = unit.len() == 3 && unit.bytes().all(|b| b.is_ascii_uppercase());
                 if self.currencies.contains_key(unit) || (iso && !self.units.contains_key(unit)) {
-                    Ok(V::Money { amt: v, cur: Rc::from(unit.as_str()) })
+                    Ok(V::Money {
+                        amt: v,
+                        cur: Rc::from(unit.as_str()),
+                    })
                 } else {
-                    Ok(V::Qty { v, unit: Rc::from(unit.as_str()) })
+                    Ok(V::Qty {
+                        v,
+                        unit: Rc::from(unit.as_str()),
+                    })
                 }
             }
             ExprKind::Name(n) => self.name(n, ctx),
             ExprKind::SelfRef => Ok(ctx.this.clone().unwrap_or(V::None)),
-            ExprKind::Field { base, name, optional } => {
+            ExprKind::Field {
+                base,
+                name,
+                optional,
+            } => {
                 // `record.field.is_provisional`
                 if name == "is_provisional" {
-                    if let ExprKind::Field { base: rb, name: field, .. } = &base.kind {
+                    if let ExprKind::Field {
+                        base: rb,
+                        name: field,
+                        ..
+                    } = &base.kind
+                    {
                         if let V::Ref { id, .. } = self.eval(rb, ctx)? {
-                            let m = self.store.read(id, &format!("{field}#provisional"), ctx.as_of);
+                            let m = self
+                                .store
+                                .read(id, &format!("{field}#provisional"), ctx.as_of);
                             return Ok(V::Bool(m.map_or(false, |m| !m.is_none())));
                         }
                     }
                 }
                 let b = self.eval(base, ctx)?;
                 if b.is_none() {
-                    return if *optional { Ok(V::None) } else { fail(format!("`{}` is none: cannot read `{name}`", print::expr(base))) };
+                    return if *optional {
+                        Ok(V::None)
+                    } else {
+                        fail(format!(
+                            "`{}` is none: cannot read `{name}`",
+                            print::expr(base)
+                        ))
+                    };
                 }
                 if self.viewing() {
                     if let V::Ref { ent, id } = &b {
@@ -1634,7 +2188,10 @@ impl<'m> Interp<'m> {
             }
             ExprKind::Index { base, index } => {
                 // per-company member at a company: `product.cost[company]`
-                if let ExprKind::Field { base: recv, name, .. } = &base.kind {
+                if let ExprKind::Field {
+                    base: recv, name, ..
+                } = &base.kind
+                {
                     let r = self.eval(recv, ctx)?;
                     if let V::Ref { ent, .. } = &r {
                         if self.field(ent, name).map_or(false, |f| f.per_company) {
@@ -1646,7 +2203,9 @@ impl<'m> Interp<'m> {
                 let b = self.eval(base, ctx)?;
                 let i = self.eval(index, ctx)?;
                 match (&b, &i) {
-                    (V::List(v) | V::Set(v), V::Int(i)) => Ok(v.get(*i as usize).cloned().unwrap_or(V::None)),
+                    (V::List(v) | V::Set(v), V::Int(i)) => {
+                        Ok(v.get(*i as usize).cloned().unwrap_or(V::None))
+                    }
                     _ => fail(format!("cannot index {b}")),
                 }
             }
@@ -1658,7 +2217,11 @@ impl<'m> Interp<'m> {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, ctx),
-            ExprKind::If { cond, then, otherwise } => {
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 if self.eval(cond, ctx)?.truthy() {
                     self.eval(then, ctx)
                 } else {
@@ -1668,7 +2231,11 @@ impl<'m> Interp<'m> {
             ExprKind::Lambda { params, body } => Ok(V::Lambda(Rc::new(Closure {
                 params: params.clone(),
                 body: body.clone(),
-                locals: ctx.scopes.iter().flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone()))).collect(),
+                locals: ctx
+                    .scopes
+                    .iter()
+                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .collect(),
                 this: ctx.this.clone(),
                 entity: ctx.entity.clone(),
                 company: ctx.company,
@@ -1771,18 +2338,33 @@ impl<'m> Interp<'m> {
             (V::Dec(d), Some(p)) => (fixed(*d, p), true),
             (V::Pct(d), Some(p)) => (format!("{}%", fixed(d * Decimal::from(100), p)), true),
             (V::Money { amt, cur }, Some(p)) => (format!("{} {cur}", fixed(*amt, p)), true),
-            (V::Price { amt, cur, per }, Some(p)) => (format!("{} {cur}/{per}", fixed(*amt, p)), true),
+            (V::Price { amt, cur, per }, Some(p)) => {
+                (format!("{} {cur}/{per}", fixed(*amt, p)), true)
+            }
             (V::Qty { v, unit }, Some(p)) => (format!("{} {unit}", fixed(*v, p)), true),
-            (V::Int(_) | V::Dec(_) | V::Pct(_) | V::Money { .. } | V::Price { .. } | V::Qty { .. }, None) => (self.display(v), true),
+            (
+                V::Int(_)
+                | V::Dec(_)
+                | V::Pct(_)
+                | V::Money { .. }
+                | V::Price { .. }
+                | V::Qty { .. },
+                None,
+            ) => (self.display(v), true),
             _ => (self.display(v), false),
         };
-        spec.pad(&shown, numeric && matches!(v, V::Int(_) | V::Dec(_)) || (numeric && !spec.zero))
+        spec.pad(
+            &shown,
+            numeric && matches!(v, V::Int(_) | V::Dec(_)) || (numeric && !spec.zero),
+        )
     }
 
     pub fn display(&mut self, v: &V) -> String {
         match v {
             // an instant, as the clock of the project's zone shows it
-            V::DateTime(dt) => time::local(*dt, self.tz).format("%Y-%m-%d %H:%M").to_string(),
+            V::DateTime(dt) => time::local(*dt, self.tz)
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
             V::Ref { ent, id } => {
                 for key in ["number", "code", "name", "login"] {
                     if let Some(x) = self.store.read(*id, key, None) {
@@ -1796,14 +2378,39 @@ impl<'m> Interp<'m> {
             // a value record (an address): its parts, as a person would write them
             V::Rec { ent, fields } => {
                 // in the order the record declares its fields
-                let order: Vec<String> = self.m.entity(ent).map(|e| e.fields.iter().map(|f| f.name.clone()).collect()).unwrap_or_default();
-                let mut items: Vec<(usize, V)> = fields.iter().filter(|(_, v)| !v.is_none()).map(|(n, v)| (order.iter().position(|o| o == n).unwrap_or(usize::MAX), v.clone())).collect();
+                let order: Vec<String> = self
+                    .m
+                    .entity(ent)
+                    .map(|e| e.fields.iter().map(|f| f.name.clone()).collect())
+                    .unwrap_or_default();
+                let mut items: Vec<(usize, V)> = fields
+                    .iter()
+                    .filter(|(_, v)| !v.is_none())
+                    .map(|(n, v)| {
+                        (
+                            order.iter().position(|o| o == n).unwrap_or(usize::MAX),
+                            v.clone(),
+                        )
+                    })
+                    .collect();
                 items.sort_by_key(|(i, _)| *i);
-                let parts: Vec<String> = items.iter().map(|(_, v)| self.display(v)).filter(|s| !s.is_empty()).take(4).collect();
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|(_, v)| self.display(v))
+                    .filter(|s| !s.is_empty())
+                    .take(4)
+                    .collect();
                 parts.join(", ")
             }
             V::List(items) | V::Set(items) => {
-                let shown: Vec<String> = items.iter().take(3).cloned().collect::<Vec<_>>().iter().map(|v| self.display(v)).collect();
+                let shown: Vec<String> = items
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(|v| self.display(v))
+                    .collect();
                 if items.len() > 3 {
                     format!("{} … ({})", shown.join(", "), items.len())
                 } else {
@@ -1813,13 +2420,20 @@ impl<'m> Interp<'m> {
             V::None => String::new(),
             // amounts and prices with the decimals of their currency
             V::Money { amt, cur } => format!("{:.*} {cur}", self.decimals(cur) as usize, amt),
-            V::Price { amt, cur, per } => format!("{} {cur}/{per}", crate::value::price_amount(amt, self.decimals(cur))),
+            V::Price { amt, cur, per } => format!(
+                "{} {cur}/{per}",
+                crate::value::price_amount(amt, self.decimals(cur))
+            ),
             other => other.to_string(),
         }
     }
 
     fn login_id(&mut self, login: &str) -> Option<Id> {
-        self.ids("User", None).into_iter().find(|id| self.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login))
+        self.ids("User", None).into_iter().find(|id| {
+            self.store
+                .read(*id, "login", None)
+                .map_or(false, |v| v.to_string() == login)
+        })
     }
 
     fn pattern(&mut self, p: &Pattern, v: &V, binds: &mut Vec<(String, V)>) -> bool {
@@ -1831,7 +2445,13 @@ impl<'m> Interp<'m> {
                 if n.chars().next().map_or(false, char::is_uppercase) {
                     match v {
                         V::Variant { name, .. } => **name == **n,
-                        V::Ref { ent, .. } => **ent == **n || self.m.entity(ent).map_or(false, |e| self.m.implements(e, n)),
+                        V::Ref { ent, .. } => {
+                            **ent == **n
+                                || self
+                                    .m
+                                    .entity(ent)
+                                    .map_or(false, |e| self.m.implements(e, n))
+                        }
                         _ => false,
                     }
                 } else {
@@ -1847,8 +2467,19 @@ impl<'m> Interp<'m> {
                     return args.first().map_or(true, |a| self.pattern(a, v, binds));
                 }
                 match v {
-                    V::Variant { name: vn, fields } if **vn == **name => args.iter().zip(fields.iter()).all(|(a, f)| self.pattern(a, f, binds)),
-                    V::Ref { ent, .. } if **ent == **name || self.m.entity(ent).map_or(false, |e| self.m.implements(e, name)) => args.first().map_or(true, |a| self.pattern(a, v, binds)),
+                    V::Variant { name: vn, fields } if **vn == **name => args
+                        .iter()
+                        .zip(fields.iter())
+                        .all(|(a, f)| self.pattern(a, f, binds)),
+                    V::Ref { ent, .. }
+                        if **ent == **name
+                            || self
+                                .m
+                                .entity(ent)
+                                .map_or(false, |e| self.m.implements(e, name)) =>
+                    {
+                        args.first().map_or(true, |a| self.pattern(a, v, binds))
+                    }
                     _ => false,
                 }
             }
@@ -1860,14 +2491,36 @@ impl<'m> Interp<'m> {
             return Ok(v.clone());
         }
         match n {
-            "me" => return Ok(self.user.map(|id| V::Ref { ent: Rc::from("User"), id }).unwrap_or(V::None)),
+            "me" => {
+                return Ok(self
+                    .user
+                    .map(|id| V::Ref {
+                        ent: Rc::from("User"),
+                        id,
+                    })
+                    .unwrap_or(V::None))
+            }
             "current" => return Ok(V::Current),
             _ => {}
         }
         if let (Some(this), Some(ent)) = (ctx.this.clone(), ctx.entity.clone()) {
             if let V::Ref { .. } | V::Rec { .. } = this {
-                let known = self.field(&ent, n).is_some() || ["id", "created_at", "created_by", "updated_at", "updated_by", "version"].contains(&n);
+                let known = self.field(&ent, n).is_some()
+                    || [
+                        "id",
+                        "created_at",
+                        "created_by",
+                        "updated_at",
+                        "updated_by",
+                        "version",
+                    ]
+                    .contains(&n);
                 if known {
+                    if self.viewing() {
+                        if let V::Ref { ent, id } = &this {
+                            self.viewer_read(ent, *id, n)?;
+                        }
+                    }
                     return self.get(&this, n, ctx.company, ctx.as_of);
                 }
             }
@@ -1876,13 +2529,19 @@ impl<'m> Interp<'m> {
             return Ok(V::Table(Rc::from(n)));
         }
         if self.m.variant(n).is_some() {
-            return Ok(V::Variant { name: Rc::from(n), fields: Rc::new(Vec::new()) });
+            return Ok(V::Variant {
+                name: Rc::from(n),
+                fields: Rc::new(Vec::new()),
+            });
         }
         if let Some(c) = self.m.constant(n) {
             let v = c.value.clone();
             return self.eval(&v, &mut Ctx::default());
         }
-        if let Some(v) = self.by_code("Currency", n).or_else(|| self.by_code("Uom", n)) {
+        if let Some(v) = self
+            .by_code("Currency", n)
+            .or_else(|| self.by_code("Uom", n))
+        {
             return Ok(v);
         }
         if self.m.role(n).is_some() {
@@ -1919,7 +2578,11 @@ impl<'m> Interp<'m> {
             }
             Coalesce => {
                 let l = self.eval(lhs, ctx)?;
-                return if l.is_none() { self.eval(rhs, ctx) } else { Ok(l) };
+                return if l.is_none() {
+                    self.eval(rhs, ctx)
+                } else {
+                    Ok(l)
+                };
             }
             _ => {}
         }
@@ -1927,7 +2590,16 @@ impl<'m> Interp<'m> {
         // an instant plus days or weeks written out (`+ 1 day`): days of the calendar in the
         // project's zone, the same wall-clock time across a change of the clocks; any other
         // duration (`+ 24 hours`, a computed one) is exact time
-        if let (V::DateTime(dt), Add | Sub, ExprKind::Quantity { value, unit, per: None }) = (&l, op, &rhs.kind) {
+        if let (
+            V::DateTime(dt),
+            Add | Sub,
+            ExprKind::Quantity {
+                value,
+                unit,
+                per: None,
+            },
+        ) = (&l, op, &rhs.kind)
+        {
             let days = match unit.as_str() {
                 "day" | "days" => Some(1),
                 "week" | "weeks" => Some(7),
@@ -1951,7 +2623,9 @@ impl<'m> Interp<'m> {
             V::Text(t) if t.is_empty() => Ok(self.tz),
             V::Text(t) => time::zone(t).or_else(|e| fail(e)),
             V::None => Ok(self.tz),
-            other => fail(format!("a time zone is the text of its name (`Europe/Rome`), not {other}")),
+            other => fail(format!(
+                "a time zone is the text of its name (`Europe/Rome`), not {other}"
+            )),
         }
     }
 
@@ -1966,7 +2640,10 @@ impl<'m> Interp<'m> {
                 ("date".into(), V::Date(l.date())),
                 ("hour".into(), V::Int(l.hour() as i64)),
                 ("minute".into(), V::Int(l.minute() as i64)),
-                ("weekday".into(), V::Int(l.weekday().number_from_monday() as i64)),
+                (
+                    "weekday".into(),
+                    V::Int(l.weekday().number_from_monday() as i64),
+                ),
                 ("offset".into(), V::Duration(time::offset(dt, tz))),
             ]),
         }
@@ -2004,7 +2681,13 @@ impl<'m> Interp<'m> {
             Is | IsNot => {
                 let hit = match (&l, &r) {
                     (V::Variant { name: a, .. }, V::Variant { name: b, .. }) => a == b,
-                    (V::Ref { ent, .. }, V::Table(t)) => **ent == **t || self.m.entity(ent).map_or(false, |e| self.m.implements(e, t)),
+                    (V::Ref { ent, .. }, V::Table(t)) => {
+                        **ent == **t
+                            || self
+                                .m
+                                .entity(ent)
+                                .map_or(false, |e| self.m.implements(e, t))
+                    }
                     (V::None, V::None) => true,
                     (V::None, _) | (_, V::None) => false,
                     (a, b) => a == b,
@@ -2017,6 +2700,18 @@ impl<'m> Interp<'m> {
                 };
                 let mut out = Vec::new();
                 if let (V::Int(a), V::Int(b)) = (&l, &r) {
+                    // counted before it is made: a range of billions is refused, not allocated
+                    let n = b
+                        .checked_sub(*a)
+                        .and_then(|d| d.checked_add(1))
+                        .unwrap_or(i64::MAX)
+                        .max(0) as u64;
+                    let cap = self.max_list.unwrap_or(MAX_VALUES).min(MAX_VALUES) as u64;
+                    if n > cap {
+                        let m = crate::limits::too_long_list(cap as usize);
+                        crate::limits::hit(m.clone());
+                        return fail(m);
+                    }
                     for i in *a..=*b {
                         out.push(V::Int(i));
                     }
@@ -2036,8 +2731,12 @@ impl<'m> Interp<'m> {
 
     fn equal(&self, l: &V, r: &V) -> R<bool> {
         Ok(match (l, r) {
-            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) if u != w => self.convert_qty(*b, w, u).map(|b| *a == b).unwrap_or(false),
-            (V::Duration(a), x) | (x, V::Duration(a)) if x.num().is_some_and(|n| n.is_zero()) => *a == 0,
+            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) if u != w => {
+                self.convert_qty(*b, w, u).map(|b| *a == b).unwrap_or(false)
+            }
+            (V::Duration(a), x) | (x, V::Duration(a)) if x.num().is_some_and(|n| n.is_zero()) => {
+                *a == 0
+            }
             _ => l == r,
         })
     }
@@ -2061,7 +2760,9 @@ impl<'m> Interp<'m> {
             }
             (V::Money { amt, .. }, x) if x.num().is_some() => ord(*amt, x.num().unwrap()),
             (x, V::Money { amt, .. }) if x.num().is_some() => ord(x.num().unwrap(), *amt),
-            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) => ord(*a, self.convert_qty(*b, w, u)?),
+            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) => {
+                ord(*a, self.convert_qty(*b, w, u)?)
+            }
             (V::Qty { v, .. }, x) if x.num().is_some() => ord(*v, x.num().unwrap()),
             (x, V::Qty { v, .. }) if x.num().is_some() => ord(x.num().unwrap(), *v),
             (V::Price { amt: a, cur: c, .. }, V::Price { amt: b, cur: e, .. }) => {
@@ -2077,8 +2778,12 @@ impl<'m> Interp<'m> {
             (V::Date(a), V::DateTime(b)) => a.cmp(&time::local(*b, self.tz).date()) as i32,
             (V::Duration(a), V::Duration(b)) => a.cmp(b) as i32,
             // `hours > 0`: zero is zero in every unit
-            (V::Duration(a), x) if x.num().is_some_and(|n| n.is_zero()) => ord(Decimal::from(*a), Decimal::ZERO),
-            (x, V::Duration(b)) if x.num().is_some_and(|n| n.is_zero()) => ord(Decimal::ZERO, Decimal::from(*b)),
+            (V::Duration(a), x) if x.num().is_some_and(|n| n.is_zero()) => {
+                ord(Decimal::from(*a), Decimal::ZERO)
+            }
+            (x, V::Duration(b)) if x.num().is_some_and(|n| n.is_zero()) => {
+                ord(Decimal::ZERO, Decimal::from(*b))
+            }
             (V::Text(a), V::Text(b)) => a.cmp(b) as i32,
             (V::Tuple(a), V::Tuple(b)) => {
                 for ((_, x), (_, y)) in a.iter().zip(b.iter()) {
@@ -2103,26 +2808,68 @@ impl<'m> Interp<'m> {
                 if c != e {
                     return fail(format!("cannot add {l} and {r}: different currencies"));
                 }
-                V::Money { amt: s(*a, *b), cur: c.clone() }
+                V::Money {
+                    amt: s(*a, *b),
+                    cur: c.clone(),
+                }
             }
             (V::Money { amt, cur }, V::Int(0)) | (V::Int(0), V::Money { amt, cur }) => {
-                let v = if matches!(l, V::Int(0)) && !add { -*amt } else { *amt };
-                V::Money { amt: v, cur: cur.clone() }
+                let v = if matches!(l, V::Int(0)) && !add {
+                    -*amt
+                } else {
+                    *amt
+                };
+                V::Money {
+                    amt: v,
+                    cur: cur.clone(),
+                }
             }
-            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) => V::Qty { v: s(*a, self.convert_qty(*b, w, u)?), unit: u.clone() },
-            (V::Qty { v, unit }, V::Int(0)) => V::Qty { v: *v, unit: unit.clone() },
-            (V::Int(0), V::Qty { v, unit }) => V::Qty { v: if add { *v } else { -*v }, unit: unit.clone() },
-            (V::Price { amt: a, cur, per }, V::Price { amt: b, .. }) => V::Price { amt: s(*a, *b), cur: cur.clone(), per: per.clone() },
-            (V::Price { amt, cur, per }, V::Int(0)) => V::Price { amt: *amt, cur: cur.clone(), per: per.clone() },
-            (V::Int(0), V::Price { amt, cur, per }) => V::Price { amt: if add { *amt } else { -*amt }, cur: cur.clone(), per: per.clone() },
-            (V::Date(dt), V::Duration(secs)) => V::Date(*dt + Duration::seconds(if add { *secs } else { -*secs })),
-            (V::DateTime(dt), V::Duration(secs)) => V::DateTime(*dt + Duration::seconds(if add { *secs } else { -*secs })),
+            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) => V::Qty {
+                v: s(*a, self.convert_qty(*b, w, u)?),
+                unit: u.clone(),
+            },
+            (V::Qty { v, unit }, V::Int(0)) => V::Qty {
+                v: *v,
+                unit: unit.clone(),
+            },
+            (V::Int(0), V::Qty { v, unit }) => V::Qty {
+                v: if add { *v } else { -*v },
+                unit: unit.clone(),
+            },
+            (V::Price { amt: a, cur, per }, V::Price { amt: b, .. }) => V::Price {
+                amt: s(*a, *b),
+                cur: cur.clone(),
+                per: per.clone(),
+            },
+            (V::Price { amt, cur, per }, V::Int(0)) => V::Price {
+                amt: *amt,
+                cur: cur.clone(),
+                per: per.clone(),
+            },
+            (V::Int(0), V::Price { amt, cur, per }) => V::Price {
+                amt: if add { *amt } else { -*amt },
+                cur: cur.clone(),
+                per: per.clone(),
+            },
+            (V::Date(dt), V::Duration(secs)) => {
+                V::Date(*dt + Duration::seconds(if add { *secs } else { -*secs }))
+            }
+            (V::DateTime(dt), V::Duration(secs)) => {
+                V::DateTime(*dt + Duration::seconds(if add { *secs } else { -*secs }))
+            }
             (V::Date(a), V::Date(b)) if !add => V::Duration((*a - *b).num_seconds()),
             (V::DateTime(a), V::DateTime(b)) if !add => V::Duration((*a - *b).num_seconds()),
             (V::Duration(a), V::Duration(b)) => V::Duration(if add { a + b } else { a - b }),
             (V::Duration(a), x) if x.num().is_some_and(|n| n.is_zero()) => V::Duration(*a),
-            (x, V::Duration(b)) if x.num().is_some_and(|n| n.is_zero()) => V::Duration(if add { *b } else { -*b }),
-            (V::Text(a), V::Text(b)) if add => text(&format!("{a}{b}")),
+            (x, V::Duration(b)) if x.num().is_some_and(|n| n.is_zero()) => {
+                V::Duration(if add { *b } else { -*b })
+            }
+            (V::Text(a), V::Text(b)) if add => {
+                if a.len() + b.len() > MAX_TEXT {
+                    return fail(format!("a text longer than {} MB", MAX_TEXT >> 20));
+                }
+                text(&format!("{a}{b}"))
+            }
             (V::List(a) | V::Set(a), V::List(b) | V::Set(b)) if add => {
                 let mut out = a.to_vec();
                 for x in b.iter() {
@@ -2136,30 +2883,67 @@ impl<'m> Interp<'m> {
                     list(out)
                 }
             }
-            (V::Int(a), V::Int(b)) => V::Int(if add { a + b } else { a - b }),
+            (V::Int(a), V::Int(b)) => match if add {
+                a.checked_add(*b)
+            } else {
+                a.checked_sub(*b)
+            } {
+                Some(n) => V::Int(n),
+                None => return fail("an integer too large: the result does not fit"),
+            },
             (V::Pct(a), V::Pct(b)) => V::Pct(s(*a, *b)),
             (a, b) => match (a.num(), b.num()) {
                 (Some(x), Some(y)) => {
                     // 1 - 10% = 0.9
                     V::Dec(s(x, y))
                 }
-                _ => return fail(format!("cannot {} {l} and {r}", if add { "add" } else { "subtract" })),
+                _ => {
+                    return fail(format!(
+                        "cannot {} {l} and {r}",
+                        if add { "add" } else { "subtract" }
+                    ))
+                }
             },
         })
     }
 
     fn mul(&self, l: V, r: V) -> R<V> {
         Ok(match (&l, &r) {
-            (V::Qty { v, unit }, V::Price { amt, cur, per }) | (V::Price { amt, cur, per }, V::Qty { v, unit }) => {
+            (V::Qty { v, unit }, V::Price { amt, cur, per })
+            | (V::Price { amt, cur, per }, V::Qty { v, unit }) => {
                 // multiply before dividing: 10 min × 60 €/h = 10 × 60 × (1/60) exactly
                 let (f1, f2) = self.factors(unit, per)?;
-                V::Money { amt: tidy(*v * amt * f1 / f2), cur: cur.clone() }
+                V::Money {
+                    amt: tidy(*v * amt * f1 / f2),
+                    cur: cur.clone(),
+                }
             }
-            (V::Money { amt, cur }, x) | (x, V::Money { amt, cur }) if x.num().is_some() => V::Money { amt: amt * x.num().unwrap(), cur: cur.clone() },
-            (V::Price { amt, cur, per }, x) | (x, V::Price { amt, cur, per }) if x.num().is_some() => V::Price { amt: amt * x.num().unwrap(), cur: cur.clone(), per: per.clone() },
-            (V::Qty { v, unit }, x) | (x, V::Qty { v, unit }) if x.num().is_some() => V::Qty { v: v * x.num().unwrap(), unit: unit.clone() },
-            (V::Duration(s), x) if x.num().is_some() => V::Duration((d(*s) * x.num().unwrap()).to_i64().unwrap_or(0)),
-            (V::Int(a), V::Int(b)) => V::Int(a * b),
+            (V::Money { amt, cur }, x) | (x, V::Money { amt, cur }) if x.num().is_some() => {
+                V::Money {
+                    amt: amt * x.num().unwrap(),
+                    cur: cur.clone(),
+                }
+            }
+            (V::Price { amt, cur, per }, x) | (x, V::Price { amt, cur, per })
+                if x.num().is_some() =>
+            {
+                V::Price {
+                    amt: amt * x.num().unwrap(),
+                    cur: cur.clone(),
+                    per: per.clone(),
+                }
+            }
+            (V::Qty { v, unit }, x) | (x, V::Qty { v, unit }) if x.num().is_some() => V::Qty {
+                v: v * x.num().unwrap(),
+                unit: unit.clone(),
+            },
+            (V::Duration(s), x) if x.num().is_some() => {
+                V::Duration((d(*s) * x.num().unwrap()).to_i64().unwrap_or(0))
+            }
+            (V::Int(a), V::Int(b)) => match a.checked_mul(*b) {
+                Some(n) => V::Int(n),
+                None => return fail("an integer too large: the result does not fit"),
+            },
             (V::Pct(a), V::Pct(b)) => V::Pct(a * b),
             (a, b) => match (a.num(), b.num()) {
                 (Some(x), Some(y)) => V::Dec(x * y),
@@ -2177,12 +2961,29 @@ impl<'m> Interp<'m> {
             }
         };
         Ok(match (&l, &r) {
-            (V::Money { amt: a, .. }, V::Money { amt: b, .. }) | (V::Price { amt: a, .. }, V::Price { amt: b, .. }) => V::Dec(a / nz(*b)?),
-            (V::Money { amt, cur }, V::Qty { v, unit }) => V::Price { amt: tidy(amt / nz(*v)?), cur: cur.clone(), per: unit.clone() },
-            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) => V::Dec(a / nz(self.convert_qty(*b, w, u)?)?),
-            (V::Money { amt, cur }, x) if x.num().is_some() => V::Money { amt: amt / nz(x.num().unwrap())?, cur: cur.clone() },
-            (V::Price { amt, cur, per }, x) if x.num().is_some() => V::Price { amt: amt / nz(x.num().unwrap())?, cur: cur.clone(), per: per.clone() },
-            (V::Qty { v, unit }, x) if x.num().is_some() => V::Qty { v: v / nz(x.num().unwrap())?, unit: unit.clone() },
+            (V::Money { amt: a, .. }, V::Money { amt: b, .. })
+            | (V::Price { amt: a, .. }, V::Price { amt: b, .. }) => V::Dec(a / nz(*b)?),
+            (V::Money { amt, cur }, V::Qty { v, unit }) => V::Price {
+                amt: tidy(amt / nz(*v)?),
+                cur: cur.clone(),
+                per: unit.clone(),
+            },
+            (V::Qty { v: a, unit: u }, V::Qty { v: b, unit: w }) => {
+                V::Dec(a / nz(self.convert_qty(*b, w, u)?)?)
+            }
+            (V::Money { amt, cur }, x) if x.num().is_some() => V::Money {
+                amt: amt / nz(x.num().unwrap())?,
+                cur: cur.clone(),
+            },
+            (V::Price { amt, cur, per }, x) if x.num().is_some() => V::Price {
+                amt: amt / nz(x.num().unwrap())?,
+                cur: cur.clone(),
+                per: per.clone(),
+            },
+            (V::Qty { v, unit }, x) if x.num().is_some() => V::Qty {
+                v: v / nz(x.num().unwrap())?,
+                unit: unit.clone(),
+            },
             (a, b) => match (a.num(), b.num()) {
                 (Some(x), Some(y)) => V::Dec(x / nz(y)?),
                 _ => return fail(format!("cannot divide {l} by {r}")),
@@ -2207,14 +3008,25 @@ impl<'m> Interp<'m> {
 
     fn call(&mut self, callee: &Expr, args: &[Arg], ctx: &mut Ctx) -> R<V> {
         match &callee.kind {
-            ExprKind::Field { base, name, optional } => {
+            ExprKind::Field {
+                base,
+                name,
+                optional,
+            } => {
                 // a method over a whole entity (`Order.where(…).count()`): SQL when it can
                 if let Some(v) = self.query_call(base, name, args, ctx)? {
                     return Ok(v);
                 }
                 let b = self.eval(base, ctx)?;
                 if b.is_none() {
-                    return if *optional { Ok(V::None) } else { fail(format!("`{}` is none: cannot call `{name}`", print::expr(base))) };
+                    return if *optional {
+                        Ok(V::None)
+                    } else {
+                        fail(format!(
+                            "`{}` is none: cannot call `{name}`",
+                            print::expr(base)
+                        ))
+                    };
                 }
                 self.method(b, name, args, ctx)
             }
@@ -2231,9 +3043,16 @@ impl<'m> Interp<'m> {
         let V::Lambda(c) = f else {
             return fail(format!("{f} is not a function"));
         };
-        let mut scope: Scope = Scope::with_capacity_and_hasher(c.locals.len() + c.params.len(), Default::default());
+        let mut scope: Scope =
+            Scope::with_capacity_and_hasher(c.locals.len() + c.params.len(), Default::default());
         scope.extend(c.locals.iter().cloned());
-        let mut ctx = Ctx { this: c.this.clone(), entity: c.entity.clone(), scopes: vec![scope], company: c.company, as_of: c.as_of };
+        let mut ctx = Ctx {
+            this: c.this.clone(),
+            entity: c.entity.clone(),
+            scopes: vec![scope],
+            company: c.company,
+            as_of: c.as_of,
+        };
         for (p, a) in c.params.iter().zip(args) {
             ctx.bind(p, a);
         }
@@ -2258,18 +3077,40 @@ impl<'m> Interp<'m> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             self.depth -= 1;
-            return fail(format!("recursion too deep: more than {MAX_DEPTH} nested calls ({what})"));
+            return fail(format!(
+                "recursion too deep: more than {MAX_DEPTH} nested calls ({what})"
+            ));
         }
         Ok(())
     }
 
-    fn call_fn(&mut self, f: &FnDef, args: &[Arg], ctx: &mut Ctx, this: Option<V>, entity: Option<String>) -> R<V> {
+    fn call_fn(
+        &mut self,
+        f: &FnDef,
+        args: &[Arg],
+        ctx: &mut Ctx,
+        this: Option<V>,
+        entity: Option<String>,
+    ) -> R<V> {
         let (pos, named) = self.eval_args(args, ctx)?;
         self.invoke_fn(f, pos, named, this, entity)
     }
 
-    fn invoke_fn(&mut self, f: &FnDef, pos: Vec<V>, named: Vec<(String, V)>, this: Option<V>, entity: Option<String>) -> R<V> {
-        let mut fctx = Ctx { this, entity, scopes: vec![Default::default()], company: None, as_of: None };
+    fn invoke_fn(
+        &mut self,
+        f: &FnDef,
+        pos: Vec<V>,
+        named: Vec<(String, V)>,
+        this: Option<V>,
+        entity: Option<String>,
+    ) -> R<V> {
+        let mut fctx = Ctx {
+            this,
+            entity,
+            scopes: vec![Default::default()],
+            company: None,
+            as_of: None,
+        };
         for (k, v) in &named {
             if let Some(name) = k.strip_prefix("__captured_") {
                 fctx.bind(name, v.clone());
@@ -2308,17 +3149,29 @@ impl<'m> Interp<'m> {
     fn builtin_fn(&mut self, name: &str, ctx: &Ctx) -> R<V> {
         match name {
             "next_number" => {
-                let company = ctx.local("company").and_then(|v| v.as_ref_id()).unwrap_or(0);
+                let company = ctx
+                    .local("company")
+                    .and_then(|v| v.as_ref_id())
+                    .unwrap_or(0);
                 let code = ctx.local("code").map(|v| v.to_string()).unwrap_or_default();
                 let on = match ctx.local("on") {
                     Some(V::Date(d)) => *d,
                     _ => time::local(self.clock, self.tz).date(),
                 };
-                let seq = self
-                    .ids("Sequence", None)
-                    .into_iter()
-                    .find(|id| self.store.read(*id, "code", None).map_or(false, |v| v.to_string() == code) && self.store.read(*id, "company", None).and_then(|v| v.as_ref_id()) == Some(company));
-                let pattern = seq.and_then(|id| self.store.read(id, "pattern", None)).map(|v| v.to_string()).unwrap_or_else(|| "{code}/{year}/{n:05}".into());
+                let seq = self.ids("Sequence", None).into_iter().find(|id| {
+                    self.store
+                        .read(*id, "code", None)
+                        .map_or(false, |v| v.to_string() == code)
+                        && self
+                            .store
+                            .read(*id, "company", None)
+                            .and_then(|v| v.as_ref_id())
+                            == Some(company)
+                });
+                let pattern = seq
+                    .and_then(|id| self.store.read(id, "pattern", None))
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{code}/{year}/{n:05}".into());
                 let key = format!("{company}/{code}/{}", on.year());
                 let n = self.store.bump_counter(&key);
                 Ok(text(&sequence_number(&pattern, &code, on.year(), n)))
@@ -2338,7 +3191,11 @@ impl<'m> Interp<'m> {
             // captured variables first, so parameters shadow them
             let mut seeded: Vec<(String, V)> = captured;
             seeded.retain(|(k, _)| !f.params.iter().any(|p| &p.name == k));
-            named.extend(seeded.into_iter().map(|(k, v)| (format!("__captured_{k}"), v)));
+            named.extend(
+                seeded
+                    .into_iter()
+                    .map(|(k, v)| (format!("__captured_{k}"), v)),
+            );
             return self.invoke_fn(&f, pos, named, ctx.this.clone(), ctx.entity.clone());
         }
         match n {
@@ -2365,7 +3222,9 @@ impl<'m> Interp<'m> {
                         None => return fail(format!("`{t}` is not a time of day (`09:00`)")),
                     },
                     Some(V::None) | None => return Ok(V::None),
-                    Some(other) => return fail(format!("datetime() needs a time of day, not {other}")),
+                    Some(other) => {
+                        return fail(format!("datetime() needs a time of day, not {other}"))
+                    }
                 };
                 let tz = match pos.get(2) {
                     Some(v) => self.zone_of(v)?,
@@ -2392,8 +3251,15 @@ impl<'m> Interp<'m> {
                     }
                 };
                 return Ok(match x {
-                    V::Money { amt, .. } => V::Money { amt: amt * rate, cur: Rc::from(to.as_str()) },
-                    V::Price { amt, per, .. } => V::Price { amt: amt * rate, cur: Rc::from(to.as_str()), per },
+                    V::Money { amt, .. } => V::Money {
+                        amt: amt * rate,
+                        cur: Rc::from(to.as_str()),
+                    },
+                    V::Price { amt, per, .. } => V::Price {
+                        amt: amt * rate,
+                        cur: Rc::from(to.as_str()),
+                        per,
+                    },
                     other => other,
                 });
             }
@@ -2405,13 +3271,21 @@ impl<'m> Interp<'m> {
                 let Some(cause) = self.store.get(*id).map(|r| r.cause.clone()) else {
                     return Ok(text(""));
                 };
-                let mut lines = vec![format!("{ent} {} created", self.display(&V::Ref { ent: ent.clone(), id: *id }))];
+                let mut lines = vec![format!(
+                    "{ent} {} created",
+                    self.display(&V::Ref {
+                        ent: ent.clone(),
+                        id: *id
+                    })
+                )];
                 for c in cause.chain() {
                     lines.push(format!("  because {c}"));
                 }
                 return Ok(text(&lines.join("\n")));
             }
-            "login" if self.viewer => return fail("login() is not allowed here: an expression of an app runs as whoever looks at it"),
+            "login" if self.viewer => return fail(
+                "login() is not allowed here: an expression of an app runs as whoever looks at it",
+            ),
             "login" => {
                 let (pos, named) = self.eval_args(args, ctx)?;
                 let login = pos.first().map(|v| v.to_string()).unwrap_or_default();
@@ -2425,7 +3299,10 @@ impl<'m> Interp<'m> {
                 let (pos, _) = self.eval_args(args, ctx)?;
                 let v = pos.first().and_then(|v| v.num()).unwrap_or_default();
                 let unit = self.code_of(pos.get(1).unwrap_or(&V::None))?;
-                return Ok(V::Qty { v, unit: Rc::from(unit.as_str()) });
+                return Ok(V::Qty {
+                    v,
+                    unit: Rc::from(unit.as_str()),
+                });
             }
             "Price" => {
                 let (pos, named) = self.eval_args(args, ctx)?;
@@ -2433,8 +3310,18 @@ impl<'m> Interp<'m> {
                     Some(V::Money { amt, cur }) => (*amt, cur.clone()),
                     _ => (Decimal::ZERO, Rc::from("")),
                 };
-                let per = self.code_of(&named.iter().find(|(n, _)| n == "per").map(|(_, v)| v.clone()).unwrap_or(V::None))?;
-                return Ok(V::Price { amt, cur, per: Rc::from(per.as_str()) });
+                let per = self.code_of(
+                    &named
+                        .iter()
+                        .find(|(n, _)| n == "per")
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(V::None),
+                )?;
+                return Ok(V::Price {
+                    amt,
+                    cur,
+                    per: Rc::from(per.as_str()),
+                });
             }
             "DateRange" => {
                 let (pos, _) = self.eval_args(args, ctx)?;
@@ -2455,7 +3342,10 @@ impl<'m> Interp<'m> {
             }
             "add" if self.post_buffer.is_some() => {
                 let (_, named) = self.eval_args(args, ctx)?;
-                self.post_buffer.as_mut().unwrap().push(named.into_iter().collect());
+                self.post_buffer
+                    .as_mut()
+                    .unwrap()
+                    .push(named.into_iter().collect());
                 return Ok(V::None);
             }
             _ => {}
@@ -2473,7 +3363,12 @@ impl<'m> Interp<'m> {
             let mut mctx = Ctx::default();
             let mut pos = pos.into_iter();
             for p in &metric.params {
-                let v = named.iter().find(|(x, _)| x == &p.name).map(|(_, v)| v.clone()).or_else(|| pos.next()).unwrap_or(V::None);
+                let v = named
+                    .iter()
+                    .find(|(x, _)| x == &p.name)
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| pos.next())
+                    .unwrap_or(V::None);
                 mctx.bind(&p.name, v);
             }
             let Some((_, body)) = metric.formulas.first() else {
@@ -2483,15 +3378,31 @@ impl<'m> Interp<'m> {
         }
         if self.m.event(n).is_some() {
             let (_, named) = self.eval_args(args, ctx)?;
-            return Ok(V::Event { name: Rc::from(n), fields: Rc::new(named) });
+            return Ok(V::Event {
+                name: Rc::from(n),
+                fields: Rc::new(named),
+            });
         }
         // a variant with data: `Discount(off=10%)`, `Fixed(8.00 EUR)`; fields in declared order
         if let Some(variant) = self.m.variant(n).filter(|v| !v.fields.is_empty()) {
             let names: Vec<String> = variant.fields.iter().map(|(f, _)| f.clone()).collect();
             let (pos, named) = self.eval_args(args, ctx)?;
             let mut pos = pos.into_iter();
-            let fields: Vec<V> = names.iter().map(|f| named.iter().find(|(x, _)| x == f).map(|(_, v)| v.clone()).or_else(|| pos.next()).unwrap_or(V::None)).collect();
-            return Ok(V::Variant { name: Rc::from(n), fields: Rc::new(fields) });
+            let fields: Vec<V> = names
+                .iter()
+                .map(|f| {
+                    named
+                        .iter()
+                        .find(|(x, _)| x == f)
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| pos.next())
+                        .unwrap_or(V::None)
+                })
+                .collect();
+            return Ok(V::Variant {
+                name: Rc::from(n),
+                fields: Rc::new(fields),
+            });
         }
         if self.m.entity(n).is_some() {
             let outer = self.ctor_depth == 0;
@@ -2508,7 +3419,9 @@ impl<'m> Interp<'m> {
         }
         // action or method of the current record called by its bare name
         if let (Some(this), Some(ent)) = (ctx.this.clone(), ctx.entity.clone()) {
-            return self.method(this, n, args, ctx).or_else(|_| fail(format!("unknown function `{n}` in {ent}")));
+            return self
+                .method(this, n, args, ctx)
+                .or_else(|_| fail(format!("unknown function `{n}` in {ent}")));
         }
         fail(format!("unknown function `{n}`"))
     }
@@ -2518,7 +3431,11 @@ impl<'m> Interp<'m> {
             return Ok(Decimal::ONE);
         }
         let f = self.m.function("exchange_rate").cloned();
-        let (Some(f), Some(src), Some(dst)) = (f, self.by_code("Currency", from), self.by_code("Currency", to)) else {
+        let (Some(f), Some(src), Some(dst)) = (
+            f,
+            self.by_code("Currency", from),
+            self.by_code("Currency", to),
+        ) else {
             return fail(format!("Missing exchange rate {from}/{to}"));
         };
         let saved = self.system;
@@ -2530,7 +3447,13 @@ impl<'m> Interp<'m> {
 
     // ---- methods ----------------------------------------------------------------------
 
-    fn lambda_arg(&mut self, args: &[Arg], ctx: &mut Ctx, idx: usize, name: Option<&str>) -> R<Option<V>> {
+    fn lambda_arg(
+        &mut self,
+        args: &[Arg],
+        ctx: &mut Ctx,
+        idx: usize,
+        name: Option<&str>,
+    ) -> R<Option<V>> {
         let a = match name {
             Some(n) => args.iter().find(|a| a.name.as_deref() == Some(n)),
             None => args.iter().filter(|a| a.name.is_none()).nth(idx),
@@ -2556,14 +3479,28 @@ impl<'m> Interp<'m> {
                 let filter = self.pushdown(args, ctx);
                 if self.m.entity(t).map_or(false, |e| e.is_ledger) {
                     self.post_written();
-                    let rows = self.store.ledger_rows(t, filter.as_ref().map(|(c, v)| (c.as_str(), v)));
-                    let rows: Vec<V> = rows.iter().filter(|r| ctx.as_of.map_or(true, |a| r.tx <= a)).map(|r| V::Ref { ent: r.ledger.clone(), id: r.id }).collect();
+                    let rows = self
+                        .store
+                        .ledger_rows(t, filter.as_ref().map(|(c, v)| (c.as_str(), v)));
+                    let rows: Vec<V> = rows
+                        .iter()
+                        .filter(|r| ctx.as_of.map_or(true, |a| r.tx <= a))
+                        .map(|r| V::Ref {
+                            ent: r.ledger.clone(),
+                            id: r.id,
+                        })
+                        .collect();
                     Some((rows, false))
                 } else {
                     let ids = match &filter {
                         Some((col, v)) => {
                             let names: Vec<String> = match self.m.entity(t) {
-                                Some(e) if e.kind == EntityKind::Trait => self.m.implementors(t).iter().map(|e| e.name.clone()).collect(),
+                                Some(e) if e.kind == EntityKind::Trait => self
+                                    .m
+                                    .implementors(t)
+                                    .iter()
+                                    .map(|e| e.name.clone())
+                                    .collect(),
                                 _ => vec![t.to_string()],
                             };
                             let mut ids = Vec::new();
@@ -2583,10 +3520,17 @@ impl<'m> Interp<'m> {
                         }
                         None => self.ids(t, ctx.as_of),
                     };
-                    let ids = if self.viewing() { self.viewer_rows(t, ids)? } else { ids };
+                    let ids = if self.viewing() {
+                        self.viewer_rows(t, ids)?
+                    } else {
+                        ids
+                    };
                     let mut out = Vec::new();
                     for id in ids {
-                        out.push(V::Ref { ent: self.ent_of(id), id });
+                        out.push(V::Ref {
+                            ent: self.ent_of(id),
+                            id,
+                        });
                     }
                     Some((out, false))
                 }
@@ -2602,14 +3546,21 @@ impl<'m> Interp<'m> {
         match &base {
             V::Ref { ent, id } => {
                 let actual = self.ent_of(*id);
-                let ent_name = if actual.is_empty() { ent.to_string() } else { actual.to_string() };
+                let ent_name = if actual.is_empty() {
+                    ent.to_string()
+                } else {
+                    actual.to_string()
+                };
                 let e = self.entity(&ent_name)?;
                 if let Some(a) = e.actions.iter().find(|a| a.name == name) {
                     let a = a.clone();
                     let (pos, named) = self.eval_args(args, ctx)?;
                     return self.run_action(&base, &ent_name, name, Some(&a), pos, named);
                 }
-                if e.flows.iter().any(|f| f.transitions.iter().any(|t| t.by.as_deref() == Some(name))) {
+                if e.flows
+                    .iter()
+                    .any(|f| f.transitions.iter().any(|t| t.by.as_deref() == Some(name)))
+                {
                     return self.run_action(&base, &ent_name, name, None, Vec::new(), Vec::new());
                 }
                 if let Some(f) = e.methods.iter().find(|f| f.name == name) {
@@ -2656,34 +3607,81 @@ impl<'m> Interp<'m> {
     fn scalar_method(&mut self, base: V, name: &str, pos: Vec<V>, named: Vec<(String, V)>) -> R<V> {
         let arg = |i: usize| pos.get(i).cloned().unwrap_or(V::None);
         Ok(match (&base, name) {
-            (V::Money { amt, cur }, "round") => match named.iter().find(|(n, _)| n == "step").and_then(|(_, v)| v.num()) {
-                Some(step) => V::Money { amt: (amt / step).round_dp_with_strategy(0, self.rounding(cur)) * step, cur: cur.clone() },
-                None => V::Money { amt: self.round_money(*amt, cur), cur: cur.clone() },
+            (V::Money { amt, cur }, "round") => match named
+                .iter()
+                .find(|(n, _)| n == "step")
+                .and_then(|(_, v)| v.num())
+            {
+                Some(step) => V::Money {
+                    amt: (amt / step).round_dp_with_strategy(0, self.rounding(cur)) * step,
+                    cur: cur.clone(),
+                },
+                None => V::Money {
+                    amt: self.round_money(*amt, cur),
+                    cur: cur.clone(),
+                },
             },
-            (V::Money { amt, cur }, "abs") => V::Money { amt: amt.abs(), cur: cur.clone() },
-            (V::Price { amt, cur, per }, "round") => V::Price { amt: amt.round_dp_with_strategy(self.decimals(cur) + 2, self.rounding(cur)).normalize(), cur: cur.clone(), per: per.clone() },
+            (V::Money { amt, cur }, "abs") => V::Money {
+                amt: amt.abs(),
+                cur: cur.clone(),
+            },
+            (V::Price { amt, cur, per }, "round") => V::Price {
+                amt: amt
+                    .round_dp_with_strategy(self.decimals(cur) + 2, self.rounding(cur))
+                    .normalize(),
+                cur: cur.clone(),
+                per: per.clone(),
+            },
             (V::Price { amt, cur, per }, "to") => {
                 let to = self.code_of(&arg(0))?;
                 // price per `per` → price per `to`: multiply by the size of `to` in `per`
                 let factor = self.convert_qty(Decimal::ONE, &to, per)?;
-                V::Price { amt: amt * factor, cur: cur.clone(), per: Rc::from(to.as_str()) }
+                V::Price {
+                    amt: amt * factor,
+                    cur: cur.clone(),
+                    per: Rc::from(to.as_str()),
+                }
             }
-            (V::Price { amt, cur, per }, "abs") => V::Price { amt: amt.abs(), cur: cur.clone(), per: per.clone() },
+            (V::Price { amt, cur, per }, "abs") => V::Price {
+                amt: amt.abs(),
+                cur: cur.clone(),
+                per: per.clone(),
+            },
             (V::Qty { v, unit }, "to") => {
                 let to = self.code_of(&arg(0))?;
-                V::Qty { v: self.convert_qty(*v, unit, &to)?, unit: Rc::from(to.as_str()) }
+                V::Qty {
+                    v: self.convert_qty(*v, unit, &to)?,
+                    unit: Rc::from(to.as_str()),
+                }
             }
             (V::Qty { v, unit }, "round") | (V::Qty { v, unit }, "round_up") => {
-                let precision = self.units.get(&**unit).map(|u| u.2).unwrap_or(parse_dec("0.001"));
+                let precision = self
+                    .units
+                    .get(&**unit)
+                    .map(|u| u.2)
+                    .unwrap_or(parse_dec("0.001"));
                 let steps = v / precision;
-                let steps = if name == "round_up" { steps.ceil() } else { steps.round_dp_with_strategy(0, RoundingStrategy::MidpointNearestEven) };
-                V::Qty { v: (steps * precision).normalize(), unit: unit.clone() }
+                let steps = if name == "round_up" {
+                    steps.ceil()
+                } else {
+                    steps.round_dp_with_strategy(0, RoundingStrategy::MidpointNearestEven)
+                };
+                V::Qty {
+                    v: (steps * precision).normalize(),
+                    unit: unit.clone(),
+                }
             }
-            (V::Qty { v, unit }, "abs") => V::Qty { v: v.abs(), unit: unit.clone() },
+            (V::Qty { v, unit }, "abs") => V::Qty {
+                v: v.abs(),
+                unit: unit.clone(),
+            },
             (V::Duration(s), "to") => {
                 let to = self.code_of(&arg(0))?;
                 let hours = d(*s) / d(3600);
-                V::Qty { v: self.convert_qty(hours, "h", &to)?.normalize(), unit: Rc::from(to.as_str()) }
+                V::Qty {
+                    v: self.convert_qty(hours, "h", &to)?.normalize(),
+                    unit: Rc::from(to.as_str()),
+                }
             }
             (V::Dec(x), "as_percent") | (V::Pct(x), "as_percent") => V::Pct(*x),
             (V::Int(i), "as_percent") => V::Pct(Decimal::from(*i)),
@@ -2702,15 +3700,38 @@ impl<'m> Interp<'m> {
             (V::Text(t), "lower") => text(&t.to_lowercase()),
             (V::Text(t), "trim") => text(t.trim()),
             // the first n characters
-            (V::Text(t), "take") => text(&t.chars().take(arg(0).num().and_then(|n| n.to_usize()).unwrap_or(0)).collect::<String>()),
+            (V::Text(t), "take") => text(
+                &t.chars()
+                    .take(arg(0).num().and_then(|n| n.to_usize()).unwrap_or(0))
+                    .collect::<String>(),
+            ),
             // the first letter of each word: "Magazzino centrale" → "Mc"
-            (V::Text(t), "initials") => text(&t.split_whitespace().filter_map(|w| w.chars().next()).collect::<String>()),
-            (V::Text(t), "sequence_part") => V::Int(t.rsplit('/').next().and_then(|p| p.parse().ok()).unwrap_or(0)),
+            (V::Text(t), "initials") => text(
+                &t.split_whitespace()
+                    .filter_map(|w| w.chars().next())
+                    .collect::<String>(),
+            ),
+            (V::Text(t), "sequence_part") => V::Int(
+                t.rsplit('/')
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0),
+            ),
             (V::Date(dt), "end_of_month") => V::Date(end_of_month(*dt)),
             (V::Date(dt), "start_of_month") => V::Date(start_of_month(*dt)),
             // the first and the last second of the month
-            (V::DateTime(dt), "start_of_month") => V::DateTime(time::instant(start_of_month(time::local(*dt, self.tz).date()).and_hms_opt(0, 0, 0).unwrap(), self.tz)),
-            (V::DateTime(dt), "end_of_month") => V::DateTime(time::instant(end_of_month(time::local(*dt, self.tz).date()).and_hms_opt(23, 59, 59).unwrap(), self.tz)),
+            (V::DateTime(dt), "start_of_month") => V::DateTime(time::instant(
+                start_of_month(time::local(*dt, self.tz).date())
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+                self.tz,
+            )),
+            (V::DateTime(dt), "end_of_month") => V::DateTime(time::instant(
+                end_of_month(time::local(*dt, self.tz).date())
+                    .and_hms_opt(23, 59, 59)
+                    .unwrap(),
+                self.tz,
+            )),
             (V::DateRange(a, b), "contains") => match arg(0) {
                 V::Date(x) => V::Bool(*a <= x && x <= *b),
                 _ => V::Bool(false),
@@ -2719,7 +3740,14 @@ impl<'m> Interp<'m> {
         })
     }
 
-    fn coll_method(&mut self, items: Vec<V>, set: bool, name: &str, args: &[Arg], ctx: &mut Ctx) -> R<V> {
+    fn coll_method(
+        &mut self,
+        items: Vec<V>,
+        set: bool,
+        name: &str,
+        args: &[Arg],
+        ctx: &mut Ctx,
+    ) -> R<V> {
         let f = self.lambda_arg(args, ctx, 0, None)?;
         let wrap = |v: Vec<V>| if set { V::Set(Rc::new(v)) } else { list(v) };
         let map = |s: &mut Self, x: &V| -> R<V> {
@@ -2805,14 +3833,21 @@ impl<'m> Interp<'m> {
                 }
                 Ok(V::Bool(name != "any"))
             }
-            "first" | "last" if matches!(args, [Arg { name: None, value, .. }] if !matches!(value.kind, ExprKind::Lambda { .. })) => {
+            "first" | "last" if matches!(args, [Arg { name: None, value, .. }] if !matches!(value.kind, ExprKind::Lambda { .. })) =>
+            {
                 // `first(n)` / `last(n)`
                 let n = match self.eval(&args[0].value, ctx)? {
                     V::Int(n) if n >= 0 => n as usize,
-                    other => return fail(format!("{name}(n) takes a whole number ≥ 0, not {other}")),
+                    other => {
+                        return fail(format!("{name}(n) takes a whole number ≥ 0, not {other}"))
+                    }
                 };
                 let n = n.min(items.len());
-                Ok(wrap(if name == "first" { items[..n].to_vec() } else { items[items.len() - n..].to_vec() }))
+                Ok(wrap(if name == "first" {
+                    items[..n].to_vec()
+                } else {
+                    items[items.len() - n..].to_vec()
+                }))
             }
             "avg" => {
                 let mut acc = V::Int(0);
@@ -2836,7 +3871,11 @@ impl<'m> Interp<'m> {
             }
             "first" | "last" => {
                 if f.is_none() {
-                    let x = if name == "first" { items.first() } else { items.last() };
+                    let x = if name == "first" {
+                        items.first()
+                    } else {
+                        items.last()
+                    };
                     return Ok(x.cloned().unwrap_or(V::None));
                 }
                 let mut found = None;
@@ -2885,7 +3924,10 @@ impl<'m> Interp<'m> {
                 Ok(list(out))
             }
             "is_contiguous" => {
-                let mut nums: Vec<i64> = items.iter().filter_map(|v| if let V::Int(i) = v { Some(*i) } else { None }).collect();
+                let mut nums: Vec<i64> = items
+                    .iter()
+                    .filter_map(|v| if let V::Int(i) = v { Some(*i) } else { None })
+                    .collect();
                 nums.sort();
                 Ok(V::Bool(nums.windows(2).all(|w| w[1] == w[0] + 1)))
             }
@@ -2930,7 +3972,11 @@ impl<'m> Interp<'m> {
                     // equal values print alike: a hash of the printed keys finds the group,
                     // equality decides (linear only among keys printed alike)
                     let h = format!("{k:?}\u{1}{k2:?}");
-                    match index.get(&h).copied().filter(|&i| groups[i].0 .0 == k && groups[i].0 .1 == k2) {
+                    match index
+                        .get(&h)
+                        .copied()
+                        .filter(|&i| groups[i].0 .0 == k && groups[i].0 .1 == k2)
+                    {
                         Some(i) => groups[i].1.push(x.clone()),
                         None => match groups.iter_mut().find(|((a, b), _)| *a == k && *b == k2) {
                             Some((_, v)) => v.push(x.clone()),
@@ -2942,10 +3988,20 @@ impl<'m> Interp<'m> {
                     }
                 }
                 let two = f2.is_some();
-                Ok(list(groups.into_iter().map(|((k, k2), v)| group_tuple(k, two.then_some(k2), list(v))).collect()))
+                Ok(list(
+                    groups
+                        .into_iter()
+                        .map(|((k, k2), v)| group_tuple(k, two.then_some(k2), list(v)))
+                        .collect(),
+                ))
             }
             "allocate" => {
-                let total = args.first().filter(|a| a.name.is_none()).map(|a| self.eval(&a.value, ctx)).transpose()?.unwrap_or(V::None);
+                let total = args
+                    .first()
+                    .filter(|a| a.name.is_none())
+                    .map(|a| self.eval(&a.value, ctx))
+                    .transpose()?
+                    .unwrap_or(V::None);
                 let by = self.lambda_arg(args, ctx, 0, Some("by"))?;
                 let mut weights = Vec::new();
                 for x in &items {
@@ -2956,7 +4012,18 @@ impl<'m> Interp<'m> {
                     weights.push(w.num().unwrap_or_default());
                 }
                 let shares = self.allocate(&total, &weights)?;
-                Ok(list(items.into_iter().zip(shares).map(|(item, share)| V::Tuple(Rc::new(vec![(Some("item".into()), item), (Some("share".into()), share)]))).collect()))
+                Ok(list(
+                    items
+                        .into_iter()
+                        .zip(shares)
+                        .map(|(item, share)| {
+                            V::Tuple(Rc::new(vec![
+                                (Some("item".into()), item),
+                                (Some("share".into()), share),
+                            ]))
+                        })
+                        .collect(),
+                ))
             }
             _ => fail(format!("collections have no method `{name}`")),
         }
@@ -2975,13 +4042,21 @@ impl<'m> Interp<'m> {
         let negative = amt.is_sign_negative();
         let units = (amt.abs() / unit).round();
         let wsum: Decimal = weights.iter().map(|w| w.abs()).sum();
-        let ws: Vec<Decimal> = if wsum.is_zero() { vec![Decimal::ONE; weights.len()] } else { weights.iter().map(|w| w.abs()).collect() };
+        let ws: Vec<Decimal> = if wsum.is_zero() {
+            vec![Decimal::ONE; weights.len()]
+        } else {
+            weights.iter().map(|w| w.abs()).collect()
+        };
         let wsum: Decimal = ws.iter().copied().sum();
         let raw: Vec<Decimal> = ws.iter().map(|w| units * w / wsum).collect();
         let mut floors: Vec<Decimal> = raw.iter().map(|r| r.floor()).collect();
         let mut left = units - floors.iter().copied().sum::<Decimal>();
         let mut order: Vec<usize> = (0..raw.len()).collect();
-        order.sort_by(|&a, &b| (raw[b] - floors[b]).cmp(&(raw[a] - floors[a])).then(a.cmp(&b)));
+        order.sort_by(|&a, &b| {
+            (raw[b] - floors[b])
+                .cmp(&(raw[a] - floors[a]))
+                .then(a.cmp(&b))
+        });
         for i in order {
             if left <= Decimal::ZERO {
                 break;
@@ -2993,7 +4068,10 @@ impl<'m> Interp<'m> {
             .into_iter()
             .map(|f| {
                 let v = f * unit;
-                V::Money { amt: if negative { -v } else { v }, cur: cur.clone() }
+                V::Money {
+                    amt: if negative { -v } else { v },
+                    cur: cur.clone(),
+                }
             })
             .collect())
     }
@@ -3002,14 +4080,25 @@ impl<'m> Interp<'m> {
         let e = self.entity(ent)?;
         let mut args: Vec<(String, V)> = Vec::new();
         let flow_fields: HashSet<&str> = e.flows.iter().map(|f| f.field.as_str()).collect();
-        let this = V::Ref { ent: Rc::from(ent), id };
+        let this = V::Ref {
+            ent: Rc::from(ent),
+            id,
+        };
         let mut children: Vec<(String, Vec<V>)> = Vec::new();
         for f in self.m.all_fields(e) {
-            if f.formula.is_some() || overrides.iter().any(|(n, _)| n == &f.name) || flow_fields.contains(f.name.as_str()) {
+            if f.formula.is_some()
+                || overrides.iter().any(|(n, _)| n == &f.name)
+                || flow_fields.contains(f.name.as_str())
+            {
                 continue;
             }
             // a copy gets its own number and its own values for single-field unique fields
-            let alone_unique = f.unique || self.m.all_uniques(e).iter().any(|u| u.fields.len() == 1 && u.fields[0] == f.name);
+            let alone_unique = f.unique
+                || self
+                    .m
+                    .all_uniques(e)
+                    .iter()
+                    .any(|u| u.fields.len() == 1 && u.fields[0] == f.name);
             if f.name == "number" || alone_unique {
                 continue;
             }
@@ -3017,10 +4106,14 @@ impl<'m> Interp<'m> {
                 // composition children (whose back-reference is `parent`) are copied too;
                 // other inverse relations (journal entries, payments…) are not
                 let child = ty_names(Some(inner)).unwrap_or_default();
-                let composition = self
-                    .m
-                    .entity(&child)
-                    .map_or(false, |ce| ce.fields.iter().any(|cf| cf.parent && (ty_names(cf.ty.as_ref()).as_deref() == Some(ent) || e.traits.contains(&ty_names(cf.ty.as_ref()).unwrap_or_default()))));
+                let composition = self.m.entity(&child).map_or(false, |ce| {
+                    ce.fields.iter().any(|cf| {
+                        cf.parent
+                            && (ty_names(cf.ty.as_ref()).as_deref() == Some(ent)
+                                || e.traits
+                                    .contains(&ty_names(cf.ty.as_ref()).unwrap_or_default()))
+                    })
+                });
                 if composition {
                     let v = self.get(&this, &f.name, None, None)?;
                     let mut copies = Vec::new();
@@ -3031,7 +4124,11 @@ impl<'m> Interp<'m> {
                     }
                     children.push((f.name.clone(), copies));
                 }
-                if self.m.entity(&child).map_or(false, |ce| ce.kind != EntityKind::Record) {
+                if self
+                    .m
+                    .entity(&child)
+                    .map_or(false, |ce| ce.kind != EntityKind::Record)
+                {
                     continue;
                 }
             }
@@ -3067,9 +4164,18 @@ impl<'m> Interp<'m> {
                 let v = self.eval(value, ctx)?;
                 ctx.bind(name, v);
             }
-            StmtKind::If { binding, cond, then, otherwise } => {
+            StmtKind::If {
+                binding,
+                cond,
+                then,
+                otherwise,
+            } => {
                 let v = self.eval(cond, ctx)?;
-                let go = if binding.is_some() { !v.is_none() } else { v.truthy() };
+                let go = if binding.is_some() {
+                    !v.is_none()
+                } else {
+                    v.truthy()
+                };
                 if go {
                     ctx.scopes.push(Default::default());
                     if let Some(b) = binding {
@@ -3132,9 +4238,12 @@ impl<'m> Interp<'m> {
             StmtKind::Assign { target, op, value } => {
                 // `x.f = provisional(v, reason=…, until=…)`: the value plus a marker next to it
                 let marker = match &value.kind {
-                    ExprKind::Call { callee, args } if matches!(&callee.kind, ExprKind::Name(n) if n == "provisional") => {
+                    ExprKind::Call { callee, args } if matches!(&callee.kind, ExprKind::Name(n) if n == "provisional") =>
+                    {
                         let (_, named) = self.eval_args(args, ctx)?;
-                        Some(V::Tuple(Rc::new(named.into_iter().map(|(k, v)| (Some(k), v)).collect())))
+                        Some(V::Tuple(Rc::new(
+                            named.into_iter().map(|(k, v)| (Some(k), v)).collect(),
+                        )))
                     }
                     _ => None,
                 };
@@ -3171,7 +4280,11 @@ impl<'m> Interp<'m> {
                 self.eval(e, ctx)?;
             }
             StmtKind::Fn(f) => {
-                let captured = ctx.scopes.iter().flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone()))).collect();
+                let captured = ctx
+                    .scopes
+                    .iter()
+                    .flat_map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .collect();
                 self.local_fns.insert(f.name.clone(), (f.clone(), captured));
             }
             StmtKind::Meta { .. } | StmtKind::Migration { .. } | StmtKind::Block { .. } => {}
@@ -3183,16 +4296,30 @@ impl<'m> Interp<'m> {
                 r?;
             }
             // test-only statements are handled by the runner
-            StmtKind::Expect(_) | StmtKind::ExpectError { .. } | StmtKind::ExpectCompileError { .. } | StmtKind::Use(_) | StmtKind::Clock(_) => {}
+            StmtKind::Expect(_)
+            | StmtKind::ExpectError { .. }
+            | StmtKind::ExpectCompileError { .. }
+            | StmtKind::Use(_)
+            | StmtKind::Clock(_) => {}
         }
         Ok(())
     }
 
     // ---- actions, flows, reactions ----------------------------------------------------
 
-    pub fn run_action(&mut self, rec: &V, ent: &str, name: &str, action: Option<&Action>, pos: Vec<V>, named: Vec<(String, V)>) -> R<V> {
+    pub fn run_action(
+        &mut self,
+        rec: &V,
+        ent: &str,
+        name: &str,
+        action: Option<&Action>,
+        pos: Vec<V>,
+        named: Vec<(String, V)>,
+    ) -> R<V> {
         if self.viewing() {
-            return fail(format!("{ent}.{name}: an action cannot run in a formula of an app (it only reads)"));
+            return fail(format!(
+                "{ent}.{name}: an action cannot run in a formula of an app (it only reads)"
+            ));
         }
         self.check_permission("run", ent, Some(name), Some(rec))?;
         self.enter(&format!("action `{ent}.{name}`"))?;
@@ -3201,7 +4328,15 @@ impl<'m> Interp<'m> {
         r
     }
 
-    fn run_action_inner(&mut self, rec: &V, ent: &str, name: &str, action: Option<&Action>, pos: Vec<V>, named: Vec<(String, V)>) -> R<V> {
+    fn run_action_inner(
+        &mut self,
+        rec: &V,
+        ent: &str,
+        name: &str,
+        action: Option<&Action>,
+        pos: Vec<V>,
+        named: Vec<(String, V)>,
+    ) -> R<V> {
         let e = self.entity(ent)?;
         let label = format!("{ent}.{name}");
         self.system += 1;
@@ -3287,14 +4422,34 @@ impl<'m> Interp<'m> {
         let V::Ref { id, .. } = rec else {
             return Ok(());
         };
-        self.store.write(*id, field, V::Variant { name: Rc::from(to), fields: Rc::new(Vec::new()) });
+        self.store.write(
+            *id,
+            field,
+            V::Variant {
+                name: Rc::from(to),
+                fields: Rc::new(Vec::new()),
+            },
+        );
         if let Some(r) = self.store.records.get_mut(id) {
             r.pending_defaults.retain(|p| p != field);
         }
-        if self.store.records.get(id).map_or(false, |r| r.frozen_at.is_some()) && !self.frozen_holds(*id, None)? {
+        if self
+            .store
+            .records
+            .get(id)
+            .map_or(false, |r| r.frozen_at.is_some())
+            && !self.frozen_holds(*id, None)?
+        {
             self.thaw(*id);
         }
-        let reactions: Vec<usize> = self.m.reactions.iter().enumerate().filter(|(_, r)| r.entity == ent && matches!(&r.trigger, Trigger::Enters(s) if s == to)).map(|(i, _)| i).collect();
+        let reactions: Vec<usize> = self
+            .m
+            .reactions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.entity == ent && matches!(&r.trigger, Trigger::Enters(s) if s == to))
+            .map(|(i, _)| i)
+            .collect();
         for i in reactions {
             self.run_reaction(i, rec)?;
         }
@@ -3332,21 +4487,33 @@ impl<'m> Interp<'m> {
             // automatic transitions (`when` without `by`)
             for e in &self.m.entities {
                 for (fi, flow) in e.flows.iter().enumerate() {
-                    for (ti, t) in flow.transitions.iter().enumerate().filter(|(_, t)| t.by.is_none() && t.when.is_some()) {
+                    for (ti, t) in flow
+                        .transitions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| t.by.is_none() && t.when.is_some())
+                    {
                         let deps = self.transition_deps(e, fi, ti);
                         for id in self.candidates(&e.name, &deps) {
                             if *self.ent_of(id) != *e.name {
                                 continue;
                             }
-                            let rec = V::Ref { ent: Rc::from(e.name.as_str()), id };
+                            let rec = V::Ref {
+                                ent: Rc::from(e.name.as_str()),
+                                id,
+                            };
                             let state = self.get(&rec, &flow.field, None, None)?;
-                            if !matches!(&state, V::Variant { name, .. } if t.from.iter().any(|f| **f == **name)) {
+                            if !matches!(&state, V::Variant { name, .. } if t.from.iter().any(|f| **f == **name))
+                            {
                                 continue;
                             }
                             let mut ctx = Ctx::for_record(&rec, &e.name);
                             if self.eval(t.when.as_ref().unwrap(), &mut ctx)?.truthy() {
                                 self.system += 1;
-                                let r = self.with_cause(format!("{}.{} → {} (automatic)", e.name, flow.field, t.to), |s| s.transition(&rec, &e.name, &flow.field, &t.to));
+                                let r = self.with_cause(
+                                    format!("{}.{} → {} (automatic)", e.name, flow.field, t.to),
+                                    |s| s.transition(&rec, &e.name, &flow.field, &t.to),
+                                );
                                 self.system -= 1;
                                 r?;
                                 changed = true;
@@ -3362,13 +4529,22 @@ impl<'m> Interp<'m> {
                 };
                 let deps = self.deps(&format!("becomes:{i}"), &r.entity, &[cond], &[]);
                 for id in self.candidates(&r.entity, &deps) {
-                    let rec = V::Ref { ent: Rc::from(r.entity.as_str()), id };
+                    let rec = V::Ref {
+                        ent: Rc::from(r.entity.as_str()),
+                        id,
+                    };
                     let mut ctx = Ctx::for_record(&rec, &r.entity);
                     let now = self.eval(cond, &mut ctx)?.truthy();
                     let before = match self.store.becomes.insert((i, id), now) {
                         Some(b) => b,
                         // first time seen in this working set: the value before this transaction
-                        None if self.store.lazy() && self.store.records.get(&id).map_or(false, |r| r.created_tx < self.store.tx) => {
+                        None if self.store.lazy()
+                            && self
+                                .store
+                                .records
+                                .get(&id)
+                                .map_or(false, |r| r.created_tx < self.store.tx) =>
+                        {
                             let mut c2 = Ctx::for_record(&rec, &r.entity);
                             c2.as_of = Some(self.store.tx - 1);
                             // a sweep: the condition was last evaluated when the record was last
@@ -3377,12 +4553,17 @@ impl<'m> Interp<'m> {
                             let saved = self.clock;
                             if self.sweep {
                                 let version = self.store.records.get(&id).map(|r| r.version());
-                                let written = version.and_then(|t| self.store.commit_info(t)).map(|c| c.0);
-                                if let Some(then) = written.into_iter().chain(self.last_sweep).max() {
+                                let written =
+                                    version.and_then(|t| self.store.commit_info(t)).map(|c| c.0);
+                                if let Some(then) = written.into_iter().chain(self.last_sweep).max()
+                                {
                                     self.clock = then.min(saved);
                                 }
                             }
-                            let before = self.eval(cond, &mut c2).map(|v| v.truthy()).unwrap_or(false);
+                            let before = self
+                                .eval(cond, &mut c2)
+                                .map(|v| v.truthy())
+                                .unwrap_or(false);
                             self.clock = saved;
                             before
                         }
@@ -3393,9 +4574,17 @@ impl<'m> Interp<'m> {
                         // caused by whatever was changed last
                         let last = if self.store.lazy() {
                             let dirty: Vec<Id> = self.store.dirty.iter().copied().collect();
-                            dirty.iter().filter_map(|d| self.store.records.get(d)).max_by_key(|r| (r.created_tx, r.id)).map(|r| r.cause.clone())
+                            dirty
+                                .iter()
+                                .filter_map(|d| self.store.records.get(d))
+                                .max_by_key(|r| (r.created_tx, r.id))
+                                .map(|r| r.cause.clone())
                         } else {
-                            self.store.records.values().max_by_key(|r| (r.created_tx, r.id)).map(|r| r.cause.clone())
+                            self.store
+                                .records
+                                .values()
+                                .max_by_key(|r| (r.created_tx, r.id))
+                                .map(|r| r.cause.clone())
                         };
                         let saved = self.cause.clone();
                         if let Some(c) = last {
@@ -3426,7 +4615,14 @@ impl<'m> Interp<'m> {
     /// `on X created` for each record created in this transaction, `on X changes` for each
     /// existing record written in it: once per record and transaction. True if any ran.
     fn record_reactions(&mut self) -> R<bool> {
-        let reactions: Vec<usize> = self.m.reactions.iter().enumerate().filter(|(_, r)| matches!(r.trigger, Trigger::Created | Trigger::Changes)).map(|(i, _)| i).collect();
+        let reactions: Vec<usize> = self
+            .m
+            .reactions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.trigger, Trigger::Created | Trigger::Changes))
+            .map(|(i, _)| i)
+            .collect();
         if reactions.is_empty() {
             return Ok(false);
         }
@@ -3448,7 +4644,12 @@ impl<'m> Interp<'m> {
                 if !fire || self.store.fired.contains(&(i, id)) {
                     continue;
                 }
-                if *ent != *r.entity && !self.m.entity(&ent).map_or(false, |e| self.m.implements(e, &r.entity)) {
+                if *ent != *r.entity
+                    && !self
+                        .m
+                        .entity(&ent)
+                        .map_or(false, |e| self.m.implements(e, &r.entity))
+                {
                     continue;
                 }
                 self.store.fired.insert((i, id));
@@ -3502,7 +4703,10 @@ impl<'m> Interp<'m> {
     /// it posted before. True if rows were posted.
     fn post_record(&mut self, e: &'m Entity, pi: usize, id: Id) -> R<bool> {
         let post = &e.posts[pi];
-        let rec = V::Ref { ent: Rc::from(e.name.as_str()), id };
+        let rec = V::Ref {
+            ent: Rc::from(e.name.as_str()),
+            id,
+        };
         let mut ctx = Ctx::for_record(&rec, &e.name);
         let active = match &post.when {
             Some(w) => self.eval(w, &mut ctx)?.truthy(),
@@ -3523,7 +4727,17 @@ impl<'m> Interp<'m> {
         let date = self.clock;
         let tx = self.store.tx;
         let ledger: Rc<str> = Rc::from(post.ledger.as_str());
-        let measures: Vec<String> = self.m.entity(&post.ledger).map(|l| l.fields.iter().filter(|f| f.kind == FieldKind::LedgerMeasure).map(|f| f.name.clone()).collect()).unwrap_or_default();
+        let measures: Vec<String> = self
+            .m
+            .entity(&post.ledger)
+            .map(|l| {
+                l.fields
+                    .iter()
+                    .filter(|f| f.kind == FieldKind::LedgerMeasure)
+                    .map(|f| f.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         // rows posted earlier in this transaction are taken back, not reversed
         let earlier = self.store.posted_rows.remove(&key);
         if let Some(ids) = &earlier {
@@ -3537,14 +4751,28 @@ impl<'m> Interp<'m> {
                 }
             }
             let rid = self.store.new_id();
-            self.store.push_row(LedgerRow { ledger: ledger.clone(), id: rid, cols: rev, source: Some(rec.clone()), date, tx });
+            self.store.push_row(LedgerRow {
+                ledger: ledger.clone(),
+                id: rid,
+                cols: rev,
+                source: Some(rec.clone()),
+                date,
+                tx,
+            });
         }
         let mut ids = Vec::new();
         for row in &desired {
             let rid = self.store.new_id();
             self.store.posted.push(rid);
             ids.push(rid);
-            self.store.push_row(LedgerRow { ledger: ledger.clone(), id: rid, cols: row.clone(), source: Some(rec.clone()), date, tx });
+            self.store.push_row(LedgerRow {
+                ledger: ledger.clone(),
+                id: rid,
+                cols: row.clone(),
+                source: Some(rec.clone()),
+                date,
+                tx,
+            });
         }
         self.store.posted_rows.insert(key.clone(), ids);
         self.store.postings.insert(key, desired);
@@ -3577,7 +4805,8 @@ impl<'m> Interp<'m> {
             let narrow = self.narrow_checks(e, &ids);
             // the records and what their rules read through references, in a few queries
             if ids.len() > 1 {
-                let (full, part): (Vec<Id>, Vec<Id>) = ids.iter().partition(|id| !narrow.contains_key(id));
+                let (full, part): (Vec<Id>, Vec<Id>) =
+                    ids.iter().partition(|id| !narrow.contains_key(id));
                 self.store.prefetch_refs(&full, 3);
                 self.store.prefetch_refs(&part, 2);
             }
@@ -3597,7 +4826,10 @@ impl<'m> Interp<'m> {
             for u in self.m.all_uniques(e) {
                 let mut seen: Vec<Vec<V>> = Vec::new();
                 for id in self.ids(&e.name, None) {
-                    let rec = V::Ref { ent: self.ent_of(id), id };
+                    let rec = V::Ref {
+                        ent: self.ent_of(id),
+                        id,
+                    };
                     let mut ctx = Ctx::for_record(&rec, &e.name);
                     if let Some(w) = &u.when {
                         if !self.eval(w, &mut ctx)?.truthy() {
@@ -3621,13 +4853,26 @@ impl<'m> Interp<'m> {
             for f in self.m.all_fields(e).into_iter().filter(|f| f.unique) {
                 let mut seen: Vec<V> = Vec::new();
                 for id in self.ids(&e.name, None) {
-                    let v = self.get(&V::Ref { ent: Rc::from(e.name.as_str()), id }, &f.name, None, None)?;
+                    let v = self.get(
+                        &V::Ref {
+                            ent: Rc::from(e.name.as_str()),
+                            id,
+                        },
+                        &f.name,
+                        None,
+                        None,
+                    )?;
                     if v.is_none() {
                         continue;
                     }
                     if seen.contains(&v) {
                         let shown = [self.display(&v)];
-                        return fail(unique_message(&e.name, std::slice::from_ref(&f.name), false, &shown));
+                        return fail(unique_message(
+                            &e.name,
+                            std::slice::from_ref(&f.name),
+                            false,
+                            &shown,
+                        ));
                     }
                     seen.push(v);
                 }
@@ -3653,16 +4898,30 @@ impl<'m> Interp<'m> {
     /// ones are added to `missing`, reported together by the caller), the `where` of its
     /// fields, the rules of the `record` values it holds, `check` and `warn`. Warnings are
     /// attached to the record. Also used by the bulk import, record by record.
-    pub fn check_record(&mut self, e: &'m Entity, id: Id, missing: &mut Vec<(Id, String)>) -> R<()> {
+    pub fn check_record(
+        &mut self,
+        e: &'m Entity,
+        id: Id,
+        missing: &mut Vec<(Id, String)>,
+    ) -> R<()> {
         self.check_record_sel(e, id, None, missing)
     }
 
     /// `check_record` limited to the rules `sel` selects (every rule when None): a deploy
     /// checks on the existing records only the rules it adds or changes.
-    pub fn check_record_sel(&mut self, e: &'m Entity, id: Id, sel: Option<&RuleSel>, missing: &mut Vec<(Id, String)>) -> R<()> {
+    pub fn check_record_sel(
+        &mut self,
+        e: &'m Entity,
+        id: Id,
+        sel: Option<&RuleSel>,
+        missing: &mut Vec<(Id, String)>,
+    ) -> R<()> {
         let all = sel.map_or(true, |s| s.all);
         let warnings = all || sel.map_or(false, |s| s.warnings);
-        let rec = V::Ref { ent: Rc::from(e.name.as_str()), id };
+        let rec = V::Ref {
+            ent: Rc::from(e.name.as_str()),
+            id,
+        };
         if warnings {
             if let Some(r) = self.store.records.get_mut(&id) {
                 r.warnings.clear();
@@ -3679,7 +4938,8 @@ impl<'m> Interp<'m> {
                 continue;
             }
             let want_req = all || sel.map_or(false, |s| s.required.contains(&f.name));
-            let want_where = (all || sel.map_or(false, |s| s.wheres.contains(&f.name))) && f.where_.is_some();
+            let want_where =
+                (all || sel.map_or(false, |s| s.wheres.contains(&f.name))) && f.where_.is_some();
             if !want_req && !want_where {
                 continue;
             }
@@ -3690,7 +4950,10 @@ impl<'m> Interp<'m> {
             }
             let mut ctx = Ctx::for_record(&rec, &e.name);
             let v = self.get(&rec, &f.name, None, None)?;
-            let optional = matches!(f.ty, Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None);
+            let optional = matches!(
+                f.ty,
+                Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None
+            );
             if v.is_none() {
                 let required = match &f.required_when {
                     Some(c) if want_req => self.eval(c, &mut ctx)?.truthy(),
@@ -3702,8 +4965,14 @@ impl<'m> Interp<'m> {
                 }
                 continue;
             }
-            let written_now = || self.store.records.get(&id).map_or(false, |r| r.history.iter().any(|(t, n, _)| *t == tx && n == &f.name));
-            let recheck = want_where && (written_now() || !*frozen.get_or_insert_with(|| self.frozen_owner(id).is_some()));
+            let written_now = || {
+                self.store.records.get(&id).map_or(false, |r| {
+                    r.history.iter().any(|(t, n, _)| *t == tx && n == &f.name)
+                })
+            };
+            let recheck = want_where
+                && (written_now()
+                    || !*frozen.get_or_insert_with(|| self.frozen_owner(id).is_some()));
             if let (Some(w), true) = (&f.where_, recheck) {
                 let values: Vec<V> = match &v {
                     V::List(items) | V::Set(items) => items.to_vec(),
@@ -3711,7 +4980,12 @@ impl<'m> Interp<'m> {
                 };
                 for v in values {
                     if !self.satisfies_where(w, &v, &mut ctx)? {
-                        return fail(format!("{}.{} = {}: does not satisfy its `where`", e.name, f.name, self.display(&v)));
+                        return fail(format!(
+                            "{}.{} = {}: does not satisfy its `where`",
+                            e.name,
+                            f.name,
+                            self.display(&v)
+                        ));
                     }
                 }
             }
@@ -3725,7 +4999,12 @@ impl<'m> Interp<'m> {
                 if !(warnings || sel.map_or(false, |s| s.records.contains(&f.name))) {
                     continue;
                 }
-                if f.formula.is_none() && self.m.entity(&ty_names_inner(f.ty.as_ref()).unwrap_or_default()).map_or(false, |x| x.kind == EntityKind::Record) {
+                if f.formula.is_none()
+                    && self
+                        .m
+                        .entity(&ty_names_inner(f.ty.as_ref()).unwrap_or_default())
+                        .map_or(false, |x| x.kind == EntityKind::Record)
+                {
                     let v = self.get(&rec, &f.name, None, None)?;
                     self.check_record_values(id, &v)?;
                 }
@@ -3742,7 +5021,10 @@ impl<'m> Interp<'m> {
             let mut ctx = Ctx::for_record(&rec, &e.name);
             let held = self.eval_rule(e, id, &rec, &c.cond, &mut ctx)?;
             if !held.truthy() {
-                let msg = self.eval(&c.message, &mut ctx).map(|m| m.to_string()).unwrap_or_else(|_| print::expr(&c.cond));
+                let msg = self
+                    .eval(&c.message, &mut ctx)
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|_| print::expr(&c.cond));
                 if c.warn {
                     if let Some(r) = self.store.records.get_mut(&id) {
                         r.warnings.push(msg);
@@ -3773,7 +5055,11 @@ impl<'m> Interp<'m> {
             }
         };
         if !captured.is_empty() {
-            let guard = if v.truthy() { self.guard_of(e, id, rec, cond, &captured, ctx) } else { None };
+            let guard = if v.truthy() {
+                self.guard_of(e, id, rec, cond, &captured, ctx)
+            } else {
+                None
+            };
             match guard {
                 Some(g) => self.store.guards.push(g),
                 None => {
@@ -3794,7 +5080,15 @@ impl<'m> Interp<'m> {
 
     /// `cond` as a guard: a comparison of one of the record's own rollups changed by delta
     /// (the only one it read) with a value that reads none.
-    fn guard_of(&mut self, e: &'m Entity, id: Id, rec: &V, cond: &Expr, captured: &[(Id, String)], ctx: &mut Ctx) -> Option<crate::store::Guard> {
+    fn guard_of(
+        &mut self,
+        e: &'m Entity,
+        id: Id,
+        rec: &V,
+        cond: &Expr,
+        captured: &[(Id, String)],
+        ctx: &mut Ctx,
+    ) -> Option<crate::store::Guard> {
         let ExprKind::Binary { op, lhs, rhs } = &cond.kind else {
             return None;
         };
@@ -3804,7 +5098,9 @@ impl<'m> Interp<'m> {
         }
         let own = |x: &Expr| match &x.kind {
             ExprKind::Name(n) => Some(n.clone()),
-            ExprKind::Field { base, name, .. } if matches!(base.kind, ExprKind::SelfRef) => Some(name.clone()),
+            ExprKind::Field { base, name, .. } if matches!(base.kind, ExprKind::SelfRef) => {
+                Some(name.clone())
+            }
             _ => None,
         };
         let field = captured.first().map(|(_, f)| f.clone())?;
@@ -3824,7 +5120,12 @@ impl<'m> Interp<'m> {
         } else {
             return None;
         };
-        if !self.m.all_fields(e).iter().any(|f| f.name == field && f.formula.is_some()) {
+        if !self
+            .m
+            .all_fields(e)
+            .iter()
+            .any(|f| f.name == field && f.formula.is_some())
+        {
             return None;
         }
         // the other side, on its own: it may read no rollup changed by delta
@@ -3836,7 +5137,12 @@ impl<'m> Interp<'m> {
             return None;
         }
         let _ = rec;
-        Some(crate::store::Guard { id, field, op, bound: value })
+        Some(crate::store::Guard {
+            id,
+            field,
+            op,
+            bound: value,
+        })
     }
 
     /// A deploy changed `frozen when`: freeze the record if it holds now, unfreeze it if it
@@ -3857,8 +5163,14 @@ impl<'m> Interp<'m> {
                 }
             }
             Some(None) => {
-                let rec = V::Ref { ent: ent.clone(), id };
-                if self.eval(&fr.when, &mut Ctx::for_record(&rec, &ent))?.truthy() {
+                let rec = V::Ref {
+                    ent: ent.clone(),
+                    id,
+                };
+                if self
+                    .eval(&fr.when, &mut Ctx::for_record(&rec, &ent))?
+                    .truthy()
+                {
                     let tx = self.store.tx;
                     if let Some(r) = self.store.records.get_mut(&id) {
                         r.frozen_at = Some(tx);
@@ -3875,17 +5187,38 @@ impl<'m> Interp<'m> {
 
     /// The uniqueness rules of an entity: (fields, `when`).
     pub fn unique_rules(&self, e: &Entity) -> Vec<(Vec<String>, Option<Expr>)> {
-        let mut keys: Vec<(Vec<String>, Option<Expr>)> = self.m.all_uniques(e).into_iter().map(|u| (u.fields.clone(), u.when.clone())).collect();
-        keys.extend(self.m.all_fields(e).into_iter().filter(|f| f.unique).map(|f| (vec![f.name.clone()], None)));
+        let mut keys: Vec<(Vec<String>, Option<Expr>)> = self
+            .m
+            .all_uniques(e)
+            .into_iter()
+            .map(|u| (u.fields.clone(), u.when.clone()))
+            .collect();
+        keys.extend(
+            self.m
+                .all_fields(e)
+                .into_iter()
+                .filter(|f| f.unique)
+                .map(|f| (vec![f.name.clone()], None)),
+        );
         keys
     }
 
     /// A record that breaks a `check`, while every record is checked against a new model.
     fn violation(&mut self, e: &Entity, c: &quadra_ir::Check, id: Id, rec: &V, message: String) {
-        let at = match self.violations.iter().position(|v| v.span == c.span && v.entity == e.name) {
+        let at = match self
+            .violations
+            .iter()
+            .position(|v| v.span == c.span && v.entity == e.name)
+        {
             Some(i) => i,
             None => {
-                self.violations.push(Violation { entity: e.name.clone(), span: c.span, message, records: Vec::new(), count: 0 });
+                self.violations.push(Violation {
+                    entity: e.name.clone(),
+                    span: c.span,
+                    message,
+                    records: Vec::new(),
+                    count: 0,
+                });
                 self.violations.len() - 1
             }
         };
@@ -3903,16 +5236,30 @@ impl<'m> Interp<'m> {
                 !part(before) && !part(after) && before != Some('.')
             })
         };
-        let names: Vec<String> = self.m.all_fields(e).into_iter().filter(|f| word(&f.name)).map(|f| f.name.clone()).collect();
+        let names: Vec<String> = self
+            .m
+            .all_fields(e)
+            .into_iter()
+            .filter(|f| word(&f.name))
+            .map(|f| f.name.clone())
+            .collect();
         let mut values = Vec::new();
         for n in names {
             if let Ok(v) = self.get(rec, &n, None, None) {
-                let shown = if v.is_none() { "none".to_string() } else { self.display(&v) };
+                let shown = if v.is_none() {
+                    "none".to_string()
+                } else {
+                    self.display(&v)
+                };
                 values.push((n, shown));
             }
         }
         let who = self.display(rec);
-        let who = if who.contains('#') { who } else { format!("{} {who} (#{id})", e.name) };
+        let who = if who.contains('#') {
+            who
+        } else {
+            format!("{} {who} (#{id})", e.name)
+        };
         self.violations[at].records.push((id, who, values));
     }
 
@@ -3921,18 +5268,37 @@ impl<'m> Interp<'m> {
     pub fn violations_report(&self) -> String {
         let mut out = String::new();
         let n = self.violations.len();
-        out.push_str(if n == 1 { "a rule of the new code is broken by data you already have:\n" } else { "rules of the new code are broken by data you already have:\n" });
+        out.push_str(if n == 1 {
+            "a rule of the new code is broken by data you already have:\n"
+        } else {
+            "rules of the new code are broken by data you already have:\n"
+        });
         for v in &self.violations {
             out.push('\n');
             match self.m.place(v.span) {
                 Some((path, line, text)) => out.push_str(&format!("  {path}:{line}\n    {text}\n")),
                 None => out.push_str(&format!("  {}: {}\n", v.entity, v.message)),
             }
-            let what = if v.count == 1 { format!("1 {} breaks it", v.entity) } else { format!("{} records of {} break it", v.count, v.entity) };
+            let what = if v.count == 1 {
+                format!("1 {} breaks it", v.entity)
+            } else {
+                format!("{} records of {} break it", v.count, v.entity)
+            };
             out.push_str(&format!("  {what}:\n"));
             for (_, who, values) in &v.records {
-                let vals = values.iter().map(|(f, x)| format!("{f} = {x}")).collect::<Vec<_>>().join(", ");
-                out.push_str(&format!("    {who}{}\n", if vals.is_empty() { String::new() } else { format!(": {vals}") }));
+                let vals = values
+                    .iter()
+                    .map(|(f, x)| format!("{f} = {x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "    {who}{}\n",
+                    if vals.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {vals}")
+                    }
+                ));
             }
             if v.count > v.records.len() {
                 out.push_str(&format!("    … and {} more\n", v.count - v.records.len()));
@@ -3956,7 +5322,11 @@ impl<'m> Interp<'m> {
             return Ok(());
         };
         let tx = self.store.tx;
-        let written = self.store.records.get(id).map_or(false, |r| r.history.iter().any(|(t, name, _)| *t == tx && name == &f.name));
+        let written = self.store.records.get(id).map_or(false, |r| {
+            r.history
+                .iter()
+                .any(|(t, name, _)| *t == tx && name == &f.name)
+        });
         if !written {
             return Ok(());
         }
@@ -3967,13 +5337,32 @@ impl<'m> Interp<'m> {
             return Ok(());
         };
         // units of different kinds: both known, different categories
-        let other_kind = |s: &Self, a: &str, b: &str| a != b && matches!((s.units.get(a), s.units.get(b)), (Some((_, c1, _)), Some((_, c2, _))) if c1 != c2);
+        let other_kind = |s: &Self, a: &str, b: &str| {
+            a != b
+                && matches!((s.units.get(a), s.units.get(b)), (Some((_, c1, _)), Some((_, c2, _))) if c1 != c2)
+        };
         let shown = self.display(v);
         match (v, &expected) {
-            (V::Money { cur, .. }, V::Money { cur: want, .. }) if cur != want => fail(format!("{}.{} = {shown}: expected an amount in {want}", e.name, f.name)),
-            (V::Qty { unit, .. }, V::Qty { unit: want, .. }) if other_kind(self, unit, want) => fail(format!("{}.{} = {shown}: expected a quantity in {want}", e.name, f.name)),
-            (V::Price { cur, .. }, V::Price { cur: want, .. }) if cur != want => fail(format!("{}.{} = {shown}: expected a price in {want}", e.name, f.name)),
-            (V::Price { per, .. }, V::Price { per: want, .. }) if other_kind(self, per, want) => fail(format!("{}.{} = {shown}: expected a price per {want}", e.name, f.name)),
+            (V::Money { cur, .. }, V::Money { cur: want, .. }) if cur != want => fail(format!(
+                "{}.{} = {shown}: expected an amount in {want}",
+                e.name, f.name
+            )),
+            (V::Qty { unit, .. }, V::Qty { unit: want, .. }) if other_kind(self, unit, want) => {
+                fail(format!(
+                    "{}.{} = {shown}: expected a quantity in {want}",
+                    e.name, f.name
+                ))
+            }
+            (V::Price { cur, .. }, V::Price { cur: want, .. }) if cur != want => fail(format!(
+                "{}.{} = {shown}: expected a price in {want}",
+                e.name, f.name
+            )),
+            (V::Price { per, .. }, V::Price { per: want, .. }) if other_kind(self, per, want) => {
+                fail(format!(
+                    "{}.{} = {shown}: expected a price per {want}",
+                    e.name, f.name
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -3991,7 +5380,11 @@ impl<'m> Interp<'m> {
                     c2.bind(&params[0], v.clone());
                     self.eval(body, &mut c2)?.truthy()
                 }
-                ExprKind::Binary { op: BinOp::Range, lhs, rhs } => {
+                ExprKind::Binary {
+                    op: BinOp::Range,
+                    lhs,
+                    rhs,
+                } => {
                     let lo = self.eval(lhs, ctx)?;
                     let hi = self.eval(rhs, ctx)?;
                     self.compare(v, &lo)? >= 0 && self.compare(v, &hi)? <= 0
@@ -4021,7 +5414,10 @@ impl<'m> Interp<'m> {
                 }
                 let fv = self.get(&rv, &f.name, None, None)?;
                 if fv.is_none() {
-                    let optional = matches!(f.ty, Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None);
+                    let optional = matches!(
+                        f.ty,
+                        Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_)) | None
+                    );
                     let required = match &f.required_when {
                         Some(c) => self.eval(c, &mut ctx)?.truthy(),
                         None => !optional,
@@ -4038,7 +5434,12 @@ impl<'m> Interp<'m> {
                     };
                     for x in items {
                         if !self.satisfies_where(w, &x, &mut ctx)? {
-                            return fail(format!("{}.{} = {}: does not satisfy its `where`", re.name, f.name, self.display(&x)));
+                            return fail(format!(
+                                "{}.{} = {}: does not satisfy its `where`",
+                                re.name,
+                                f.name,
+                                self.display(&x)
+                            ));
                         }
                     }
                 }
@@ -4046,7 +5447,10 @@ impl<'m> Interp<'m> {
             }
             for c in self.m.all_checks(re) {
                 if !self.eval(&c.cond, &mut ctx)?.truthy() {
-                    let msg = self.eval(&c.message, &mut ctx).map(|m| m.to_string()).unwrap_or_else(|_| print::expr(&c.cond));
+                    let msg = self
+                        .eval(&c.message, &mut ctx)
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|_| print::expr(&c.cond));
                     if c.warn {
                         if let Some(r) = self.store.records.get_mut(&holder) {
                             r.warnings.push(msg);
@@ -4063,19 +5467,51 @@ impl<'m> Interp<'m> {
     /// Uniqueness of the records written in this transaction, by index lookups.
     pub fn check_uniques_written(&mut self, e: &Entity) -> R<()> {
         let tx = self.store.tx;
-        let written: Vec<Id> = self.store.dirty.iter().copied().filter(|id| self.store.records.get(id).map_or(false, |r| *r.ent == *e.name && r.history.iter().any(|(t, _, _)| *t == tx))).collect();
-        let mut keys: Vec<(Vec<String>, Option<Expr>)> = self.m.all_uniques(e).into_iter().map(|u| (u.fields.clone(), u.when.clone())).collect();
-        keys.extend(self.m.all_fields(e).into_iter().filter(|f| f.unique).map(|f| (vec![f.name.clone()], None)));
+        let written: Vec<Id> = self
+            .store
+            .dirty
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.store.records.get(id).map_or(false, |r| {
+                    *r.ent == *e.name && r.history.iter().any(|(t, _, _)| *t == tx)
+                })
+            })
+            .collect();
+        let mut keys: Vec<(Vec<String>, Option<Expr>)> = self
+            .m
+            .all_uniques(e)
+            .into_iter()
+            .map(|u| (u.fields.clone(), u.when.clone()))
+            .collect();
+        keys.extend(
+            self.m
+                .all_fields(e)
+                .into_iter()
+                .filter(|f| f.unique)
+                .map(|f| (vec![f.name.clone()], None)),
+        );
         for (fields, when) in keys {
             for &id in &written {
                 // a key without `when` that this transaction did not write cannot have become
                 // a duplicate: a record that now collides with it was written, and is checked
-                let touched = self.store.records.get(&id).map_or(true, |r| r.created_tx == tx || r.history.iter().any(|(t, f, _)| *t == tx && fields.iter().any(|k| f == k || f.starts_with(&format!("{k}@")))));
+                let touched = self.store.records.get(&id).map_or(true, |r| {
+                    r.created_tx == tx
+                        || r.history.iter().any(|(t, f, _)| {
+                            *t == tx
+                                && fields
+                                    .iter()
+                                    .any(|k| f == k || f.starts_with(&format!("{k}@")))
+                        })
+                });
                 if when.is_none() && !touched {
                     continue;
                 }
                 let key_of = |s: &mut Self, rid: Id| -> R<Option<Vec<V>>> {
-                    let rec = V::Ref { ent: Rc::from(e.name.as_str()), id: rid };
+                    let rec = V::Ref {
+                        ent: Rc::from(e.name.as_str()),
+                        id: rid,
+                    };
                     if let Some(w) = &when {
                         if !s.eval(w, &mut Ctx::for_record(&rec, &e.name))?.truthy() {
                             return Ok(None);
@@ -4085,7 +5521,11 @@ impl<'m> Interp<'m> {
                     for f in &fields {
                         key.push(s.get(&rec, f, None, None)?);
                     }
-                    Ok(if key.iter().any(|k| k.is_none()) { None } else { Some(key) })
+                    Ok(if key.iter().any(|k| k.is_none()) {
+                        None
+                    } else {
+                        Some(key)
+                    })
                 };
                 let Some(key) = key_of(self, id)? else {
                     continue;
@@ -4111,14 +5551,25 @@ impl<'m> Interp<'m> {
         if !plain.is_empty() {
             let posted: Vec<Id> = self.store.posted.clone();
             for rid in posted {
-                if !self.store.rows.iter().any(|r| r.id == rid && *r.ledger == *l.name) {
+                if !self
+                    .store
+                    .rows
+                    .iter()
+                    .any(|r| r.id == rid && *r.ledger == *l.name)
+                {
                     continue;
                 }
-                let row = V::Ref { ent: Rc::from(l.name.as_str()), id: rid };
+                let row = V::Ref {
+                    ent: Rc::from(l.name.as_str()),
+                    id: rid,
+                };
                 for c in &plain {
                     let mut ctx = Ctx::for_record(&row, &l.name);
                     if !self.eval(&c.cond, &mut ctx)?.truthy() {
-                        let msg = self.eval(&c.message, &mut ctx).map(|m| m.to_string()).unwrap_or_else(|_| print::expr(&c.cond));
+                        let msg = self
+                            .eval(&c.message, &mut ctx)
+                            .map(|m| m.to_string())
+                            .unwrap_or_else(|_| print::expr(&c.cond));
                         return fail(msg);
                     }
                 }
@@ -4130,12 +5581,20 @@ impl<'m> Interp<'m> {
                 // only the groups that received rows in this transaction
                 let tx = self.store.tx;
                 let first = c.per[0].clone();
-                let new: Vec<LedgerRow> = self.store.rows.iter().filter(|r| *r.ledger == *l.name && r.tx == tx).cloned().collect();
+                let new: Vec<LedgerRow> = self
+                    .store
+                    .rows
+                    .iter()
+                    .filter(|r| *r.ledger == *l.name && r.tx == tx)
+                    .cloned()
+                    .collect();
                 let mut out: Vec<LedgerRow> = Vec::new();
                 let mut seen = HashSet::new();
                 for r in &new {
                     let loaded = match r.cols.get(&first) {
-                        Some(v) if first != "source" => self.store.ledger_rows(&l.name, Some((first.as_str(), v))),
+                        Some(v) if first != "source" => {
+                            self.store.ledger_rows(&l.name, Some((first.as_str(), v)))
+                        }
                         _ => self.store.ledger_rows(&l.name, None),
                     };
                     for x in loaded {
@@ -4147,7 +5606,12 @@ impl<'m> Interp<'m> {
                 out.sort_by_key(|r| r.id);
                 out
             } else {
-                self.store.rows.iter().filter(|r| *r.ledger == *l.name).cloned().collect()
+                self.store
+                    .rows
+                    .iter()
+                    .filter(|r| *r.ledger == *l.name)
+                    .cloned()
+                    .collect()
             };
             for r in &rows {
                 let key: Vec<V> = c
@@ -4158,14 +5622,24 @@ impl<'m> Interp<'m> {
                         other => r.cols.get(other).cloned().unwrap_or(V::None),
                     })
                     .collect();
-                let rv = V::Ref { ent: r.ledger.clone(), id: r.id };
+                let rv = V::Ref {
+                    ent: r.ledger.clone(),
+                    id: r.id,
+                };
                 match groups.iter_mut().find(|(k, _)| *k == key) {
                     Some((_, v)) => v.push(rv),
                     None => groups.push((key, vec![rv])),
                 }
             }
             for (key, items) in groups {
-                let key_tuple = V::Tuple(Rc::new(c.per.iter().cloned().map(Some).zip(key.into_iter()).collect()));
+                let key_tuple = V::Tuple(Rc::new(
+                    c.per
+                        .iter()
+                        .cloned()
+                        .map(Some)
+                        .zip(key.into_iter())
+                        .collect(),
+                ));
                 let ExprKind::Lambda { params, body } = &c.cond.kind else {
                     continue;
                 };
@@ -4174,7 +5648,10 @@ impl<'m> Interp<'m> {
                 ctx.bind("__key", key_tuple.clone());
                 let ok = self.eval_group(body, &mut ctx, &params[0], key_tuple)?;
                 if !ok {
-                    let msg = self.eval(&c.message, &mut Ctx::default()).map(|m| m.to_string()).unwrap_or_default();
+                    let msg = self
+                        .eval(&c.message, &mut Ctx::default())
+                        .map(|m| m.to_string())
+                        .unwrap_or_default();
                     return fail(msg);
                 }
             }
@@ -4198,7 +5675,13 @@ impl<'m> Interp<'m> {
             }
             let deps = self.frozen_deps(e);
             for id in self.candidates(&e.name, &deps) {
-                if *self.ent_of(id) != *e.name || self.store.records.get(&id).map_or(true, |r| r.frozen_at.is_none()) {
+                if *self.ent_of(id) != *e.name
+                    || self
+                        .store
+                        .records
+                        .get(&id)
+                        .map_or(true, |r| r.frozen_at.is_none())
+                {
                     continue;
                 }
                 if !self.frozen_holds(id, None)? {
@@ -4215,10 +5698,19 @@ impl<'m> Interp<'m> {
             let Some(fr) = &e.frozen else { continue };
             let deps = self.frozen_deps(e);
             for id in self.candidates(&e.name, &deps) {
-                if *self.ent_of(id) != *e.name || self.store.records.get(&id).map_or(true, |r| r.frozen_at.is_some()) {
+                if *self.ent_of(id) != *e.name
+                    || self
+                        .store
+                        .records
+                        .get(&id)
+                        .map_or(true, |r| r.frozen_at.is_some())
+                {
                     continue;
                 }
-                let rec = V::Ref { ent: Rc::from(e.name.as_str()), id };
+                let rec = V::Ref {
+                    ent: Rc::from(e.name.as_str()),
+                    id,
+                };
                 let mut ctx = Ctx::for_record(&rec, &e.name);
                 if self.eval(&fr.when, &mut ctx)?.truthy() {
                     let tx = self.store.tx;
@@ -4236,7 +5728,9 @@ impl<'m> Interp<'m> {
     pub fn transaction<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
         let snapshot = self.store.clone();
         self.store.tx += 1;
-        self.store.commits.insert(self.store.tx, (self.clock, self.user));
+        self.store
+            .commits
+            .insert(self.store.tx, (self.clock, self.user));
         self.store.fired.clear();
         self.store.dirty.clear();
         self.store.wlog.clear();
@@ -4258,7 +5752,11 @@ impl<'m> Interp<'m> {
                 return fail(format!("database: {e}"));
             }
             // a periodic sweep that found nothing to do writes no (empty) commit
-            if self.sweep && self.store.dirty.is_empty() && self.store.rows.len() == snapshot.rows.len() && self.store.outbox.is_empty() {
+            if self.sweep
+                && self.store.dirty.is_empty()
+                && self.store.rows.len() == snapshot.rows.len()
+                && self.store.outbox.is_empty()
+            {
                 let (next, block) = (self.store.next_id, self.store.id_block());
                 self.store = snapshot.clone();
                 self.store.next_id = next;
@@ -4268,7 +5766,15 @@ impl<'m> Interp<'m> {
             if self.sink.is_some() {
                 self.materialize_formulas();
                 let mut sink = self.sink.take().unwrap();
-                let commit = Commit { tx: self.store.tx, base: self.store.base, before: &snapshot, after: &self.store, user: self.user, cause: self.cause.chain().join(" ← "), time: self.clock };
+                let commit = Commit {
+                    tx: self.store.tx,
+                    base: self.store.base,
+                    before: &snapshot,
+                    after: &self.store,
+                    user: self.user,
+                    cause: self.cause.chain().join(" ← "),
+                    time: self.clock,
+                };
                 let res = sink.commit(&commit);
                 self.sink = Some(sink);
                 match res {
@@ -4324,7 +5830,10 @@ impl<'m> Interp<'m> {
                 self.store.known_ids(&ent)
             };
             for id in ids {
-                let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+                let rec = V::Ref {
+                    ent: Rc::from(ent.as_str()),
+                    id,
+                };
                 self.materializing = Some((id, field.clone()));
                 let v = self.get(&rec, &field, None, None).unwrap_or(V::None);
                 self.materializing = None;
@@ -4427,9 +5936,16 @@ fn tidy(x: Decimal) -> Decimal {
 /// `unique (n)`, in memory and on a database.
 pub fn unique_message(ent: &str, fields: &[String], conditional: bool, shown: &[String]) -> String {
     if fields.len() == 1 && !conditional {
-        format!("{ent}.{} must be unique: {} already exists", fields[0], shown[0])
+        format!(
+            "{ent}.{} must be unique: {} already exists",
+            fields[0], shown[0]
+        )
     } else {
-        format!("unique ({}): {} already exists in {ent}", fields.join(", "), shown.join(", "))
+        format!(
+            "unique ({}): {} already exists in {ent}",
+            fields.join(", "),
+            shown.join(", ")
+        )
     }
 }
 
@@ -4469,7 +5985,11 @@ fn start_of_month(d: NaiveDate) -> NaiveDate {
 }
 
 fn end_of_month(d: NaiveDate) -> NaiveDate {
-    let (y, m) = if d.month() == 12 { (d.year() + 1, 1) } else { (d.year(), d.month() + 1) };
+    let (y, m) = if d.month() == 12 {
+        (d.year() + 1, 1)
+    } else {
+        (d.year(), d.month() + 1)
+    };
     NaiveDate::from_ymd_opt(y, m, 1).unwrap() - Duration::days(1)
 }
 
@@ -4479,13 +5999,20 @@ pub fn lit(l: &Lit) -> V {
             if n.contains('.') {
                 V::Dec(parse_dec(n))
             } else {
-                n.parse().map(V::Int).unwrap_or_else(|_| V::Dec(parse_dec(n)))
+                n.parse()
+                    .map(V::Int)
+                    .unwrap_or_else(|_| V::Dec(parse_dec(n)))
             }
         }
         Lit::Percent(p) => V::Pct(parse_dec(p) / hundred()),
         Lit::Str(s) => text(s),
-        Lit::Date(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d").map(V::Date).unwrap_or(V::None),
-        Lit::DateTime(s) => NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")).map(V::DateTime).unwrap_or(V::None),
+        Lit::Date(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .map(V::Date)
+            .unwrap_or(V::None),
+        Lit::DateTime(s) => NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
+            .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+            .map(V::DateTime)
+            .unwrap_or(V::None),
         Lit::YearMonth(s) => {
             let (y, m) = s.split_once('-').unwrap_or(("0", "0"));
             V::YearMonth(y.parse().unwrap_or(0), m.parse().unwrap_or(0))
@@ -4501,7 +6028,11 @@ fn neg(v: V) -> R<V> {
         V::Dec(x) => V::Dec(-x),
         V::Pct(x) => V::Pct(-x),
         V::Money { amt, cur } => V::Money { amt: -amt, cur },
-        V::Price { amt, cur, per } => V::Price { amt: -amt, cur, per },
+        V::Price { amt, cur, per } => V::Price {
+            amt: -amt,
+            cur,
+            per,
+        },
         V::Qty { v, unit } => V::Qty { v: -v, unit },
         V::Duration(s) => V::Duration(-s),
         V::None => V::None,

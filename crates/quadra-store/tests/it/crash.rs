@@ -26,7 +26,10 @@ fn project() -> Project {
 }
 
 fn dir() -> PathBuf {
-    std::env::temp_dir().join(format!("quadra-crash-{}", std::env::var("QUADRA_CRASH_ID").unwrap_or_else(|_| std::process::id().to_string())))
+    std::env::temp_dir().join(format!(
+        "quadra-crash-{}",
+        std::env::var("QUADRA_CRASH_ID").unwrap_or_else(|_| std::process::id().to_string())
+    ))
 }
 
 fn url() -> String {
@@ -64,19 +67,43 @@ fn crash_child() {
     let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
     let url = url();
     let folder = quadra_store::segments::Folder::new(dir().join("log")).unwrap();
-    let s = Sequencer::start(&url, Options { destinations: vec![Box::new(folder)], rule: Rule::All, ..Default::default() }).unwrap();
+    let s = Sequencer::start(
+        &url,
+        Options {
+            destinations: vec![Box::new(folder)],
+            rule: Rule::All,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let run = std::env::var("QUADRA_CRASH_RUN").unwrap();
-    let mut acked = std::fs::OpenOptions::new().create(true).append(true).open(dir().join("acked.txt")).unwrap();
+    let mut acked = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir().join("acked.txt"))
+        .unwrap();
     for n in 0.. {
         let db = Database::open(&url, m, r).unwrap();
         let src = DbSource::open(&url, db.schema.clone(), None).unwrap();
         let mut i = Interp::new(m);
         i.store = quadra_runtime::Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
         i.materialize = materialized_formulas(&db.schema);
-        i.sink = Some(Box::new(SequencedSink { db, model: m, sequencer: s.clone(), tickets: None }));
+        i.sink = Some(Box::new(SequencedSink {
+            db,
+            model: m,
+            sequencer: s.clone(),
+            tickets: None,
+        }));
         i.load_units();
         let name = format!("c-{run}-{n}");
-        i.transaction(|i| i.create("Customer", vec![("name".into(), V::Text(name.clone().into()))]).map(|_| ())).unwrap();
+        i.transaction(|i| {
+            i.create(
+                "Customer",
+                vec![("name".into(), V::Text(name.clone().into()))],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
         // confirmed: noted, on disk, before the next one (one write: a kill never splits a line)
         acked.write_all(format!("{name}\n").as_bytes()).unwrap();
         acked.sync_data().unwrap();
@@ -85,14 +112,23 @@ fn crash_child() {
 
 fn names(url: &str) -> std::collections::HashSet<String> {
     let mut c = quadra_store::Conn::open(url).unwrap();
-    c.query("SELECT \"name\" FROM \"customer\"", &[]).unwrap().into_iter().filter_map(|r| r[0].clone()).collect()
+    c.query("SELECT \"name\" FROM \"customer\"", &[])
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect()
 }
 
 fn verify(url: &str) -> Vec<String> {
     let p = project();
     let checked = quadra_analysis::check(&p);
-    let now = chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap().and_hms_opt(10, 0, 0).unwrap();
-    quadra_store::ops::verify(url, checked.model.as_ref().unwrap(), &checked.report, now).unwrap().0
+    let now = chrono::NaiveDate::from_ymd_opt(2026, 12, 1)
+        .unwrap()
+        .and_hms_opt(10, 0, 0)
+        .unwrap();
+    quadra_store::ops::verify(url, checked.model.as_ref().unwrap(), &checked.report, now)
+        .unwrap()
+        .0
 }
 
 #[test]
@@ -103,7 +139,10 @@ fn confirmed_commits_survive_being_killed_at_random() {
     std::fs::create_dir_all(dir()).unwrap();
     let p = project();
     init(&p, &url());
-    let crashes: usize = std::env::var("QUADRA_CRASHES").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let crashes: usize = std::env::var("QUADRA_CRASHES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
     let exe = std::env::current_exe().unwrap();
     // a small pseudo-random sequence of moments: the same on every run of the test
     let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -116,7 +155,13 @@ fn confirmed_commits_survive_being_killed_at_random() {
     let started = Instant::now();
     for run in 0..crashes {
         let mut child = Command::new(&exe)
-            .args(["crash::crash_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .args([
+                "crash::crash_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env("QUADRA_CRASH_ID", &id)
             .env("QUADRA_CRASH_RUN", run.to_string())
             .stdout(std::process::Stdio::null())
@@ -127,22 +172,42 @@ fn confirmed_commits_survive_being_killed_at_random() {
         child.kill().unwrap();
         child.wait().unwrap();
     }
-    let acked: Vec<String> = std::fs::read_to_string(dir().join("acked.txt")).unwrap_or_default().lines().map(str::to_string).collect();
-    eprintln!("{crashes} kills in {:?}, {} commits confirmed", started.elapsed(), acked.len());
-    assert!(!acked.is_empty(), "nothing was ever confirmed: the writer did not run");
+    let acked: Vec<String> = std::fs::read_to_string(dir().join("acked.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    eprintln!(
+        "{crashes} kills in {:?}, {} commits confirmed",
+        started.elapsed(),
+        acked.len()
+    );
+    assert!(
+        !acked.is_empty(),
+        "nothing was ever confirmed: the writer did not run"
+    );
 
     // the database holds every confirmed commit, and verifies
     let in_db = names(&url());
     let lost: Vec<&String> = acked.iter().filter(|n| !in_db.contains(*n)).collect();
-    assert!(lost.is_empty(), "confirmed and lost from the database: {lost:?}");
+    assert!(
+        lost.is_empty(),
+        "confirmed and lost from the database: {lost:?}"
+    );
     assert_eq!(verify(&url()), Vec::<String>::new());
 
     // so does the database rebuilt from the folder alone
     let rebuilt = dir().join("rebuilt.db");
-    quadra_store::segments::Folder::new(dir().join("log")).unwrap().restore(&rebuilt).unwrap();
+    quadra_store::segments::Folder::new(dir().join("log"))
+        .unwrap()
+        .restore(&rebuilt)
+        .unwrap();
     let rebuilt_url = format!("sqlite:{}", rebuilt.display());
     let in_log = names(&rebuilt_url);
     let lost: Vec<&String> = acked.iter().filter(|n| !in_log.contains(*n)).collect();
-    assert!(lost.is_empty(), "confirmed and missing from what the folder rebuilds: {lost:?}");
+    assert!(
+        lost.is_empty(),
+        "confirmed and missing from what the folder rebuilds: {lost:?}"
+    );
     assert_eq!(verify(&rebuilt_url), Vec::<String>::new());
 }

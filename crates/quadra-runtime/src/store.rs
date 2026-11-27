@@ -25,13 +25,23 @@ pub struct Cause {
 
 impl Cause {
     pub fn chain(&self) -> Vec<String> {
-        let mut out = vec![format!("{}  ({}, {})", self.desc, self.user, self.time.format("%Y-%m-%d %H:%M"))];
+        let mut out = vec![format!(
+            "{}  ({}, {})",
+            self.desc,
+            self.user,
+            self.time.format("%Y-%m-%d %H:%M")
+        )];
         let mut cur = self.parent.clone();
         while let Some(c) = cur {
             if c.parent.is_none() && c.desc == "setup" {
                 break;
             }
-            out.push(format!("{}  ({}, {})", c.desc, c.user, c.time.format("%Y-%m-%d %H:%M")));
+            out.push(format!(
+                "{}  ({}, {})",
+                c.desc,
+                c.user,
+                c.time.format("%Y-%m-%d %H:%M")
+            ));
             cur = c.parent.clone();
         }
         out
@@ -69,7 +79,12 @@ pub struct Record {
 impl Record {
     /// Last transaction that wrote the record.
     pub fn version(&self) -> u64 {
-        self.history.iter().map(|(t, _, _)| *t).max().unwrap_or(self.created_tx).max(self.created_tx)
+        self.history
+            .iter()
+            .map(|(t, _, _)| *t)
+            .max()
+            .unwrap_or(self.created_tx)
+            .max(self.created_tx)
     }
 
     /// The value of a stored field before transaction `tx` (None: no value, or created in it).
@@ -77,7 +92,11 @@ impl Record {
         if self.created_tx >= tx {
             return None;
         }
-        self.history.iter().rev().find(|(t, f, _)| *t < tx && f == key).map(|(_, _, v)| v.clone())
+        self.history
+            .iter()
+            .rev()
+            .find(|(t, f, _)| *t < tx && f == key)
+            .map(|(_, _, v)| v.clone())
     }
 }
 
@@ -126,7 +145,12 @@ pub trait Source {
     fn find(&mut self, ent: &str, field: &str, value: &V) -> Option<Vec<Id>>;
     /// `find` of several records at once (the lines of a page of records): referenced id →
     /// ids of the records of `ent` whose `field` holds it. None: one `find` each.
-    fn find_many(&mut self, _ent: &str, _field: &str, _targets: &[Id]) -> Option<HashMap<Id, Vec<Id>>> {
+    fn find_many(
+        &mut self,
+        _ent: &str,
+        _field: &str,
+        _targets: &[Id],
+    ) -> Option<HashMap<Id, Vec<Id>>> {
         None
     }
     /// Rows of a ledger, all or those whose `col` equals a value.
@@ -217,7 +241,14 @@ impl ReadSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty() && self.find_values.is_empty() && self.scans.is_empty() && self.finds.is_empty() && self.ledgers.is_empty() && self.counters.is_empty() && self.formulas.is_empty() && self.formula_scans.is_empty()
+        self.records.is_empty()
+            && self.find_values.is_empty()
+            && self.scans.is_empty()
+            && self.finds.is_empty()
+            && self.ledgers.is_empty()
+            && self.counters.is_empty()
+            && self.formulas.is_empty()
+            && self.formula_scans.is_empty()
     }
 }
 
@@ -342,7 +373,9 @@ pub struct Guard {
 /// amount of money in the same currency, a quantity in the same unit).
 pub fn delta_amount(old: &V, new: &V) -> Option<rust_decimal::Decimal> {
     match (old, new) {
-        (V::Int(a), V::Int(b)) => Some(rust_decimal::Decimal::from(*b) - rust_decimal::Decimal::from(*a)),
+        (V::Int(a), V::Int(b)) => {
+            Some(rust_decimal::Decimal::from(*b) - rust_decimal::Decimal::from(*a))
+        }
         (V::Dec(a), V::Dec(b)) => Some(*b - *a),
         (V::Money { amt: a, cur: x }, V::Money { amt: b, cur: y }) if x == y => Some(*b - *a),
         (V::Qty { v: a, unit: x }, V::Qty { v: b, unit: y }) if x == y => Some(*b - *a),
@@ -365,7 +398,9 @@ pub fn amount_of(v: &V) -> Option<(rust_decimal::Decimal, String)> {
 pub fn same(stored: Option<&V>, value: &V) -> bool {
     match (stored, value) {
         (Some(V::Ref { id: a, .. }), V::Ref { id: b, .. }) => a == b,
-        (Some(V::Set(items)) | Some(V::List(items)), V::Ref { id: b, .. }) => items.iter().any(|i| i.as_ref_id() == Some(*b)),
+        (Some(V::Set(items)) | Some(V::List(items)), V::Ref { id: b, .. }) => {
+            items.iter().any(|i| i.as_ref_id() == Some(*b))
+        }
         (Some(x), y) => x == y,
         (None, _) => false,
     }
@@ -413,7 +448,14 @@ impl Store {
             (s.base(), s.wants_hints())
         };
         let uid = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Store { tx: base, base, src: Some(src), uid, hinting, ..Default::default() }
+        Store {
+            tx: base,
+            base,
+            src: Some(src),
+            uid,
+            hinting,
+            ..Default::default()
+        }
     }
 
     pub fn lazy(&self) -> bool {
@@ -423,7 +465,11 @@ impl Store {
     pub fn new_id(&mut self) -> Id {
         if let Some(src) = &self.src {
             if self.id_block.0 >= self.id_block.1 {
-                let n = if self.id_block_size == 0 { 100 } else { self.id_block_size };
+                let n = if self.id_block_size == 0 {
+                    100
+                } else {
+                    self.id_block_size
+                };
                 let first = src.borrow_mut().reserve_ids(n);
                 self.id_block = (first, first + n);
             }
@@ -445,7 +491,10 @@ impl Store {
     }
 
     pub fn insert(&mut self, r: Record) {
-        self.by_entity.entry(r.ent.to_string()).or_default().insert(r.id);
+        self.by_entity
+            .entry(r.ent.to_string())
+            .or_default()
+            .insert(r.id);
         self.dirty.insert(r.id);
         self.absent.remove(&r.id);
         self.epoch += 1;
@@ -459,9 +508,19 @@ impl Store {
     }
 
     /// Keep the lookup structures current after `field` of a record changed.
-    fn note_written(&mut self, ent: &Rc<str>, id: Id, field: &str, old: Option<&V>, new: Option<&V>) {
+    fn note_written(
+        &mut self,
+        ent: &Rc<str>,
+        id: Id,
+        field: &str,
+        old: Option<&V>,
+        new: Option<&V>,
+    ) {
         if self.src.is_some() {
-            self.written_by.entry((ent.clone(), field.to_string())).or_default().insert(id);
+            self.written_by
+                .entry((ent.clone(), field.to_string()))
+                .or_default()
+                .insert(id);
         }
         if let Some(idx) = self.ref_index.get_mut(&(ent.clone(), field.to_string())) {
             for t in old.map(ref_ids).unwrap_or_default() {
@@ -488,7 +547,10 @@ impl Store {
     /// `loaded` without recording a read (loaded in advance: the read is recorded when it
     /// happens, `load`).
     fn loaded_quiet(&mut self, mut r: Record) {
-        self.by_entity.entry(r.ent.to_string()).or_default().insert(r.id);
+        self.by_entity
+            .entry(r.ent.to_string())
+            .or_default()
+            .insert(r.id);
         if let Some(over) = self.formula_overrides.get(&r.id) {
             for (f, v) in over {
                 r.formulas.insert(f.clone(), v.clone());
@@ -519,7 +581,8 @@ impl Store {
                 }
             }
         }
-        self.origin.insert(r.id, (r.frozen_at, r.warnings.clone(), r.cause.clone()));
+        self.origin
+            .insert(r.id, (r.frozen_at, r.warnings.clone(), r.cause.clone()));
         self.records.insert(r.id, r);
     }
 
@@ -539,7 +602,10 @@ impl Store {
             }
             self.ref_index.insert(key.clone(), idx);
         }
-        self.ref_index[&key].get(&target).map(|s| s.iter().copied().collect()).unwrap_or_default()
+        self.ref_index[&key]
+            .get(&target)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// The lookup structures of an entity no longer match its records (fields renamed).
@@ -550,9 +616,17 @@ impl Store {
     /// A field renamed in the records of the working set: what `find` knows follows it.
     pub fn renamed_field(&mut self, ent: &str, old: &str, new: &str) {
         self.forget_indexes(ent);
-        let moved: Vec<((Rc<str>, String), BTreeSet<Id>)> = self.written_by.iter().filter(|((e, f), _)| &**e == ent && f == old).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let moved: Vec<((Rc<str>, String), BTreeSet<Id>)> = self
+            .written_by
+            .iter()
+            .filter(|((e, f), _)| &**e == ent && f == old)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for ((e, _), ids) in moved {
-            self.written_by.entry((e, new.to_string())).or_default().extend(ids);
+            self.written_by
+                .entry((e, new.to_string()))
+                .or_default()
+                .extend(ids);
         }
     }
 
@@ -585,7 +659,12 @@ impl Store {
             return;
         }
         for id in ids {
-            if self.dirty.contains(id) || self.records.get(id).map_or(true, |r| !r.pending_defaults.is_empty()) {
+            if self.dirty.contains(id)
+                || self
+                    .records
+                    .get(id)
+                    .map_or(true, |r| !r.pending_defaults.is_empty())
+            {
                 continue;
             }
             self.records.remove(id);
@@ -626,7 +705,10 @@ impl Store {
     fn fetch(&mut self, src: &SharedSource, missing: &[Id]) -> Vec<Record> {
         let mut groups: BTreeMap<Option<Rc<str>>, Vec<Id>> = BTreeMap::new();
         for id in missing {
-            groups.entry(self.hints.get(id).cloned()).or_default().push(*id);
+            groups
+                .entry(self.hints.get(id).cloned())
+                .or_default()
+                .push(*id);
         }
         let mut out = Vec::new();
         let mut src = src.borrow_mut();
@@ -672,7 +754,11 @@ impl Store {
     /// Load several records in one go (a scan about to read them all).
     pub fn prefetch(&mut self, ids: &[Id]) {
         let Some(src) = self.src.clone() else { return };
-        let missing: Vec<Id> = ids.iter().copied().filter(|id| !self.records.contains_key(id) && !self.absent.contains(id)).collect();
+        let missing: Vec<Id> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.records.contains_key(id) && !self.absent.contains(id))
+            .collect();
         if missing.is_empty() {
             return;
         }
@@ -724,7 +810,11 @@ impl Store {
     /// `prefetch` without recording reads (see `loaded_quiet`).
     fn prefetch_quiet(&mut self, ids: &[Id]) {
         let Some(src) = self.src.clone() else { return };
-        let missing: Vec<Id> = ids.iter().copied().filter(|id| !self.records.contains_key(id) && !self.absent.contains(id)).collect();
+        let missing: Vec<Id> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.records.contains_key(id) && !self.absent.contains(id))
+            .collect();
         if missing.is_empty() {
             return;
         }
@@ -797,7 +887,12 @@ impl Store {
         let r = self.records.get(&id)?;
         match as_of {
             None => r.fields.get(key).cloned(),
-            Some(t) => r.history.iter().rev().find(|(tx, f, _)| *tx <= t && f == key).map(|(_, _, v)| v.clone()),
+            Some(t) => r
+                .history
+                .iter()
+                .rev()
+                .find(|(tx, f, _)| *tx <= t && f == key)
+                .map(|(_, _, v)| v.clone()),
         }
     }
 
@@ -822,7 +917,9 @@ impl Store {
 
     pub fn exists(&mut self, id: Id, as_of: Option<u64>) -> bool {
         self.load(id);
-        self.records.get(&id).map_or(false, |r| as_of.map_or(true, |t| r.created_tx <= t))
+        self.records
+            .get(&id)
+            .map_or(false, |r| as_of.map_or(true, |t| r.created_tx <= t))
     }
 
     /// Every id of an entity (exact name): loaded from the source the first time.
@@ -830,19 +927,32 @@ impl Store {
         if let Some(src) = self.src.clone() {
             if !self.complete.contains(ent) {
                 let ids = src.borrow_mut().ids(ent);
-                self.by_entity.entry(ent.to_string()).or_default().extend(ids);
+                self.by_entity
+                    .entry(ent.to_string())
+                    .or_default()
+                    .extend(ids);
                 self.complete.insert(ent.to_string());
             }
             self.reads.scans.insert(ent.to_string());
-            let ids: Vec<Id> = self.by_entity.get(ent).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            let ids: Vec<Id> = self
+                .by_entity
+                .get(ent)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
             self.prefetch_as(ent, &ids);
         }
-        self.by_entity.get(ent).map(|s| s.iter().copied().collect()).unwrap_or_default()
+        self.by_entity
+            .get(ent)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// The ids of an entity known to the working set, without loading anything.
     pub fn known_ids(&self, ent: &str) -> Vec<Id> {
-        self.by_entity.get(ent).map(|s| s.iter().copied().collect()).unwrap_or_default()
+        self.by_entity
+            .get(ent)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Ids of records of `ent` whose `field` equals `value` now, using the source's index.
@@ -853,7 +963,10 @@ impl Store {
             return None;
         }
         let cached = match value {
-            V::Ref { id, .. } if !self.found.is_empty() => self.found.get(&(ent.to_string(), field.to_string(), *id)).cloned(),
+            V::Ref { id, .. } if !self.found.is_empty() => self
+                .found
+                .get(&(ent.to_string(), field.to_string(), *id))
+                .cloned(),
             _ => None,
         };
         let candidates = match cached {
@@ -862,7 +975,9 @@ impl Store {
         };
         if !self.untracked {
             for k in value_keys(value) {
-                self.reads.find_values.insert((ent.to_string(), field.to_string(), k));
+                self.reads
+                    .find_values
+                    .insert((ent.to_string(), field.to_string(), k));
             }
         }
         let mut out = Vec::with_capacity(candidates.len());
@@ -877,9 +992,18 @@ impl Store {
         // are among the committed candidates)
         if !self.written_by.is_empty() {
             let seen: HashSet<Id> = out.iter().copied().collect();
-            let written: Vec<Id> = self.written_by.get(&(Rc::from(ent), field.to_string())).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            let written: Vec<Id> = self
+                .written_by
+                .get(&(Rc::from(ent), field.to_string()))
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
             for id in written {
-                if !seen.contains(&id) && self.records.get(&id).map_or(false, |r| same(r.fields.get(field), value)) {
+                if !seen.contains(&id)
+                    && self
+                        .records
+                        .get(&id)
+                        .map_or(false, |r| same(r.fields.get(field), value))
+                {
                     out.push(id);
                 }
             }
@@ -912,7 +1036,8 @@ impl Store {
             for t in todo {
                 let ids = map.get(&t).cloned().unwrap_or_default();
                 all.extend(ids.iter().copied());
-                self.found.insert((ent.to_string(), field.to_string(), t), ids);
+                self.found
+                    .insert((ent.to_string(), field.to_string(), t), ids);
             }
         }
         all.sort();
@@ -938,9 +1063,18 @@ impl Store {
                 self.rows.sort_by_key(|r| r.id);
                 self.rows_loaded.insert(key);
             }
-            self.reads.ledgers.insert((ledger.to_string(), filter.map(|(c, v)| (c.to_string(), json_key(v)))));
+            self.reads.ledgers.insert((
+                ledger.to_string(),
+                filter.map(|(c, v)| (c.to_string(), json_key(v))),
+            ));
         }
-        self.rows.iter().filter(|r| &*r.ledger == ledger && filter.map_or(true, |(c, v)| same(r.cols.get(c), v))).cloned().collect()
+        self.rows
+            .iter()
+            .filter(|r| {
+                &*r.ledger == ledger && filter.map_or(true, |(c, v)| same(r.cols.get(c), v))
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn ledger_row(&mut self, id: Id) -> Option<LedgerRow> {
@@ -978,7 +1112,10 @@ impl Store {
                 }
             }
         }
-        self.postings.get(&(record, ledger_key.to_string())).cloned().unwrap_or_default()
+        self.postings
+            .get(&(record, ledger_key.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The next value of a counter (incremented).

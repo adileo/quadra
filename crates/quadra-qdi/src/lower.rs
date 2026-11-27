@@ -24,13 +24,19 @@ pub fn lower(file: &File) -> Result<Vec<J>, Vec<Diag>> {
             Item::App(a) => {
                 apps += 1;
                 if apps > 1 {
-                    diags.push(Diag::new("a file holds one app (its path is the app's)", a.span));
+                    diags.push(Diag::new(
+                        "a file holds one app (its path is the app's)",
+                        a.span,
+                    ));
                 }
                 out.push(lower_app(a, &mut diags));
             }
             Item::View(v) => {
                 if !view_names.insert(v.name.clone()) {
-                    diags.push(Diag::new(format!("two views named \"{}\" in the file", v.name), v.span));
+                    diags.push(Diag::new(
+                        format!("two views named \"{}\" in the file", v.name),
+                        v.span,
+                    ));
                 }
                 out.push(lower_saved_view(v, &mut diags));
             }
@@ -58,7 +64,9 @@ pub fn set(obj: &mut J, path: &[&str], v: J) {
         m.insert(path[0].to_string(), v);
         return;
     }
-    let next = m.entry(path[0].to_string()).or_insert_with(|| J::Object(Map::new()));
+    let next = m
+        .entry(path[0].to_string())
+        .or_insert_with(|| J::Object(Map::new()));
     set(next, &path[1..], v);
 }
 
@@ -78,7 +86,9 @@ pub fn source_json(s: &Source) -> J {
     match s {
         Source::Param(n) => json!({ "from": "param", "name": n }),
         Source::Id(n) => json!({ "from": "id", "id": n }),
-        Source::Cell { component, cell } => json!({ "from": "cell", "component": component, "cell": cell }),
+        Source::Cell { component, cell } => {
+            json!({ "from": "cell", "component": component, "cell": cell })
+        }
         Source::Value(v) => json!({ "from": "value", "value": v }),
     }
 }
@@ -107,11 +117,22 @@ fn fresh(prefix: &str, taken: &mut HashSet<String>) -> String {
 }
 
 fn meta_id(raws: &[Raw]) -> Option<String> {
-    raws.iter().find(|r| r.meta && r.path == ["id"]).and_then(|r| r.value.as_str().map(str::to_string))
+    raws.iter()
+        .find(|r| r.meta && r.path == ["id"])
+        .and_then(|r| r.value.as_str().map(str::to_string))
 }
 
 fn line_raws(lines: &[Line]) -> Vec<Raw> {
-    lines.iter().filter_map(|l| if let Line::Raw(r) = l { Some(r.clone()) } else { None }).collect()
+    lines
+        .iter()
+        .filter_map(|l| {
+            if let Line::Raw(r) = l {
+                Some(r.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 // ---- apps -----------------------------------------------------------------------------------------
@@ -128,7 +149,10 @@ fn lower_app(a: &App, diags: &mut Vec<Diag>) -> J {
         visit(&p.body, &mut |c| {
             if let Some(n) = &c.name {
                 if !comp_ids.insert(n.text.clone()) {
-                    diags.push(Diag::new(format!("two components named `{}` in the app", n.text), n.span));
+                    diags.push(Diag::new(
+                        format!("two components named `{}` in the app", n.text),
+                        n.span,
+                    ));
                 }
             } else if let Some(id) = meta_id(&line_raws(&c.lines)) {
                 comp_ids.insert(id);
@@ -136,7 +160,11 @@ fn lower_app(a: &App, diags: &mut Vec<Diag>) -> J {
             if c.kind == "view" {
                 let opt = |k: &str| {
                     c.lines.iter().find_map(|l| match l {
-                        Line::Opt { key, value: Value::Word(w), .. } if key.text == k => Some(w.clone()),
+                        Line::Opt {
+                            key,
+                            value: Value::Word(w),
+                            ..
+                        } if key.text == k => Some(w.clone()),
                         _ => None,
                     })
                 };
@@ -146,7 +174,11 @@ fn lower_app(a: &App, diags: &mut Vec<Diag>) -> J {
             }
             if c.kind == "form" {
                 for l in &c.lines {
-                    if let Line::Opt { value: Value::After(After::Select { entity, name }), .. } = l {
+                    if let Line::Opt {
+                        value: Value::After(After::Select { entity, name }),
+                        ..
+                    } = l
+                    {
                         selections.entry(name.clone()).or_insert(entity.clone());
                     }
                 }
@@ -168,23 +200,42 @@ fn lower_app(a: &App, diags: &mut Vec<Diag>) -> J {
         }
         apply_raws(&mut d, &f.raws.iter().collect::<Vec<_>>());
         if defs.insert(f.name.text.clone(), (d, f.name.span)).is_some() {
-            diags.push(Diag::new(format!("two filters named `{}`", f.name.text), f.name.span));
+            diags.push(Diag::new(
+                format!("two filters named `{}`", f.name.text),
+                f.name.span,
+            ));
         }
         if selections.contains_key(&f.name.text) {
-            diags.push(Diag::new(format!("`@{}` is both a filter and a selection", f.name.text), f.name.span));
+            diags.push(Diag::new(
+                format!("`@{}` is both a filter and a selection", f.name.text),
+                f.name.span,
+            ));
         }
     }
     let mut owned: HashSet<String> = HashSet::new();
-    let mut page_ids: HashSet<String> = a.pages.iter().filter_map(|p| p.id.as_ref().map(|n| n.text.clone())).collect();
+    let mut page_ids: HashSet<String> = a
+        .pages
+        .iter()
+        .filter_map(|p| p.id.as_ref().map(|n| n.text.clone()))
+        .collect();
     let mut pages = Vec::new();
     let mut tab_ids: HashSet<String> = HashSet::new();
     for p in &a.pages {
-        let id = p.id.as_ref().map(|n| n.text.clone()).or_else(|| meta_id(&p.raws)).unwrap_or_else(|| fresh("page", &mut page_ids));
+        let id =
+            p.id.as_ref()
+                .map(|n| n.text.clone())
+                .or_else(|| meta_id(&p.raws))
+                .unwrap_or_else(|| fresh("page", &mut page_ids));
         let mut placed = layout::place_page(&p.body, diags);
         placed.sort_by_key(|(_, r)| (r[1], r[0]));
         let mut comps = Vec::new();
         for (c, r) in placed {
-            let id = c.name.as_ref().map(|n| n.text.clone()).or_else(|| meta_id(&line_raws(&c.lines))).unwrap_or_else(|| fresh(&c.kind, &mut comp_ids));
+            let id = c
+                .name
+                .as_ref()
+                .map(|n| n.text.clone())
+                .or_else(|| meta_id(&line_raws(&c.lines)))
+                .unwrap_or_else(|| fresh(&c.kind, &mut comp_ids));
             let (mut j, show) = lower_component(c, &id, r, &selections, &mut tab_ids, diags);
             if let Some(show) = show {
                 let mut own = Vec::new();
@@ -258,7 +309,14 @@ fn visit<'a>(blocks: &'a [Block], f: &mut impl FnMut(&'a Component)) {
 }
 
 /// A component as the JSON keeps it, and the filters it shows (a `filters` component).
-fn lower_component(c: &Component, id: &str, r: [u32; 4], selections: &HashMap<String, String>, tab_ids: &mut HashSet<String>, diags: &mut Vec<Diag>) -> (J, Option<Vec<String>>) {
+fn lower_component(
+    c: &Component,
+    id: &str,
+    r: [u32; 4],
+    selections: &HashMap<String, String>,
+    tab_ids: &mut HashSet<String>,
+    diags: &mut Vec<Diag>,
+) -> (J, Option<Vec<String>>) {
     let mut env = json!({ "id": id, "type": c.kind, "layout": { "x": r[0], "y": r[1], "w": r[2], "h": r[3] }, "bindings": {} });
     if let Some(t) = &c.title {
         env["title"] = json!(t);
@@ -278,9 +336,14 @@ fn lower_component(c: &Component, id: &str, r: [u32; 4], selections: &HashMap<St
     let mut sheets: Vec<J> = Vec::new();
     for l in &c.lines {
         match l {
-            Line::Opt { key, value, span, .. } => {
+            Line::Opt {
+                key, value, span, ..
+            } => {
                 let Some((opt, prefix)) = options::find(kind, &key.text) else {
-                    diags.push(Diag::new(format!("unknown option `{}`", key.text), key.span));
+                    diags.push(Diag::new(
+                        format!("unknown option `{}`", key.text),
+                        key.span,
+                    ));
                     continue;
                 };
                 let path = format!("{prefix}{}", opt.path);
@@ -300,7 +363,9 @@ fn lower_component(c: &Component, id: &str, r: [u32; 4], selections: &HashMap<St
                         cfg["entity"] = json!(entity);
                         cfg["action"] = json!(run.action);
                         match &run.target {
-                            Target::Param(n) => cfg["target"] = json!({ "from": "param", "name": n }),
+                            Target::Param(n) => {
+                                cfg["target"] = json!({ "from": "param", "name": n })
+                            }
                             Target::Of(_, s) => cfg["target"] = source_json(s),
                             Target::Entity(_) => {}
                         }
@@ -331,7 +396,10 @@ fn lower_component(c: &Component, id: &str, r: [u32; 4], selections: &HashMap<St
                     },
                     (_, _, v) => match value_json(v) {
                         Some(j) => set_dotted(&mut cfg, &path, j),
-                        None => diags.push(Diag::new(format!("`{}`: this value does not fit here", key.text), *span)),
+                        None => diags.push(Diag::new(
+                            format!("`{}`: this value does not fit here", key.text),
+                            *span,
+                        )),
                     },
                 }
             }
@@ -352,9 +420,15 @@ fn lower_component(c: &Component, id: &str, r: [u32; 4], selections: &HashMap<St
                 if kind != "view" {
                     diags.push(Diag::new("`color` is a view's", *span));
                 }
-                push(&mut cfg, &["view", "colors"], json!({ "expr": expr.text, "color": color }));
+                push(
+                    &mut cfg,
+                    &["view", "colors"],
+                    json!({ "expr": expr.text, "color": color }),
+                );
             }
-            Line::Default { field, source, .. } => set(&mut cfg, &["defaults", &field.text], source_json(source)),
+            Line::Default { field, source, .. } => {
+                set(&mut cfg, &["defaults", &field.text], source_json(source))
+            }
             Line::Section { title, fields, .. } => {
                 let mut s = json!({ "fields": fields });
                 if let Some(t) = title {
@@ -424,7 +498,11 @@ fn push(obj: &mut J, path: &[&str], v: J) {
         if !cur.is_object() {
             *cur = json!({});
         }
-        cur = cur.as_object_mut().unwrap().entry(p.to_string()).or_insert(J::Null);
+        cur = cur
+            .as_object_mut()
+            .unwrap()
+            .entry(p.to_string())
+            .or_insert(J::Null);
     }
     if !cur.is_array() {
         *cur = json!([]);
@@ -437,7 +515,10 @@ fn push(obj: &mut J, path: &[&str], v: J) {
 fn complete_view_parts(view: &mut J, span: Span, diags: &mut Vec<Diag>) {
     if let Some(k) = view.get_mut("kanban").and_then(J::as_object_mut) {
         if !k.contains_key("field") {
-            diags.push(Diag::new("a board's options need `by` (the field of its columns)", span));
+            diags.push(Diag::new(
+                "a board's options need `by` (the field of its columns)",
+                span,
+            ));
         }
         k.entry("cards").or_insert(json!([]));
         k.entry("hidden").or_insert(json!([]));
@@ -446,11 +527,15 @@ fn complete_view_parts(view: &mut J, span: Span, diags: &mut Vec<Diag>) {
     }
     if let Some(g) = view.get_mut("group").and_then(J::as_object_mut) {
         if !g.contains_key("keys") {
-            diags.push(Diag::new("a view's grouping needs `group` (its keys)", span));
+            diags.push(Diag::new(
+                "a view's grouping needs `group` (its keys)",
+                span,
+            ));
         }
         g.entry("aggregates").or_insert(json!({}));
         g.entry("pivot").or_insert(json!(false));
-        g.entry("order").or_insert(json!({ "by": "key", "desc": false }));
+        g.entry("order")
+            .or_insert(json!({ "by": "key", "desc": false }));
         g.entry("measure").or_insert(json!("count"));
     }
 }
@@ -467,12 +552,20 @@ fn value_json(v: &Value) -> Option<J> {
         Value::Pairs(p) => J::Object(p.iter().cloned().collect()),
         Value::Data(d) => d.clone(),
         Value::Source(DataSource::Expr(e)) => json!({ "type": "expr", "expr": e.text }),
-        Value::Source(DataSource::Cell { component, cell }) => json!({ "type": "cell", "component": component, "cell": cell }),
-        Value::Source(DataSource::Range { component, range }) => json!({ "type": "range", "component": component, "range": range }),
+        Value::Source(DataSource::Cell { component, cell }) => {
+            json!({ "type": "cell", "component": component, "cell": cell })
+        }
+        Value::Source(DataSource::Range { component, range }) => {
+            json!({ "type": "range", "component": component, "range": range })
+        }
         Value::Compare(Compare::Previous(f)) => json!({ "kind": "previous_period", "filter": f }),
         Value::Compare(Compare::Target(e)) => json!({ "kind": "target", "expr": e.text }),
         Value::From(s) => source_json(s),
-        Value::Sort(s) => J::Array(s.iter().map(|(f, d)| json!({ "field": f, "desc": d })).collect()),
+        Value::Sort(s) => J::Array(
+            s.iter()
+                .map(|(f, d)| json!({ "field": f, "desc": d }))
+                .collect(),
+        ),
         Value::Group(g) => J::Array(
             g.iter()
                 .map(|(f, b)| match b {
@@ -491,7 +584,17 @@ fn value_json(v: &Value) -> Option<J> {
 // ---- spreadsheets ----------------------------------------------------------------------------------
 
 fn lower_tab(t: &Tab, ids: &mut HashSet<String>) -> J {
-    let raws: Vec<Raw> = t.lines.iter().filter_map(|l| if let TabLine::Raw(r) = l { Some(r.clone()) } else { None }).collect();
+    let raws: Vec<Raw> = t
+        .lines
+        .iter()
+        .filter_map(|l| {
+            if let TabLine::Raw(r) = l {
+                Some(r.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
     let id = match (&t.id, meta_id(&raws)) {
         (Some(n), _) => {
             ids.insert(n.text.clone());
@@ -518,7 +621,9 @@ fn lower_tab(t: &Tab, ids: &mut HashSet<String>) -> J {
     }
     for l in &t.lines {
         match l {
-            TabLine::Cell { addr, style, value, .. } => {
+            TabLine::Cell {
+                addr, style, value, ..
+            } => {
                 let mut cell = json!({});
                 match value {
                     Some(CellValue::Text(v)) => cell["v"] = json!(v),
@@ -539,9 +644,18 @@ fn lower_tab(t: &Tab, ids: &mut HashSet<String>) -> J {
                                 };
                                 st[k] = json!(true);
                             }
-                            StyleItem::Color(k, c) => st[if k == "color" { "fg" } else { "bg" }] = json!(c),
-                            StyleItem::Align(k, a) => st[if k == "align" { "ha" } else { "va" }] = json!(a),
-                            StyleItem::Format { kind, dec, thousands, date } => {
+                            StyleItem::Color(k, c) => {
+                                st[if k == "color" { "fg" } else { "bg" }] = json!(c)
+                            }
+                            StyleItem::Align(k, a) => {
+                                st[if k == "align" { "ha" } else { "va" }] = json!(a)
+                            }
+                            StyleItem::Format {
+                                kind,
+                                dec,
+                                thousands,
+                                date,
+                            } => {
                                 let mut f = json!({ "kind": kind });
                                 if let Some(d) = dec {
                                     f["dec"] = json!(d);
@@ -599,7 +713,9 @@ fn lower_saved_view(v: &SavedView, diags: &mut Vec<Diag>) -> J {
     let mut meta_raws = Vec::new();
     for l in &v.lines {
         match l {
-            Line::Opt { key, value, span, .. } => match (key.text.as_str(), value) {
+            Line::Opt {
+                key, value, span, ..
+            } => match (key.text.as_str(), value) {
                 ("description", Value::Text(t)) => def["description"] = json!(t),
                 ("share", Value::Shares(s)) => def["shares"] = shares_json(s),
                 ("type", Value::Word(w)) => def["type"] = json!(w),
@@ -608,8 +724,14 @@ fn lower_saved_view(v: &SavedView, diags: &mut Vec<Diag>) -> J {
                     _ => diags.push(Diag::new(format!("`{k}`: not an option of a view"), *span)),
                 },
             },
-            Line::Compute { name, expr, .. } => set(&mut cfg, &["columns", &name.text], json!(expr.text)),
-            Line::Color { color, expr, .. } => push(&mut cfg, &["colors"], json!({ "expr": expr.text, "color": color })),
+            Line::Compute { name, expr, .. } => {
+                set(&mut cfg, &["columns", &name.text], json!(expr.text))
+            }
+            Line::Color { color, expr, .. } => push(
+                &mut cfg,
+                &["colors"],
+                json!({ "expr": expr.text, "color": color }),
+            ),
             Line::Raw(r) => {
                 if r.meta {
                     meta_raws.push(r);
@@ -629,7 +751,13 @@ fn lower_saved_view(v: &SavedView, diags: &mut Vec<Diag>) -> J {
 
 fn line_span(l: &Line) -> Span {
     match l {
-        Line::Opt { span, .. } | Line::Apply { span, .. } | Line::Compute { span, .. } | Line::Color { span, .. } | Line::Default { span, .. } | Line::Section { span, .. } | Line::Submit { span, .. } => *span,
+        Line::Opt { span, .. }
+        | Line::Apply { span, .. }
+        | Line::Compute { span, .. }
+        | Line::Color { span, .. }
+        | Line::Default { span, .. }
+        | Line::Section { span, .. }
+        | Line::Submit { span, .. } => *span,
         Line::ApplyAuto(_, s) | Line::Text(_, s) => *s,
         Line::Field(f) => f.span,
         Line::Tab(t) => t.span,

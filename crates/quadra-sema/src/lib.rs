@@ -11,7 +11,10 @@ use quadra_syntax::{Parse, TextRange};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub use resolve::{Analysis, Decl, DeclId, DeclKind, Member, MemberKind, Reference, Target, BUILTIN_TYPES as BUILTIN_TYPE_NAMES};
+pub use resolve::{
+    Analysis, Decl, DeclId, DeclKind, Member, MemberKind, Reference, Target,
+    BUILTIN_TYPES as BUILTIN_TYPE_NAMES,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileId(pub u32);
@@ -90,7 +93,10 @@ pub fn read_edition(root: &Path) -> Result<String, String> {
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') {
-            section = line.trim_matches(|c| c == '[' || c == ']').trim().to_string();
+            section = line
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim()
+                .to_string();
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -114,7 +120,10 @@ fn project_setting(root: &Path, want: &str) -> Option<String> {
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') {
-            section = line.trim_matches(|c| c == '[' || c == ']').trim().to_string();
+            section = line
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim()
+                .to_string();
             continue;
         }
         if let Some((key, value)) = line.split_once('=') {
@@ -152,7 +161,10 @@ impl Project {
     }
 
     /// Load from disk, replacing file contents with `overlays` (unsaved editor buffers).
-    pub fn load_with_overlays(root: &Path, overlays: &HashMap<PathBuf, String>) -> std::io::Result<Project> {
+    pub fn load_with_overlays(
+        root: &Path,
+        overlays: &HashMap<PathBuf, String>,
+    ) -> std::io::Result<Project> {
         read_edition(root).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         read_timezone(root).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let mut paths = Vec::new();
@@ -163,7 +175,8 @@ impl Project {
         }
         for p in overlays.keys() {
             let code = p.extension().map_or(false, |e| e == "qd");
-            let interface = p.extension().map_or(false, |e| e == "qdi") && p.starts_with(&interfaces);
+            let interface =
+                p.extension().map_or(false, |e| e == "qdi") && p.starts_with(&interfaces);
             if p.starts_with(root) && (code || interface) && !paths.contains(p) {
                 paths.push(p.clone());
             }
@@ -195,18 +208,37 @@ impl Project {
         for (path, text) in sources {
             let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
             if path.extension().map_or(false, |e| e == "qdi") {
-                let module = format!("qdi:{}", rel.with_extension("").to_string_lossy().replace('\\', "/"));
+                let module = format!(
+                    "qdi:{}",
+                    rel.with_extension("").to_string_lossy().replace('\\', "/")
+                );
                 let parse = quadra_syntax::parse("");
-                files.push(SourceFile { id: FileId(0), path, module, text, parse, kind: FileKind::Interface });
+                files.push(SourceFile {
+                    id: FileId(0),
+                    path,
+                    module,
+                    text,
+                    parse,
+                    kind: FileKind::Interface,
+                });
                 continue;
             }
             let module = module_name(&rel);
             let kind = match rel.components().next().and_then(|c| c.as_os_str().to_str()) {
-                Some(first) if SCRIPT_DIRS.contains(&first) && rel.components().count() > 1 => FileKind::Script,
+                Some(first) if SCRIPT_DIRS.contains(&first) && rel.components().count() > 1 => {
+                    FileKind::Script
+                }
                 _ => FileKind::Module,
             };
             let parse = quadra_syntax::parse(&text);
-            files.push(SourceFile { id: FileId(0), path, module, text, parse, kind });
+            files.push(SourceFile {
+                id: FileId(0),
+                path,
+                module,
+                text,
+                parse,
+                kind,
+            });
         }
         for (i, f) in files.iter_mut().enumerate() {
             f.id = FileId(i as u32);
@@ -214,13 +246,20 @@ impl Project {
         // read again here (it was checked by `load`): projects built from sources keep it too
         let edition = read_edition(root).unwrap_or_else(|_| DEFAULT_EDITION.to_string());
         let timezone = read_timezone(root).unwrap_or_else(|_| "UTC".to_string());
-        Project { root: root.to_path_buf(), edition, timezone, files }
+        Project {
+            root: root.to_path_buf(),
+            edition,
+            timezone,
+            files,
+        }
     }
 
     /// The code written by the user: `.qd` modules and scripts (not the standard library, not
     /// interface files).
     pub fn user_files(&self) -> impl Iterator<Item = &SourceFile> {
-        self.files.iter().filter(|f| matches!(f.kind, FileKind::Module | FileKind::Script))
+        self.files
+            .iter()
+            .filter(|f| matches!(f.kind, FileKind::Module | FileKind::Script))
     }
 
     /// The interface files (`interfaces/**/*.qdi`).
@@ -230,7 +269,12 @@ impl Project {
 
     /// The same project with more script files (generated code, checked with the project).
     pub fn with_scripts(&self, scripts: Vec<(PathBuf, String)>) -> Project {
-        let mut sources: Vec<(PathBuf, String)> = self.files.iter().filter(|f| f.kind != FileKind::Std).map(|f| (f.path.clone(), f.text.clone())).collect();
+        let mut sources: Vec<(PathBuf, String)> = self
+            .files
+            .iter()
+            .filter(|f| f.kind != FileKind::Std)
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
         sources.extend(scripts);
         Project::from_sources(&self.root, sources)
     }
@@ -255,7 +299,10 @@ impl Project {
 /// `core/money.qd` → `core.money`, `tests/a.test.qd` → `tests.a.test`.
 pub fn module_name(rel: &Path) -> String {
     let s = rel.with_extension("");
-    s.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join(".")
+    s.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn collect_qd(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -297,8 +344,15 @@ fn collect_qdi(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// Nearest directory containing `quadra.toml`, starting from `path` (file or directory).
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
     let path = std::fs::canonicalize(path).ok()?;
-    let start = if path.is_file() { path.parent()?.to_path_buf() } else { path };
-    start.ancestors().find(|d| d.join("quadra.toml").is_file()).map(Path::to_path_buf)
+    let start = if path.is_file() {
+        path.parent()?.to_path_buf()
+    } else {
+        path
+    };
+    start
+        .ancestors()
+        .find(|d| d.join("quadra.toml").is_file())
+        .map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -312,12 +366,24 @@ mod edition_tests {
         std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"x\"\n").unwrap();
         assert_eq!(read_edition(&dir).unwrap(), DEFAULT_EDITION);
         assert_eq!(Project::load(&dir).unwrap().edition, DEFAULT_EDITION);
-        std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"x\"\nedition = \"2026\"  # the first\n").unwrap();
+        std::fs::write(
+            dir.join("quadra.toml"),
+            "[project]\nname = \"x\"\nedition = \"2026\"  # the first\n",
+        )
+        .unwrap();
         assert_eq!(read_edition(&dir).unwrap(), "2026");
         // an edition under another section is not the project's
-        std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"x\"\n\n[database]\nedition = \"1999\"\n").unwrap();
+        std::fs::write(
+            dir.join("quadra.toml"),
+            "[project]\nname = \"x\"\n\n[database]\nedition = \"1999\"\n",
+        )
+        .unwrap();
         assert_eq!(read_edition(&dir).unwrap(), DEFAULT_EDITION);
-        std::fs::write(dir.join("quadra.toml"), "[project]\nname = \"x\"\nedition = \"2031\"\n").unwrap();
+        std::fs::write(
+            dir.join("quadra.toml"),
+            "[project]\nname = \"x\"\nedition = \"2031\"\n",
+        )
+        .unwrap();
         let e = Project::load(&dir).err().unwrap().to_string();
         assert!(e.contains("edition `2031` is not known"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);

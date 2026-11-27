@@ -35,7 +35,11 @@ pub(crate) struct Parser<'a> {
     captured: Vec<Name>,
 }
 
-const LAYOUT_ERRORS: &[&str] = &["unexpected indentation", "tabs are not allowed", "this line's indentation"];
+const LAYOUT_ERRORS: &[&str] = &[
+    "unexpected indentation",
+    "tabs are not allowed",
+    "this line's indentation",
+];
 
 pub fn parse(src: &str) -> (File, Vec<Diag>) {
     let (lexed, errors) = quadra_syntax::lexer::tokenize(src);
@@ -43,8 +47,13 @@ pub fn parse(src: &str) -> (File, Vec<Diag>) {
     for e in errors {
         // unexpected characters are reported where they are not allowed (`@` is; `!`, `'`
         // and `$` are inside a cell's formula); the layout is done again below
-        if !e.message.starts_with("unexpected character") && !LAYOUT_ERRORS.iter().any(|m| e.message.starts_with(m)) {
-            diags.push(Diag::new(e.message, Span::new(e.range.start().into(), e.range.end().into())));
+        if !e.message.starts_with("unexpected character")
+            && !LAYOUT_ERRORS.iter().any(|m| e.message.starts_with(m))
+        {
+            diags.push(Diag::new(
+                e.message,
+                Span::new(e.range.start().into(), e.range.end().into()),
+            ));
         }
     }
     let raw: Vec<Tok> = lexed
@@ -53,7 +62,13 @@ pub fn parse(src: &str) -> (File, Vec<Diag>) {
         .map(|t| {
             let (start, end) = (u32::from(t.range.start()), u32::from(t.range.end()));
             let text = &src[start as usize..end as usize];
-            let kind = if t.kind == K::NEWLINE || (t.kind == K::WHITESPACE && (text == "\n" || text == "\r\n")) { K::NEWLINE } else { t.kind };
+            let kind = if t.kind == K::NEWLINE
+                || (t.kind == K::WHITESPACE && (text == "\n" || text == "\r\n"))
+            {
+                K::NEWLINE
+            } else {
+                t.kind
+            };
             Tok { kind, start, end }
         })
         .collect();
@@ -67,21 +82,40 @@ pub fn parse(src: &str) -> (File, Vec<Diag>) {
                 let text = &src[t.start as usize..t.end as usize];
                 let text = text.strip_prefix('#').unwrap_or(text);
                 let text = text.strip_prefix(' ').unwrap_or(text);
-                comments.push(Comment { at: t.start, text: text.trim_end().to_string(), taken: false });
+                comments.push(Comment {
+                    at: t.start,
+                    text: text.trim_end().to_string(),
+                    taken: false,
+                });
             }
             _ => toks.push(t),
         }
     }
-    let mut p = Parser { src, toks, pos: 0, diags, comments, captured: Vec::new() };
+    let mut p = Parser {
+        src,
+        toks,
+        pos: 0,
+        diags,
+        comments,
+        captured: Vec::new(),
+    };
     let mut file = p.file();
     // comments after the last declaration belong to it
-    let rest: Vec<String> = p.comments.iter_mut().filter(|c| !c.taken).map(|c| {
-        c.taken = true;
-        c.text.clone()
-    }).collect();
+    let rest: Vec<String> = p
+        .comments
+        .iter_mut()
+        .filter(|c| !c.taken)
+        .map(|c| {
+            c.taken = true;
+            c.text.clone()
+        })
+        .collect();
     if !rest.is_empty() {
         if let Some(slot) = last_comment_slot(&mut file) {
-            let mut all: Vec<String> = slot.take().map(|s| s.split('\n').map(str::to_string).collect()).unwrap_or_default();
+            let mut all: Vec<String> = slot
+                .take()
+                .map(|s| s.split('\n').map(str::to_string).collect())
+                .unwrap_or_default();
             all.extend(rest);
             *slot = Some(all.join("\n"));
         }
@@ -91,7 +125,22 @@ pub fn parse(src: &str) -> (File, Vec<Diag>) {
 }
 
 fn is_binary_op(kind: K, text: &str) -> bool {
-    matches!(kind, K::PLUS | K::MINUS | K::STAR | K::SLASH | K::QUESTION2 | K::EQ2 | K::NEQ | K::LT | K::GT | K::LE | K::GE | K::AND_KW | K::OR_KW) || (kind == K::IDENT && text == "implies")
+    matches!(
+        kind,
+        K::PLUS
+            | K::MINUS
+            | K::STAR
+            | K::SLASH
+            | K::QUESTION2
+            | K::EQ2
+            | K::NEQ
+            | K::LT
+            | K::GT
+            | K::LE
+            | K::GE
+            | K::AND_KW
+            | K::OR_KW
+    ) || (kind == K::IDENT && text == "implies")
 }
 
 /// The layout of Quadra's lexer (which line breaks count, `INDENT`/`DEDENT`: the syntax reference (quadra.run/reference/syntax)
@@ -114,7 +163,10 @@ fn layout(src: &str, raw: &[Tok], diags: &mut Vec<Diag>) -> Vec<Tok> {
     for (ri, tok) in raw.iter().copied().enumerate() {
         match tok.kind {
             K::NEWLINE => {
-                out.push(Tok { kind: K::WHITESPACE, ..tok });
+                out.push(Tok {
+                    kind: K::WHITESPACE,
+                    ..tok
+                });
                 last_nl = Some(out.len() - 1);
                 if pending_nl.is_none() && open.is_empty() && last_sig.is_some() {
                     pending_nl = Some(out.len() - 1);
@@ -139,7 +191,10 @@ fn layout(src: &str, raw: &[Tok], diags: &mut Vec<Diag>) -> Vec<Tok> {
                     let closing = matches!(tok.kind, K::R_PAREN | K::R_BRACK | K::R_BRACE);
                     if let Some((first, at)) = open.first().copied() {
                         if indent_col <= at && !closing {
-                            diags.push(Diag::new(format!("`{}` is not closed", text(&first)), Span::new(first.start, first.end)));
+                            diags.push(Diag::new(
+                                format!("`{}` is not closed", text(&first)),
+                                Span::new(first.start, first.end),
+                            ));
                             open.clear();
                             if pending_nl.is_none() {
                                 pending_nl = last_nl;
@@ -151,32 +206,57 @@ fn layout(src: &str, raw: &[Tok], diags: &mut Vec<Diag>) -> Vec<Tok> {
                     match last_sig {
                         None => {
                             if indent_col > 0 {
-                                diags.push(Diag::new("unexpected indentation", Span::new(tok.start, tok.end)));
+                                diags.push(Diag::new(
+                                    "unexpected indentation",
+                                    Span::new(tok.start, tok.end),
+                                ));
                             }
                         }
                         Some(ls) => {
                             let prev = out[ls];
                             let starts_cont = match tok.kind {
                                 K::DOT | K::QUESTION_DOT => true,
-                                K::ELSE_KW => !matches!(raw[ri + 1..].iter().find(|t| !matches!(t.kind, K::WHITESPACE | K::COMMENT | K::NEWLINE)).map(|t| t.kind), Some(K::COLON) | Some(K::FAT_ARROW) | Some(K::IF_KW)),
+                                K::ELSE_KW => !matches!(
+                                    raw[ri + 1..]
+                                        .iter()
+                                        .find(|t| !matches!(
+                                            t.kind,
+                                            K::WHITESPACE | K::COMMENT | K::NEWLINE
+                                        ))
+                                        .map(|t| t.kind),
+                                    Some(K::COLON) | Some(K::FAT_ARROW) | Some(K::IF_KW)
+                                ),
                                 k => is_binary_op(k, text(&tok)),
                             };
-                            let continues_after = prev.kind == K::COMMA || (is_binary_op(prev.kind, text(&prev)) && !matches!(prev.kind, K::GT | K::LT | K::STAR));
+                            let continues_after = prev.kind == K::COMMA
+                                || (is_binary_op(prev.kind, text(&prev))
+                                    && !matches!(prev.kind, K::GT | K::LT | K::STAR));
                             if !(continues_after || starts_cont) {
                                 if let Some(nl) = pending_nl {
                                     out[nl].kind = K::NEWLINE;
                                 }
                                 if let Some(tab) = indent_tab {
-                                    diags.push(Diag::new("tabs are not allowed in indentation, use spaces", tab));
+                                    diags.push(Diag::new(
+                                        "tabs are not allowed in indentation, use spaces",
+                                        tab,
+                                    ));
                                 }
                                 let top = *stack.last().unwrap();
                                 if indent_col > top {
                                     stack.push(indent_col);
-                                    out.push(Tok { kind: K::INDENT, start: tok.start, end: tok.start });
+                                    out.push(Tok {
+                                        kind: K::INDENT,
+                                        start: tok.start,
+                                        end: tok.start,
+                                    });
                                 } else if indent_col < top {
                                     while indent_col < *stack.last().unwrap() {
                                         stack.pop();
-                                        out.push(Tok { kind: K::DEDENT, start: tok.start, end: tok.start });
+                                        out.push(Tok {
+                                            kind: K::DEDENT,
+                                            start: tok.start,
+                                            end: tok.start,
+                                        });
                                     }
                                     if indent_col != *stack.last().unwrap() {
                                         diags.push(Diag::new("this line's indentation does not match any outer block", Span::new(tok.start, tok.end)));
@@ -202,15 +282,26 @@ fn layout(src: &str, raw: &[Tok], diags: &mut Vec<Diag>) -> Vec<Tok> {
     }
     let end = src.len() as u32;
     if let Some((first, _)) = open.first() {
-        diags.push(Diag::new(format!("`{}` is not closed", text(first)), Span::new(first.start, first.end)));
+        diags.push(Diag::new(
+            format!("`{}` is not closed", text(first)),
+            Span::new(first.start, first.end),
+        ));
     }
     if last_sig.is_some() {
         match pending_nl {
             Some(nl) => out[nl].kind = K::NEWLINE,
-            None => out.push(Tok { kind: K::NEWLINE, start: end, end }),
+            None => out.push(Tok {
+                kind: K::NEWLINE,
+                start: end,
+                end,
+            }),
         }
         for _ in 1..stack.len() {
-            out.push(Tok { kind: K::DEDENT, start: end, end });
+            out.push(Tok {
+                kind: K::DEDENT,
+                start: end,
+                end,
+            });
         }
     }
     out
@@ -266,7 +357,17 @@ fn last_comment_slot(file: &mut File) -> Option<&mut Option<String>> {
     }
 }
 
-const COMPONENT_WORDS: &[&str] = &["sheet", "markdown", "chart", "kpi", "filters", "view", "button", "form", "component"];
+const COMPONENT_WORDS: &[&str] = &[
+    "sheet",
+    "markdown",
+    "chart",
+    "kpi",
+    "filters",
+    "view",
+    "button",
+    "form",
+    "component",
+];
 
 fn is_word_kind(k: K) -> bool {
     k == K::IDENT || k.is_keyword()
@@ -339,11 +440,13 @@ impl<'a> Parser<'a> {
     }
 
     fn at_word(&self, w: &str) -> bool {
-        self.peek().is_some_and(|t| self.is_word(t) && self.text(t) == w)
+        self.peek()
+            .is_some_and(|t| self.is_word(t) && self.text(t) == w)
     }
 
     fn nth_word(&self, n: usize, w: &str) -> bool {
-        self.nth(n).is_some_and(|t| self.is_word(t) && self.text(t) == w)
+        self.nth(n)
+            .is_some_and(|t| self.is_word(t) && self.text(t) == w)
     }
 
     fn eat_word(&mut self, w: &str) -> bool {
@@ -439,7 +542,10 @@ impl<'a> Parser<'a> {
         if !self.end_of_line() {
             let s = self.here();
             let w = self.what();
-            self.err(format!("expected the end of the line after `:`, found {w}"), s);
+            self.err(
+                format!("expected the end of the line after `:`, found {w}"),
+                s,
+            );
             while !self.end_of_line() {
                 self.pos += 1;
             }
@@ -497,7 +603,10 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(t) if self.is_word(t) => {
                 self.pos += 1;
-                let n = Name { text: self.text(t).to_string(), span: Span::new(t.start, t.end) };
+                let n = Name {
+                    text: self.text(t).to_string(),
+                    span: Span::new(t.start, t.end),
+                };
                 self.captured.push(n.clone());
                 Some(n)
             }
@@ -543,7 +652,9 @@ impl<'a> Parser<'a> {
     }
 
     fn string_of(&self, t: Tok) -> String {
-        let line_start = self.src[..t.start as usize].rfind('\n').map_or(0, |k| k + 1);
+        let line_start = self.src[..t.start as usize]
+            .rfind('\n')
+            .map_or(0, |k| k + 1);
         let col = self.src[line_start..t.start as usize].chars().count();
         string_value(self.text(t), col)
     }
@@ -569,7 +680,10 @@ impl<'a> Parser<'a> {
                     Some(if neg { -n } else { n })
                 }
                 Err(_) => {
-                    self.err(format!("expected {what} (a whole number)"), Span::new(t.start, t.end));
+                    self.err(
+                        format!("expected {what} (a whole number)"),
+                        Span::new(t.start, t.end),
+                    );
                     self.pos += 1;
                     None
                 }
@@ -605,7 +719,10 @@ impl<'a> Parser<'a> {
 
     /// `@name` (the `@` right before the name)
     fn at_param(&self) -> bool {
-        self.peek().is_some_and(|t| t.kind == K::AT) && self.nth(1).is_some_and(|n| self.is_word(n) && n.start == self.peek().unwrap().end)
+        self.peek().is_some_and(|t| t.kind == K::AT)
+            && self
+                .nth(1)
+                .is_some_and(|n| self.is_word(n) && n.start == self.peek().unwrap().end)
     }
 
     fn param(&mut self) -> Option<String> {
@@ -617,7 +734,10 @@ impl<'a> Parser<'a> {
         }
         let at = self.bump().unwrap();
         let t = self.bump().unwrap();
-        self.captured.push(Name { text: format!("@{}", self.text(t)), span: Span::new(at.start, t.end) });
+        self.captured.push(Name {
+            text: format!("@{}", self.text(t)),
+            span: Span::new(at.start, t.end),
+        });
         Some(self.text(t).to_string())
     }
 
@@ -704,7 +824,10 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let w = self.what();
-                self.err(format!("expected a value, found {w}"), Span::new(t.start, t.end));
+                self.err(
+                    format!("expected a value, found {w}"),
+                    Span::new(t.start, t.end),
+                );
                 None
             }
         }
@@ -730,13 +853,19 @@ impl<'a> Parser<'a> {
         // an exponent, written against the number: 1e21, 1E-7
         if let Some(n) = self.peek().filter(|n| n.start == end && n.kind == K::IDENT) {
             let w = self.text(n);
-            if (w.starts_with('e') || w.starts_with('E')) && w[1..].chars().all(|c| c.is_ascii_digit()) {
+            if (w.starts_with('e') || w.starts_with('E'))
+                && w[1..].chars().all(|c| c.is_ascii_digit())
+            {
                 if w.len() > 1 {
                     text.push_str(w);
                     end = n.end;
                     self.pos += 1;
                 } else if let (Some(sign), Some(d)) = (self.nth(1), self.nth(2)) {
-                    if sign.start == n.end && matches!(sign.kind, K::PLUS | K::MINUS) && d.start == sign.end && d.kind == K::NUMBER {
+                    if sign.start == n.end
+                        && matches!(sign.kind, K::PLUS | K::MINUS)
+                        && d.start == sign.end
+                        && d.kind == K::NUMBER
+                    {
                         text.push_str(w);
                         text.push_str(self.text(sign));
                         text.push_str(self.text(d));
@@ -747,11 +876,18 @@ impl<'a> Parser<'a> {
             }
         }
         // a quantity, an amount, a price: kept as the text
-        if let Some(u) = self.peek().filter(|u| self.is_word(*u) && !matches!(self.text(*u), "default" | "as")) {
+        if let Some(u) = self
+            .peek()
+            .filter(|u| self.is_word(*u) && !matches!(self.text(*u), "default" | "as"))
+        {
             let mut q = format!("{} {}", text, self.text(u));
             self.pos += 1;
             if let (Some(sl), Some(u2)) = (self.peek(), self.nth(1)) {
-                if sl.kind == K::SLASH && sl.start == u.end && u2.start == sl.end && self.is_word(u2) {
+                if sl.kind == K::SLASH
+                    && sl.start == u.end
+                    && u2.start == sl.end
+                    && self.is_word(u2)
+                {
                     q.push('/');
                     q.push_str(self.text(u2));
                     self.pos += 2;
@@ -762,7 +898,10 @@ impl<'a> Parser<'a> {
         match serde_json::from_str::<serde_json::Number>(&text) {
             Ok(n) => Some(J::Number(n)),
             Err(_) => {
-                self.err(format!("`{text}` is not a number"), Span::new(start.start, end));
+                self.err(
+                    format!("`{text}` is not a number"),
+                    Span::new(start.start, end),
+                );
                 None
             }
         }
@@ -796,8 +935,17 @@ impl<'a> Parser<'a> {
         }
         let span = Span::new(toks[0].start, toks[toks.len() - 1].end);
         // raw "…": a text kept as it is
-        if toks.len() == 2 && self.is_word(toks[0]) && self.text(toks[0]) == "raw" && toks[1].kind == K::STRING {
-            return Some(Expr { text: self.string_of(toks[1]), raw: true, span, map: Vec::new() });
+        if toks.len() == 2
+            && self.is_word(toks[0])
+            && self.text(toks[0]) == "raw"
+            && toks[1].kind == K::STRING
+        {
+            return Some(Expr {
+                text: self.string_of(toks[1]),
+                raw: true,
+                span,
+                map: Vec::new(),
+            });
         }
         let mut text = String::new();
         let mut check = String::new();
@@ -807,7 +955,11 @@ impl<'a> Parser<'a> {
                 let prev = toks[k - 1];
                 let gap = &self.src[prev.end as usize..t.start as usize];
                 let sep = if gap.contains('\n') {
-                    if matches!(t.kind, K::DOT | K::QUESTION_DOT | K::R_PAREN | K::R_BRACK | K::R_BRACE) || matches!(prev.kind, K::L_PAREN | K::L_BRACK | K::L_BRACE) {
+                    if matches!(
+                        t.kind,
+                        K::DOT | K::QUESTION_DOT | K::R_PAREN | K::R_BRACK | K::R_BRACE
+                    ) || matches!(prev.kind, K::L_PAREN | K::L_BRACK | K::L_BRACE)
+                    {
                         ""
                     } else {
                         " "
@@ -826,7 +978,12 @@ impl<'a> Parser<'a> {
         if quadra_syntax::parse_expr(&check).is_none() {
             self.err(format!("`{text}` is not an expression (write `raw \"…\"` to keep a text that is not one)"), span);
         }
-        Some(Expr { text, raw: false, span, map })
+        Some(Expr {
+            text,
+            raw: false,
+            span,
+            map,
+        })
     }
 
     fn expr(&mut self) -> Option<Expr> {
@@ -850,7 +1007,10 @@ impl<'a> Parser<'a> {
             }
             return Some(Source::Id(n as u64));
         }
-        if self.at_word("cell") && self.nth(1).is_some_and(|t| self.is_word(t)) && self.nth(2).is_some_and(|t| t.kind == K::STRING) {
+        if self.at_word("cell")
+            && self.nth(1).is_some_and(|t| self.is_word(t))
+            && self.nth(2).is_some_and(|t| t.kind == K::STRING)
+        {
             self.pos += 1;
             let component = self.word("a component")?.text;
             let cell = self.string("a cell")?;
@@ -868,10 +1028,15 @@ impl<'a> Parser<'a> {
             let entity = self.word("`@name` or an entity")?.text;
             if self.eat(K::L_BRACK) {
                 let src = match self.source()? {
-                    Source::Value(J::Number(n)) if n.as_u64().is_some() => Source::Id(n.as_u64().unwrap()),
+                    Source::Value(J::Number(n)) if n.as_u64().is_some() => {
+                        Source::Id(n.as_u64().unwrap())
+                    }
                     s @ (Source::Param(_) | Source::Id(_) | Source::Cell { .. }) => s,
                     Source::Value(_) => {
-                        self.err("the record: `@name`, an id or `cell <component> \"<cell>\"`", start);
+                        self.err(
+                            "the record: `@name`, an id or `cell <component> \"<cell>\"`",
+                            start,
+                        );
                         return None;
                     }
                 };
@@ -920,7 +1085,12 @@ impl<'a> Parser<'a> {
             self.err(format!("expected `)`, found {w}"), end);
             return None;
         }
-        Some(Run { target, action, args, span: Span::new(start.start, end.end) })
+        Some(Run {
+            target,
+            action,
+            args,
+            span: Span::new(start.start, end.end),
+        })
     }
 
     // ---- values of options ---------------------------------------------------------------------
@@ -929,7 +1099,11 @@ impl<'a> Parser<'a> {
         if self.at(K::L_BRACK) {
             let s = self.here();
             return match self.data()? {
-                J::Array(a) if a.iter().all(J::is_string) => Some(a.into_iter().map(|x| x.as_str().unwrap().to_string()).collect()),
+                J::Array(a) if a.iter().all(J::is_string) => Some(
+                    a.into_iter()
+                        .map(|x| x.as_str().unwrap().to_string())
+                        .collect(),
+                ),
                 _ => {
                     self.err("a list of names", s);
                     None
@@ -990,7 +1164,11 @@ impl<'a> Parser<'a> {
             },
             Vt::Word(set) => {
                 let s = self.here();
-                let w = if self.at(K::STRING) { self.opt_string().unwrap() } else { self.path(&format!("`{key}`"))?.text };
+                let w = if self.at(K::STRING) {
+                    self.opt_string().unwrap()
+                } else {
+                    self.path(&format!("`{key}`"))?.text
+                };
                 if !set.is_empty() && !set.contains(&w.as_str()) {
                     self.err(format!("`{key}`: one of {}", set.join(", ")), s);
                     return None;
@@ -1002,11 +1180,21 @@ impl<'a> Parser<'a> {
             Vt::Expr => Value::Expr(self.expr()?),
             Vt::Source => {
                 for kind in ["cell", "range"] {
-                    if self.at_word(kind) && self.nth(1).is_some_and(|t| self.is_word(t)) && self.nth(2).is_some_and(|t| t.kind == K::STRING) {
+                    if self.at_word(kind)
+                        && self.nth(1).is_some_and(|t| self.is_word(t))
+                        && self.nth(2).is_some_and(|t| t.kind == K::STRING)
+                    {
                         self.pos += 1;
                         let component = self.word("a component")?.text;
                         let r = self.string("a cell")?;
-                        return Some(Value::Source(if kind == "cell" { DataSource::Cell { component, cell: r } } else { DataSource::Range { component, range: r } }));
+                        return Some(Value::Source(if kind == "cell" {
+                            DataSource::Cell { component, cell: r }
+                        } else {
+                            DataSource::Range {
+                                component,
+                                range: r,
+                            }
+                        }));
                     }
                 }
                 Value::Source(DataSource::Expr(self.expr()?))
@@ -1018,7 +1206,10 @@ impl<'a> Parser<'a> {
                     Value::Compare(Compare::Target(self.expr()?))
                 } else {
                     let s = self.here();
-                    self.err("`compare`: `previous @<filter>` or `target <expression>`", s);
+                    self.err(
+                        "`compare`: `previous @<filter>` or `target <expression>`",
+                        s,
+                    );
                     return None;
                 }
             }
@@ -1045,7 +1236,14 @@ impl<'a> Parser<'a> {
                 let mut out = Vec::new();
                 loop {
                     let f = self.path("a field")?.text;
-                    let bucket = if self.eat_word("by") { Some(self.word("a bucket (day, week, month, quarter, year)")?.text) } else { None };
+                    let bucket = if self.eat_word("by") {
+                        Some(
+                            self.word("a bucket (day, week, month, quarter, year)")?
+                                .text,
+                        )
+                    } else {
+                        None
+                    };
                     out.push((f, bucket));
                     if !self.eat(K::COMMA) {
                         break;
@@ -1054,7 +1252,11 @@ impl<'a> Parser<'a> {
                 Value::Group(out)
             }
             Vt::Order => {
-                let by = if self.at(K::STRING) { self.opt_string().unwrap() } else { self.path("key, count or an aggregate")?.text };
+                let by = if self.at(K::STRING) {
+                    self.opt_string().unwrap()
+                } else {
+                    self.path("key, count or an aggregate")?.text
+                };
                 Value::Order(by, self.eat_word("desc"))
             }
             Vt::Shares => Value::Shares(self.shares()?),
@@ -1092,7 +1294,10 @@ impl<'a> Parser<'a> {
                         "keep" => After::Keep,
                         "open" => After::Open,
                         _ => {
-                            self.err("`after`: clear, keep, open or `select <Entity> as <name>`", s);
+                            self.err(
+                                "`after`: clear, keep, open or `select <Entity> as <name>`",
+                                s,
+                            );
                             return None;
                         }
                     })
@@ -1110,7 +1315,10 @@ impl<'a> Parser<'a> {
                 Some(self.word("a role")?.text)
             } else {
                 let s = self.here();
-                self.err("a share: `role <Role> use|change` or `everyone use|change`", s);
+                self.err(
+                    "a share: `role <Role> use|change` or `everyone use|change`",
+                    s,
+                );
                 return None;
             };
             let change = if self.eat_word("change") {
@@ -1162,11 +1370,19 @@ impl<'a> Parser<'a> {
         }
         let value = self.data()?;
         let end = self.toks[self.pos - 1].end;
-        Some(Raw { meta, path, value, span: Span::new(start.start, end) })
+        Some(Raw {
+            meta,
+            path,
+            value,
+            span: Span::new(start.start, end),
+        })
     }
 
     fn at_raw(&self) -> bool {
-        (self.at_word("config") || self.at_word("meta")) && self.nth(1).is_some_and(|t| self.is_word(t) || t.kind == K::STRING)
+        (self.at_word("config") || self.at_word("meta"))
+            && self
+                .nth(1)
+                .is_some_and(|t| self.is_word(t) || t.kind == K::STRING)
     }
 
     // ---- the file ------------------------------------------------------------------------------
@@ -1210,7 +1426,17 @@ impl<'a> Parser<'a> {
                 return None;
             }
         };
-        let mut app = App { comment, name, description: None, shares: Vec::new(), filters: Vec::new(), lets: Vec::new(), pages: Vec::new(), raws: Vec::new(), span: Span::default() };
+        let mut app = App {
+            comment,
+            name,
+            description: None,
+            shares: Vec::new(),
+            filters: Vec::new(),
+            lets: Vec::new(),
+            pages: Vec::new(),
+            raws: Vec::new(),
+            span: Span::default(),
+        };
         self.opt_block(|p| {
             let t = p.peek().unwrap();
             if p.at_word("description") && p.nth(1).is_some_and(|t| t.kind == K::COLON) {
@@ -1233,13 +1459,22 @@ impl<'a> Parser<'a> {
             } else if p.at(K::LET_KW) {
                 let comment = p.comments_before(t.start);
                 p.pos += 1;
-                let Some(name) = p.word("a name") else { return p.skip_line() };
+                let Some(name) = p.word("a name") else {
+                    return p.skip_line();
+                };
                 if !p.eat(K::EQ) {
                     return p.fail_line(format!("expected `=`, found {}", p.what()));
                 }
-                let Some(expr) = p.expr() else { return p.skip_line() };
+                let Some(expr) = p.expr() else {
+                    return p.skip_line();
+                };
                 let end = expr.span.end;
-                app.lets.push(Let { comment, name, expr, span: Span::new(t.start, end) });
+                app.lets.push(Let {
+                    comment,
+                    name,
+                    expr,
+                    span: Span::new(t.start, end),
+                });
                 p.end_line();
             } else if p.at_word("page") {
                 let comment = p.comments_before(t.start);
@@ -1252,10 +1487,18 @@ impl<'a> Parser<'a> {
                 }
                 p.end_line();
             } else {
-                p.fail_line(format!("expected `description`, `share`, `filter`, `let`, `page` or `meta`, found {}", p.what()));
+                p.fail_line(format!(
+                    "expected `description`, `share`, `filter`, `let`, `page` or `meta`, found {}",
+                    p.what()
+                ));
             }
         });
-        app.span = Span::new(start, self.toks.get(self.pos.saturating_sub(1)).map_or(start, |t| t.end));
+        app.span = Span::new(
+            start,
+            self.toks
+                .get(self.pos.saturating_sub(1))
+                .map_or(start, |t| t.end),
+        );
         Some(app)
     }
 
@@ -1278,7 +1521,8 @@ impl<'a> Parser<'a> {
         if !options::WIDGETS.contains(&widget.text.as_str()) {
             self.err(format!("a widget: {}", options::WIDGETS.join(", ")), s);
         }
-        let Some(path) = self.path("the entity and field it filters (`Order.customer.region`)") else {
+        let Some(path) = self.path("the entity and field it filters (`Order.customer.region`)")
+        else {
             self.skip_line();
             return None;
         };
@@ -1286,16 +1530,42 @@ impl<'a> Parser<'a> {
             Some((e, f)) => {
                 let es = Span::new(path.span.start, path.span.start + e.len() as u32);
                 let fs = Span::new(es.end + 1, path.span.end);
-                (Name { text: e.into(), span: es }, Name { text: f.into(), span: fs })
+                (
+                    Name {
+                        text: e.into(),
+                        span: es,
+                    },
+                    Name {
+                        text: f.into(),
+                        span: fs,
+                    },
+                )
             }
             None => {
-                self.err("the entity and the field it filters: `Order.customer.region`", path.span);
+                self.err(
+                    "the entity and the field it filters: `Order.customer.region`",
+                    path.span,
+                );
                 (path.clone(), Name::default())
             }
         };
-        let default = if self.eat_word("default") { self.data() } else { None };
+        let default = if self.eat_word("default") {
+            self.data()
+        } else {
+            None
+        };
         let end = self.toks[self.pos - 1].end;
-        let mut f = FilterDecl { comment, name, label, widget, entity, field, default, raws: Vec::new(), span: Span::new(start, end) };
+        let mut f = FilterDecl {
+            comment,
+            name,
+            label,
+            widget,
+            entity,
+            field,
+            default,
+            raws: Vec::new(),
+            span: Span::new(start, end),
+        };
         self.end_line_or_meta(&mut f.raws);
         Some(f)
     }
@@ -1327,9 +1597,20 @@ impl<'a> Parser<'a> {
 
     fn page(&mut self, comment: Option<String>) -> Option<Page> {
         let start = self.bump().unwrap().start;
-        let id = if self.peek().is_some_and(|t| self.is_word(t)) { self.word("a name") } else { None };
+        let id = if self.peek().is_some_and(|t| self.is_word(t)) {
+            self.word("a name")
+        } else {
+            None
+        };
         let name = self.opt_string();
-        let mut page = Page { comment, id, name, body: Vec::new(), raws: Vec::new(), span: Span::default() };
+        let mut page = Page {
+            comment,
+            id,
+            name,
+            body: Vec::new(),
+            raws: Vec::new(),
+            span: Span::default(),
+        };
         self.opt_block(|p| {
             if p.at_word("row") {
                 if let Some(r) = p.row() {
@@ -1355,7 +1636,12 @@ impl<'a> Parser<'a> {
                 p.fail_line(format!("expected `row`, `space`, a component placed with `at`, or `meta`, found {}", p.what()));
             }
         });
-        page.span = Span::new(start, self.toks.get(self.pos.saturating_sub(1)).map_or(start, |t| t.end));
+        page.span = Span::new(
+            start,
+            self.toks
+                .get(self.pos.saturating_sub(1))
+                .map_or(start, |t| t.end),
+        );
         Some(page)
     }
 
@@ -1369,8 +1655,16 @@ impl<'a> Parser<'a> {
 
     fn row(&mut self) -> Option<Row> {
         let start = self.bump().unwrap().start;
-        let height = if self.eat_word("height") { Some(self.uint("the height")?) } else { None };
-        let mut row = Row { height, children: Vec::new(), span: Span::default() };
+        let height = if self.eat_word("height") {
+            Some(self.uint("the height")?)
+        } else {
+            None
+        };
+        let mut row = Row {
+            height,
+            children: Vec::new(),
+            span: Span::default(),
+        };
         let had = self.opt_block(|p| {
             if p.at_word("column") {
                 if let Some(c) = p.column() {
@@ -1380,7 +1674,10 @@ impl<'a> Parser<'a> {
                 if let Some(b) = p.space() {
                     row.children.push(b);
                 }
-            } else if p.peek().is_some_and(|t| p.is_word(t) && COMPONENT_WORDS.contains(&p.text(t))) {
+            } else if p
+                .peek()
+                .is_some_and(|t| p.is_word(t) && COMPONENT_WORDS.contains(&p.text(t)))
+            {
                 if let Some(c) = p.component() {
                     if c.at.is_some() {
                         p.err("`at` places a component on the page, not in a row", c.span);
@@ -1388,20 +1685,36 @@ impl<'a> Parser<'a> {
                     row.children.push(Block::Component(Box::new(c)));
                 }
             } else {
-                p.fail_line(format!("expected a component, `column` or `space`, found {}", p.what()));
+                p.fail_line(format!(
+                    "expected a component, `column` or `space`, found {}",
+                    p.what()
+                ));
             }
         });
         if !had {
             self.err("a row holds components", Span::new(start, start + 3));
         }
-        row.span = Span::new(start, self.toks.get(self.pos.saturating_sub(1)).map_or(start, |t| t.end));
+        row.span = Span::new(
+            start,
+            self.toks
+                .get(self.pos.saturating_sub(1))
+                .map_or(start, |t| t.end),
+        );
         Some(row)
     }
 
     fn column(&mut self) -> Option<Column> {
         let start = self.bump().unwrap().start;
-        let width = if self.eat_word("width") { Some(self.uint("the width")?) } else { None };
-        let mut col = Column { width, children: Vec::new(), span: Span::default() };
+        let width = if self.eat_word("width") {
+            Some(self.uint("the width")?)
+        } else {
+            None
+        };
+        let mut col = Column {
+            width,
+            children: Vec::new(),
+            span: Span::default(),
+        };
         let had = self.opt_block(|p| {
             if p.at_word("row") {
                 if let Some(r) = p.row() {
@@ -1411,21 +1724,35 @@ impl<'a> Parser<'a> {
                 if let Some(b) = p.space() {
                     col.children.push(b);
                 }
-            } else if p.peek().is_some_and(|t| p.is_word(t) && COMPONENT_WORDS.contains(&p.text(t))) {
+            } else if p
+                .peek()
+                .is_some_and(|t| p.is_word(t) && COMPONENT_WORDS.contains(&p.text(t)))
+            {
                 if let Some(c) = p.component() {
                     if c.at.is_some() {
-                        p.err("`at` places a component on the page, not in a column", c.span);
+                        p.err(
+                            "`at` places a component on the page, not in a column",
+                            c.span,
+                        );
                     }
                     col.children.push(Block::Component(Box::new(c)));
                 }
             } else {
-                p.fail_line(format!("expected a component, `row` or `space`, found {}", p.what()));
+                p.fail_line(format!(
+                    "expected a component, `row` or `space`, found {}",
+                    p.what()
+                ));
             }
         });
         if !had {
             self.err("a column holds components", Span::new(start, start + 6));
         }
-        col.span = Span::new(start, self.toks.get(self.pos.saturating_sub(1)).map_or(start, |t| t.end));
+        col.span = Span::new(
+            start,
+            self.toks
+                .get(self.pos.saturating_sub(1))
+                .map_or(start, |t| t.end),
+        );
         Some(col)
     }
 
@@ -1451,7 +1778,8 @@ impl<'a> Parser<'a> {
         let name = match (self.peek(), self.nth(1)) {
             (Some(t), next) if self.is_word(t) => {
                 let w = self.text(t);
-                let option_word = matches!(w, "width" | "height" | "at") && next.is_some_and(|n| n.kind == K::NUMBER);
+                let option_word = matches!(w, "width" | "height" | "at")
+                    && next.is_some_and(|n| n.kind == K::NUMBER);
                 if option_word {
                     None
                 } else {
@@ -1461,7 +1789,17 @@ impl<'a> Parser<'a> {
             _ => None,
         };
         let title = self.opt_string();
-        let mut c = Component { comment, kind, name, title, width: None, height: None, at: None, lines: Vec::new(), span: Span::default() };
+        let mut c = Component {
+            comment,
+            kind,
+            name,
+            title,
+            width: None,
+            height: None,
+            at: None,
+            lines: Vec::new(),
+            span: Span::default(),
+        };
         loop {
             if self.eat_word("width") {
                 c.width = Some(self.uint("the width")?);
@@ -1501,7 +1839,12 @@ impl<'a> Parser<'a> {
             }
         });
         c.lines = lines;
-        c.span = Span::new(first.start, self.toks.get(self.pos.saturating_sub(1)).map_or(header_end, |t| t.end.max(header_end)));
+        c.span = Span::new(
+            first.start,
+            self.toks
+                .get(self.pos.saturating_sub(1))
+                .map_or(header_end, |t| t.end.max(header_end)),
+        );
         Some(c)
     }
 
@@ -1533,7 +1876,11 @@ impl<'a> Parser<'a> {
             self.end_line();
             return r;
         }
-        if viewish && self.at_word("compute") && self.nth(1).is_some_and(|n| self.is_word(n)) && self.nth(2).is_some_and(|n| n.kind == K::COLON) {
+        if viewish
+            && self.at_word("compute")
+            && self.nth(1).is_some_and(|n| self.is_word(n))
+            && self.nth(2).is_some_and(|n| n.kind == K::COLON)
+        {
             self.pos += 1;
             let name = self.word("a name")?;
             self.pos += 1;
@@ -1557,32 +1904,56 @@ impl<'a> Parser<'a> {
             return Some(Line::Color { color, expr, span });
         }
         if kind == "form" {
-            if self.at_word("default") && self.nth(1).is_some_and(|n| self.is_word(n)) && self.nth(2).is_some_and(|n| n.kind == K::COLON) {
+            if self.at_word("default")
+                && self.nth(1).is_some_and(|n| self.is_word(n))
+                && self.nth(2).is_some_and(|n| n.kind == K::COLON)
+            {
                 self.pos += 1;
                 let field = self.word("a field")?;
                 self.pos += 1;
                 let source = self.source();
                 let end = self.toks[self.pos - 1].end;
                 self.end_line();
-                return Some(Line::Default { field, source: source?, span: Span::new(t.start, end) });
+                return Some(Line::Default {
+                    field,
+                    source: source?,
+                    span: Span::new(t.start, end),
+                });
             }
-            if self.at_word("section") && self.nth(1).is_some_and(|n| n.kind == K::COLON || n.kind == K::STRING) {
+            if self.at_word("section")
+                && self
+                    .nth(1)
+                    .is_some_and(|n| n.kind == K::COLON || n.kind == K::STRING)
+            {
                 self.pos += 1;
                 let title = self.opt_string();
                 if !self.colon() {
                     self.skip_line();
                     return None;
                 }
-                let fields = if self.end_of_line() { Vec::new() } else { self.names()? };
+                let fields = if self.end_of_line() {
+                    Vec::new()
+                } else {
+                    self.names()?
+                };
                 let end = self.toks[self.pos - 1].end;
                 self.end_line();
                 let names = std::mem::take(&mut self.captured);
-                return Some(Line::Section { title, fields, span: Span::new(t.start, end), names });
+                return Some(Line::Section {
+                    title,
+                    fields,
+                    span: Span::new(t.start, end),
+                    names,
+                });
             }
             if self.at_word("field") && self.nth(1).is_some_and(|n| self.is_word(n)) {
                 return self.form_field();
             }
-            if self.at_word("submit") && self.nth(1).is_some_and(|n| n.kind == K::COLON || n.kind == K::STRING) {
+            if self.at_word("submit")
+                && self
+                    .nth(1)
+                    .is_some_and(|n| n.kind == K::COLON || n.kind == K::STRING)
+            {
                 return self.submit();
             }
         }
@@ -1591,10 +1962,18 @@ impl<'a> Parser<'a> {
         }
         // key: value
         let key = self.word("an option")?;
-        let opt = if saved { options::find_saved(&key.text).map(|o| (o, "")) } else { options::find(kind, &key.text) };
+        let opt = if saved {
+            options::find_saved(&key.text).map(|o| (o, ""))
+        } else {
+            options::find(kind, &key.text)
+        };
         let Some((opt, _)) = opt else {
             let known: Vec<&str> = if saved {
-                options::SAVED_VIEW.iter().chain(options::VIEW_BODY).map(|o| o.key).collect()
+                options::SAVED_VIEW
+                    .iter()
+                    .chain(options::VIEW_BODY)
+                    .map(|o| o.key)
+                    .collect()
             } else {
                 let mut k: Vec<&str> = options::table(kind).iter().map(|o| o.key).collect();
                 if kind == "view" {
@@ -1605,7 +1984,11 @@ impl<'a> Parser<'a> {
             let msg = if known.is_empty() {
                 format!("unknown option `{}` (this component's settings are written `config <key>: <value>`)", key.text)
             } else {
-                format!("unknown option `{}`; the options here are {}", key.text, known.join(", "))
+                format!(
+                    "unknown option `{}`; the options here are {}",
+                    key.text,
+                    known.join(", ")
+                )
             };
             self.err(msg, key.span);
             self.skip_line();
@@ -1623,7 +2006,12 @@ impl<'a> Parser<'a> {
         if names.first().is_some_and(|n| n.span == key.span) {
             names.remove(0);
         }
-        Some(Line::Opt { key, value: v?, span: Span::new(t.start, end), names })
+        Some(Line::Opt {
+            key,
+            value: v?,
+            span: Span::new(t.start, end),
+            names,
+        })
     }
 
     fn apply(&mut self, start: u32) -> Option<Line> {
@@ -1642,7 +2030,10 @@ impl<'a> Parser<'a> {
                 }
             };
             self.pos += 1;
-            return Some(Line::ApplyAuto(v, Span::new(start, self.toks[self.pos - 1].end)));
+            return Some(Line::ApplyAuto(
+                v,
+                Span::new(start, self.toks[self.pos - 1].end),
+            ));
         }
         let mut binds = Vec::new();
         loop {
@@ -1664,7 +2055,11 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Some(Line::Apply { entity, binds, span: Span::new(start, self.toks[self.pos - 1].end) })
+        Some(Line::Apply {
+            entity,
+            binds,
+            span: Span::new(start, self.toks[self.pos - 1].end),
+        })
     }
 
     fn form_field(&mut self) -> Option<Line> {
@@ -1708,17 +2103,32 @@ impl<'a> Parser<'a> {
             }
             s
         };
-        let ty = Name { text: ty_text, span: tspan };
+        let ty = Name {
+            text: ty_text,
+            span: tspan,
+        };
         let where_ = if self.at(K::WHERE_KW) {
             self.pos += 1;
             Some(self.expr_until_raw(&["default"])?)
         } else {
             None
         };
-        let default = if self.eat_word("default") { Some(self.expr()?) } else { None };
+        let default = if self.eat_word("default") {
+            Some(self.expr()?)
+        } else {
+            None
+        };
         let end = self.toks[self.pos - 1].end;
         self.end_line();
-        Some(Line::Field(FormField { comment, name, label, ty, where_, default, span: Span::new(t.start, end) }))
+        Some(Line::Field(FormField {
+            comment,
+            name,
+            label,
+            ty,
+            where_,
+            default,
+            span: Span::new(t.start, end),
+        }))
     }
 
     /// The text of a `where` condition (`> 0`, `0..10`, `v => …`): kept as written, on one line.
@@ -1753,7 +2163,12 @@ impl<'a> Parser<'a> {
             map.push((text.len() as u32, t.start));
             text.push_str(self.text(*t));
         }
-        Some(Expr { text, raw: false, span: Span::new(toks[0].start, toks[toks.len() - 1].end), map })
+        Some(Expr {
+            text,
+            raw: false,
+            span: Span::new(toks[0].start, toks[toks.len() - 1].end),
+            map,
+        })
     }
 
     /// `submit ["label"]:` and its statements, kept as their text (dedented).
@@ -1771,7 +2186,10 @@ impl<'a> Parser<'a> {
         self.eat(K::NEWLINE);
         if !self.at(K::INDENT) {
             let s = self.here();
-            self.err("expected the statements `submit` runs, in an indented block", s);
+            self.err(
+                "expected the statements `submit` runs, in an indented block",
+                s,
+            );
             return None;
         }
         let first = self.nth(1).map_or(self.src.len() as u32, |x| x.start);
@@ -1796,7 +2214,9 @@ impl<'a> Parser<'a> {
         // comments inside the block are the code's
         let line_start = self.src[..first as usize].rfind('\n').map_or(0, |k| k + 1);
         let indent = first as usize - line_start;
-        let end_line = self.src[last_end as usize..].find('\n').map_or(self.src.len(), |k| last_end as usize + k);
+        let end_line = self.src[last_end as usize..]
+            .find('\n')
+            .map_or(self.src.len(), |k| last_end as usize + k);
         for c in self.comments.iter_mut() {
             if c.at as usize >= line_start && (c.at as usize) < end_line {
                 c.taken = true;
@@ -1813,7 +2233,12 @@ impl<'a> Parser<'a> {
             .collect::<Vec<_>>()
             .join("\n");
         self.eat(K::DEDENT);
-        Some(Line::Submit { label, code, span: Span::new(t.start, end_line as u32), code_span: Span::new(line_start as u32, end_line as u32) })
+        Some(Line::Submit {
+            label,
+            code,
+            span: Span::new(t.start, end_line as u32),
+            code_span: Span::new(line_start as u32, end_line as u32),
+        })
     }
 
     // ---- spreadsheets --------------------------------------------------------------------------
@@ -1821,9 +2246,26 @@ impl<'a> Parser<'a> {
     fn tab(&mut self) -> Option<Tab> {
         let t = self.bump().unwrap();
         let comment = self.comments_before(t.start);
-        let id = if self.peek().is_some_and(|x| self.is_word(x)) && !matches!(self.peek().map(|x| self.text(x)), Some("fixed" | "free" | "rows" | "cols")) { self.word("a name") } else { None };
+        let id = if self.peek().is_some_and(|x| self.is_word(x))
+            && !matches!(
+                self.peek().map(|x| self.text(x)),
+                Some("fixed" | "free" | "rows" | "cols")
+            ) {
+            self.word("a name")
+        } else {
+            None
+        };
         let name = self.opt_string();
-        let mut tab = Tab { comment, id, name, mode: None, rows: None, cols: None, lines: Vec::new(), span: Span::default() };
+        let mut tab = Tab {
+            comment,
+            id,
+            name,
+            mode: None,
+            rows: None,
+            cols: None,
+            lines: Vec::new(),
+            span: Span::default(),
+        };
         if self.at_word("fixed") || self.at_word("free") {
             let m = self.bump().unwrap();
             tab.mode = Some(self.text(m).to_string());
@@ -1848,7 +2290,12 @@ impl<'a> Parser<'a> {
             }
         });
         tab.lines = lines;
-        tab.span = Span::new(t.start, self.toks.get(self.pos.saturating_sub(1)).map_or(t.end, |x| x.end));
+        tab.span = Span::new(
+            t.start,
+            self.toks
+                .get(self.pos.saturating_sub(1))
+                .map_or(t.end, |x| x.end),
+        );
         Some(tab)
     }
 
@@ -1862,7 +2309,10 @@ impl<'a> Parser<'a> {
         let w = if self.is_word(t) { self.text(t) } else { "" };
         let is_addr = {
             let letters = w.chars().take_while(|c| c.is_ascii_uppercase()).count();
-            (1..=3).contains(&letters) && w.len() > letters && w[letters..].chars().all(|c| c.is_ascii_digit()) && !w[letters..].starts_with('0')
+            (1..=3).contains(&letters)
+                && w.len() > letters
+                && w[letters..].chars().all(|c| c.is_ascii_digit())
+                && !w[letters..].starts_with('0')
         };
         if is_addr {
             self.pos += 1;
@@ -1876,9 +2326,14 @@ impl<'a> Parser<'a> {
             }
             let value = if self.at(K::EQ) {
                 let eq = self.bump().unwrap();
-                let line_end = self.src[eq.end as usize..].find('\n').map_or(self.src.len(), |k| eq.end as usize + k);
+                let line_end = self.src[eq.end as usize..]
+                    .find('\n')
+                    .map_or(self.src.len(), |k| eq.end as usize + k);
                 let text = self.src[eq.end as usize..line_end].trim().to_string();
-                while self.peek().is_some_and(|x| (x.start as usize) < line_end && !matches!(x.kind, K::NEWLINE | K::INDENT | K::DEDENT)) {
+                while self.peek().is_some_and(|x| {
+                    (x.start as usize) < line_end
+                        && !matches!(x.kind, K::NEWLINE | K::INDENT | K::DEDENT)
+                }) {
                     self.pos += 1;
                 }
                 for c in self.comments.iter_mut() {
@@ -1896,12 +2351,20 @@ impl<'a> Parser<'a> {
             } else if self.end_of_line() {
                 None
             } else {
-                self.fail_line(format!("a cell holds a \"value\" or `= formula`, found {}", self.what()));
+                self.fail_line(format!(
+                    "a cell holds a \"value\" or `= formula`, found {}",
+                    self.what()
+                ));
                 return None;
             };
             let end = self.toks[self.pos - 1].end;
             self.end_line();
-            return Some(TabLine::Cell { addr: w.to_string(), style, value, span: Span::new(t.start, end) });
+            return Some(TabLine::Cell {
+                addr: w.to_string(),
+                style,
+                value,
+                span: Span::new(t.start, end),
+            });
         }
         match w {
             "width" | "height" => {
@@ -1909,7 +2372,11 @@ impl<'a> Parser<'a> {
                 let pairs = self.pairs()?;
                 let span = Span::new(t.start, self.toks[self.pos - 1].end);
                 self.end_line();
-                Some(if w == "width" { TabLine::Widths(pairs, span) } else { TabLine::Heights(pairs, span) })
+                Some(if w == "width" {
+                    TabLine::Widths(pairs, span)
+                } else {
+                    TabLine::Heights(pairs, span)
+                })
             }
             "merge" => {
                 self.pos += 1;
@@ -1960,21 +2427,30 @@ impl<'a> Parser<'a> {
             "color" | "fill" => StyleItem::Color(w, self.string("a color")?),
             "align" | "valign" => StyleItem::Align(w, self.word("an alignment")?.text),
             "fmt" => {
-                let kind = self.word("a number format (general, number, percent, currency, date, text)")?.text;
+                let kind = self
+                    .word("a number format (general, number, percent, currency, date, text)")?
+                    .text;
                 let (mut dec, mut thousands, mut date) = (None, false, None);
                 loop {
                     if self.eat_word("dec") {
                         dec = Some(self.int("decimals")?);
                     } else if self.eat_word("thousands") {
                         thousands = true;
-                    } else if self.at_word("date") && self.nth(1).is_some_and(|t| t.kind == K::STRING) {
+                    } else if self.at_word("date")
+                        && self.nth(1).is_some_and(|t| t.kind == K::STRING)
+                    {
                         self.pos += 1;
                         date = self.opt_string();
                     } else {
                         break;
                     }
                 }
-                StyleItem::Format { kind, dec, thousands, date }
+                StyleItem::Format {
+                    kind,
+                    dec,
+                    thousands,
+                    date,
+                }
             }
             "border" => StyleItem::Border(self.data()?),
             "style" => StyleItem::Style(self.data()?),
@@ -2007,7 +2483,16 @@ impl<'a> Parser<'a> {
                 lines.push(l);
             }
         });
-        let end = self.toks.get(self.pos.saturating_sub(1)).map_or(start, |t| t.end);
-        Some(SavedView { comment, name, entity, lines, span: Span::new(start, end) })
+        let end = self
+            .toks
+            .get(self.pos.saturating_sub(1))
+            .map_or(start, |t| t.end);
+        Some(SavedView {
+            comment,
+            name,
+            entity,
+            lines,
+            span: Span::new(start, end),
+        })
     }
 }

@@ -29,28 +29,58 @@ enum KeyKind {
 
 /// A key of `group_by` or `group_filter`, checked against the model and what the user may
 /// see: (the key, the entity a reference points to, its kind).
-fn parse_key(i: &mut Interp, model: &Model, entity: &str, item: &J) -> Result<(GroupKey, Option<String>, KeyKind), Fail> {
+fn parse_key(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    item: &J,
+) -> Result<(GroupKey, Option<String>, KeyKind), Fail> {
     let (path, bucket) = match item {
         J::String(s) => (s.clone(), None),
-        J::Object(o) => (o.get("field").and_then(|x| x.as_str()).unwrap_or("").to_string(), o.get("bucket").and_then(|x| x.as_str()).map(str::to_string)),
-        _ => return Err((400, "`group_by`: a field path, or {\"field\": …, \"bucket\": …}".into())),
+        J::Object(o) => (
+            o.get("field")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            o.get("bucket").and_then(|x| x.as_str()).map(str::to_string),
+        ),
+        _ => {
+            return Err((
+                400,
+                "`group_by`: a field path, or {\"field\": …, \"bucket\": …}".into(),
+            ))
+        }
     };
     let segs: Vec<String> = path.split('.').map(str::to_string).collect();
     if path.is_empty() || segs.len() > 5 {
-        return Err((400, format!("`{path}`: a field path of at most 5 fields (4 relations)")));
+        return Err((
+            400,
+            format!("`{path}`: a field path of at most 5 fields (4 relations)"),
+        ));
     }
     let mut ent = entity.to_string();
     let mut last: Option<quadra_ir::Field> = None;
     let mut hidden_path = false;
     for (k, seg) in segs.iter().enumerate() {
-        let e = model.entity(&ent).ok_or((400, format!("`{path}`: `{ent}` is not an entity")))?;
-        let f = model.find_field(e, seg).ok_or((400, format!("`{path}`: `{ent}` has no field `{seg}`")))?.clone();
+        let e = model
+            .entity(&ent)
+            .ok_or((400, format!("`{path}`: `{ent}` is not an entity")))?;
+        let f = model
+            .find_field(e, seg)
+            .ok_or((400, format!("`{path}`: `{ent}` has no field `{seg}`")))?
+            .clone();
         if i.hidden(&ent, seg) {
             return Err((403, format!("`{path}`: `{ent}.{seg}` is hidden")));
         }
         if k + 1 < segs.len() {
-            let next = f.ty.as_ref().and_then(entity_named).filter(|n| model.entity(n).is_some_and(|x| x.kind == EntityKind::Entity));
-            let Some(next) = next else { return Err((400, format!("`{path}`: `{seg}` is not a reference"))) };
+            let next = f.ty.as_ref().and_then(entity_named).filter(|n| {
+                model
+                    .entity(n)
+                    .is_some_and(|x| x.kind == EntityKind::Entity)
+            });
+            let Some(next) = next else {
+                return Err((400, format!("`{path}`: `{seg}` is not a reference")));
+            };
             if !i.read_unconditional(&next) {
                 hidden_path = true;
             }
@@ -64,7 +94,11 @@ fn parse_key(i: &mut Interp, model: &Model, entity: &str, item: &J) -> Result<(G
         t => t.clone(),
     };
     let named = |n: &str| matches!(&base, Some(Ty::Path { segments, .. }) if segments.last().map(String::as_str) == Some(n));
-    let target = base.as_ref().and_then(entity_named).filter(|n| model.entity(n).is_some_and(|x| x.kind == EntityKind::Entity));
+    let target = base.as_ref().and_then(entity_named).filter(|n| {
+        model
+            .entity(n)
+            .is_some_and(|x| x.kind == EntityKind::Entity)
+    });
     let kind = if target.is_some() {
         KeyKind::Ref
     } else if matches!(base, Some(Ty::Enum(_))) || quadra_runtime::query::text_type(base.as_ref()) {
@@ -80,16 +114,34 @@ fn parse_key(i: &mut Interp, model: &Model, entity: &str, item: &J) -> Result<(G
     };
     let bucket = match bucket.as_deref() {
         None | Some("") => None,
-        Some(b) if kind == KeyKind::Date => Some(Bucket::parse(b).ok_or((400, format!("`{path}`: bucket `{b}`: day, week, month, quarter or year")))?),
+        Some(b) if kind == KeyKind::Date => Some(Bucket::parse(b).ok_or((
+            400,
+            format!("`{path}`: bucket `{b}`: day, week, month, quarter or year"),
+        ))?),
         Some(_) => return Err((400, format!("`{path}`: only a date has a bucket"))),
     };
-    Ok((GroupKey { path: segs, bucket, hidden_path }, target, kind))
+    Ok((
+        GroupKey {
+            path: segs,
+            bucket,
+            hidden_path,
+        },
+        target,
+        kind,
+    ))
 }
 
 /// `group_filter`: the rows of a group (each key with its value; null: no value).
-pub(crate) fn group_filter(i: &mut Interp, model: &Model, entity: &str, q: &J) -> Result<Vec<(GroupKey, Option<String>)>, Fail> {
+pub(crate) fn group_filter(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    q: &J,
+) -> Result<Vec<(GroupKey, Option<String>)>, Fail> {
     let mut out = Vec::new();
-    let Some(list) = q["group_filter"].as_array() else { return Ok(out) };
+    let Some(list) = q["group_filter"].as_array() else {
+        return Ok(out);
+    };
     for item in list.iter().take(4) {
         let (k, _, _) = parse_key(i, model, entity, item)?;
         let v = match &item["value"] {
@@ -97,7 +149,12 @@ pub(crate) fn group_filter(i: &mut Interp, model: &Model, entity: &str, q: &J) -
             J::String(s) => Some(s.clone()),
             J::Number(n) => Some(n.to_string()),
             J::Bool(b) => Some(b.to_string()),
-            _ => return Err((400, "`group_filter`: a value is text, a number, true/false or null".into())),
+            _ => {
+                return Err((
+                    400,
+                    "`group_filter`: a value is text, a number, true/false or null".into(),
+                ))
+            }
         };
         out.push((k, v));
     }
@@ -105,8 +162,15 @@ pub(crate) fn group_filter(i: &mut Interp, model: &Model, entity: &str, q: &J) -
 }
 
 /// `search`: every word begins a word of a stored text field the user may see.
-pub(crate) fn search_of(i: &mut Interp, model: &Model, entity: &str, q: &J) -> Result<Option<TextSearch>, Fail> {
-    let Some(text) = q["search"].as_str() else { return Ok(None) };
+pub(crate) fn search_of(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    q: &J,
+) -> Result<Option<TextSearch>, Fail> {
+    let Some(text) = q["search"].as_str() else {
+        return Ok(None);
+    };
     if text.chars().count() > 200 {
         return Err((400, "`search`: at most 200 characters".into()));
     }
@@ -114,12 +178,21 @@ pub(crate) fn search_of(i: &mut Interp, model: &Model, entity: &str, q: &J) -> R
     if words.is_empty() {
         return Ok(None);
     }
-    let fields: Vec<String> = quadra_runtime::query::searchable(model, entity).into_iter().filter(|f| !i.hidden(entity, f)).collect();
+    let fields: Vec<String> = quadra_runtime::query::searchable(model, entity)
+        .into_iter()
+        .filter(|f| !i.hidden(entity, f))
+        .collect();
     Ok(Some(TextSearch { words, fields }))
 }
 
 /// Whether a record is in a group and matches the search (the interpreter's way).
-pub(crate) fn in_scope(i: &mut Interp, entity: &str, rec: &V, keys: &[(GroupKey, Option<String>)], search: Option<&TextSearch>) -> Result<bool, Fail> {
+pub(crate) fn in_scope(
+    i: &mut Interp,
+    entity: &str,
+    rec: &V,
+    keys: &[(GroupKey, Option<String>)],
+    search: Option<&TextSearch>,
+) -> Result<bool, Fail> {
     for (k, want) in keys {
         match i.group_key_of(rec, entity, k) {
             Ok(v) if v == KeyVal::Val(want.clone()) => {}
@@ -171,7 +244,10 @@ fn sort_of(i: &mut Interp, model: &Model, k: &KeyInfo, v: &KeyVal) -> Option<Sor
             let ent = k.target.clone().unwrap_or_default();
             // what SQL orders a reference by: its number, code, name or login (the first it has)
             let mut shown = None;
-            let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+            let rec = V::Ref {
+                ent: Rc::from(ent.as_str()),
+                id,
+            };
             if let Some(e) = model.entity(&ent) {
                 for f in ["number", "code", "name", "login"] {
                     if model.find_field(e, f).is_some_and(|x| x.formula.is_none()) {
@@ -184,7 +260,10 @@ fn sort_of(i: &mut Interp, model: &Model, k: &KeyInfo, v: &KeyVal) -> Option<Sor
                     }
                 }
             }
-            Sort::Ref(shown.unwrap_or_else(|| format!("{}#{id}", ent.to_ascii_lowercase())), id)
+            Sort::Ref(
+                shown.unwrap_or_else(|| format!("{}#{id}", ent.to_ascii_lowercase())),
+                id,
+            )
         }
     })
 }
@@ -198,13 +277,18 @@ fn key_json(i: &mut Interp, k: &KeyInfo, v: &KeyVal) -> J {
         KeyVal::Val(Some(s)) => {
             let d = match k.kind {
                 KeyKind::Ref => {
-                    let rec = V::Ref { ent: Rc::from(k.target.clone().unwrap_or_default().as_str()), id: s.parse().unwrap_or(0) };
+                    let rec = V::Ref {
+                        ent: Rc::from(k.target.clone().unwrap_or_default().as_str()),
+                        id: s.parse().unwrap_or(0),
+                    };
                     i.display(&rec)
                 }
-                KeyKind::Date if k.key.bucket.unwrap_or(Bucket::Day) == Bucket::Day => match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                    Ok(d) => i.display(&V::Date(d)),
-                    Err(_) => s.clone(),
-                },
+                KeyKind::Date if k.key.bucket.unwrap_or(Bucket::Day) == Bucket::Day => {
+                    match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                        Ok(d) => i.display(&V::Date(d)),
+                        Err(_) => s.clone(),
+                    }
+                }
                 KeyKind::Date if k.key.bucket == Some(Bucket::Week) => format!("week of {s}"),
                 KeyKind::Bool => i.display(&V::Bool(s == "true")),
                 _ => s.clone(),
@@ -279,7 +363,9 @@ fn decimal_field(model: &Model, entity: &str, path: &str) -> bool {
     let mut ent = entity.to_string();
     let mut last = None;
     for seg in path.split('.') {
-        let Some(f) = model.entity(&ent).and_then(|e| model.find_field(e, seg)) else { return false };
+        let Some(f) = model.entity(&ent).and_then(|e| model.find_field(e, seg)) else {
+            return false;
+        };
         if let Some(n) = f.ty.as_ref().and_then(entity_named) {
             ent = n;
         }
@@ -293,7 +379,13 @@ fn decimal_field(model: &Model, entity: &str, path: &str) -> bool {
 }
 
 /// The aggregates of a group computed by the interpreter (the same values and errors as SQL's).
-fn aggs_engine(i: &mut Interp, model: &Model, entity: &str, aggs: &[AggInfo], ids: &[u64]) -> (J, Vec<Option<V>>) {
+fn aggs_engine(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    aggs: &[AggInfo],
+    ids: &[u64],
+) -> (J, Vec<Option<V>>) {
     let mut m = serde_json::Map::new();
     let mut vals = Vec::new();
     for a in aggs {
@@ -306,7 +398,10 @@ fn aggs_engine(i: &mut Interp, model: &Model, entity: &str, aggs: &[AggInfo], id
         let mut units: std::collections::BTreeSet<String> = Default::default();
         let mut kind = "";
         for id in ids {
-            let mut cur = V::Ref { ent: Rc::from(entity), id: *id };
+            let mut cur = V::Ref {
+                ent: Rc::from(entity),
+                id: *id,
+            };
             for seg in a.path.split('.') {
                 cur = match &cur {
                     V::None => V::None,
@@ -326,14 +421,19 @@ fn aggs_engine(i: &mut Interp, model: &Model, entity: &str, aggs: &[AggInfo], id
             }
         }
         if units.len() > 1 && a.func != "count" {
-            m.insert(a.path.clone(), json!({ "fn": a.func, "error": several(kind) }));
+            m.insert(
+                a.path.clone(),
+                json!({ "fn": a.func, "error": several(kind) }),
+            );
             vals.push(None);
             continue;
         }
         match aggregate(i, entity, ids, &a.path, &a.func) {
             Ok(v) => {
                 let v = match v {
-                    V::Int(n) if a.func != "count" && decimal_field(model, entity, &a.path) => V::Dec(n.into()),
+                    V::Int(n) if a.func != "count" && decimal_field(model, entity, &a.path) => {
+                        V::Dec(n.into())
+                    }
                     v => v,
                 };
                 let v = v.normalized();
@@ -375,12 +475,20 @@ fn agg_sort(v: &Option<V>) -> Option<AggSort> {
 /// `POST /v1/query` with `group_by` (see API.md): a page of groups of the rows, each with its
 /// key values, row count, aggregates and the `group_filter` of its rows; with `pivot`, the
 /// second key's values are columns (at most `PIVOT_COLUMNS`, `more_columns` beyond).
-pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(String, String)]) -> Result<J, Fail> {
+pub fn group_rows(
+    i: &mut Interp,
+    model: &Model,
+    entity: &str,
+    q: &J,
+    items: &[(String, String)],
+) -> Result<J, Fail> {
     let entity = entity.to_string();
     if !i.can("read", &entity, None, None) {
         return Err((403, format!("permission denied: cannot read {entity}")));
     }
-    let list = q["group_by"].as_array().ok_or((400, "`group_by`: a list of 1 or 2 keys".to_string()))?;
+    let list = q["group_by"]
+        .as_array()
+        .ok_or((400, "`group_by`: a list of 1 or 2 keys".to_string()))?;
     if list.is_empty() || list.len() > 2 {
         return Err((400, "`group_by`: 1 or 2 keys".into()));
     }
@@ -398,13 +506,21 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
         for (path, f) in o.iter().take(20) {
             let func = f.as_str().unwrap_or("").to_string();
             if !matches!(func.as_str(), "sum" | "count" | "min" | "max" | "avg") {
-                return Err((400, format!("aggregate of `{path}`: sum, count, min, max or avg")));
+                return Err((
+                    400,
+                    format!("aggregate of `{path}`: sum, count, min, max or avg"),
+                ));
             }
             // a hidden field on the path: hidden in every group
             let mut ent = entity.clone();
             let mut hidden = false;
             for seg in path.split('.') {
-                let Some(f) = model.entity(&ent).and_then(|e| model.find_field(e, seg)) else { return Err((400, format!("aggregate of `{path}`: `{ent}` has no field `{seg}`"))) };
+                let Some(f) = model.entity(&ent).and_then(|e| model.find_field(e, seg)) else {
+                    return Err((
+                        400,
+                        format!("aggregate of `{path}`: `{ent}` has no field `{seg}`"),
+                    ));
+                };
                 if i.hidden(&ent, seg) {
                     hidden = true;
                 }
@@ -412,7 +528,11 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                     ent = n;
                 }
             }
-            aggs.push(AggInfo { path: path.clone(), func, hidden });
+            aggs.push(AggInfo {
+                path: path.clone(),
+                func,
+                hidden,
+            });
         }
     }
     let (order, desc) = {
@@ -422,8 +542,20 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
             "key" => (GroupOrder::Key, desc),
             "count" => (GroupOrder::Count, desc),
             path => {
-                let n = aggs.iter().filter(|a| !a.hidden).position(|a| a.path == path).ok_or((400, format!("`group_order`: `{path}` is not one of the aggregates")))?;
-                if aggs.iter().filter(|a| !a.hidden).nth(n).is_some_and(|a| a.func == "avg") {
+                let n = aggs
+                    .iter()
+                    .filter(|a| !a.hidden)
+                    .position(|a| a.path == path)
+                    .ok_or((
+                        400,
+                        format!("`group_order`: `{path}` is not one of the aggregates"),
+                    ))?;
+                if aggs
+                    .iter()
+                    .filter(|a| !a.hidden)
+                    .nth(n)
+                    .is_some_and(|a| a.func == "avg")
+                {
                     return Err((400, "`group_order`: not by an average".into()));
                 }
                 (GroupOrder::Agg(n), desc)
@@ -432,25 +564,39 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
     };
     let limit = q["limit"].as_u64().unwrap_or(100).clamp(1, 1000) as usize;
     let offset = match q["after"].as_str() {
-        Some(c) if !c.is_empty() => decode_cursor(c)?["g"].as_u64().ok_or((400, "`after`: not a cursor of this query".to_string()))? as usize,
+        Some(c) if !c.is_empty() => decode_cursor(c)?["g"]
+            .as_u64()
+            .ok_or((400, "`after`: not a cursor of this query".to_string()))?
+            as usize,
         _ => q["offset"].as_u64().unwrap_or(0) as usize,
     };
     // the rows grouped: those of the query
     let refs = refs_of(model, &entity, q)?;
     let wexpr = where_expr(model, &entity, items);
-    let ids: Option<Vec<u64>> = q["ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).take(1000).collect());
+    let ids: Option<Vec<u64>> = q["ids"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_u64()).take(1000).collect());
     let filter = group_filter(i, model, &entity, q)?;
     let search = search_of(i, model, &entity, q)?;
     let flt = filters_of(i, model, &entity, q)?;
     let this = quadra_runtime::query::Binder::This;
-    let conjuncts: Vec<&quadra_ir::Expr> = wexpr.map(quadra_runtime::query::conjuncts).unwrap_or_default();
+    let conjuncts: Vec<&quadra_ir::Expr> = wexpr
+        .map(quadra_runtime::query::conjuncts)
+        .unwrap_or_default();
     let mut spec = quadra_runtime::Spec::new(&entity);
     spec.read_check = true;
     spec.ids = ids.clone();
     spec.refs = refs.clone();
     spec.keys = filter.clone();
     spec.search = search.clone();
-    spec.conds = conjuncts.iter().map(|e| quadra_runtime::query::Cond { binder: &this, expr: e, negate: false }).collect();
+    spec.conds = conjuncts
+        .iter()
+        .map(|e| quadra_runtime::query::Cond {
+            binder: &this,
+            expr: e,
+            negate: false,
+        })
+        .collect();
     spec.conds.extend(flt.conds());
     let sql_aggs: Vec<quadra_runtime::query::Agg> = aggs
         .iter()
@@ -470,40 +616,105 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
 
     let gk = |ks: &[&KeyInfo]| -> Vec<GroupKey> { ks.iter().map(|k| k.key.clone()).collect() };
     let mut out = json!({ "entity": entity, "base": i.store.base, "group_by": keys.iter().map(|k| json!({ "field": k.key.path.join("."), "bucket": k.key.bucket.map(|b| b.name()), "kind": match k.kind { KeyKind::Ref => "ref", KeyKind::Text => "text", KeyKind::Int => "int", KeyKind::Bool => "bool", KeyKind::Date => "date" }, "entity": k.target })).collect::<Vec<_>>(), "pivot": pivot });
-    let row_keys: Vec<&KeyInfo> = if pivot { vec![&keys[0]] } else { keys.iter().collect() };
+    let row_keys: Vec<&KeyInfo> = if pivot {
+        vec![&keys[0]]
+    } else {
+        keys.iter().collect()
+    };
 
     // ---- SQL ----
     if !through_rows {
         let mut ctx = flt.ctx();
         let sql = (|| -> Result<Option<J>, Fail> {
             let err = |e: Flow| (422, format!("where: {}", describe(e)));
-            let Some(page) = i.sql_groups(&spec, &mut ctx, &gk(&row_keys), &sql_aggs, order, desc, offset, limit, Vec::new()).map_err(err)? else { return Ok(None) };
+            let Some(page) = i
+                .sql_groups(
+                    &spec,
+                    &mut ctx,
+                    &gk(&row_keys),
+                    &sql_aggs,
+                    order,
+                    desc,
+                    offset,
+                    limit,
+                    Vec::new(),
+                )
+                .map_err(err)?
+            else {
+                return Ok(None);
+            };
             let mut groups: Vec<J> = Vec::new();
             prefetch_keys(i, &row_keys, page.groups.iter().map(|g| &g.keys));
             for g in &page.groups {
-                let vals: Vec<KeyVal> = g.keys.iter().zip(row_keys.iter()).map(|(v, k)| KeyVal::Val(v.as_ref().map(|s| canonical(k.kind, s)))).collect();
-                let kj: Vec<J> = row_keys.iter().zip(vals.iter()).map(|(k, v)| key_json(i, k, v)).collect();
+                let vals: Vec<KeyVal> = g
+                    .keys
+                    .iter()
+                    .zip(row_keys.iter())
+                    .map(|(v, k)| KeyVal::Val(v.as_ref().map(|s| canonical(k.kind, s))))
+                    .collect();
+                let kj: Vec<J> = row_keys
+                    .iter()
+                    .zip(vals.iter())
+                    .map(|(k, v)| key_json(i, k, v))
+                    .collect();
                 groups.push(json!({ "keys": kj, "count": g.count, "aggregates": aggs_json(i, model, &entity, &aggs, &g.aggs), "filter": filter_json(&row_keys, &vals) }));
             }
             let mut o = json!({ "groups": groups, "groups_total": page.total });
             if pivot {
                 let col = [&keys[1]];
-                let Some(cols) = i.sql_groups(&spec, &mut ctx, &gk(&col), &sql_aggs, GroupOrder::Key, false, 0, PIVOT_COLUMNS + 1, Vec::new()).map_err(err)? else { return Ok(None) };
+                let Some(cols) = i
+                    .sql_groups(
+                        &spec,
+                        &mut ctx,
+                        &gk(&col),
+                        &sql_aggs,
+                        GroupOrder::Key,
+                        false,
+                        0,
+                        PIVOT_COLUMNS + 1,
+                        Vec::new(),
+                    )
+                    .map_err(err)?
+                else {
+                    return Ok(None);
+                };
                 let more = cols.groups.len() > PIVOT_COLUMNS;
                 let shown: Vec<&GroupOut> = cols.groups.iter().take(PIVOT_COLUMNS).collect();
                 prefetch_keys(i, &col, shown.iter().map(|g| &g.keys));
-                let col_vals: Vec<Option<String>> = shown.iter().map(|g| g.keys[0].as_ref().map(|s| canonical(keys[1].kind, s))).collect();
+                let col_vals: Vec<Option<String>> = shown
+                    .iter()
+                    .map(|g| g.keys[0].as_ref().map(|s| canonical(keys[1].kind, s)))
+                    .collect();
                 let mut columns = Vec::new();
                 for (g, v) in shown.iter().zip(col_vals.iter()) {
                     let kv = KeyVal::Val(v.clone());
                     columns.push(json!({ "key": key_json(i, &keys[1], &kv), "count": g.count, "aggregates": aggs_json(i, model, &entity, &aggs, &g.aggs), "filter": filter_json(&col, &[kv]) }));
                 }
-                let row_vals: Vec<Option<String>> = page.groups.iter().map(|g| g.keys[0].as_ref().map(|s| canonical(keys[0].kind, s))).collect();
+                let row_vals: Vec<Option<String>> = page
+                    .groups
+                    .iter()
+                    .map(|g| g.keys[0].as_ref().map(|s| canonical(keys[0].kind, s)))
+                    .collect();
                 let mut cells: HashMap<(Option<String>, Option<String>), GroupOut> = HashMap::new();
                 if !row_vals.is_empty() && !col_vals.is_empty() {
                     let both = [&keys[0], &keys[1]];
                     let n = row_vals.len() * col_vals.len();
-                    let Some(c) = i.sql_groups(&spec, &mut ctx, &gk(&both), &sql_aggs, GroupOrder::Key, false, 0, n, vec![Some(row_vals.clone()), Some(col_vals.clone())]).map_err(err)? else { return Ok(None) };
+                    let Some(c) = i
+                        .sql_groups(
+                            &spec,
+                            &mut ctx,
+                            &gk(&both),
+                            &sql_aggs,
+                            GroupOrder::Key,
+                            false,
+                            0,
+                            n,
+                            vec![Some(row_vals.clone()), Some(col_vals.clone())],
+                        )
+                        .map_err(err)?
+                    else {
+                        return Ok(None);
+                    };
                     for g in c.groups {
                         let a = g.keys[0].as_ref().map(|s| canonical(keys[0].kind, s));
                         let b = g.keys[1].as_ref().map(|s| canonical(keys[1].kind, s));
@@ -519,7 +730,8 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                         });
                     }
                     o["groups"][gi]["cells"] = J::Array(cs);
-                    o["groups"][gi]["filter"] = filter_json(&[&keys[0]], &[KeyVal::Val(rv.clone())]);
+                    o["groups"][gi]["filter"] =
+                        filter_json(&[&keys[0]], &[KeyVal::Val(rv.clone())]);
                 }
                 o["columns"] = J::Array(columns);
                 o["more_columns"] = json!(more);
@@ -542,7 +754,10 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
         let mut ctx = flt.ctx();
         let mut s2 = spec.clone();
         s2.order = Vec::new();
-        match i.sql_page(&s2, &mut ctx, None, 0, COUNT_CAP as usize + 1, usize::MAX).map_err(|e| (422, format!("where: {}", describe(e))))? {
+        match i
+            .sql_page(&s2, &mut ctx, None, 0, COUNT_CAP as usize + 1, usize::MAX)
+            .map_err(|e| (422, format!("where: {}", describe(e))))?
+        {
             Some(p) => p.ids,
             None => {
                 let all = match &ids {
@@ -550,15 +765,32 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                     None => i.ids(&entity, None),
                 };
                 if i.store.lazy() && all.len() > SCAN_CAP {
-                    return Err((422, format!("more than {SCAN_CAP} rows to group this way: filter them further")));
+                    return Err((
+                        422,
+                        format!("more than {SCAN_CAP} rows to group this way: filter them further"),
+                    ));
                 }
                 let mut kept = Vec::new();
                 for id in all {
-                    let rec = V::Ref { ent: Rc::from(entity.as_str()), id };
-                    if !i.store.exists(id, None) || i.store.get(id).map_or(true, |r| *r.ent != *entity) || !i.can("read", &entity, None, Some(&rec)) {
+                    let rec = V::Ref {
+                        ent: Rc::from(entity.as_str()),
+                        id,
+                    };
+                    if !i.store.exists(id, None)
+                        || i.store.get(id).map_or(true, |r| *r.ent != *entity)
+                        || !i.can("read", &entity, None, Some(&rec))
+                    {
                         continue;
                     }
-                    if refs.iter().any(|(f, t)| !quadra_runtime::store::same(i.store.read(id, f, None).as_ref(), &V::Ref { ent: Rc::from(""), id: *t })) {
+                    if refs.iter().any(|(f, t)| {
+                        !quadra_runtime::store::same(
+                            i.store.read(id, f, None).as_ref(),
+                            &V::Ref {
+                                ent: Rc::from(""),
+                                id: *t,
+                            },
+                        )
+                    }) {
                         continue;
                     }
                     if !in_scope(i, &entity, &rec, &filter, search.as_ref())? {
@@ -586,27 +818,53 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
     i.store.prefetch_as(&entity, &rows);
     let mut key_of: Vec<Vec<KeyVal>> = Vec::new();
     for id in &rows {
-        let rec = V::Ref { ent: Rc::from(entity.as_str()), id: *id };
+        let rec = V::Ref {
+            ent: Rc::from(entity.as_str()),
+            id: *id,
+        };
         let mut ks = Vec::new();
         for k in &keys {
-            ks.push(i.group_key_of(&rec, &entity, &k.key).map_err(|e| (422, format!("group_by: {}", describe(e))))?);
+            ks.push(
+                i.group_key_of(&rec, &entity, &k.key)
+                    .map_err(|e| (422, format!("group_by: {}", describe(e))))?,
+            );
         }
         key_of.push(ks);
     }
     // groups of `which` keys (indexes into `keys`), in their order
-    let group_of = |i: &mut Interp, which: &[usize], order: GroupOrder, desc: bool| -> Vec<(Found, J, Vec<Option<V>>)> {
+    let group_of = |i: &mut Interp,
+                    which: &[usize],
+                    order: GroupOrder,
+                    desc: bool|
+     -> Vec<(Found, J, Vec<Option<V>>)> {
         let mut map: BTreeMap<Vec<KeyVal>, Vec<u64>> = BTreeMap::new();
         for (n, id) in rows.iter().enumerate() {
-            map.entry(which.iter().map(|w| key_of[n][*w].clone()).collect()).or_default().push(*id);
+            map.entry(which.iter().map(|w| key_of[n][*w].clone()).collect())
+                .or_default()
+                .push(*id);
         }
         let mut found: Vec<(Found, J, Vec<Option<V>>, Vec<Option<Sort>>)> = Vec::new();
         for (ks, ids) in map {
             let (aj, vals) = aggs_engine(i, model, &entity, &aggs, &ids);
-            let sorts: Vec<Option<Sort>> = which.iter().zip(ks.iter()).map(|(w, v)| sort_of(i, model, &keys[*w], v)).collect();
+            let sorts: Vec<Option<Sort>> = which
+                .iter()
+                .zip(ks.iter())
+                .map(|(w, v)| sort_of(i, model, &keys[*w], v))
+                .collect();
             found.push((Found { keys: ks, ids }, aj, vals, sorts));
         }
-        let visible: Vec<usize> = aggs.iter().enumerate().filter(|(_, a)| !a.hidden).map(|(n, _)| n).collect();
-        let key_cmp = |a: &[Option<Sort>], ak: &[KeyVal], b: &[Option<Sort>], bk: &[KeyVal], kdesc: bool| -> std::cmp::Ordering {
+        let visible: Vec<usize> = aggs
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| !a.hidden)
+            .map(|(n, _)| n)
+            .collect();
+        let key_cmp = |a: &[Option<Sort>],
+                       ak: &[KeyVal],
+                       b: &[Option<Sort>],
+                       bk: &[KeyVal],
+                       kdesc: bool|
+         -> std::cmp::Ordering {
             for n in 0..a.len() {
                 // none (and hidden) last, first when descending
                 let o = match (&a[n], &b[n]) {
@@ -627,14 +885,22 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                 GroupOrder::Key | GroupOrder::Ranked { .. } => std::cmp::Ordering::Equal,
                 GroupOrder::Count => {
                     let o = a.0.ids.len().cmp(&b.0.ids.len());
-                    if desc { o.reverse() } else { o }
+                    if desc {
+                        o.reverse()
+                    } else {
+                        o
+                    }
                 }
                 GroupOrder::Agg(n) => {
                     let at = visible.get(n).copied().unwrap_or(0);
                     match (agg_sort(&a.2[at]), agg_sort(&b.2[at])) {
                         (Some(x), Some(y)) => {
                             let o = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
-                            if desc { o.reverse() } else { o }
+                            if desc {
+                                o.reverse()
+                            } else {
+                                o
+                            }
                         }
                         (Some(_), None) => std::cmp::Ordering::Less,
                         (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -642,18 +908,34 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
                     }
                 }
             };
-            first.then_with(|| key_cmp(&a.3, &a.0.keys, &b.3, &b.0.keys, desc && order == GroupOrder::Key))
+            first.then_with(|| {
+                key_cmp(
+                    &a.3,
+                    &a.0.keys,
+                    &b.3,
+                    &b.0.keys,
+                    desc && order == GroupOrder::Key,
+                )
+            })
         });
         found.into_iter().map(|(f, j, v, _)| (f, j, v)).collect()
     };
-    let which: Vec<usize> = if pivot { vec![0] } else { (0..keys.len()).collect() };
+    let which: Vec<usize> = if pivot {
+        vec![0]
+    } else {
+        (0..keys.len()).collect()
+    };
     let all = group_of(i, &which, order, desc);
     let total = all.len();
     let mut groups: Vec<J> = Vec::new();
     let page: Vec<&(Found, J, Vec<Option<V>>)> = all.iter().skip(offset).take(limit).collect();
     for (f, aj, _) in &page {
         let infos: Vec<&KeyInfo> = which.iter().map(|w| &keys[*w]).collect();
-        let kj: Vec<J> = infos.iter().zip(f.keys.iter()).map(|(k, v)| key_json(i, k, v)).collect();
+        let kj: Vec<J> = infos
+            .iter()
+            .zip(f.keys.iter())
+            .map(|(k, v)| key_json(i, k, v))
+            .collect();
         groups.push(json!({ "keys": kj, "count": f.ids.len(), "aggregates": aj, "filter": filter_json(&infos, &f.keys) }));
     }
     if pivot {
@@ -668,10 +950,15 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
         for (gi, (f, _, _)) in page.iter().enumerate() {
             let mut cs = Vec::new();
             for (c, _, _) in &shown {
-                cs.push(match cells.iter().find(|(x, _, _)| x.keys[0] == f.keys[0] && x.keys[1] == c.keys[0]) {
-                    Some((x, aj, _)) => json!({ "count": x.ids.len(), "aggregates": aj }),
-                    None => J::Null,
-                });
+                cs.push(
+                    match cells
+                        .iter()
+                        .find(|(x, _, _)| x.keys[0] == f.keys[0] && x.keys[1] == c.keys[0])
+                    {
+                        Some((x, aj, _)) => json!({ "count": x.ids.len(), "aggregates": aj }),
+                        None => J::Null,
+                    },
+                );
             }
             groups[gi]["cells"] = J::Array(cs);
         }
@@ -687,7 +974,11 @@ pub fn group_rows(i: &mut Interp, model: &Model, entity: &str, q: &J, items: &[(
 }
 
 /// The records a page of groups shows (its references), loaded at once.
-fn prefetch_keys<'a>(i: &mut Interp, keys: &[&KeyInfo], groups: impl Iterator<Item = &'a Vec<Option<String>>>) {
+fn prefetch_keys<'a>(
+    i: &mut Interp,
+    keys: &[&KeyInfo],
+    groups: impl Iterator<Item = &'a Vec<Option<String>>>,
+) {
     let mut want: Vec<Vec<u64>> = vec![Vec::new(); keys.len()];
     for g in groups {
         for (n, v) in g.iter().enumerate() {
@@ -756,7 +1047,14 @@ impl Filters {
     }
 
     pub fn conds(&self) -> Vec<quadra_runtime::query::Cond<'_>> {
-        self.exprs.iter().map(|e| quadra_runtime::query::Cond { binder: &self.binder, expr: e, negate: false }).collect()
+        self.exprs
+            .iter()
+            .map(|e| quadra_runtime::query::Cond {
+                binder: &self.binder,
+                expr: e,
+                negate: false,
+            })
+            .collect()
     }
 
     /// Whether a record passes every filter (the interpreter's way).
@@ -779,13 +1077,24 @@ impl Filters {
 
 pub fn filters_of(i: &mut Interp, model: &Model, entity: &str, q: &J) -> Result<Filters, Fail> {
     use quadra_ir::{Arg, BinOp, Expr, ExprKind};
-    let mut out = Filters { binder: quadra_runtime::query::Binder::Param("__r".into()), exprs: Vec::new(), vals: Vec::new() };
+    let mut out = Filters {
+        binder: quadra_runtime::query::Binder::Param("__r".into()),
+        exprs: Vec::new(),
+        vals: Vec::new(),
+    };
     let list = match &q["filters"] {
         J::Null => return Ok(out),
         J::Array(a) if a.len() <= 20 => a,
-        _ => return Err((400, "`filters`: at most 20 conditions {path, op, value}".into())),
+        _ => {
+            return Err((
+                400,
+                "`filters`: at most 20 conditions {path, op, value}".into(),
+            ))
+        }
     };
-    let Some(e) = model.entity(entity) else { return Err((404, format!("unknown entity `{entity}`"))) };
+    let Some(e) = model.entity(entity) else {
+        return Err((404, format!("unknown entity `{entity}`")));
+    };
     let span = e.span;
     let mk = |kind: ExprKind| Expr { kind, span };
     for (n, f) in list.iter().enumerate() {
@@ -802,15 +1111,32 @@ pub fn filters_of(i: &mut Interp, model: &Model, entity: &str, q: &J) -> Result<
         let mut last: Option<Ty> = None;
         let mut prev_opt = false;
         for (k, seg) in segs.iter().enumerate() {
-            let en = model.entity(&ent).ok_or_else(|| at(format!("`{ent}` is not an entity")))?;
-            let fd = model.find_field(en, seg).ok_or_else(|| at(format!("`{ent}` has no field `{seg}`")))?;
+            let en = model
+                .entity(&ent)
+                .ok_or_else(|| at(format!("`{ent}` is not an entity")))?;
+            let fd = model
+                .find_field(en, seg)
+                .ok_or_else(|| at(format!("`{ent}` has no field `{seg}`")))?;
             if i.hidden(&ent, seg) {
                 return Err((403, format!("filters, `{path}`: `{ent}.{seg}` is hidden")));
             }
-            x = mk(ExprKind::Field { base: Box::new(x), name: seg.to_string(), optional: prev_opt });
+            x = mk(ExprKind::Field {
+                base: Box::new(x),
+                name: seg.to_string(),
+                optional: prev_opt,
+            });
             prev_opt = prev_opt || matches!(fd.ty, Some(Ty::Optional(_)));
             if k + 1 < segs.len() {
-                ent = fd.ty.as_ref().and_then(entity_named).filter(|t| model.entity(t).is_some_and(|y| y.kind == EntityKind::Entity)).ok_or_else(|| at(format!("`{seg}` is not a reference")))?;
+                ent = fd
+                    .ty
+                    .as_ref()
+                    .and_then(entity_named)
+                    .filter(|t| {
+                        model
+                            .entity(t)
+                            .is_some_and(|y| y.kind == EntityKind::Entity)
+                    })
+                    .ok_or_else(|| at(format!("`{seg}` is not a reference")))?;
             }
             last = fd.ty.clone();
         }
@@ -833,20 +1159,43 @@ pub fn filters_of(i: &mut Interp, model: &Model, entity: &str, q: &J) -> Result<
                 return Ok(V::None);
             }
             let fixed = match (&ty, j) {
-                (Ty::Path { args, .. }, J::Number(x)) if matches!(tname.as_str(), "Money" | "Qty") && !args.is_empty() => Some(json!(format!("{x} {}", quadra_ir::print::ty(&args[0])))),
-                (Ty::Path { args, .. }, J::String(s)) if matches!(tname.as_str(), "Money" | "Qty") && !args.is_empty() && s.trim().parse::<f64>().is_ok() => Some(json!(format!("{} {}", s.trim(), quadra_ir::print::ty(&args[0])))),
+                (Ty::Path { args, .. }, J::Number(x))
+                    if matches!(tname.as_str(), "Money" | "Qty") && !args.is_empty() =>
+                {
+                    Some(json!(format!("{x} {}", quadra_ir::print::ty(&args[0]))))
+                }
+                (Ty::Path { args, .. }, J::String(s))
+                    if matches!(tname.as_str(), "Money" | "Qty")
+                        && !args.is_empty()
+                        && s.trim().parse::<f64>().is_ok() =>
+                {
+                    Some(json!(format!(
+                        "{} {}",
+                        s.trim(),
+                        quadra_ir::print::ty(&args[0])
+                    )))
+                }
                 _ => None,
             };
-            json::decode(i, model, Some(&ty), fixed.as_ref().unwrap_or(j), &|_| None).map_err(|m| (400, format!("filters, `{path}`: {m}")))
+            json::decode(i, model, Some(&ty), fixed.as_ref().unwrap_or(j), &|_| None)
+                .map_err(|m| (400, format!("filters, `{path}`: {m}")))
         };
-        let bin = |op: BinOp, l: Expr, r: Expr| mk(ExprKind::Binary { op, lhs: Box::new(l), rhs: Box::new(r) });
+        let bin = |op: BinOp, l: Expr, r: Expr| {
+            mk(ExprKind::Binary {
+                op,
+                lhs: Box::new(l),
+                rhs: Box::new(r),
+            })
+        };
         let cond = match op {
             "eq" => {
                 let v = dec(i, &f["value"])?;
                 bin(BinOp::Eq, x, bind(v, &mut out.vals))
             }
             "in" => {
-                let items = f["value"].as_array().ok_or_else(|| at("`in`: a list of values".into()))?;
+                let items = f["value"]
+                    .as_array()
+                    .ok_or_else(|| at("`in`: a list of values".into()))?;
                 if items.len() > 500 {
                     return Err(at("`in`: at most 500 values".into()));
                 }
@@ -857,18 +1206,32 @@ pub fn filters_of(i: &mut Interp, model: &Model, entity: &str, q: &J) -> Result<
                 bin(BinOp::In, x, bind(V::List(Rc::new(vs)), &mut out.vals))
             }
             "range" => {
-                let r = f["value"].as_array().filter(|a| a.len() == 2).ok_or_else(|| at("`range`: [from, to], either may be null".into()))?;
+                let r = f["value"]
+                    .as_array()
+                    .filter(|a| a.len() == 2)
+                    .ok_or_else(|| at("`range`: [from, to], either may be null".into()))?;
                 if matches!(tname.as_str(), "Date" | "DateTime") {
                     let day = |j: &J, end: bool| -> Result<chrono::NaiveDate, Fail> {
                         match j {
-                            J::Null => Ok(if end { chrono::NaiveDate::from_ymd_opt(9999, 12, 31).unwrap() } else { chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap() }),
-                            J::String(s) => chrono::NaiveDate::parse_from_str(s.get(..10).unwrap_or(s), "%Y-%m-%d").map_err(|_| at(format!("`{s}` is not a date"))),
+                            J::Null => Ok(if end {
+                                chrono::NaiveDate::from_ymd_opt(9999, 12, 31).unwrap()
+                            } else {
+                                chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap()
+                            }),
+                            J::String(s) => chrono::NaiveDate::parse_from_str(
+                                s.get(..10).unwrap_or(s),
+                                "%Y-%m-%d",
+                            )
+                            .map_err(|_| at(format!("`{s}` is not a date"))),
                             _ => Err(at("a date is text: YYYY-MM-DD".into())),
                         }
                     };
                     let (a, b) = (day(&r[0], false)?, day(&r[1], true)?);
                     bin(BinOp::In, x, bind(V::DateRange(a, b), &mut out.vals))
-                } else if matches!(tname.as_str(), "Int" | "Decimal" | "Money" | "Qty" | "Percent" | "Price") {
+                } else if matches!(
+                    tname.as_str(),
+                    "Int" | "Decimal" | "Money" | "Qty" | "Percent" | "Price"
+                ) {
                     let (lo, hi) = (dec(i, &r[0])?, dec(i, &r[1])?);
                     let mut parts = Vec::new();
                     if !lo.is_none() {
@@ -900,9 +1263,20 @@ pub fn filters_of(i: &mut Interp, model: &Model, entity: &str, q: &J) -> Result<
                 if t.chars().count() > 200 {
                     return Err(at("at most 200 characters".into()));
                 }
-                let callee = mk(ExprKind::Field { base: Box::new(x), name: "contains".into(), optional: false });
+                let callee = mk(ExprKind::Field {
+                    base: Box::new(x),
+                    name: "contains".into(),
+                    optional: false,
+                });
                 let arg = bind(V::Text(Rc::from(t.as_str())), &mut out.vals);
-                mk(ExprKind::Call { callee: Box::new(callee), args: vec![Arg { name: None, value: arg, spread: false }] })
+                mk(ExprKind::Call {
+                    callee: Box::new(callee),
+                    args: vec![Arg {
+                        name: None,
+                        value: arg,
+                        spread: false,
+                    }],
+                })
             }
             "true" => bin(BinOp::Eq, x, bind(V::Bool(true), &mut out.vals)),
             _ => return Err(at(format!("`op` `{op}`: eq, in, range, contains or true"))),

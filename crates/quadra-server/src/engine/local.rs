@@ -11,7 +11,13 @@ pub struct Local {
 }
 
 fn principal(user: u64) -> Principal {
-    Principal { user_id: user, read_only: false, kind: "token".into(), csrf: None, name: "local".into() }
+    Principal {
+        user_id: user,
+        read_only: false,
+        kind: "token".into(),
+        csrf: None,
+        name: "local".into(),
+    }
 }
 
 fn answer(r: Result<Reply, Fail>) -> (u16, J) {
@@ -25,14 +31,46 @@ impl Local {
     /// The project at `root` over the database at `url` (initialized, schema current), with
     /// a record cache of `cache_mb` megabytes as `quadra serve` has.
     pub fn open(root: &std::path::Path, url: &str, cache_mb: usize) -> Result<Local, String> {
-        let cfg = Config { root: root.to_path_buf(), url: url.to_string(), port: 0, dev_login: false, secure_cookies: false, cache_mb, prewarm_days: None, web: None, sweep_every: 0, editors: Vec::new(), watch: false, limits: Limits::none(), engines: Engines::one() };
-        Ok(Local { engine: Engine::new(&cfg)? })
+        let cfg = Config {
+            root: root.to_path_buf(),
+            url: url.to_string(),
+            port: 0,
+            dev_login: false,
+            secure_cookies: false,
+            cache_mb,
+            prewarm_days: None,
+            web: None,
+            sweep_every: 0,
+            editors: Vec::new(),
+            watch: false,
+            limits: Limits::none(),
+            engines: Engines::one(),
+        };
+        Ok(Local {
+            engine: Engine::new(&cfg)?,
+        })
     }
 
     /// The same as `quadra dev` serves it: the apps of interface files are written back.
     pub fn open_dev(root: &std::path::Path, url: &str, cache_mb: usize) -> Result<Local, String> {
-        let cfg = Config { root: root.to_path_buf(), url: url.to_string(), port: 0, dev_login: true, secure_cookies: false, cache_mb, prewarm_days: None, web: None, sweep_every: 0, editors: Vec::new(), watch: true, limits: Limits::none(), engines: Engines::one() };
-        Ok(Local { engine: Engine::new(&cfg)? })
+        let cfg = Config {
+            root: root.to_path_buf(),
+            url: url.to_string(),
+            port: 0,
+            dev_login: true,
+            secure_cookies: false,
+            cache_mb,
+            prewarm_days: None,
+            web: None,
+            sweep_every: 0,
+            editors: Vec::new(),
+            watch: true,
+            limits: Limits::none(),
+            engines: Engines::one(),
+        };
+        Ok(Local {
+            engine: Engine::new(&cfg)?,
+        })
     }
 
     /// `quadra dev`: look at the files again, apply what changed. The event sent to the
@@ -68,14 +106,30 @@ impl Local {
 
     /// A call of `/v1/views…`, `/v1/teams…` or `/v1/directory` as `user` (`path` with its
     /// `/v1/` prefix, `query` the query string's pairs).
-    pub fn views(&mut self, user: u64, method: &str, path: &str, query: &[(&str, &str)], body: &J) -> (u16, J) {
-        let q: HashMap<String, String> = query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        answer(self.engine.views_api(&principal(user), method, path, &q, body))
+    pub fn views(
+        &mut self,
+        user: u64,
+        method: &str,
+        path: &str,
+        query: &[(&str, &str)],
+        body: &J,
+    ) -> (u16, J) {
+        let q: HashMap<String, String> = query
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        answer(
+            self.engine
+                .views_api(&principal(user), method, path, &q, body),
+        )
     }
 
     /// `POST /v1/eval` as `user`: the formulas of a workbook.
     pub fn eval(&mut self, user: u64, body: &J) -> (u16, J) {
-        answer(self.engine.views_api(&principal(user), "POST", "/v1/eval", &HashMap::new(), body))
+        answer(
+            self.engine
+                .views_api(&principal(user), "POST", "/v1/eval", &HashMap::new(), body),
+        )
     }
 
     /// Show an app as the web client does on opening it (`apps::open_requests`): every
@@ -98,10 +152,20 @@ impl Local {
         let mut n = 0;
         let mut engine_ms = 0u64;
         let push = |results: &mut serde_json::Map<String, J>, c: &str, j: J| {
-            results.entry(c.to_string()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(j);
+            results
+                .entry(c.to_string())
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .unwrap()
+                .push(j);
         };
         for r in super::apps::open_requests(cfg, values) {
-            if refresh && matches!(r, super::apps::AppRequest::Model | super::apps::AppRequest::Record { .. }) {
+            if refresh
+                && matches!(
+                    r,
+                    super::apps::AppRequest::Model | super::apps::AppRequest::Record { .. }
+                )
+            {
                 continue;
             }
             n += 1;
@@ -113,20 +177,38 @@ impl Local {
                     }
                 }
                 super::apps::AppRequest::Eval { component, body } => {
-                    let (s, b) = answer(self.engine.views_api(&who, "POST", "/v1/eval", &HashMap::new(), &body));
+                    let (s, b) = answer(self.engine.views_api(
+                        &who,
+                        "POST",
+                        "/v1/eval",
+                        &HashMap::new(),
+                        &body,
+                    ));
                     if s != 200 {
                         errors.push(format!("{component}: {s} {b}"));
                         continue;
                     }
                     engine_ms += b["ms"].as_u64().unwrap_or(0);
-                    for (k, c) in b["exprs"].as_object().into_iter().flatten().chain(b["cells"].as_object().into_iter().flatten()) {
+                    for (k, c) in b["exprs"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .chain(b["cells"].as_object().into_iter().flatten())
+                    {
                         if let Some(e) = c["error"].as_str() {
-                            errors.push(format!("{component} {k}: {} {e}", c["code"].as_str().unwrap_or("")));
+                            errors.push(format!(
+                                "{component} {k}: {} {e}",
+                                c["code"].as_str().unwrap_or("")
+                            ));
                         }
                     }
                     push(&mut results, &component, b);
                 }
-                super::apps::AppRequest::Query { component, body, columns } => {
+                super::apps::AppRequest::Query {
+                    component,
+                    body,
+                    columns,
+                } => {
                     let (s, b) = answer(self.engine.query(&who, &body));
                     if s != 200 {
                         errors.push(format!("{component}: {s} {b}"));
@@ -147,7 +229,11 @@ impl Local {
                     }
                     push(&mut results, &component, b);
                 }
-                super::apps::AppRequest::Record { component, entity, id } => {
+                super::apps::AppRequest::Record {
+                    component,
+                    entity,
+                    id,
+                } => {
                     let (s, b) = answer(self.engine.record(&who, &entity, id, None));
                     if s != 200 {
                         errors.push(format!("{component}: {s} {b}"));

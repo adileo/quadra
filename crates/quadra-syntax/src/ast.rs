@@ -14,12 +14,16 @@ pub fn children(node: &SyntaxNode, kind: SyntaxKind) -> impl Iterator<Item = Syn
 }
 
 pub fn token(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
-    node.children_with_tokens().filter_map(|e| e.into_token()).find(|t| t.kind() == kind)
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == kind)
 }
 
 /// First keyword token of a node (reserved or contextual).
 pub fn keyword(node: &SyntaxNode) -> Option<SyntaxToken> {
-    node.children_with_tokens().filter_map(|e| e.into_token()).find(|t| t.kind().is_keyword())
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind().is_keyword())
 }
 
 /// Text of the first contextual keyword (`check`, `post`, `key`…).
@@ -41,11 +45,17 @@ pub fn name_text(node: &SyntaxNode) -> Option<String> {
 
 /// Identifier tokens of a PATH node, in order.
 pub fn path_segments(path: &SyntaxNode) -> Vec<SyntaxToken> {
-    children(path, NAME_REF).filter_map(|n| token(&n, IDENT)).collect()
+    children(path, NAME_REF)
+        .filter_map(|n| token(&n, IDENT))
+        .collect()
 }
 
 pub fn path_text(path: &SyntaxNode) -> String {
-    path_segments(path).iter().map(|t| t.text().to_string()).collect::<Vec<_>>().join(".")
+    path_segments(path)
+        .iter()
+        .map(|t| t.text().to_string())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Comment lines immediately preceding a node (its documentation).
@@ -97,7 +107,10 @@ fn comment_on_own_line(comment: &SyntaxToken) -> bool {
 pub fn header(node: &SyntaxNode) -> String {
     let mut out = String::new();
     let mut depth = 0i32;
-    for tok in node.descendants_with_tokens().filter_map(|e| e.into_token()) {
+    for tok in node
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
         match tok.kind() {
             COMMENT | INDENT | DEDENT => continue,
             NEWLINE => break,

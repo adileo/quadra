@@ -4,7 +4,10 @@
 //! the interpreter would give scanning the entity; `None` means "do it the interpreter's way".
 
 use super::*;
-use crate::query::{After, Agg, AggFn, AggOut, Answer, Binder, Cond, Frees, GroupKey, GroupOrder, GroupOut, Key, Perm, Request, RuleCond, TextSearch, What};
+use crate::query::{
+    After, Agg, AggFn, AggOut, Answer, Binder, Cond, Frees, GroupKey, GroupOrder, GroupOut, Key,
+    Perm, Request, RuleCond, TextSearch, What,
+};
 
 /// A query: the entity, its conditions and order.
 #[derive(Clone)]
@@ -28,7 +31,17 @@ pub struct Spec<'a> {
 
 impl<'a> Spec<'a> {
     pub fn new(entity: &'a str) -> Spec<'a> {
-        Spec { entity, conds: Vec::new(), order: Vec::new(), id_desc: false, read_check: false, ids: None, refs: Vec::new(), keys: Vec::new(), search: None }
+        Spec {
+            entity,
+            conds: Vec::new(),
+            order: Vec::new(),
+            id_desc: false,
+            read_check: false,
+            ids: None,
+            refs: Vec::new(),
+            keys: Vec::new(),
+            search: None,
+        }
     }
 }
 
@@ -79,16 +92,23 @@ impl<'m> Interp<'m> {
         }
         let roles = self.roles_of(user);
         let m = self.m;
-        let own: Vec<&Rule> = roles.iter().filter_map(|r| m.role(r)).flat_map(|r| r.rules.iter()).collect();
+        let own: Vec<&Rule> = roles
+            .iter()
+            .filter_map(|r| m.role(r))
+            .flat_map(|r| r.rules.iter())
+            .collect();
         for rule in m.rules.iter().chain(own.iter().copied()) {
-            if rule.effect == "deny" && !rule.history && Self::rule_matches(rule, "read", ent, None) {
+            if rule.effect == "deny" && !rule.history && Self::rule_matches(rule, "read", ent, None)
+            {
                 return false;
             }
         }
         if m.roles.is_empty() {
             return true;
         }
-        own.iter().copied().chain(m.rules.iter()).any(|r| r.effect == "allow" && r.condition.is_none() && Self::rule_matches(r, "read", ent, None))
+        own.iter().copied().chain(m.rules.iter()).any(|r| {
+            r.effect == "allow" && r.condition.is_none() && Self::rule_matches(r, "read", ent, None)
+        })
     }
 
     /// The row rules deciding `verb` on rows of `ent` for the current user, as the source can
@@ -105,22 +125,51 @@ impl<'m> Interp<'m> {
 
     fn perm_build(&self, verb: &str, ent: &str, roles: &[String], depth: usize) -> Perm<'m> {
         let m: &'m Model = self.m;
-        let own: Vec<&'m Rule> = roles.iter().filter_map(|r| m.role(r)).flat_map(|r| r.rules.iter()).collect();
+        let own: Vec<&'m Rule> = roles
+            .iter()
+            .filter_map(|r| m.role(r))
+            .flat_map(|r| r.rules.iter())
+            .collect();
         // as `rule_condition`: a condition that is not a lambda always holds
         let cond = |r: &'m Rule| -> Option<RuleCond<'m>> {
             match r.condition.as_ref().map(|c| &c.kind) {
-                Some(ExprKind::Lambda { params, body }) => Some(RuleCond { param: params.first().map(String::as_str).unwrap_or("_"), body: body.as_ref() }),
+                Some(ExprKind::Lambda { params, body }) => Some(RuleCond {
+                    param: params.first().map(String::as_str).unwrap_or("_"),
+                    body: body.as_ref(),
+                }),
                 _ => None,
             }
         };
-        let deny = m.rules.iter().chain(own.iter().copied()).filter(|r| r.effect == "deny" && !r.history && Self::rule_matches(r, verb, ent, None)).map(cond).collect();
+        let deny = m
+            .rules
+            .iter()
+            .chain(own.iter().copied())
+            .filter(|r| r.effect == "deny" && !r.history && Self::rule_matches(r, verb, ent, None))
+            .map(cond)
+            .collect();
         let open = m.roles.is_empty();
-        let mut perm = Perm { entity: ent.to_string(), deny, allow: Vec::new(), open, parent: None, too_deep: false };
+        let mut perm = Perm {
+            entity: ent.to_string(),
+            deny,
+            allow: Vec::new(),
+            open,
+            parent: None,
+            too_deep: false,
+        };
         if open {
             return perm;
         }
-        perm.allow = own.iter().copied().chain(m.rules.iter()).filter(|r| r.effect == "allow" && Self::rule_matches(r, verb, ent, None)).map(cond).collect();
-        if let Some(pf) = m.entity(ent).and_then(|e| e.fields.iter().find(|f| f.parent)) {
+        perm.allow = own
+            .iter()
+            .copied()
+            .chain(m.rules.iter())
+            .filter(|r| r.effect == "allow" && Self::rule_matches(r, verb, ent, None))
+            .map(cond)
+            .collect();
+        if let Some(pf) = m
+            .entity(ent)
+            .and_then(|e| e.fields.iter().find(|f| f.parent))
+        {
             let parent_ent = ty_names(pf.ty.as_ref()).unwrap_or_default();
             let pverb = match verb {
                 "read" => "read",
@@ -131,7 +180,10 @@ impl<'m> Interp<'m> {
                 if depth >= 8 {
                     perm.too_deep = true;
                 } else {
-                    perm.parent = Some((pf.name.clone(), Box::new(self.perm_build(pverb, &parent_ent, roles, depth + 1))));
+                    perm.parent = Some((
+                        pf.name.clone(),
+                        Box::new(self.perm_build(pverb, &parent_ent, roles, depth + 1)),
+                    ));
                 }
             }
         }
@@ -144,7 +196,13 @@ impl<'m> Interp<'m> {
         let m = self.m;
         for (ent, c) in perm.conds() {
             let mut list = Vec::new();
-            crate::query::free_exprs(m, ent, &Binder::Param(c.param.to_string()), c.body, &mut list);
+            crate::query::free_exprs(
+                m,
+                ent,
+                &Binder::Param(c.param.to_string()),
+                c.body,
+                &mut list,
+            );
             for e in list {
                 if f.contains(e) {
                     continue;
@@ -191,13 +249,22 @@ impl<'m> Interp<'m> {
     }
 
     fn holds_all(&mut self, spec: &Spec, id: Id, ctx: &mut Ctx) -> R<bool> {
-        let rec = V::Ref { ent: Rc::from(spec.entity), id };
+        let rec = V::Ref {
+            ent: Rc::from(spec.entity),
+            id,
+        };
         if spec.read_check && !self.can("read", spec.entity, None, Some(&rec)) {
             return Ok(false);
         }
         for (f, target) in &spec.refs {
             let v = self.store.read(id, f, None);
-            if !crate::store::same(v.as_ref(), &V::Ref { ent: Rc::from(""), id: *target }) {
+            if !crate::store::same(
+                v.as_ref(),
+                &V::Ref {
+                    ent: Rc::from(""),
+                    id: *target,
+                },
+            ) {
                 return Ok(false);
             }
         }
@@ -247,7 +314,9 @@ impl<'m> Interp<'m> {
             }
             let v = self.get(&cur, seg, None, None)?;
             if k + 1 == key.path.len() {
-                return crate::query::group_value(&v, key.bucket).map(KeyVal::Val).map_err(Flow::Fail);
+                return crate::query::group_value(&v, key.bucket)
+                    .map(KeyVal::Val)
+                    .map_err(Flow::Fail);
             }
             match &v {
                 V::Ref { ent, .. } => {
@@ -265,7 +334,13 @@ impl<'m> Interp<'m> {
     }
 
     /// The values of the subexpressions that do not depend on the row.
-    fn frees_of<'a>(&mut self, spec: &Spec<'a>, aggs: &[Agg<'a>], perm: Option<&Perm>, ctx: &mut Ctx) -> Frees {
+    fn frees_of<'a>(
+        &mut self,
+        spec: &Spec<'a>,
+        aggs: &[Agg<'a>],
+        perm: Option<&Perm>,
+        ctx: &mut Ctx,
+    ) -> Frees {
         let m = self.m;
         let mut list: Vec<(&'a Expr, bool)> = Vec::new();
         let mut add = |b: &Binder, e: &'a Expr| {
@@ -291,7 +366,11 @@ impl<'m> Interp<'m> {
             if f.contains(e) {
                 continue;
             }
-            let v = if this { self.eval(e, &mut Ctx::default()) } else { self.eval(e, ctx) };
+            let v = if this {
+                self.eval(e, &mut Ctx::default())
+            } else {
+                self.eval(e, ctx)
+            };
             let v = match v {
                 Ok(v) => Ok(v),
                 Err(Flow::Fail(m)) => Err(m),
@@ -326,14 +405,29 @@ impl<'m> Interp<'m> {
 
     /// Can this query be asked to the source at all?
     fn sql_possible(&self, spec: &Spec, ctx: &Ctx) -> bool {
-        self.store.lazy() && ctx.as_of.is_none() && self.m.entity(spec.entity).map_or(false, |e| e.kind == EntityKind::Entity && !e.is_ledger && !e.temporary)
+        self.store.lazy()
+            && ctx.as_of.is_none()
+            && self.m.entity(spec.entity).map_or(false, |e| {
+                e.kind == EntityKind::Entity && !e.is_ledger && !e.temporary
+            })
     }
 
     /// Ask the source; None when the interpreter must answer (no SQL, or what SQL read changed
     /// after this working set's snapshot). Records what the answer relied on.
-    fn ask(&mut self, spec: &Spec, frees: &Frees, perm: Option<&Perm>, exclude: &[Id], dirty: &[String], what: What) -> Option<Answer> {
+    fn ask(
+        &mut self,
+        spec: &Spec,
+        frees: &Frees,
+        perm: Option<&Perm>,
+        exclude: &[Id],
+        dirty: &[String],
+        what: What,
+    ) -> Option<Answer> {
         let tx = self.store.tx;
-        let formulas = self.store.dirty.is_empty() && self.store.wlog.is_empty() && self.store.thawed.is_empty() && !self.store.rows.iter().any(|r| r.tx == tx);
+        let formulas = self.store.dirty.is_empty()
+            && self.store.wlog.is_empty()
+            && self.store.thawed.is_empty()
+            && !self.store.rows.iter().any(|r| r.tx == tx);
         self.ask_with(spec, frees, perm, exclude, dirty, what, formulas)
     }
 
@@ -341,12 +435,30 @@ impl<'m> Interp<'m> {
     /// incremental formulas' columns: the records whose stored values may be stale must be
     /// among `exclude` (a rollup's changed children). None: SQL cannot answer. Each row with
     /// its key values (None: no value).
-    pub(super) fn sql_rows_excluding(&mut self, spec: &Spec, ctx: &mut Ctx, exclude: &[Id], limit: usize) -> R<Option<Vec<(Id, Vec<Option<String>>)>>> {
+    pub(super) fn sql_rows_excluding(
+        &mut self,
+        spec: &Spec,
+        ctx: &mut Ctx,
+        exclude: &[Id],
+        limit: usize,
+    ) -> R<Option<Vec<(Id, Vec<Option<String>>)>>> {
         if !self.sql_possible(spec, ctx) {
             return Ok(None);
         }
         let frees = self.frees_of(spec, &[], None, ctx);
-        let Some(ans) = self.ask_with(spec, &frees, None, exclude, &[], What::Rows { after: None, limit, only_checked: false }, true) else {
+        let Some(ans) = self.ask_with(
+            spec,
+            &frees,
+            None,
+            exclude,
+            &[],
+            What::Rows {
+                after: None,
+                limit,
+                only_checked: false,
+            },
+            true,
+        ) else {
             return Ok(None);
         };
         if !ans.residual.is_empty() || ans.rows.iter().any(|r| r.check) {
@@ -356,7 +468,16 @@ impl<'m> Interp<'m> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn ask_with(&mut self, spec: &Spec, frees: &Frees, perm: Option<&Perm>, exclude: &[Id], dirty: &[String], what: What, formulas: bool) -> Option<Answer> {
+    fn ask_with(
+        &mut self,
+        spec: &Spec,
+        frees: &Frees,
+        perm: Option<&Perm>,
+        exclude: &[Id],
+        dirty: &[String],
+        what: What,
+        formulas: bool,
+    ) -> Option<Answer> {
         let src = self.store.src.clone()?;
         let req = Request {
             model: self.m,
@@ -377,7 +498,11 @@ impl<'m> Interp<'m> {
         };
         let ans = src.borrow_mut().select(&req).ok()?;
         // SQL reads the latest committed rows; the working set is as of its snapshot
-        if src.borrow_mut().changed_since(&ans.entities).unwrap_or(true) {
+        if src
+            .borrow_mut()
+            .changed_since(&ans.entities)
+            .unwrap_or(true)
+        {
             return None;
         }
         if !self.store.untracked {
@@ -398,7 +523,15 @@ impl<'m> Interp<'m> {
     /// decide, until `limit` rows are kept or `max_scan` candidates were read (then the page is
     /// shorter and `next` says where to go on). The records of the working set's own writes
     /// are not included (see `overlay`).
-    pub fn sql_page(&mut self, spec: &Spec, ctx: &mut Ctx, after: Option<After>, offset: usize, limit: usize, max_scan: usize) -> R<Option<Page>> {
+    pub fn sql_page(
+        &mut self,
+        spec: &Spec,
+        ctx: &mut Ctx,
+        after: Option<After>,
+        offset: usize,
+        limit: usize,
+        max_scan: usize,
+    ) -> R<Option<Page>> {
         if !self.sql_possible(spec, ctx) {
             return Ok(None);
         }
@@ -409,26 +542,60 @@ impl<'m> Interp<'m> {
         let mut permission = false;
         let mut cursor = after;
         let mut skip = offset;
-        let mut page = Page { ids: Vec::new(), next: None, scanned: 0, kept: 0 };
+        let mut page = Page {
+            ids: Vec::new(),
+            next: None,
+            scanned: 0,
+            kept: 0,
+        };
         loop {
-            let want = limit.saturating_add(skip).saturating_sub(page.ids.len()).max(1);
-            let batch = if permission { want.max(50).min(BATCH) } else { want.min(5000) };
-            let Some(ans) = self.ask(spec, &frees, perm.as_ref(), &exclude, &dirty, What::Rows { after: cursor.clone(), limit: batch, only_checked: false }) else {
+            let want = limit
+                .saturating_add(skip)
+                .saturating_sub(page.ids.len())
+                .max(1);
+            let batch = if permission {
+                want.max(50).min(BATCH)
+            } else {
+                want.min(5000)
+            };
+            let Some(ans) = self.ask(
+                spec,
+                &frees,
+                perm.as_ref(),
+                &exclude,
+                &dirty,
+                What::Rows {
+                    after: cursor.clone(),
+                    limit: batch,
+                    only_checked: false,
+                },
+            ) else {
                 return Ok(None);
             };
             permission = perm.is_some() && !ans.perm_sql;
             let n = ans.rows.len();
             // the records the interpreter decides, loaded at once
-            let check: Vec<Id> = ans.rows.iter().filter(|r| r.check || permission).map(|r| r.id).collect();
+            let check: Vec<Id> = ans
+                .rows
+                .iter()
+                .filter(|r| r.check || permission)
+                .map(|r| r.id)
+                .collect();
             self.store.prefetch_as(spec.entity, &check);
             for r in &ans.rows {
                 page.scanned += 1;
-                cursor = Some(After { keys: r.keys.clone(), id: r.id });
+                cursor = Some(After {
+                    keys: r.keys.clone(),
+                    id: r.id,
+                });
                 let ok = if r.check || permission {
                     if r.check {
                         self.holds_all(spec, r.id, ctx)?
                     } else {
-                        let rec = V::Ref { ent: Rc::from(spec.entity), id: r.id };
+                        let rec = V::Ref {
+                            ent: Rc::from(spec.entity),
+                            id: r.id,
+                        };
                         self.can("read", spec.entity, None, Some(&rec))
                     }
                 } else {
@@ -472,7 +639,18 @@ impl<'m> Interp<'m> {
         let mut out = Vec::new();
         let mut cursor: Option<After> = None;
         loop {
-            let Some(ans) = self.ask(spec, &frees, None, &[], &[], What::Rows { after: cursor.clone(), limit: 20_000, only_checked: false }) else {
+            let Some(ans) = self.ask(
+                spec,
+                &frees,
+                None,
+                &[],
+                &[],
+                What::Rows {
+                    after: cursor.clone(),
+                    limit: 20_000,
+                    only_checked: false,
+                },
+            ) else {
                 return Ok(None);
             };
             if !ans.residual.is_empty() {
@@ -482,7 +660,10 @@ impl<'m> Interp<'m> {
             self.store.prefetch_as(spec.entity, &flagged);
             let n = ans.rows.len();
             for r in &ans.rows {
-                cursor = Some(After { keys: r.keys.clone(), id: r.id });
+                cursor = Some(After {
+                    keys: r.keys.clone(),
+                    id: r.id,
+                });
                 if !r.check || self.holds_all(spec, r.id, ctx)? {
                     out.push(r.id);
                 }
@@ -495,14 +676,26 @@ impl<'m> Interp<'m> {
     }
 
     /// How many rows (exact when at most `cap`, else an estimate: (count, estimated)).
-    pub fn sql_count(&mut self, spec: &Spec, ctx: &mut Ctx, cap: Option<u64>) -> R<Option<(u64, bool)>> {
+    pub fn sql_count(
+        &mut self,
+        spec: &Spec,
+        ctx: &mut Ctx,
+        cap: Option<u64>,
+    ) -> R<Option<(u64, bool)>> {
         if !self.sql_possible(spec, ctx) {
             return Ok(None);
         }
         let perm = self.read_perm(spec);
         let frees = self.frees_of(spec, &[], perm.as_ref(), ctx);
         let (exclude, dirty) = self.dirty_split(spec.entity);
-        let Some(ans) = self.ask(spec, &frees, perm.as_ref(), &exclude, &dirty, What::Count { cap }) else {
+        let Some(ans) = self.ask(
+            spec,
+            &frees,
+            perm.as_ref(),
+            &exclude,
+            &dirty,
+            What::Count { cap },
+        ) else {
             return Ok(None);
         };
         // the row rules SQL could not apply: every row is checked here
@@ -528,14 +721,39 @@ impl<'m> Interp<'m> {
         }
         let mut cursor: Option<After> = None;
         loop {
-            let Some(ans) = self.ask(spec, &frees, perm.as_ref(), &exclude, &dirty, What::Rows { after: cursor.clone(), limit: BATCH, only_checked: !permission }) else {
+            let Some(ans) = self.ask(
+                spec,
+                &frees,
+                perm.as_ref(),
+                &exclude,
+                &dirty,
+                What::Rows {
+                    after: cursor.clone(),
+                    limit: BATCH,
+                    only_checked: !permission,
+                },
+            ) else {
                 return Ok(None);
             };
             let ids: Vec<Id> = ans.rows.iter().map(|r| r.id).collect();
             self.store.prefetch_as(spec.entity, &ids);
             for r in &ans.rows {
-                cursor = Some(After { keys: r.keys.clone(), id: r.id });
-                if (r.check && self.holds_all(spec, r.id, ctx)?) || (!r.check && self.can("read", spec.entity, None, Some(&V::Ref { ent: Rc::from(spec.entity), id: r.id }))) {
+                cursor = Some(After {
+                    keys: r.keys.clone(),
+                    id: r.id,
+                });
+                if (r.check && self.holds_all(spec, r.id, ctx)?)
+                    || (!r.check
+                        && self.can(
+                            "read",
+                            spec.entity,
+                            None,
+                            Some(&V::Ref {
+                                ent: Rc::from(spec.entity),
+                                id: r.id,
+                            }),
+                        ))
+                {
                     total += 1;
                 }
             }
@@ -598,12 +816,19 @@ impl<'m> Interp<'m> {
         // the interpreter's order: its keys, then the id
         let mut keyed: Vec<(Vec<V>, Id)> = Vec::new();
         for id in cands {
-            let rec = V::Ref { ent: Rc::from(spec.entity), id };
+            let rec = V::Ref {
+                ent: Rc::from(spec.entity),
+                id,
+            };
             let mut k = Vec::new();
             for key in &spec.order {
                 match key {
                     Key::Lang { binder, expr, .. } => {
-                        let c = Cond { binder, expr, negate: false };
+                        let c = Cond {
+                            binder,
+                            expr,
+                            negate: false,
+                        };
                         k.push(self.value_of(&c, &rec, spec.entity, ctx)?);
                     }
                     Key::Grid { .. } => return Ok(None),
@@ -617,7 +842,13 @@ impl<'m> Interp<'m> {
                 let desc = matches!(key, Key::Lang { desc: true, .. });
                 match self.compare(&a.0[i], &b.0[i]) {
                     Ok(0) => continue,
-                    Ok(c) => return if (c < 0) != desc { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
+                    Ok(c) => {
+                        return if (c < 0) != desc {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Greater
+                        }
+                    }
                     Err(e) => {
                         err = Some(e);
                         return std::cmp::Ordering::Equal;
@@ -651,7 +882,12 @@ impl<'m> Interp<'m> {
 
     /// Aggregates in SQL: None when a row needs the interpreter (then the caller computes them
     /// on the rows).
-    pub fn sql_aggs(&mut self, spec: &Spec, ctx: &mut Ctx, aggs: &[Agg]) -> R<Option<(u64, Vec<AggOut>)>> {
+    pub fn sql_aggs(
+        &mut self,
+        spec: &Spec,
+        ctx: &mut Ctx,
+        aggs: &[Agg],
+    ) -> R<Option<(u64, Vec<AggOut>)>> {
         if !self.sql_possible(spec, ctx) {
             return Ok(None);
         }
@@ -661,13 +897,24 @@ impl<'m> Interp<'m> {
         if !exclude.is_empty() {
             return Ok(None);
         }
-        let Some(ans) = self.ask(spec, &frees, perm.as_ref(), &exclude, &dirty, What::Aggs(aggs.to_vec())) else {
+        let Some(ans) = self.ask(
+            spec,
+            &frees,
+            perm.as_ref(),
+            &exclude,
+            &dirty,
+            What::Aggs(aggs.to_vec()),
+        ) else {
             return Ok(None);
         };
         let (n, flagged) = ans.count.unwrap_or((0, 0));
         // rows the interpreter must decide (row rules SQL could not apply among them): it
         // aggregates them itself
-        if (perm.is_some() && !ans.perm_sql) || flagged > 0 || !ans.residual.is_empty() || ans.aggs.len() != aggs.len() {
+        if (perm.is_some() && !ans.perm_sql)
+            || flagged > 0
+            || !ans.residual.is_empty()
+            || ans.aggs.len() != aggs.len()
+        {
             return Ok(None);
         }
         Ok(Some((n, ans.aggs)))
@@ -676,7 +923,18 @@ impl<'m> Interp<'m> {
     /// Groups in SQL (a page of them, with their number): None when a row needs the
     /// interpreter, or what SQL read changed (then the caller groups the rows itself).
     #[allow(clippy::too_many_arguments)]
-    pub fn sql_groups(&mut self, spec: &Spec, ctx: &mut Ctx, keys: &[GroupKey], aggs: &[Agg], order: GroupOrder, desc: bool, offset: usize, limit: usize, within: Vec<Option<Vec<Option<String>>>>) -> R<Option<Groups>> {
+    pub fn sql_groups(
+        &mut self,
+        spec: &Spec,
+        ctx: &mut Ctx,
+        keys: &[GroupKey],
+        aggs: &[Agg],
+        order: GroupOrder,
+        desc: bool,
+        offset: usize,
+        limit: usize,
+        within: Vec<Option<Vec<Option<String>>>>,
+    ) -> R<Option<Groups>> {
         if !self.sql_possible(spec, ctx) {
             return Ok(None);
         }
@@ -686,7 +944,15 @@ impl<'m> Interp<'m> {
         if !exclude.is_empty() {
             return Ok(None);
         }
-        let what = What::Groups { keys: keys.to_vec(), aggs: aggs.to_vec(), order, desc, offset, limit, within };
+        let what = What::Groups {
+            keys: keys.to_vec(),
+            aggs: aggs.to_vec(),
+            order,
+            desc,
+            offset,
+            limit,
+            within,
+        };
         let Some(ans) = self.ask(spec, &frees, perm.as_ref(), &exclude, &dirty, what) else {
             return Ok(None);
         };
@@ -696,13 +962,20 @@ impl<'m> Interp<'m> {
         if (perm.is_some() && !ans.perm_sql) || flagged > 0 || !ans.residual.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Groups { groups: ans.groups, total }))
+        Ok(Some(Groups {
+            groups: ans.groups,
+            total,
+        }))
     }
 
     // ---- the language: `Entity.where(…)` chains -----------------------------------------
 
     /// `Entity.where(λ).where(μ)…`: the entity and the lambdas (parameter, body).
-    pub(super) fn table_chain<'e>(&mut self, e: &'e Expr, ctx: &mut Ctx) -> Option<(String, Vec<(String, &'e Expr)>)> {
+    pub(super) fn table_chain<'e>(
+        &mut self,
+        e: &'e Expr,
+        ctx: &mut Ctx,
+    ) -> Option<(String, Vec<(String, &'e Expr)>)> {
         match &e.kind {
             ExprKind::Name(n) => {
                 // as `name` resolves it: locals, `me`, the record's members come first
@@ -710,7 +983,8 @@ impl<'m> Interp<'m> {
                     return None;
                 }
                 if let (Some(V::Ref { .. } | V::Rec { .. }), Some(ent)) = (&ctx.this, &ctx.entity) {
-                    if self.field(ent, n).is_some() || crate::query::IMPLICIT.contains(&n.as_str()) {
+                    if self.field(ent, n).is_some() || crate::query::IMPLICIT.contains(&n.as_str())
+                    {
                         return None;
                     }
                 }
@@ -721,7 +995,12 @@ impl<'m> Interp<'m> {
                 Some((n.clone(), Vec::new()))
             }
             ExprKind::Call { callee, args } => {
-                let ExprKind::Field { base, name, optional: false } = &callee.kind else {
+                let ExprKind::Field {
+                    base,
+                    name,
+                    optional: false,
+                } = &callee.kind
+                else {
                     return None;
                 };
                 if name != "where" {
@@ -738,7 +1017,13 @@ impl<'m> Interp<'m> {
 
     /// `Entity.where(…).count()` and the other methods over a whole entity, in SQL when the
     /// source can: None to evaluate them the interpreter's way.
-    pub(super) fn query_call(&mut self, base: &Expr, name: &str, args: &[Arg], ctx: &mut Ctx) -> R<Option<V>> {
+    pub(super) fn query_call(
+        &mut self,
+        base: &Expr,
+        name: &str,
+        args: &[Arg],
+        ctx: &mut Ctx,
+    ) -> R<Option<V>> {
         if !self.store.lazy() || ctx.as_of.is_some() {
             return Ok(None);
         }
@@ -748,7 +1033,15 @@ impl<'m> Interp<'m> {
         }
         let viewing = self.viewing();
         // `….first(n)` / `.last(n)`, after a `sort_by(k)` or in id order: one page of SQL
-        if let ("first" | "last", [Arg { name: None, spread: false, value }]) = (name, args) {
+        if let (
+            "first" | "last",
+            [Arg {
+                name: None,
+                spread: false,
+                value,
+            }],
+        ) = (name, args)
+        {
             if !matches!(value.kind, ExprKind::Lambda { .. }) {
                 if let Some(v) = self.query_take(base, name == "last", value, ctx)? {
                     return Ok(Some(v));
@@ -757,8 +1050,17 @@ impl<'m> Interp<'m> {
         }
         // `….sort_by(k).first()` / `.last()`
         if matches!(name, "first" | "last") && args.is_empty() {
-            if let ExprKind::Call { callee, args: sargs } = &base.kind {
-                if let ExprKind::Field { base: inner, name: sname, optional: false } = &callee.kind {
+            if let ExprKind::Call {
+                callee,
+                args: sargs,
+            } = &base.kind
+            {
+                if let ExprKind::Field {
+                    base: inner,
+                    name: sname,
+                    optional: false,
+                } = &callee.kind
+                {
                     if sname == "sort_by" {
                         let Some((p, key)) = single_lambda(sargs) else {
                             return Ok(None);
@@ -766,7 +1068,10 @@ impl<'m> Interp<'m> {
                         let Some((ent, lambdas)) = self.table_chain(inner, ctx) else {
                             return Ok(None);
                         };
-                        let binders: Vec<Binder> = lambdas.iter().map(|(p, _)| Binder::Param(p.clone())).collect();
+                        let binders: Vec<Binder> = lambdas
+                            .iter()
+                            .map(|(p, _)| Binder::Param(p.clone()))
+                            .collect();
                         let kb = Binder::Param(p);
                         if viewing {
                             for (p, e) in lambdas.iter().chain(std::iter::once(&(p_of(&kb), key))) {
@@ -775,10 +1080,28 @@ impl<'m> Interp<'m> {
                         }
                         let mut spec = Spec::new(&ent);
                         spec.read_check = viewing;
-                        spec.conds = lambdas.iter().zip(binders.iter()).map(|((_, e), b)| Cond { binder: b, expr: e, negate: false }).collect();
-                        spec.order = vec![Key::Lang { binder: &kb, expr: key, desc: name == "last" }];
+                        spec.conds = lambdas
+                            .iter()
+                            .zip(binders.iter())
+                            .map(|((_, e), b)| Cond {
+                                binder: b,
+                                expr: e,
+                                negate: false,
+                            })
+                            .collect();
+                        spec.order = vec![Key::Lang {
+                            binder: &kb,
+                            expr: key,
+                            desc: name == "last",
+                        }];
                         spec.id_desc = name == "last";
-                        return Ok(self.sql_first(&spec, ctx)?.map(|id| id.map(|id| V::Ref { ent: Rc::from(ent.as_str()), id }).unwrap_or(V::None)));
+                        return Ok(self.sql_first(&spec, ctx)?.map(|id| {
+                            id.map(|id| V::Ref {
+                                ent: Rc::from(ent.as_str()),
+                                id,
+                            })
+                            .unwrap_or(V::None)
+                        }));
                     }
                 }
             }
@@ -793,7 +1116,10 @@ impl<'m> Interp<'m> {
                 None => return Ok(None),
             },
         };
-        let terminal_cond = matches!(name, "where" | "count" | "any" | "none" | "first" | "last" | "find" | "all");
+        let terminal_cond = matches!(
+            name,
+            "where" | "count" | "any" | "none" | "first" | "last" | "find" | "all"
+        );
         if let (true, Some(l)) = (terminal_cond, &own) {
             lambdas.push(l.clone());
         }
@@ -802,11 +1128,25 @@ impl<'m> Interp<'m> {
                 self.viewer_lambda(&ent, p, e)?;
             }
         }
-        let binders: Vec<Binder> = lambdas.iter().map(|(p, _)| Binder::Param(p.clone())).collect();
+        let binders: Vec<Binder> = lambdas
+            .iter()
+            .map(|(p, _)| Binder::Param(p.clone()))
+            .collect();
         let mut spec = Spec::new(&ent);
         spec.read_check = viewing;
-        spec.conds = lambdas.iter().zip(binders.iter()).map(|((_, e), b)| Cond { binder: b, expr: e, negate: false }).collect();
-        let refv = |id: Id| V::Ref { ent: Rc::from(ent.as_str()), id };
+        spec.conds = lambdas
+            .iter()
+            .zip(binders.iter())
+            .map(|((_, e), b)| Cond {
+                binder: b,
+                expr: e,
+                negate: false,
+            })
+            .collect();
+        let refv = |id: Id| V::Ref {
+            ent: Rc::from(ent.as_str()),
+            id,
+        };
         let fast: Option<V> = match (name, own.is_some()) {
             ("where", true) | ("all", false) => match self.sql_ids(&spec, ctx)? {
                 Some(ids) => {
@@ -815,8 +1155,12 @@ impl<'m> Interp<'m> {
                 }
                 None => None,
             },
-            ("count", _) => self.sql_count(&spec, ctx, None)?.map(|(n, _)| V::Int(n as i64)),
-            ("any", _) | ("none", _) => self.sql_first(&spec, ctx)?.map(|f| V::Bool(f.is_some() == (name == "any"))),
+            ("count", _) => self
+                .sql_count(&spec, ctx, None)?
+                .map(|(n, _)| V::Int(n as i64)),
+            ("any", _) | ("none", _) => self
+                .sql_first(&spec, ctx)?
+                .map(|f| V::Bool(f.is_some() == (name == "any"))),
             ("all", true) => {
                 // no row where the condition is not true
                 if let Some(last) = spec.conds.last_mut() {
@@ -824,24 +1168,35 @@ impl<'m> Interp<'m> {
                 }
                 self.sql_first(&spec, ctx)?.map(|f| V::Bool(f.is_none()))
             }
-            ("first" | "find", _) => self.sql_first(&spec, ctx)?.map(|f| f.map(refv).unwrap_or(V::None)),
+            ("first" | "find", _) => self
+                .sql_first(&spec, ctx)?
+                .map(|f| f.map(refv).unwrap_or(V::None)),
             ("last", _) => {
                 spec.id_desc = true;
-                self.sql_first(&spec, ctx)?.map(|f| f.map(refv).unwrap_or(V::None))
+                self.sql_first(&spec, ctx)?
+                    .map(|f| f.map(refv).unwrap_or(V::None))
             }
             ("last_by" | "min" | "max", true) => {
                 let (p, key) = own.clone().unwrap();
                 let kb = Binder::Param(p);
                 let desc = name != "min";
                 let mut ks = spec.clone();
-                ks.order = vec![Key::Lang { binder: &kb, expr: key, desc }];
+                ks.order = vec![Key::Lang {
+                    binder: &kb,
+                    expr: key,
+                    desc,
+                }];
                 ks.id_desc = desc;
                 match self.sql_first(&ks, ctx)? {
                     None => None,
                     Some(None) => Some(V::None),
                     Some(Some(id)) if name == "last_by" => Some(refv(id)),
                     Some(Some(id)) => {
-                        let c = Cond { binder: &kb, expr: key, negate: false };
+                        let c = Cond {
+                            binder: &kb,
+                            expr: key,
+                            negate: false,
+                        };
                         Some(self.value_of(&c, &refv(id), &ent, ctx)?)
                     }
                 }
@@ -849,7 +1204,13 @@ impl<'m> Interp<'m> {
             ("sum", true) => {
                 let (p, val) = own.clone().unwrap();
                 let vb = Binder::Param(p);
-                let agg = Agg { of: crate::query::AggOf::Expr { binder: &vb, expr: val }, func: AggFn::Sum };
+                let agg = Agg {
+                    of: crate::query::AggOf::Expr {
+                        binder: &vb,
+                        expr: val,
+                    },
+                    func: AggFn::Sum,
+                };
                 match self.sql_aggs(&spec, ctx, &[agg])? {
                     Some((_, outs)) => lang_sum(&outs[0]).map(V::normalized),
                     None => None,
@@ -869,13 +1230,22 @@ impl<'m> Interp<'m> {
         }
         let mut fspec = Spec::new(&ent);
         fspec.read_check = viewing;
-        fspec.conds = spec.conds[..chain].iter().map(|c| Cond { negate: false, ..*c }).collect();
+        fspec.conds = spec.conds[..chain]
+            .iter()
+            .map(|c| Cond {
+                negate: false,
+                ..*c
+            })
+            .collect();
         let Some(ids) = self.sql_ids(&fspec, ctx)? else {
             return Ok(None);
         };
         // `first(n)` / `last(n)` of the rows: no row is read
         let counted = matches!(args, [Arg { name: None, value, .. }] if !matches!(value.kind, ExprKind::Lambda { .. }));
-        if viewing && !(counted && matches!(name, "first" | "last")) && ids.len() > super::viewer::ENGINE_ROWS {
+        if viewing
+            && !(counted && matches!(name, "first" | "last"))
+            && ids.len() > super::viewer::ENGINE_ROWS
+        {
             return fail(format!("{ent}: {} rows to read one by one for `{name}` (not answered by the database); at most {}: filter with .where(…) first", ids.len(), super::viewer::ENGINE_ROWS));
         }
         self.store.prefetch_as(&ent, &ids);
@@ -892,18 +1262,32 @@ impl<'m> Interp<'m> {
     fn query_take(&mut self, base: &Expr, last: bool, n: &Expr, ctx: &mut Ctx) -> R<Option<V>> {
         let (chain_expr, key) = match &base.kind {
             ExprKind::Call { callee, args } => match (&callee.kind, single_lambda(args)) {
-                (ExprKind::Field { base: inner, name, optional: false }, Some(k)) if name == "sort_by" => (inner.as_ref(), Some(k)),
+                (
+                    ExprKind::Field {
+                        base: inner,
+                        name,
+                        optional: false,
+                    },
+                    Some(k),
+                ) if name == "sort_by" => (inner.as_ref(), Some(k)),
                 _ => (base, None),
             },
             _ => (base, None),
         };
-        let Some((ent, lambdas)) = self.table_chain(chain_expr, ctx) else { return Ok(None) };
+        let Some((ent, lambdas)) = self.table_chain(chain_expr, ctx) else {
+            return Ok(None);
+        };
         if !self.dirty_split(&ent).0.is_empty() {
             return Ok(None);
         }
         let count = match self.eval(n, ctx)? {
             V::Int(k) if k >= 0 => k as usize,
-            other => return fail(format!("{}(n) takes a whole number ≥ 0, not {other}", if last { "last" } else { "first" })),
+            other => {
+                return fail(format!(
+                    "{}(n) takes a whole number ≥ 0, not {other}",
+                    if last { "last" } else { "first" }
+                ))
+            }
         };
         let viewing = self.viewing();
         if viewing {
@@ -914,35 +1298,69 @@ impl<'m> Interp<'m> {
                 self.viewer_lambda(&ent, p, e)?;
             }
         }
-        let binders: Vec<Binder> = lambdas.iter().map(|(p, _)| Binder::Param(p.clone())).collect();
+        let binders: Vec<Binder> = lambdas
+            .iter()
+            .map(|(p, _)| Binder::Param(p.clone()))
+            .collect();
         let kb = key.as_ref().map(|(p, _)| Binder::Param(p.clone()));
         let mut spec = Spec::new(&ent);
         spec.read_check = viewing;
-        spec.conds = lambdas.iter().zip(binders.iter()).map(|((_, e), b)| Cond { binder: b, expr: e, negate: false }).collect();
+        spec.conds = lambdas
+            .iter()
+            .zip(binders.iter())
+            .map(|((_, e), b)| Cond {
+                binder: b,
+                expr: e,
+                negate: false,
+            })
+            .collect();
         if let (Some((_, k)), Some(b)) = (&key, &kb) {
-            spec.order = vec![Key::Lang { binder: b, expr: k, desc: last }];
+            spec.order = vec![Key::Lang {
+                binder: b,
+                expr: k,
+                desc: last,
+            }];
         }
         spec.id_desc = last;
-        let Some(page) = self.sql_page(&spec, ctx, None, 0, count.max(1), usize::MAX)? else { return Ok(None) };
+        let Some(page) = self.sql_page(&spec, ctx, None, 0, count.max(1), usize::MAX)? else {
+            return Ok(None);
+        };
         let mut ids = page.ids;
         ids.truncate(count);
         if last {
             ids.reverse();
         }
         self.store.prefetch_as(&ent, &ids);
-        Ok(Some(list(ids.into_iter().map(|id| V::Ref { ent: Rc::from(ent.as_str()), id }).collect())))
+        Ok(Some(list(
+            ids.into_iter()
+                .map(|id| V::Ref {
+                    ent: Rc::from(ent.as_str()),
+                    id,
+                })
+                .collect(),
+        )))
     }
 
     /// `for x in Entity.where(…)`: the rows page by page, as the list would give them (the
     /// list is what matches when the loop starts: what the loop writes does not change it).
     /// None when it must be the list.
-    pub(super) fn query_loop(&mut self, iter: &Expr, names: &[String], body: &[Stmt], ctx: &mut Ctx) -> R<Option<()>> {
+    pub(super) fn query_loop(
+        &mut self,
+        iter: &Expr,
+        names: &[String],
+        body: &[Stmt],
+        ctx: &mut Ctx,
+    ) -> R<Option<()>> {
         if !self.store.lazy() || ctx.as_of.is_some() || names.len() != 1 {
             return Ok(None);
         }
         let (ent, lambdas) = match &iter.kind {
             ExprKind::Call { callee, args } if args.is_empty() => match &callee.kind {
-                ExprKind::Field { base, name, optional: false } if name == "all" => match self.table_chain(base, ctx) {
+                ExprKind::Field {
+                    base,
+                    name,
+                    optional: false,
+                } if name == "all" => match self.table_chain(base, ctx) {
                     Some((e, l)) if l.is_empty() => (e, l),
                     _ => return Ok(None),
                 },
@@ -953,9 +1371,20 @@ impl<'m> Interp<'m> {
                 _ => return Ok(None),
             },
         };
-        let binders: Vec<Binder> = lambdas.iter().map(|(p, _)| Binder::Param(p.clone())).collect();
+        let binders: Vec<Binder> = lambdas
+            .iter()
+            .map(|(p, _)| Binder::Param(p.clone()))
+            .collect();
         let mut spec = Spec::new(&ent);
-        spec.conds = lambdas.iter().zip(binders.iter()).map(|((_, e), b)| Cond { binder: b, expr: e, negate: false }).collect();
+        spec.conds = lambdas
+            .iter()
+            .zip(binders.iter())
+            .map(|((_, e), b)| Cond {
+                binder: b,
+                expr: e,
+                negate: false,
+            })
+            .collect();
         if !self.sql_possible(&spec, ctx) {
             return Ok(None);
         }
@@ -964,7 +1393,18 @@ impl<'m> Interp<'m> {
         // the loop runs); otherwise the list
         let frees = self.frees_of(&spec, &[], None, ctx);
         let (exclude, dirty) = self.dirty_split(&ent);
-        let Some(first) = self.ask(&spec, &frees, None, &exclude, &dirty, What::Rows { after: None, limit: 1000, only_checked: false }) else {
+        let Some(first) = self.ask(
+            &spec,
+            &frees,
+            None,
+            &exclude,
+            &dirty,
+            What::Rows {
+                after: None,
+                limit: 1000,
+                only_checked: false,
+            },
+        ) else {
             return Ok(None);
         };
         if !first.residual.is_empty() || first.guarded {
@@ -987,11 +1427,21 @@ impl<'m> Interp<'m> {
             }
             ids.sort();
             // the records this page brings in (not those the working set already had)
-            let loaded_here: Vec<Id> = ids.iter().copied().filter(|id| !self.store.records.contains_key(id)).collect();
+            let loaded_here: Vec<Id> = ids
+                .iter()
+                .copied()
+                .filter(|id| !self.store.records.contains_key(id))
+                .collect();
             self.store.prefetch_as(&ent, &ids);
             for id in ids {
                 ctx.scopes.push(Default::default());
-                ctx.bind(&names[0], V::Ref { ent: Rc::from(ent.as_str()), id });
+                ctx.bind(
+                    &names[0],
+                    V::Ref {
+                        ent: Rc::from(ent.as_str()),
+                        id,
+                    },
+                );
                 let r = self.stmts(body, ctx);
                 ctx.scopes.pop();
                 r?;
@@ -1001,10 +1451,30 @@ impl<'m> Interp<'m> {
             if n < 1000 {
                 return Ok(Some(()));
             }
-            let after = After { keys: Vec::new(), id: last.unwrap() };
-            let Some(next) = self.ask(&spec, &frees, None, &exclude, &dirty, What::Rows { after: Some(after), limit: 1000, only_checked: false }) else {
+            let after = After {
+                keys: Vec::new(),
+                id: last.unwrap(),
+            };
+            let Some(next) = self.ask(
+                &spec,
+                &frees,
+                None,
+                &exclude,
+                &dirty,
+                What::Rows {
+                    after: Some(after),
+                    limit: 1000,
+                    only_checked: false,
+                },
+            ) else {
                 // the data changed under the loop: the transaction cannot rely on what it read
-                return Err(Flow::Conflict(vec![Conflict { tx: 0, at: String::new(), user: None, cause: "a concurrent commit".into(), what: vec![format!("{ent} rows read by a loop")] }]));
+                return Err(Flow::Conflict(vec![Conflict {
+                    tx: 0,
+                    at: String::new(),
+                    user: None,
+                    cause: "a concurrent commit".into(),
+                    what: vec![format!("{ent} rows read by a loop")],
+                }]));
             };
             if !next.residual.is_empty() || next.guarded {
                 return fail("internal: a loop's query changed while it ran");
@@ -1017,8 +1487,14 @@ impl<'m> Interp<'m> {
 /// The single literal lambda of one parameter among `args`: (parameter, body).
 fn single_lambda(args: &[Arg]) -> Option<(String, &Expr)> {
     match args {
-        [Arg { name: None, spread: false, value }] => match &value.kind {
-            ExprKind::Lambda { params, body } if params.len() == 1 => Some((params[0].clone(), body.as_ref())),
+        [Arg {
+            name: None,
+            spread: false,
+            value,
+        }] => match &value.kind {
+            ExprKind::Lambda { params, body } if params.len() == 1 => {
+                Some((params[0].clone(), body.as_ref()))
+            }
             _ => None,
         },
         _ => None,
@@ -1046,8 +1522,14 @@ fn lang_sum(a: &AggOut) -> Option<V> {
     match a.kind {
         "int" => Some(V::Int(a.value.as_deref()?.parse().ok()?)),
         "num" => Some(V::Dec(d(&a.value)?)),
-        "money" if a.units == 1 => Some(V::Money { amt: d(&a.value)?, cur: Rc::from(a.unit.as_deref()?) }),
-        "qty" if a.units == 1 => Some(V::Qty { v: d(&a.value)?, unit: Rc::from(a.unit.as_deref()?) }),
+        "money" if a.units == 1 => Some(V::Money {
+            amt: d(&a.value)?,
+            cur: Rc::from(a.unit.as_deref()?),
+        }),
+        "qty" if a.units == 1 => Some(V::Qty {
+            v: d(&a.value)?,
+            unit: Rc::from(a.unit.as_deref()?),
+        }),
         _ => None,
     }
 }

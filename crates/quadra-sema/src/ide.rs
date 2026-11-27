@@ -38,18 +38,34 @@ pub fn ident_at(project: &Project, file: FileId, offset: TextSize) -> Option<Syn
 }
 
 /// What the identifier at `offset` refers to.
-pub fn target_at(project: &Project, a: &Analysis, file: FileId, offset: TextSize) -> Option<(TextRange, Target)> {
+pub fn target_at(
+    project: &Project,
+    a: &Analysis,
+    file: FileId,
+    offset: TextSize,
+) -> Option<(TextRange, Target)> {
     let tok = ident_at(project, file, offset)?;
     let range = tok.text_range();
-    if let Some(r) = a.references.iter().find(|r| r.file == file && r.range == range) {
+    if let Some(r) = a
+        .references
+        .iter()
+        .find(|r| r.file == file && r.range == range)
+    {
         return Some((range, r.target.clone()));
     }
     // a declaration's own name
-    if let Some(d) = a.decls.iter().position(|d| d.file == file && d.name_range == range) {
+    if let Some(d) = a
+        .decls
+        .iter()
+        .position(|d| d.file == file && d.name_range == range)
+    {
         return Some((range, Target::Decl(DeclId(d as u32))));
     }
     for (owner, members) in &a.members {
-        if let Some(i) = members.iter().position(|m| m.file == file && m.name_range == range) {
+        if let Some(i) = members
+            .iter()
+            .position(|m| m.file == file && m.name_range == range)
+        {
             return Some((range, Target::Member(*owner, i)));
         }
     }
@@ -65,8 +81,11 @@ pub fn target_at(project: &Project, a: &Analysis, file: FileId, offset: TextSize
 }
 
 fn enclosing_owner(a: &Analysis, file: FileId, tok: &SyntaxToken) -> Option<DeclId> {
-    let item = tok.parent_ancestors().find(|n| matches!(n.kind(), ENTITY | LEDGER | METRIC | CONTROL))?;
-    if ast::token(&item, EXTEND_KW).is_some() || ast::ctx_keyword(&item).as_deref() == Some("patch") {
+    let item = tok
+        .parent_ancestors()
+        .find(|n| matches!(n.kind(), ENTITY | LEDGER | METRIC | CONTROL))?;
+    if ast::token(&item, EXTEND_KW).is_some() || ast::ctx_keyword(&item).as_deref() == Some("patch")
+    {
         let path = ast::child(&item, PATH)?;
         let seg = ast::path_segments(&path).into_iter().next()?;
         return a.resolve(file, seg.text());
@@ -75,21 +94,35 @@ fn enclosing_owner(a: &Analysis, file: FileId, tok: &SyntaxToken) -> Option<Decl
     a.module_decls.get(&file)?.get(&name).copied()
 }
 
-pub fn definition(project: &Project, a: &Analysis, file: FileId, offset: TextSize) -> Option<NavTarget> {
+pub fn definition(
+    project: &Project,
+    a: &Analysis,
+    file: FileId,
+    offset: TextSize,
+) -> Option<NavTarget> {
     let (_, target) = target_at(project, a, file, offset)?;
     match target {
         Target::Decl(d) => {
             let d = a.decl(d);
-            Some(NavTarget { file: d.file, range: d.name_range })
+            Some(NavTarget {
+                file: d.file,
+                range: d.name_range,
+            })
         }
         Target::Member(o, i) => {
             let m = a.member(o, i);
-            Some(NavTarget { file: m.file, range: m.name_range })
+            Some(NavTarget {
+                file: m.file,
+                range: m.name_range,
+            })
         }
         Target::Variant(name) => {
             // a variant name can be defined by several entities: prefer the current file
             let defs = a.variants.get(&name)?;
-            let (f, range) = *defs.iter().find(|(f, _)| *f == file).or_else(|| defs.first())?;
+            let (f, range) = *defs
+                .iter()
+                .find(|(f, _)| *f == file)
+                .or_else(|| defs.first())?;
             Some(NavTarget { file: f, range })
         }
     }
@@ -103,7 +136,12 @@ fn code(s: &str) -> String {
     format!("```quadra\n{s}\n```")
 }
 
-pub fn hover(project: &Project, a: &Analysis, file: FileId, offset: TextSize) -> Option<(TextRange, String)> {
+pub fn hover(
+    project: &Project,
+    a: &Analysis,
+    file: FileId,
+    offset: TextSize,
+) -> Option<(TextRange, String)> {
     let (range, target) = target_at(project, a, file, offset)?;
     Some((range, hover_target(project, a, target)))
 }
@@ -121,7 +159,10 @@ pub fn hover_target(project: &Project, a: &Analysis, target: Target) -> String {
             }
             s.push_str(&format!("\n\n{} of `{}`", m.kind.describe(), o.name));
             if m.via_extend {
-                s.push_str(&format!(", added by `extend` in `{}`", module_of(project, m.file)));
+                s.push_str(&format!(
+                    ", added by `extend` in `{}`",
+                    module_of(project, m.file)
+                ));
             }
             if !m.variants.is_empty() {
                 s.push_str(&format!("\n\nValues: {}", m.variants.join(" · ")));
@@ -151,15 +192,24 @@ pub fn target_definition(a: &Analysis, target: &Target, file: FileId) -> Option<
     match target {
         Target::Decl(d) => {
             let d = a.decl(*d);
-            Some(NavTarget { file: d.file, range: d.name_range })
+            Some(NavTarget {
+                file: d.file,
+                range: d.name_range,
+            })
         }
         Target::Member(o, i) => {
             let m = a.member(*o, *i);
-            Some(NavTarget { file: m.file, range: m.name_range })
+            Some(NavTarget {
+                file: m.file,
+                range: m.name_range,
+            })
         }
         Target::Variant(name) => {
             let defs = a.variants.get(name)?;
-            let (f, range) = *defs.iter().find(|(f, _)| *f == file).or_else(|| defs.first())?;
+            let (f, range) = *defs
+                .iter()
+                .find(|(f, _)| *f == file)
+                .or_else(|| defs.first())?;
             Some(NavTarget { file: f, range })
         }
     }
@@ -172,21 +222,33 @@ pub fn references(a: &Analysis, target: &Target) -> Vec<NavTarget> {
     match target {
         Target::Decl(d) => {
             let d = a.decl(*d);
-            out.push(NavTarget { file: d.file, range: d.name_range });
+            out.push(NavTarget {
+                file: d.file,
+                range: d.name_range,
+            });
         }
         Target::Member(o, i) => {
             let m = a.member(*o, *i);
-            out.push(NavTarget { file: m.file, range: m.name_range });
+            out.push(NavTarget {
+                file: m.file,
+                range: m.name_range,
+            });
         }
         Target::Variant(name) => {
             for (f, r) in a.variants.get(name).into_iter().flatten() {
-                out.push(NavTarget { file: *f, range: *r });
+                out.push(NavTarget {
+                    file: *f,
+                    range: *r,
+                });
             }
         }
     }
     for r in &a.references {
         if &r.target == target {
-            out.push(NavTarget { file: r.file, range: r.range });
+            out.push(NavTarget {
+                file: r.file,
+                range: r.range,
+            });
         }
     }
     out.sort_by_key(|n| (n.file, n.range.start()));
@@ -197,7 +259,10 @@ pub fn references(a: &Analysis, target: &Target) -> Vec<NavTarget> {
 /// The target of a reference recorded at `offset` of `file` (a file without a syntax tree of
 /// Quadra code: an interface file; or a member the type checker resolved).
 pub fn reference_at(a: &Analysis, file: FileId, offset: TextSize) -> Option<(TextRange, Target)> {
-    a.references.iter().find(|r| r.file == file && r.range.start() <= offset && offset <= r.range.end()).map(|r| (r.range, r.target.clone()))
+    a.references
+        .iter()
+        .find(|r| r.file == file && r.range.start() <= offset && offset <= r.range.end())
+        .map(|r| (r.range, r.target.clone()))
 }
 
 /// Hover for a declaration. For entities it shows the unified view: own members, members
@@ -208,7 +273,11 @@ fn hover_decl(project: &Project, a: &Analysis, id: DeclId) -> String {
     if let Some(doc) = &d.doc {
         s.push_str(&format!("\n\n{doc}"));
     }
-    s.push_str(&format!("\n\n{} in `{}`", d.kind.describe(), module_of(project, d.file)));
+    s.push_str(&format!(
+        "\n\n{} in `{}`",
+        d.kind.describe(),
+        module_of(project, d.file)
+    ));
     if d.kind.has_members() {
         let members = a.all_members(id);
         if !members.is_empty() {
@@ -238,7 +307,9 @@ pub fn document_symbols(project: &Project, a: &Analysis, file: FileId) -> Vec<Sy
                 .get(&owner)
                 .map(|ms| {
                     ms.iter()
-                        .filter(|m| m.file == file && item.text_range().contains_range(m.name_range))
+                        .filter(|m| {
+                            m.file == file && item.text_range().contains_range(m.name_range)
+                        })
                         .map(|m| Symbol {
                             name: m.name.clone(),
                             detail: m.header.clone(),
@@ -251,7 +322,12 @@ pub fn document_symbols(project: &Project, a: &Analysis, file: FileId) -> Vec<Sy
                 })
                 .unwrap_or_default()
         };
-        if let Some((idx, d)) = a.decls.iter().enumerate().find(|(_, d)| d.file == file && d.range == item.text_range()) {
+        if let Some((idx, d)) = a
+            .decls
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.file == file && d.range == item.text_range())
+        {
             out.push(Symbol {
                 name: d.name.clone(),
                 detail: d.kind.describe().to_string(),
@@ -261,7 +337,9 @@ pub fn document_symbols(project: &Project, a: &Analysis, file: FileId) -> Vec<Sy
                 children: members_of(DeclId(idx as u32)),
             });
         } else if item.kind() == ENTITY && ast::token(&item, EXTEND_KW).is_some() {
-            let Some(path) = ast::child(&item, PATH) else { continue };
+            let Some(path) = ast::child(&item, PATH) else {
+                continue;
+            };
             let name = ast::path_text(&path);
             let children = a.resolve(file, &name).map(members_of).unwrap_or_default();
             out.push(Symbol {
@@ -314,18 +392,26 @@ pub fn method_hover(text: &str, offset: TextSize) -> Option<(TextRange, String)>
     let at = usize::from(offset).min(text.len());
     let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let start = text[..at].rfind(|c: char| !ident(c)).map_or(0, |i| i + 1);
-    let end = text[at..].find(|c: char| !ident(c)).map_or(text.len(), |i| at + i);
+    let end = text[at..]
+        .find(|c: char| !ident(c))
+        .map_or(text.len(), |i| at + i);
     if start >= end || !text[..start].ends_with('.') {
         return None;
     }
     let name = &text[start..end];
     let (_, sig, doc) = METHODS.iter().find(|m| m.0 == name)?;
-    Some((TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32)), format!("{}\n\n{doc}", code(&format!(".{sig}")))))
+    Some((
+        TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32)),
+        format!("{}\n\n{doc}", code(&format!(".{sig}"))),
+    ))
 }
 
 /// The methods to offer after a `.` at `offset` (with what is typed of the name): (name,
 /// signature, documentation). Empty when the position does not follow a `.`.
-pub fn method_completions(text: &str, offset: TextSize) -> Vec<(&'static str, &'static str, &'static str)> {
+pub fn method_completions(
+    text: &str,
+    offset: TextSize,
+) -> Vec<(&'static str, &'static str, &'static str)> {
     let at = usize::from(offset).min(text.len());
     let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let start = text[..at].rfind(|c: char| !ident(c)).map_or(0, |i| i + 1);
@@ -333,7 +419,11 @@ pub fn method_completions(text: &str, offset: TextSize) -> Vec<(&'static str, &'
         return Vec::new();
     }
     let typed = &text[start..at];
-    METHODS.iter().filter(|m| m.0.starts_with(typed)).copied().collect()
+    METHODS
+        .iter()
+        .filter(|m| m.0.starts_with(typed))
+        .copied()
+        .collect()
 }
 
 #[cfg(test)]
@@ -347,8 +437,14 @@ mod method_tests {
         let (range, doc) = method_hover(text, TextSize::from(at as u32)).unwrap();
         assert_eq!(&text[range], "group_by");
         assert!(doc.contains("key2") && doc.contains("GROUP BY"));
-        assert!(method_hover("group_by", TextSize::from(2)).is_none(), "not after a dot");
-        let names: Vec<&str> = method_completions(text, TextSize::from(text.len() as u32)).iter().map(|m| m.0).collect();
+        assert!(
+            method_hover("group_by", TextSize::from(2)).is_none(),
+            "not after a dot"
+        );
+        let names: Vec<&str> = method_completions(text, TextSize::from(text.len() as u32))
+            .iter()
+            .map(|m| m.0)
+            .collect();
         assert_eq!(names, vec!["count", "contains"]);
     }
 }

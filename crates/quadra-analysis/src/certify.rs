@@ -24,16 +24,49 @@ pub struct LockEntry {
 /// Canonical text of a node (field, ledger or metric).
 fn canonical(model: &Model, node: &Node) -> String {
     if node.0 == "metric" {
-        let Some(m) = model.metrics.iter().find(|m| m.name == node.1) else { return String::new() };
-        let params: Vec<String> =
-            m.params.iter().map(|p| format!("{}: {}", p.name, p.ty.as_ref().map(print::ty).unwrap_or_default())).collect();
-        let body: Vec<String> = m.formulas.iter().map(|(k, e)| format!("{k} = {}", print::expr(e))).collect();
-        return format!("metric {}({}) -> {}: {}", m.name, params.join(", "), m.ret.as_ref().map(print::ty).unwrap_or_default(), body.join("; "));
+        let Some(m) = model.metrics.iter().find(|m| m.name == node.1) else {
+            return String::new();
+        };
+        let params: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}: {}",
+                    p.name,
+                    p.ty.as_ref().map(print::ty).unwrap_or_default()
+                )
+            })
+            .collect();
+        let body: Vec<String> = m
+            .formulas
+            .iter()
+            .map(|(k, e)| format!("{k} = {}", print::expr(e)))
+            .collect();
+        return format!(
+            "metric {}({}) -> {}: {}",
+            m.name,
+            params.join(", "),
+            m.ret.as_ref().map(print::ty).unwrap_or_default(),
+            body.join("; ")
+        );
     }
-    let Some(e) = model.entity(&node.0) else { return String::new() };
+    let Some(e) = model.entity(&node.0) else {
+        return String::new();
+    };
     if node.1 == "*" {
         // a ledger: its columns and everything posted to it
-        let cols: Vec<String> = e.fields.iter().map(|f| format!("{}: {}", f.name, f.ty.as_ref().map(print::ty).unwrap_or_default())).collect();
+        let cols: Vec<String> = e
+            .fields
+            .iter()
+            .map(|f| {
+                format!(
+                    "{}: {}",
+                    f.name,
+                    f.ty.as_ref().map(print::ty).unwrap_or_default()
+                )
+            })
+            .collect();
         let mut posts = Vec::new();
         for src in &model.entities {
             for p in src.posts.iter().filter(|p| p.ledger == e.name) {
@@ -42,10 +75,17 @@ fn canonical(model: &Model, node: &Node) -> String {
                 posts.push(format!("{} when {when}: {}", src.name, body.join("; ")));
             }
         }
-        return format!("ledger {}({}) <- {}", e.name, cols.join(", "), posts.join(" | "));
+        return format!(
+            "ledger {}({}) <- {}",
+            e.name,
+            cols.join(", "),
+            posts.join(" | ")
+        );
     }
     let name = node.1.trim_end_matches("#default");
-    let Some(f) = model.find_field(e, name) else { return String::new() };
+    let Some(f) = model.find_field(e, name) else {
+        return String::new();
+    };
     let mut s = format!("{}.{}", e.name, f.name);
     if let Some(t) = &f.ty {
         s.push_str(&format!(": {}", print::ty(t)));
@@ -74,7 +114,11 @@ pub fn fingerprints(model: &Model, report: &Report) -> Vec<(String, String, usiz
                 continue;
             }
             // a field's default counts as part of its definition
-            let mut next: Vec<Node> = report.reads.get(&n).map(|v| v.iter().map(|(t, _)| t.clone()).collect()).unwrap_or_default();
+            let mut next: Vec<Node> = report
+                .reads
+                .get(&n)
+                .map(|v| v.iter().map(|(t, _)| t.clone()).collect())
+                .unwrap_or_default();
             if !n.1.ends_with("#default") && n.1 != "*" {
                 let d = (n.0.clone(), format!("{}#default", n.1));
                 if let Some(v) = report.reads.get(&d) {
@@ -90,7 +134,11 @@ pub fn fingerprints(model: &Model, report: &Report) -> Vec<(String, String, usiz
         }
         let hash = hasher.finalize();
         let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-        out.push((m.name.clone(), format!("sha256:{}", &hex[..16]), seen.len() - 1));
+        out.push((
+            m.name.clone(),
+            format!("sha256:{}", &hex[..16]),
+            seen.len() - 1,
+        ));
     }
     out
 }
@@ -112,7 +160,9 @@ pub fn read_lock(text: &str) -> Vec<LockEntry> {
             });
             continue;
         }
-        let (Some(entry), Some((k, v))) = (out.last_mut(), line.split_once('=')) else { continue };
+        let (Some(entry), Some((k, v))) = (out.last_mut(), line.split_once('=')) else {
+            continue;
+        };
         let v = v.trim().trim_matches('"').to_string();
         match k.trim() {
             "fingerprint" => entry.fingerprint = v,
@@ -143,11 +193,18 @@ pub fn write_lock(entries: &[LockEntry]) -> String {
 
 /// Compare the fingerprints of the code with `metrics.lock`, if the project has one.
 pub fn verify_lock(project: &Project, model: &Model, report: &Report) -> Vec<Diagnostic> {
-    let Ok(text) = std::fs::read_to_string(project.root.join(LOCK_FILE)) else { return Vec::new() };
-    let lock: HashMap<String, LockEntry> = read_lock(&text).into_iter().map(|e| (e.name.clone(), e)).collect();
+    let Ok(text) = std::fs::read_to_string(project.root.join(LOCK_FILE)) else {
+        return Vec::new();
+    };
+    let lock: HashMap<String, LockEntry> = read_lock(&text)
+        .into_iter()
+        .map(|e| (e.name.clone(), e))
+        .collect();
     let mut out = Vec::new();
     for (name, fp, _) in fingerprints(model, report) {
-        let Some(m) = model.metrics.iter().find(|m| m.name == name) else { continue };
+        let Some(m) = model.metrics.iter().find(|m| m.name == name) else {
+            continue;
+        };
         let (severity, message) = match lock.get(&name) {
             None => (Severity::Warning, format!("`{name}` is not certified: run `quadra certify {name}`")),
             Some(e) if e.fingerprint != fp => (
@@ -160,7 +217,12 @@ pub fn verify_lock(project: &Project, model: &Model, report: &Report) -> Vec<Dia
             ),
             Some(_) => continue,
         };
-        out.push(Diagnostic { file: m.span.file, range: m.span.range, severity, message });
+        out.push(Diagnostic {
+            file: m.span.file,
+            range: m.span.range,
+            severity,
+            message,
+        });
     }
     out
 }

@@ -29,7 +29,11 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let v = v.trim().trim_start_matches('v');
     let core = v.split(['-', '+']).next()?;
     let mut it = core.split('.').map(|p| p.parse::<u64>().ok());
-    Some((it.next()??, it.next().flatten().unwrap_or(0), it.next().flatten().unwrap_or(0)))
+    Some((
+        it.next()??,
+        it.next().flatten().unwrap_or(0),
+        it.next().flatten().unwrap_or(0),
+    ))
 }
 
 pub fn older(a: &str, b: &str) -> bool {
@@ -42,7 +46,10 @@ pub fn latest() -> Result<String, String> {
     if status != 200 {
         return Err(format!("{url}: HTTP {status}"));
     }
-    v["version"].as_str().map(str::to_owned).ok_or_else(|| format!("{url}: no version"))
+    v["version"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{url}: no version"))
 }
 
 fn asset(version: &str, name: &str) -> String {
@@ -85,7 +92,10 @@ pub fn upgrade_to(version: Option<&str>, force: bool) -> Result<String, String> 
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    let got: String = Sha256::digest(&gz).iter().map(|b| format!("{b:02x}")).collect();
+    let got: String = Sha256::digest(&gz)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     if want_sum.len() != 64 || got != want_sum {
         return Err(format!("the download does not match its SHA-256 ({got} instead of {want_sum}): nothing was changed"));
     }
@@ -112,7 +122,8 @@ fn replace(exe: &Path, bin: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, exe).map_err(denied)?;
     }
     #[cfg(windows)]
@@ -157,7 +168,9 @@ pub fn notice() {
     if !std::io::stderr().is_terminal() || std::env::var_os("QUADRA_NO_UPDATE_CHECK").is_some() {
         return;
     }
-    let Some(file) = crate::cloud::config_dir().map(|d| d.join("update-check.json")) else { return };
+    let Some(file) = crate::cloud::config_dir().map(|d| d.join("update-check.json")) else {
+        return;
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -173,7 +186,10 @@ pub fn notice() {
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(&file, serde_json::json!({ "checked": now, "latest": l }).to_string());
+        let _ = std::fs::write(
+            &file,
+            serde_json::json!({ "checked": now, "latest": l }).to_string(),
+        );
         l
     };
     if let Some(l) = latest.filter(|l| older(VERSION, l)) {

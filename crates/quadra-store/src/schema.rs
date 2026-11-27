@@ -195,7 +195,14 @@ pub fn snake(name: &str) -> String {
 }
 
 fn col(name: &str, ty: ColType, part: Part) -> Column {
-    Column { name: name.to_string(), ty, part, not_null: false, check: None, references: None }
+    Column {
+        name: name.to_string(),
+        ty,
+        part,
+        not_null: false,
+        check: None,
+        references: None,
+    }
 }
 
 /// Is this collection field computed from the other side (children, inverse relation)?
@@ -260,9 +267,19 @@ impl<'m> Builder<'m> {
             T::DateTime => vec![col(name, ColType::Timestamp, Part::Scalar)],
             T::Duration => vec![col(name, ColType::BigInt, Part::Duration)],
             T::DateRange => vec![col(name, ColType::Json, Part::Json)],
-            T::Money { .. } => vec![col(name, ColType::Numeric, Part::Amount), col(&format!("{name}__cur"), ColType::Text, Part::Currency)],
-            T::Price { .. } => vec![col(name, ColType::Numeric, Part::Amount), col(&format!("{name}__cur"), ColType::Text, Part::Currency), col(&format!("{name}__per"), ColType::Text, Part::Per)],
-            T::Qty { .. } => vec![col(name, ColType::Numeric, Part::Amount), col(&format!("{name}__unit"), ColType::Text, Part::Unit)],
+            T::Money { .. } => vec![
+                col(name, ColType::Numeric, Part::Amount),
+                col(&format!("{name}__cur"), ColType::Text, Part::Currency),
+            ],
+            T::Price { .. } => vec![
+                col(name, ColType::Numeric, Part::Amount),
+                col(&format!("{name}__cur"), ColType::Text, Part::Currency),
+                col(&format!("{name}__per"), ColType::Text, Part::Per),
+            ],
+            T::Qty { .. } => vec![
+                col(name, ColType::Numeric, Part::Amount),
+                col(&format!("{name}__unit"), ColType::Text, Part::Unit),
+            ],
             T::Ent(e) => match self.target_table(e) {
                 Some(table) => {
                     let mut c = col(&format!("{name}_id"), ColType::BigInt, Part::RefId);
@@ -275,7 +292,13 @@ impl<'m> Builder<'m> {
                 let payload = enum_ty
                     .and_then(inline_enum)
                     .map(|vs| vs.iter().any(|v| !v.fields.is_empty()))
-                    .or_else(|| self.model.enums.iter().find(|e| e.variants.iter().any(|v| variants.contains(&v.name))).map(|e| e.variants.iter().any(|v| !v.fields.is_empty())))
+                    .or_else(|| {
+                        self.model
+                            .enums
+                            .iter()
+                            .find(|e| e.variants.iter().any(|v| variants.contains(&v.name)))
+                            .map(|e| e.variants.iter().any(|v| !v.fields.is_empty()))
+                    })
                     .unwrap_or(false);
                 if payload {
                     vec![col(name, ColType::Json, Part::Json)]
@@ -316,7 +339,12 @@ impl<'m> Builder<'m> {
                 Some(EntityKind::Record) => Decode::Json,
                 _ => Decode::Unknown,
             },
-            T::Enum { .. } => match self.columns("x", t, enum_ty).as_ref().and_then(|c| c.first()).map(|c| c.part) {
+            T::Enum { .. } => match self
+                .columns("x", t, enum_ty)
+                .as_ref()
+                .and_then(|c| c.first())
+                .map(|c| c.part)
+            {
                 Some(Part::Json) => Decode::Json,
                 Some(Part::Scalar) => Decode::Variant,
                 _ => Decode::Unknown,
@@ -327,7 +355,10 @@ impl<'m> Builder<'m> {
 }
 
 pub fn build(model: &Model, report: &Report) -> Schema {
-    let mut b = Builder { model, traits_used: BTreeSet::new() };
+    let mut b = Builder {
+        model,
+        traits_used: BTreeSet::new(),
+    };
     let mut tables = Vec::new();
     let mut readable = BTreeSet::new();
     let mut sets: BTreeMap<String, Vec<SetMap>> = BTreeMap::new();
@@ -361,10 +392,19 @@ pub fn build(model: &Model, report: &Report) -> Schema {
             if is_inverse(model, e, f) {
                 continue;
             }
-            let t = report.field_types.get(&(e.name.clone(), f.name.clone())).cloned().or_else(|| {
-                // trait fields: typed in the trait that declares them (a trait of a trait too)
-                model.all_traits(e).iter().find_map(|tr| report.field_types.get(&(tr.name.clone(), f.name.clone())).cloned())
-            });
+            let t = report
+                .field_types
+                .get(&(e.name.clone(), f.name.clone()))
+                .cloned()
+                .or_else(|| {
+                    // trait fields: typed in the trait that declares them (a trait of a trait too)
+                    model.all_traits(e).iter().find_map(|tr| {
+                        report
+                            .field_types
+                            .get(&(tr.name.clone(), f.name.clone()))
+                            .cloned()
+                    })
+                });
             let Some(t) = t else {
                 complete &= formula;
                 continue;
@@ -389,7 +429,13 @@ pub fn build(model: &Model, report: &Report) -> Schema {
                             columns: all,
                             primary: vec!["owner_id".into(), "company_id".into()],
                             uniques: Vec::new(),
-                            fields: vec![FieldMap { field: f.name.clone(), formula: false, columns: cols, decode, incremental: false }],
+                            fields: vec![FieldMap {
+                                field: f.name.clone(),
+                                formula: false,
+                                columns: cols,
+                                decode,
+                                incremental: false,
+                            }],
                         });
                     } else {
                         complete = false;
@@ -397,7 +443,9 @@ pub fn build(model: &Model, report: &Report) -> Schema {
                 }
                 continue;
             }
-            if !formula && matches!(t.unopt(), T::Coll { elem, .. } if matches!(elem.as_ref(), T::Ent(_))) {
+            if !formula
+                && matches!(t.unopt(), T::Coll { elem, .. } if matches!(elem.as_ref(), T::Ent(_)))
+            {
                 // a collection of value records (JSON): read from the history
                 let value_records = matches!(t.unopt(), T::Coll { elem, .. } if matches!(elem.as_ref(), T::Ent(x) if model.entity(x).is_some_and(|x| x.kind == EntityKind::Record)));
                 complete &= !value_records;
@@ -407,8 +455,16 @@ pub fn build(model: &Model, report: &Report) -> Schema {
                 if let T::Ent(target) = elem.as_ref() {
                     if let Some(tt) = b.target_table(target) {
                         // references to a trait: the entity of each is not in the join table
-                        if model.entity(target).is_some_and(|x| x.kind == EntityKind::Entity) {
-                            sets.entry(e.name.clone()).or_default().push(SetMap { field: f.name.clone(), table: format!("{table}__{}", f.name), target: target.clone(), set: *set });
+                        if model
+                            .entity(target)
+                            .is_some_and(|x| x.kind == EntityKind::Entity)
+                        {
+                            sets.entry(e.name.clone()).or_default().push(SetMap {
+                                field: f.name.clone(),
+                                table: format!("{table}__{}", f.name),
+                                target: target.clone(),
+                                set: *set,
+                            });
                         } else {
                             complete = false;
                         }
@@ -444,7 +500,10 @@ pub fn build(model: &Model, report: &Report) -> Schema {
                 }
             } else {
                 // an empty collection is stored as NULL
-                let optional = matches!(t, T::Coll { .. }) || matches!(f.ty, Some(Ty::Optional(_))) || f.required_when.is_some() || f.kind != FieldKind::Stored && !e.is_ledger;
+                let optional = matches!(t, T::Coll { .. })
+                    || matches!(f.ty, Some(Ty::Optional(_)))
+                    || f.required_when.is_some()
+                    || f.kind != FieldKind::Stored && !e.is_ledger;
                 if !optional && !e.is_ledger {
                     if let Some(first) = cols.first_mut() {
                         first.not_null = true;
@@ -456,37 +515,81 @@ pub fn build(model: &Model, report: &Report) -> Schema {
             }
             columns.extend(cols.iter().cloned());
             let decode = b.decode(&t, f.ty.as_ref());
-            let incremental = formula && quadra_analysis::deps::incremental(model, &e.name, &f.name).is_ok();
-            fields.push(FieldMap { field: f.name.clone(), formula, columns: cols, decode, incremental });
+            let incremental =
+                formula && quadra_analysis::deps::incremental(model, &e.name, &f.name).is_ok();
+            fields.push(FieldMap {
+                field: f.name.clone(),
+                formula,
+                columns: cols,
+                decode,
+                incremental,
+            });
         }
         // unconditional uniques on stored columns (own and from traits)
         for u in model.all_uniques(e) {
             if u.when.is_some() {
                 continue;
             }
-            let cols: Option<Vec<String>> = u.fields.iter().map(|f| fields.iter().find(|m| &m.field == f && !m.formula).and_then(|m| (m.columns.len() == 1).then(|| m.columns[0].name.clone()))).collect();
+            let cols: Option<Vec<String>> = u
+                .fields
+                .iter()
+                .map(|f| {
+                    fields
+                        .iter()
+                        .find(|m| &m.field == f && !m.formula)
+                        .and_then(|m| (m.columns.len() == 1).then(|| m.columns[0].name.clone()))
+                })
+                .collect();
             if let Some(c) = cols {
                 if !uniques.contains(&c) {
                     uniques.push(c);
                 }
             }
         }
-        if complete && fields.iter().all(|fm: &FieldMap| fm.formula || fm.decode != Decode::Unknown) {
+        if complete
+            && fields
+                .iter()
+                .all(|fm: &FieldMap| fm.formula || fm.decode != Decode::Unknown)
+        {
             readable.insert(e.name.clone());
         }
-        tables.push(Table { name: table, source: if e.is_ledger { Source::Ledger(e.name.clone()) } else { Source::Entity(e.name.clone()) }, columns, primary: vec!["id".into()], uniques, fields });
+        tables.push(Table {
+            name: table,
+            source: if e.is_ledger {
+                Source::Ledger(e.name.clone())
+            } else {
+                Source::Entity(e.name.clone())
+            },
+            columns,
+            primary: vec!["id".into()],
+            uniques,
+            fields,
+        });
     }
     for t in b.traits_used.clone() {
         let mut ent = col("entity", ColType::Text, Part::Scalar);
         ent.not_null = true;
-        tables.push(Table { name: snake(&t), source: Source::Trait(t), columns: vec![col("id", ColType::BigInt, Part::Scalar), ent], primary: vec!["id".into()], uniques: Vec::new(), fields: Vec::new() });
+        tables.push(Table {
+            name: snake(&t),
+            source: Source::Trait(t),
+            columns: vec![col("id", ColType::BigInt, Part::Scalar), ent],
+            primary: vec!["id".into()],
+            uniques: Vec::new(),
+            fields: Vec::new(),
+        });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
     let markers = serde_json::to_string(model).map_or(true, |m| m.contains("\"provisional\""));
     if markers {
         readable.clear();
     }
-    let mut schema = Schema { tables, indexes: Vec::new(), markers, readable, sets };
+    let mut schema = Schema {
+        tables,
+        indexes: Vec::new(),
+        markers,
+        readable,
+        sets,
+    };
     schema.indexes = schema.indexes(model);
     schema
 }
@@ -516,11 +619,31 @@ impl Table {
     pub fn create_sql_as(&self, name: &str, d: Dialect) -> String {
         // SQLite: an `id` key that is the table's rowid (`INTEGER PRIMARY KEY`): one B-tree
         // instead of the table's and the key's index
-        let rowid = d == Dialect::Sqlite && self.primary.len() == 1 && self.column(&self.primary[0]).is_some_and(|c| c.ty == ColType::BigInt);
-        let mut parts: Vec<String> =
-            self.columns.iter().map(|c| if rowid && self.primary[0] == c.name { format!("\"{}\" INTEGER PRIMARY KEY", c.name) } else { c.definition(d, c.not_null || self.primary.contains(&c.name)) }).collect();
+        let rowid = d == Dialect::Sqlite
+            && self.primary.len() == 1
+            && self
+                .column(&self.primary[0])
+                .is_some_and(|c| c.ty == ColType::BigInt);
+        let mut parts: Vec<String> = self
+            .columns
+            .iter()
+            .map(|c| {
+                if rowid && self.primary[0] == c.name {
+                    format!("\"{}\" INTEGER PRIMARY KEY", c.name)
+                } else {
+                    c.definition(d, c.not_null || self.primary.contains(&c.name))
+                }
+            })
+            .collect();
         if !rowid {
-            parts.push(format!("PRIMARY KEY ({})", self.primary.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(", ")));
+            parts.push(format!(
+                "PRIMARY KEY ({})",
+                self.primary
+                    .iter()
+                    .map(|p| format!("\"{p}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         if d == Dialect::Sqlite {
             for c in &self.columns {
@@ -530,14 +653,27 @@ impl Table {
             }
         }
         for u in &self.uniques {
-            parts.push(format!("UNIQUE ({})", u.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ")));
+            parts.push(format!(
+                "UNIQUE ({})",
+                u.iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         format!("CREATE TABLE \"{name}\" (\n  {}\n)", parts.join(",\n  "))
     }
 
     /// PostgreSQL: the foreign keys of the table, as `ALTER TABLE` statements.
     pub fn foreign_keys(&self) -> Vec<String> {
-        self.columns.iter().filter_map(|c| c.references.as_ref().map(|r| foreign_key(&self.name, &c.name, r))).collect()
+        self.columns
+            .iter()
+            .filter_map(|c| {
+                c.references
+                    .as_ref()
+                    .map(|r| foreign_key(&self.name, &c.name, r))
+            })
+            .collect()
     }
 
     pub fn column(&self, name: &str) -> Option<&Column> {
@@ -587,7 +723,13 @@ impl Index {
         if self.fts {
             // (SQLite: the FTS5 table, `Database::sync_search`)
             let c = format!("\"{}\"", self.columns[0]);
-            return format!("CREATE INDEX {}IF NOT EXISTS \"{}\" ON \"{}\" USING gin ({})", if concurrently { "CONCURRENTLY " } else { "" }, self.name, self.table, fts_vector_pg(&c));
+            return format!(
+                "CREATE INDEX {}IF NOT EXISTS \"{}\" ON \"{}\" USING gin ({})",
+                if concurrently { "CONCURRENTLY " } else { "" },
+                self.name,
+                self.table,
+                fts_vector_pg(&c)
+            );
         }
         let cols: Vec<String> = self
             .columns
@@ -599,7 +741,13 @@ impl Index {
                 (true, Dialect::Postgres) => format!("(lower(\"{c}\" COLLATE \"C\"))"),
             })
             .collect();
-        format!("CREATE INDEX {}IF NOT EXISTS \"{}\" ON \"{}\" ({})", if concurrently { "CONCURRENTLY " } else { "" }, self.name, self.table, cols.join(", "))
+        format!(
+            "CREATE INDEX {}IF NOT EXISTS \"{}\" ON \"{}\" ({})",
+            if concurrently { "CONCURRENTLY " } else { "" },
+            self.name,
+            self.table,
+            cols.join(", ")
+        )
     }
 }
 
@@ -612,7 +760,11 @@ pub fn index_name(table: &str, cols: &[String]) -> String {
     if n.len() <= 63 {
         return n;
     }
-    let h: String = Sha256::digest(n.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let h: String = Sha256::digest(n.as_bytes())
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let mut cut = 54;
     while !n.is_char_boundary(cut) {
         cut -= 1;
@@ -644,10 +796,22 @@ impl Schema {
     fn indexes(&self, model: &Model) -> Vec<Index> {
         let mut out: Vec<Index> = Vec::new();
         let add = |out: &mut Vec<Index>, t: &Table, cols: Vec<String>, why: String| {
-            let covered = t.primary.first() == cols.first() && t.primary.len() >= cols.len() && t.primary[..cols.len()] == cols[..] || t.uniques.iter().any(|u| u.len() >= cols.len() && u[..cols.len()] == cols[..]);
+            let covered = t.primary.first() == cols.first()
+                && t.primary.len() >= cols.len()
+                && t.primary[..cols.len()] == cols[..]
+                || t.uniques
+                    .iter()
+                    .any(|u| u.len() >= cols.len() && u[..cols.len()] == cols[..]);
             let name = index_name(&t.name, &cols);
             if !covered && !out.iter().any(|i| i.name == name) {
-                out.push(Index { name, table: t.name.clone(), columns: cols, why, lower: false, fts: false });
+                out.push(Index {
+                    name,
+                    table: t.name.clone(),
+                    columns: cols,
+                    why,
+                    lower: false,
+                    fts: false,
+                });
             }
         };
         for t in &self.tables {
@@ -655,25 +819,59 @@ impl Schema {
                 Source::Entity(e) | Source::Ledger(e) => {
                     for fm in t.fields.iter().filter(|f| !f.formula) {
                         for c in fm.columns.iter().filter(|c| c.part == Part::RefId) {
-                            add(&mut out, t, vec![c.name.clone()], format!("reference {e}.{}", fm.field));
+                            add(
+                                &mut out,
+                                t,
+                                vec![c.name.clone()],
+                                format!("reference {e}.{}", fm.field),
+                            );
                         }
                     }
                     if let (Source::Entity(e), Some(ent)) = (&t.source, model.entity(e)) {
                         for u in model.all_uniques(ent).iter().filter(|u| u.when.is_some()) {
-                            let cols: Option<Vec<String>> = u.fields.iter().map(|f| t.fields.iter().find(|m| &m.field == f && !m.formula && m.columns.len() == 1).map(|m| m.columns[0].name.clone())).collect();
+                            let cols: Option<Vec<String>> = u
+                                .fields
+                                .iter()
+                                .map(|f| {
+                                    t.fields
+                                        .iter()
+                                        .find(|m| {
+                                            &m.field == f && !m.formula && m.columns.len() == 1
+                                        })
+                                        .map(|m| m.columns[0].name.clone())
+                                })
+                                .collect();
                             if let Some(cols) = cols {
-                                add(&mut out, t, cols, format!("unique ({}) when … of {e}", u.fields.join(", ")));
+                                add(
+                                    &mut out,
+                                    t,
+                                    cols,
+                                    format!("unique ({}) when … of {e}", u.fields.join(", ")),
+                                );
                             }
                         }
                     }
                 }
-                Source::Join(e, f) => add(&mut out, t, vec!["target_id".into()], format!("set {e}.{f}")),
+                Source::Join(e, f) => add(
+                    &mut out,
+                    t,
+                    vec!["target_id".into()],
+                    format!("set {e}.{f}"),
+                ),
                 _ => {}
             }
         }
         // fields compared with `==` in row rules (`c.salesperson == me`, `o.state == …`)
-        for rule in model.roles.iter().flat_map(|r| r.rules.iter()).chain(model.rules.iter()) {
-            let (Some(target), Some(cond)) = (rule.targets.first().and_then(|t| t.first()), &rule.condition) else {
+        for rule in model
+            .roles
+            .iter()
+            .flat_map(|r| r.rules.iter())
+            .chain(model.rules.iter())
+        {
+            let (Some(target), Some(cond)) = (
+                rule.targets.first().and_then(|t| t.first()),
+                &rule.condition,
+            ) else {
                 continue;
             };
             let ExprKind::Lambda { params, body } = &cond.kind else {
@@ -683,37 +881,74 @@ impl Schema {
             let mut found = Vec::new();
             compared_fields(model, body, p, target, &mut found);
             for (ent, field) in found {
-                let Some(t) = self.tables.iter().find(|t| matches!(&t.source, Source::Entity(e) if *e == ent)) else {
+                let Some(t) = self
+                    .tables
+                    .iter()
+                    .find(|t| matches!(&t.source, Source::Entity(e) if *e == ent))
+                else {
                     continue;
                 };
-                let Some(fm) = t.fields.iter().find(|m| m.field == field && !m.formula && m.columns.len() == 1 && m.columns[0].part != Part::Json) else {
+                let Some(fm) = t.fields.iter().find(|m| {
+                    m.field == field
+                        && !m.formula
+                        && m.columns.len() == 1
+                        && m.columns[0].part != Part::Json
+                }) else {
                     continue;
                 };
-                add(&mut out, t, vec![fm.columns[0].name.clone()], format!("row rule on {ent}.{field}"));
+                add(
+                    &mut out,
+                    t,
+                    vec![fm.columns[0].name.clone()],
+                    format!("row rule on {ent}.{field}"),
+                );
             }
         }
         for t in &self.tables {
             let Source::Entity(e) = &t.source else {
                 continue;
             };
-            for fm in t.fields.iter().filter(|f| !f.formula && f.columns.len() == 1 && f.columns[0].part == Part::Scalar) {
+            for fm in t
+                .fields
+                .iter()
+                .filter(|f| !f.formula && f.columns.len() == 1 && f.columns[0].part == Part::Scalar)
+            {
                 let c = &fm.columns[0];
                 // dates: documents are listed by date (an index orders a page without sorting)
                 if matches!(c.ty, ColType::Date | ColType::Timestamp) {
                     // with the id: the order of a page (ties by id) is the index's
-                    add(&mut out, t, vec![c.name.clone(), "id".into()], format!("order by {e}.{}", fm.field));
+                    add(
+                        &mut out,
+                        t,
+                        vec![c.name.clone(), "id".into()],
+                        format!("order by {e}.{}", fm.field),
+                    );
                 }
                 // what a record is shown by: the search, prefix first (ASCII case-insensitive)
-                if c.ty == ColType::Text && c.check.is_none() && DISPLAY_FIELDS.contains(&fm.field.as_str()) {
+                if c.ty == ColType::Text
+                    && c.check.is_none()
+                    && DISPLAY_FIELDS.contains(&fm.field.as_str())
+                {
                     let name = index_name(&t.name, &[format!("lower_{}", c.name)]);
                     if !out.iter().any(|i| i.name == name) {
-                        out.push(Index { name, table: t.name.clone(), columns: vec![c.name.clone()], why: format!("search {e}.{}", fm.field), lower: true, fts: false });
+                        out.push(Index {
+                            name,
+                            table: t.name.clone(),
+                            columns: vec![c.name.clone()],
+                            why: format!("search {e}.{}", fm.field),
+                            lower: true,
+                            fts: false,
+                        });
                     }
                 }
             }
             // the full-text search: the stored text fields (`query::searchable`)
             for f in quadra_runtime::query::searchable(model, e) {
-                let Some(fm) = t.fields.iter().find(|m| m.field == f && !m.formula && m.columns.len() == 1) else {
+                let Some(fm) = t
+                    .fields
+                    .iter()
+                    .find(|m| m.field == f && !m.formula && m.columns.len() == 1)
+                else {
                     continue;
                 };
                 let c = &fm.columns[0];
@@ -722,7 +957,14 @@ impl Schema {
                 }
                 let name = index_name(&t.name, &["fts".to_string(), c.name.clone()]);
                 if !out.iter().any(|i| i.name == name) {
-                    out.push(Index { name, table: t.name.clone(), columns: vec![c.name.clone()], why: format!("full-text search {e}.{f}"), lower: false, fts: true });
+                    out.push(Index {
+                        name,
+                        table: t.name.clone(),
+                        columns: vec![c.name.clone()],
+                        why: format!("full-text search {e}.{f}"),
+                        lower: false,
+                        fts: true,
+                    });
                 }
             }
         }
@@ -732,7 +974,12 @@ impl Schema {
 
     /// The columns of a table in its full-text search index, in their order.
     pub fn search_columns(&self, table: &str) -> Vec<String> {
-        let mut cols: Vec<(String, String)> = self.indexes.iter().filter(|i| i.fts && i.table == table).map(|i| (i.name.clone(), i.columns[0].clone())).collect();
+        let mut cols: Vec<(String, String)> = self
+            .indexes
+            .iter()
+            .filter(|i| i.fts && i.table == table)
+            .map(|i| (i.name.clone(), i.columns[0].clone()))
+            .collect();
         cols.sort();
         cols.into_iter().map(|(_, c)| c).collect()
     }
@@ -745,16 +992,23 @@ impl Schema {
     /// The table of an entity or ledger.
     /// The per-company table of a field of an entity.
     pub fn per_company_table(&self, ent: &str, field: &str) -> Option<&Table> {
-        self.tables.iter().find(|t| matches!(&t.source, Source::PerCompany(e, f) if e == ent && f == field))
+        self.tables
+            .iter()
+            .find(|t| matches!(&t.source, Source::PerCompany(e, f) if e == ent && f == field))
     }
 
     /// The per-company tables of an entity.
     pub fn per_company_tables(&self, ent: &str) -> Vec<&Table> {
-        self.tables.iter().filter(|t| matches!(&t.source, Source::PerCompany(e, _) if e == ent)).collect()
+        self.tables
+            .iter()
+            .filter(|t| matches!(&t.source, Source::PerCompany(e, _) if e == ent))
+            .collect()
     }
 
     pub fn entity_table(&self, ent: &str) -> Option<&Table> {
-        self.tables.iter().find(|t| matches!(&t.source, Source::Entity(e) | Source::Ledger(e) if e == ent))
+        self.tables
+            .iter()
+            .find(|t| matches!(&t.source, Source::Entity(e) | Source::Ledger(e) if e == ent))
     }
 
     /// The single column holding a stored field of an entity, when an index has it first:
@@ -762,10 +1016,16 @@ impl Schema {
     /// projections).
     pub fn indexed_column(&self, ent: &str, field: &str) -> Option<(&Table, &Column)> {
         let t = self.entity_table(ent)?;
-        let fm = t.fields.iter().find(|f| f.field == field && !f.formula && f.columns.len() == 1)?;
+        let fm = t
+            .fields
+            .iter()
+            .find(|f| f.field == field && !f.formula && f.columns.len() == 1)?;
         let c = &fm.columns[0];
         let indexed =
-            self.indexes.iter().any(|i| i.table == t.name && !i.lower && !i.fts && i.columns.first() == Some(&c.name)) || t.uniques.iter().any(|u| u.first() == Some(&c.name)) || t.primary.first() == Some(&c.name);
+            self.indexes.iter().any(|i| {
+                i.table == t.name && !i.lower && !i.fts && i.columns.first() == Some(&c.name)
+            }) || t.uniques.iter().any(|u| u.first() == Some(&c.name))
+                || t.primary.first() == Some(&c.name);
         indexed.then_some((t, c))
     }
 
@@ -785,7 +1045,13 @@ impl Schema {
 }
 
 /// The (entity, field) at the end of every `param.a.b == …` of a rule's condition.
-fn compared_fields(model: &Model, e: &Expr, param: &str, root: &str, out: &mut Vec<(String, String)>) {
+fn compared_fields(
+    model: &Model,
+    e: &Expr,
+    param: &str,
+    root: &str,
+    out: &mut Vec<(String, String)>,
+) {
     // the entity and field a path from the parameter ends on
     fn resolve(model: &Model, e: &Expr, param: &str, root: &str) -> Option<(String, String)> {
         let mut names = Vec::new();
@@ -820,7 +1086,11 @@ fn compared_fields(model: &Model, e: &Expr, param: &str, root: &str, out: &mut V
         None
     }
     match &e.kind {
-        ExprKind::Binary { op: BinOp::Eq, lhs, rhs } => {
+        ExprKind::Binary {
+            op: BinOp::Eq,
+            lhs,
+            rhs,
+        } => {
             for side in [lhs, rhs] {
                 if let Some(x) = resolve(model, side, param, root) {
                     if !out.contains(&x) {
@@ -834,7 +1104,11 @@ fn compared_fields(model: &Model, e: &Expr, param: &str, root: &str, out: &mut V
             compared_fields(model, rhs, param, root, out);
         }
         ExprKind::Unary { expr, .. } => compared_fields(model, expr, param, root, out),
-        ExprKind::If { cond, then, otherwise } => {
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
             for x in [cond, then, otherwise] {
                 compared_fields(model, x, param, root, out);
             }

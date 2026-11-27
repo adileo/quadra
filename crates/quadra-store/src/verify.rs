@@ -52,17 +52,40 @@ fn page() -> usize {
 }
 
 /// Hash chain and tables against the history. Returns the problems and the record count.
-pub fn verify(url: &str, model: &Model, report: &Report, time: NaiveDateTime) -> Result<(Vec<String>, usize), String> {
+pub fn verify(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<(Vec<String>, usize), String> {
     let mut db = Database::open(url, model, report)?;
     // the chain on a connection of its own, while the tables are checked
     let chain_url = url.to_string();
-    let chain_check = std::thread::Builder::new().name("quadra-verify-chain".into()).spawn(move || chain(&mut Conn::open(&chain_url)?)).map_err(|e| e.to_string())?;
+    let chain_check = std::thread::Builder::new()
+        .name("quadra-verify-chain".into())
+        .spawn(move || chain(&mut Conn::open(&chain_url)?))
+        .map_err(|e| e.to_string())?;
     // every write of the history, those of a transaction without commit row too (as loading
     // the whole database reads them)
-    let latest = db.conn.query("SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_history\"", &[])?;
-    let created = db.conn.query("SELECT CAST(MAX(\"created_tx\") AS TEXT) FROM \"_quadra_records\"", &[])?;
-    let base = head(&mut db.conn)?.max(num(&latest.first().and_then(|r| r[0].clone())) as u64).max(num(&created.first().and_then(|r| r[0].clone())) as u64);
-    let records = num(&db.conn.query("SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_records\"", &[])?.first().and_then(|r| r[0].clone())) as usize;
+    let latest = db.conn.query(
+        "SELECT CAST(MAX(\"tx\") AS TEXT) FROM \"_quadra_history\"",
+        &[],
+    )?;
+    let created = db.conn.query(
+        "SELECT CAST(MAX(\"created_tx\") AS TEXT) FROM \"_quadra_records\"",
+        &[],
+    )?;
+    let base = head(&mut db.conn)?
+        .max(num(&latest.first().and_then(|r| r[0].clone())) as u64)
+        .max(num(&created.first().and_then(|r| r[0].clone())) as u64);
+    let records = num(&db
+        .conn
+        .query(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_records\"",
+            &[],
+        )?
+        .first()
+        .and_then(|r| r[0].clone())) as usize;
     let (mut problems, tables) = projections(url, &mut db, model, time, base, Some(chain_check))?;
     problems.extend(tables);
     Ok((problems, records))
@@ -94,7 +117,13 @@ impl Stream {
     }
 
     /// The entries of commit `tx` to its hash; those of earlier transactions have no commit.
-    fn feed(&mut self, conn: &mut Conn, tx: i64, hasher: &mut CommitHasher, orphans: &mut BTreeSet<i64>) -> Result<(), String> {
+    fn feed(
+        &mut self,
+        conn: &mut Conn,
+        tx: i64,
+        hasher: &mut CommitHasher,
+        orphans: &mut BTreeSet<i64>,
+    ) -> Result<(), String> {
         while let Some(t) = self.front(conn)? {
             if t > tx {
                 break;
@@ -129,10 +158,20 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
     };
     // applied migrations and renames: a few rows per migration
     let mut applied: BTreeMap<i64, Vec<String>> = BTreeMap::new();
-    let mut keys: Vec<(i64, String)> = conn.query("SELECT CAST(\"tx\" AS TEXT), \"key\" FROM \"_quadra_applied\"", &[])?.iter().map(|r| (num(&r[0]), r[1].clone().unwrap_or_default())).collect();
+    let mut keys: Vec<(i64, String)> = conn
+        .query(
+            "SELECT CAST(\"tx\" AS TEXT), \"key\" FROM \"_quadra_applied\"",
+            &[],
+        )?
+        .iter()
+        .map(|r| (num(&r[0]), r[1].clone().unwrap_or_default()))
+        .collect();
     keys.sort();
     for (tx, k) in keys {
-        applied.entry(tx).or_default().push(json!(["a", k]).to_string());
+        applied
+            .entry(tx)
+            .or_default()
+            .push(json!(["a", k]).to_string());
     }
     let mut renames: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     for r in conn.query("SELECT CAST(\"tx\" AS TEXT), \"entity\", \"old_name\", \"new_name\" FROM \"_quadra_renames\" ORDER BY \"_quadra_renames\".\"seq\"", &[])? {
@@ -153,20 +192,37 @@ fn chain(conn: &mut Conn) -> Result<Vec<String>, String> {
             let tx = num(&r[0]);
             after = tx;
             if r[4].as_deref() != Some(prev.as_str()) {
-                problems.push(format!("commit {tx}: previous hash does not match the chain"));
+                problems.push(format!(
+                    "commit {tx}: previous hash does not match the chain"
+                ));
             }
             let user = r[2].as_deref().and_then(|u| u.parse().ok());
-            let mut h = CommitHasher::new(&prev, tx as u64, r[1].as_deref().unwrap_or(""), user, r[3].as_deref().unwrap_or(""));
+            let mut h = CommitHasher::new(
+                &prev,
+                tx as u64,
+                r[1].as_deref().unwrap_or(""),
+                user,
+                r[3].as_deref().unwrap_or(""),
+            );
             hist.feed(conn, tx, &mut h, &mut orphans)?;
             ledger.feed(conn, tx, &mut h, &mut orphans)?;
             // (those of earlier transactions have no commit)
-            let earlier: Vec<i64> = applied.range(..tx).map(|(t, _)| *t).chain(renames.range(..tx).map(|(t, _)| *t)).collect();
+            let earlier: Vec<i64> = applied
+                .range(..tx)
+                .map(|(t, _)| *t)
+                .chain(renames.range(..tx).map(|(t, _)| *t))
+                .collect();
             for t in earlier {
                 applied.remove(&t);
                 renames.remove(&t);
                 orphans.insert(t);
             }
-            for e in applied.remove(&tx).unwrap_or_default().iter().chain(renames.remove(&tx).unwrap_or_default().iter()) {
+            for e in applied
+                .remove(&tx)
+                .unwrap_or_default()
+                .iter()
+                .chain(renames.remove(&tx).unwrap_or_default().iter())
+            {
                 h.entry(e);
             }
             if r[5].as_deref() != Some(h.finish().as_str()) {
@@ -228,7 +284,16 @@ struct Pass<'a> {
 
 /// Workers checking the units of a pass, each with its connection, engine and cache.
 fn workers() -> usize {
-    std::env::var("QUADRA_VERIFY_WORKERS").ok().and_then(|v| v.parse().ok()).unwrap_or((std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 6))
+    std::env::var("QUADRA_VERIFY_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(
+            (std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                / 2)
+            .clamp(1, 6),
+        )
 }
 
 /// Every entity table against the history, a range of rows at a time, the ranges checked by
@@ -238,10 +303,22 @@ fn workers() -> usize {
 /// (`DbSource::patch`), and they are read from their history, so that a collection is the one
 /// of the history whatever the tables say. The findings come in the order of the tables and
 /// of the ids, whatever the worker that found them.
-fn projections(url: &str, db: &mut Database, model: &Model, time: NaiveDateTime, base: u64, chain: Option<std::thread::JoinHandle<Result<Vec<String>, String>>>) -> Result<(Vec<String>, Vec<String>), String> {
+fn projections(
+    url: &str,
+    db: &mut Database,
+    model: &Model,
+    time: NaiveDateTime,
+    base: u64,
+    chain: Option<std::thread::JoinHandle<Result<Vec<String>, String>>>,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let schema = db.schema.clone();
     let renames = load_renames(&mut db.conn)?;
-    let tables: Vec<Table> = schema.tables.iter().filter(|t| matches!(t.source, TableSource::Entity(_))).cloned().collect();
+    let tables: Vec<Table> = schema
+        .tables
+        .iter()
+        .filter(|t| matches!(t.source, TableSource::Entity(_)))
+        .cloned()
+        .collect();
     // the ranges of rows: about `UNIT_ROWS` each (smaller when `PAGE` is set lower, as the
     // tests do to cross page boundaries)
     let per_unit = UNIT_ROWS.min(page() * 10).max(1);
@@ -252,10 +329,27 @@ fn projections(url: &str, db: &mut Database, model: &Model, time: NaiveDateTime,
         let TableSource::Entity(ent) = &t.source else {
             continue;
         };
-        let n_rows = num(&db.conn.query(&format!("SELECT CAST(COUNT(*) AS TEXT) FROM \"{}\"", t.name), &[])?.first().and_then(|r| r[0].clone()));
-        let n_recs = num(&db.conn.query("SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_records\" WHERE \"entity\" = ?text", &[Sql::Text(ent.clone())])?.first().and_then(|r| r[0].clone()));
+        let n_rows = num(&db
+            .conn
+            .query(
+                &format!("SELECT CAST(COUNT(*) AS TEXT) FROM \"{}\"", t.name),
+                &[],
+            )?
+            .first()
+            .and_then(|r| r[0].clone()));
+        let n_recs = num(&db
+            .conn
+            .query(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_records\" WHERE \"entity\" = ?text",
+                &[Sql::Text(ent.clone())],
+            )?
+            .first()
+            .and_then(|r| r[0].clone()));
         if n_rows != n_recs {
-            table_msgs[ti].push(format!("table {}: {} rows, the history has {}", t.name, n_rows, n_recs));
+            table_msgs[ti].push(format!(
+                "table {}: {} rows, the history has {}",
+                t.name, n_rows, n_recs
+            ));
             // the records without a row: candidates of every lookup of their entity
             let missing = db.conn.query(
                 &format!("SELECT CAST(r.\"id\" AS TEXT) FROM \"_quadra_records\" r WHERE r.\"entity\" = ?text AND NOT EXISTS (SELECT 1 FROM \"{}\" t WHERE t.\"id\" = r.\"id\")", t.name),
@@ -265,10 +359,16 @@ fn projections(url: &str, db: &mut Database, model: &Model, time: NaiveDateTime,
             for r in missing {
                 let id = num(&r[0]) as Id;
                 for fm in t.fields.iter().filter(|fm| !fm.formula) {
-                    patch.entry((ent.clone(), fm.field.clone())).or_default().insert(id);
+                    patch
+                        .entry((ent.clone(), fm.field.clone()))
+                        .or_default()
+                        .insert(id);
                 }
                 for sm in &sets {
-                    patch.entry((ent.clone(), sm.field.clone())).or_default().insert(id);
+                    patch
+                        .entry((ent.clone(), sm.field.clone()))
+                        .or_default()
+                        .insert(id);
                 }
             }
         }
@@ -281,10 +381,18 @@ fn projections(url: &str, db: &mut Database, model: &Model, time: NaiveDateTime,
         }
         let mut after = i64::MIN;
         for b in bounds {
-            units.push(Unit { table: ti, after, upto: Some(b) });
+            units.push(Unit {
+                table: ti,
+                after,
+                upto: Some(b),
+            });
             after = b;
         }
-        units.push(Unit { table: ti, after, upto: None });
+        units.push(Unit {
+            table: ti,
+            after,
+            upto: None,
+        });
     }
     let mut stored_problems: Vec<String> = Vec::new();
     let mut overrides: HashMap<(Id, String), serde_json::Value> = HashMap::new();
@@ -296,15 +404,33 @@ fn projections(url: &str, db: &mut Database, model: &Model, time: NaiveDateTime,
         for ((id, f), v) in &overrides {
             by_id.entry(*id).or_default().push((f.clone(), v.clone()));
         }
-        let patch_list: HashMap<(String, String), Vec<Id>> = patch.iter().map(|(k, v)| (k.clone(), v.iter().copied().collect())).collect();
+        let patch_list: HashMap<(String, String), Vec<Id>> = patch
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
+            .collect();
         // the records whose rows do not say what their history says (found by the first pass):
         // read from their history wherever they are read
         let wrong_rows: std::collections::HashSet<Id> = patch.values().flatten().copied().collect();
         let patched = patch.len();
-        let ctx = Pass { url, model, schema: &schema, renames: &renames, time, base, first, tables: &tables, units: &units, overrides: &by_id, patch: &patch_list, wrong_rows: &wrong_rows };
+        let ctx = Pass {
+            url,
+            model,
+            schema: &schema,
+            renames: &renames,
+            time,
+            base,
+            first,
+            tables: &tables,
+            units: &units,
+            overrides: &by_id,
+            patch: &patch_list,
+            wrong_rows: &wrong_rows,
+        };
         let outs = run_units(&ctx)?;
         if let Some(h) = chain.take() {
-            chain_problems = h.join().map_err(|_| "verify: the hash chain's check failed".to_string())??;
+            chain_problems = h
+                .join()
+                .map_err(|_| "verify: the hash chain's check failed".to_string())??;
         }
         let mut problems = Vec::new();
         let mut wrong: HashMap<(Id, String), serde_json::Value> = HashMap::new();
@@ -334,7 +460,8 @@ fn projections(url: &str, db: &mut Database, model: &Model, time: NaiveDateTime,
 /// The units of a pass, checked by the workers; their findings in the order of the units.
 fn run_units(ctx: &Pass) -> Result<Vec<UnitOut>, String> {
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: std::sync::Mutex<Vec<Option<UnitOut>>> = std::sync::Mutex::new((0..ctx.units.len()).map(|_| None).collect());
+    let results: std::sync::Mutex<Vec<Option<UnitOut>>> =
+        std::sync::Mutex::new((0..ctx.units.len()).map(|_| None).collect());
     let n = workers().min(ctx.units.len()).max(1);
     let errors: Vec<String> = std::thread::scope(|sc| {
         let handles: Vec<_> = (0..n)
@@ -359,12 +486,24 @@ fn run_units(ctx: &Pass) -> Result<Vec<UnitOut>, String> {
                 })
             })
             .collect();
-        handles.into_iter().filter_map(|h| h.join().unwrap_or_else(|_| Err("verify: a worker failed".into())).err()).collect()
+        handles
+            .into_iter()
+            .filter_map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("verify: a worker failed".into()))
+                    .err()
+            })
+            .collect()
     });
     if let Some(e) = errors.into_iter().next() {
         return Err(e);
     }
-    results.into_inner().unwrap().into_iter().map(|o| o.ok_or_else(|| "verify: a range of rows was not checked".to_string())).collect()
+    results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|o| o.ok_or_else(|| "verify: a range of rows was not checked".to_string()))
+        .collect()
 }
 
 /// A worker: its connection (a source reading the page's records from their history and the
@@ -380,7 +519,13 @@ struct Worker<'m> {
 impl<'m> Worker<'m> {
     fn new(ctx: &Pass<'m>) -> Result<Worker<'m>, String> {
         let schema = Rc::new(ctx.schema.clone());
-        let src = Rc::new(RefCell::new(DbSource::with_renames(Pooled::own(Conn::open(ctx.url)?), ctx.base, schema.clone(), None, ctx.renames.clone())?));
+        let src = Rc::new(RefCell::new(DbSource::with_renames(
+            Pooled::own(Conn::open(ctx.url)?),
+            ctx.base,
+            schema.clone(),
+            None,
+            ctx.renames.clone(),
+        )?));
         {
             let mut s = src.borrow_mut();
             // the page's records from their history, the other records from their rows (checked
@@ -400,8 +545,24 @@ impl<'m> Worker<'m> {
         interp.store.untracked = true;
         interp.load_units();
         interp.materialize = materialized_formulas(&schema);
-        let by_id: HashMap<Id, Vec<(String, V)>> = ctx.overrides.iter().map(|(id, l)| (*id, l.iter().map(|(f, v)| (f.clone(), quadra_runtime::codec::from_json(v))).collect())).collect();
-        Ok(Worker { src, interp, by_id: Rc::new(by_id), size: HashMap::new() })
+        let by_id: HashMap<Id, Vec<(String, V)>> = ctx
+            .overrides
+            .iter()
+            .map(|(id, l)| {
+                (
+                    *id,
+                    l.iter()
+                        .map(|(f, v)| (f.clone(), quadra_runtime::codec::from_json(v)))
+                        .collect(),
+                )
+            })
+            .collect();
+        Ok(Worker {
+            src,
+            interp,
+            by_id: Rc::new(by_id),
+            size: HashMap::new(),
+        })
     }
 
     /// The rows of a unit, a page at a time.
@@ -417,8 +578,20 @@ impl<'m> Worker<'m> {
         // what the page's formulas read is loaded with it (nothing for a table without any)
         let computes = t.fields.iter().any(|f| f.formula);
         let sets = ctx.schema.sets.get(ent).cloned().unwrap_or_default();
-        let cols: Vec<String> = t.fields.iter().flat_map(|f| f.columns.iter().map(|c| format!("CAST(\"{}\" AS TEXT)", c.name))).collect();
-        let names: Vec<String> = t.fields.iter().flat_map(|f| f.columns.iter().map(|c| c.name.clone())).collect();
+        let cols: Vec<String> = t
+            .fields
+            .iter()
+            .flat_map(|f| {
+                f.columns
+                    .iter()
+                    .map(|c| format!("CAST(\"{}\" AS TEXT)", c.name))
+            })
+            .collect();
+        let names: Vec<String> = t
+            .fields
+            .iter()
+            .flat_map(|f| f.columns.iter().map(|c| c.name.clone()))
+            .collect();
         let upto = match u.upto {
             Some(b) => format!(" AND \"id\" <= {b}"),
             None => String::new(),
@@ -427,7 +600,11 @@ impl<'m> Worker<'m> {
         let mut after = u.after;
         let mut size = *self.size.get(&u.table).unwrap_or(&page().min(64));
         loop {
-            let rows = self.src.borrow_mut().conn().query(&sql, &[Sql::Int(after), Sql::Int(size as i64)])?;
+            let rows = self
+                .src
+                .borrow_mut()
+                .conn()
+                .query(&sql, &[Sql::Int(after), Sql::Int(size as i64)])?;
             if rows.is_empty() {
                 break;
             }
@@ -480,7 +657,15 @@ impl<'m> Worker<'m> {
                         held.entry(num(&r[0]) as Id).or_default().insert(num(&r[1]) as Id);
                     }
                     for id in &recs {
-                        let want: BTreeSet<Id> = interp.store.records.get(id).and_then(|r| r.fields.get(&sm.field)).map(quadra_runtime::store::ref_ids).unwrap_or_default().into_iter().collect();
+                        let want: BTreeSet<Id> = interp
+                            .store
+                            .records
+                            .get(id)
+                            .and_then(|r| r.fields.get(&sm.field))
+                            .map(quadra_runtime::store::ref_ids)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
                         if held.get(id).cloned().unwrap_or_default() != want {
                             out.patch.push(((ent.clone(), sm.field.clone()), *id));
                         }
@@ -491,24 +676,44 @@ impl<'m> Worker<'m> {
                 let id = num(&r[0]) as Id;
                 if !known.contains(&id) {
                     if first {
-                        out.stored.push(format!("table {}: row {id} is not in the history", t.name));
+                        out.stored
+                            .push(format!("table {}: row {id} is not in the history", t.name));
                     }
                     continue;
                 }
-                let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+                let rec = V::Ref {
+                    ent: Rc::from(ent.as_str()),
+                    id,
+                };
                 let mut i = 1;
                 for fm in &t.fields {
                     if !first && !fm.formula {
                         i += fm.columns.len();
                         continue;
                     }
-                    let v = if fm.formula { interp.get(&rec, &fm.field, None, None).unwrap_or(V::None) } else { interp.store.records.get(&id).and_then(|r| r.fields.get(&fm.field)).cloned().unwrap_or(V::None) };
+                    let v = if fm.formula {
+                        interp.get(&rec, &fm.field, None, None).unwrap_or(V::None)
+                    } else {
+                        interp
+                            .store
+                            .records
+                            .get(&id)
+                            .and_then(|r| r.fields.get(&fm.field))
+                            .cloned()
+                            .unwrap_or(V::None)
+                    };
                     let mut bad = false;
                     for c in &fm.columns {
                         let expected = encode(c, &v).as_text();
                         if !same(&r[i], &expected) {
                             bad = true;
-                            let p = format!("{}.{} of {id}: the table has {}, the history says {}", t.name, names[i - 1], r[i].as_deref().unwrap_or("NULL"), expected.as_deref().unwrap_or("NULL"));
+                            let p = format!(
+                                "{}.{} of {id}: the table has {}, the history says {}",
+                                t.name,
+                                names[i - 1],
+                                r[i].as_deref().unwrap_or("NULL"),
+                                expected.as_deref().unwrap_or("NULL")
+                            );
                             if fm.formula {
                                 out.problems.push(p);
                             } else {
@@ -518,7 +723,8 @@ impl<'m> Worker<'m> {
                         i += 1;
                     }
                     if bad && fm.formula {
-                        out.wrong.push(((id, fm.field.clone()), quadra_runtime::codec::to_json(&v)));
+                        out.wrong
+                            .push(((id, fm.field.clone()), quadra_runtime::codec::to_json(&v)));
                     } else if bad {
                         // a stored value the row does not have: lookups by it take the record
                         out.patch.push(((ent.clone(), fm.field.clone()), id));
@@ -552,12 +758,19 @@ fn lines_read(model: &Model, ent: &str) -> Vec<(String, String)> {
     let mut mentioned: BTreeSet<String> = BTreeSet::new();
     for f in &fields {
         if let Some(x) = &f.formula {
-            names(&serde_json::to_value(x).unwrap_or(serde_json::Value::Null), &mut mentioned);
+            names(
+                &serde_json::to_value(x).unwrap_or(serde_json::Value::Null),
+                &mut mentioned,
+            );
         }
     }
     let mut out = Vec::new();
     for f in &fields {
-        if f.formula.is_some() || f.through.is_some() || !mentioned.contains(&f.name) || !crate::schema::is_inverse(model, e, f) {
+        if f.formula.is_some()
+            || f.through.is_some()
+            || !mentioned.contains(&f.name)
+            || !crate::schema::is_inverse(model, e, f)
+        {
             continue;
         }
         let Some(quadra_ir::Ty::List(inner) | quadra_ir::Ty::Set(inner)) = &f.ty else {

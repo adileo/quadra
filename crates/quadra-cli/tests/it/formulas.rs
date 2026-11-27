@@ -22,23 +22,32 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 fn clock() -> chrono::NaiveDateTime {
-    chrono::NaiveDate::from_ymd_opt(2026, 11, 20).unwrap().and_hms_opt(10, 0, 0).unwrap()
+    chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+        .unwrap()
+        .and_hms_opt(10, 0, 0)
+        .unwrap()
 }
 
 fn example(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(name)
 }
 
 fn fresh(target: &str, name: &str) -> String {
     if target == "sqlite" {
-        let p = std::env::temp_dir().join(format!("quadra-formulas-{}-{name}.db", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("quadra-formulas-{}-{name}.db", std::process::id()));
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", p.display()));
         }
         format!("sqlite:{}", p.display())
     } else {
         let schema = format!("qf_{}_{name}", std::process::id());
-        Conn::open(target).unwrap().batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")).unwrap();
+        Conn::open(target)
+            .unwrap()
+            .batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+            .unwrap();
         format!("{target}#schema={schema}")
     }
 }
@@ -49,7 +58,8 @@ fn cleanup(target: &str, url: &str) {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
     } else if let Some((_, schema)) = url.split_once("#schema=") {
-        let _ = Conn::open(target).and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
+        let _ = Conn::open(target)
+            .and_then(|mut c| c.batch(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")));
     }
 }
 
@@ -97,11 +107,24 @@ enum Outcome {
 impl World {
     fn new(root: &Path, url: String) -> World {
         let project = quadra_sema::Project::load(root).unwrap();
-        let sources: Vec<(PathBuf, String)> = project.user_files().map(|f| (f.path.clone(), f.text.clone())).collect();
+        let sources: Vec<(PathBuf, String)> = project
+            .user_files()
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
         let checked = quadra_analysis::check(&project);
         assert!(checked.model.is_some(), "{} does not check", root.display());
-        let schema = Rc::new(quadra_store::schema::build(checked.model.as_ref().unwrap(), &checked.report));
-        World { root: root.to_path_buf(), url, sources, checked, schema, overlays: RefCell::new(Default::default()) }
+        let schema = Rc::new(quadra_store::schema::build(
+            checked.model.as_ref().unwrap(),
+            &checked.report,
+        ));
+        World {
+            root: root.to_path_buf(),
+            url,
+            sources,
+            checked,
+            schema,
+            overlays: RefCell::new(Default::default()),
+        }
     }
 
     /// The model with formulas added to an entity (as the server checks a query's `where`).
@@ -112,7 +135,10 @@ impl World {
         }
         let mut sources = self.sources.clone();
         if !items.is_empty() {
-            sources.push((self.root.join("tests/__api__.qd"), quadra_api::overlay_source(entity, items)));
+            sources.push((
+                self.root.join("tests/__api__.qd"),
+                quadra_api::overlay_source(entity, items),
+            ));
         }
         let project = quadra_sema::Project::from_sources(&self.root, sources);
         let c = quadra_analysis::check(&project);
@@ -133,7 +159,13 @@ impl World {
         self.interp_on(self.model(), fast, user, base)
     }
 
-    fn interp_on<'m>(&self, model: &'m quadra_ir::Model, fast: bool, user: Option<u64>, base: Option<u64>) -> Interp<'m> {
+    fn interp_on<'m>(
+        &self,
+        model: &'m quadra_ir::Model,
+        fast: bool,
+        user: Option<u64>,
+        base: Option<u64>,
+    ) -> Interp<'m> {
         let mut conn = Conn::open(&self.url).unwrap();
         let base = base.unwrap_or_else(|| head(&mut conn).unwrap());
         let mut src = DbSource::at(Pooled::own(conn), base, self.schema.clone(), None).unwrap();
@@ -155,22 +187,39 @@ impl World {
     fn user(&self, login: &str) -> u64 {
         let mut i = self.interp(false, None, None);
         let ids = i.ids("User", None);
-        ids.into_iter().find(|id| i.store.read(*id, "login", None).map_or(false, |v| v.to_string() == login)).unwrap_or_else(|| panic!("no user {login}"))
+        ids.into_iter()
+            .find(|id| {
+                i.store
+                    .read(*id, "login", None)
+                    .map_or(false, |v| v.to_string() == login)
+            })
+            .unwrap_or_else(|| panic!("no user {login}"))
     }
 
     fn ids(&self, sql: &str) -> Vec<u64> {
-        Conn::open(&self.url).unwrap().query(sql, &[]).unwrap().into_iter().filter_map(|r| r[0].as_deref().and_then(|x| x.parse().ok())).collect()
+        Conn::open(&self.url)
+            .unwrap()
+            .query(sql, &[])
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| r[0].as_deref().and_then(|x| x.parse().ok()))
+            .collect()
     }
 
     /// API operations committed as the server commits them, on a working set read at `base`.
     fn commit_at(&self, fast: bool, user: u64, base: Option<u64>, ops: &J) -> Outcome {
         let model = self.model();
         let mut i = self.interp(fast, Some(user), base);
-        let db = quadra_store::Database::with(Pooled::own(Conn::open(&self.url).unwrap()), self.schema.clone());
+        let db = quadra_store::Database::with(
+            Pooled::own(Conn::open(&self.url).unwrap()),
+            self.schema.clone(),
+        );
         i.materialize = quadra_store::materialized_formulas(&db.schema);
         i.sink = Some(Box::new(quadra_store::Sink { db, model }));
         let ops = ops.as_array().unwrap().clone();
-        let r = i.with_cause("test".into(), |i| i.transaction(|i| quadra_api::apply_ops(i, model, &ops).map(|_| ())));
+        let r = i.with_cause("test".into(), |i| {
+            i.transaction(|i| quadra_api::apply_ops(i, model, &ops).map(|_| ()))
+        });
         match r {
             Ok(()) => Outcome::Done,
             Err(Flow::Conflict(_)) => Outcome::Conflict,
@@ -183,7 +232,11 @@ impl World {
         let before = self.head();
         let r = self.commit_at(true, user, None, ops);
         if r != Outcome::Done {
-            assert_eq!(self.head(), before, "a refused commit wrote something: {ops}");
+            assert_eq!(
+                self.head(),
+                before,
+                "a refused commit wrote something: {ops}"
+            );
         }
         r
     }
@@ -191,16 +244,39 @@ impl World {
     /// Every materialized column against a recomputation from the history (streamed, and
     /// in memory: the same findings).
     fn verify(&self) {
-        let (problems, n) = quadra_store::ops::verify(&self.url, self.model(), &self.checked.report, clock()).unwrap();
-        assert!(problems.is_empty(), "verify: {}", problems.into_iter().take(10).collect::<Vec<_>>().join("\n"));
-        let (reference, m) = quadra_store::ops::verify_in_memory(&self.url, self.model(), &self.checked.report, clock()).unwrap();
-        assert!(reference.is_empty() && n == m, "verify in memory: {reference:?}, {m} records against {n}");
+        let (problems, n) =
+            quadra_store::ops::verify(&self.url, self.model(), &self.checked.report, clock())
+                .unwrap();
+        assert!(
+            problems.is_empty(),
+            "verify: {}",
+            problems.into_iter().take(10).collect::<Vec<_>>().join("\n")
+        );
+        let (reference, m) = quadra_store::ops::verify_in_memory(
+            &self.url,
+            self.model(),
+            &self.checked.report,
+            clock(),
+        )
+        .unwrap();
+        assert!(
+            reference.is_empty() && n == m,
+            "verify in memory: {reference:?}, {m} records against {n}"
+        );
     }
 
     /// The problems both ways, sorted (the in-memory verify lists them in no fixed order).
     fn verify_both(&self) -> (Vec<String>, Vec<String>) {
-        let (mut a, _) = quadra_store::ops::verify(&self.url, self.model(), &self.checked.report, clock()).unwrap();
-        let (mut b, _) = quadra_store::ops::verify_in_memory(&self.url, self.model(), &self.checked.report, clock()).unwrap();
+        let (mut a, _) =
+            quadra_store::ops::verify(&self.url, self.model(), &self.checked.report, clock())
+                .unwrap();
+        let (mut b, _) = quadra_store::ops::verify_in_memory(
+            &self.url,
+            self.model(),
+            &self.checked.report,
+            clock(),
+        )
+        .unwrap();
         a.sort();
         b.sort();
         (a, b)
@@ -216,7 +292,11 @@ impl World {
             Ok(j) => j.clone(),
             Err((s, m)) => json!({ "status": s, "error": m }),
         };
-        assert_eq!(show(&got), show(&want), "{entity}#{id}: read with the stored formulas and the reference way differ");
+        assert_eq!(
+            show(&got),
+            show(&want),
+            "{entity}#{id}: read with the stored formulas and the reference way differ"
+        );
     }
 
     /// A query read with SQL and the stored formulas, and the reference way.
@@ -236,7 +316,11 @@ impl World {
             }
             Err((s, m)) => json!({ "status": s, "error": m }),
         };
-        assert_eq!(strip(&got), strip(&want), "query {q}: with the stored formulas and the reference way differ");
+        assert_eq!(
+            strip(&got),
+            strip(&want),
+            "query {q}: with the stored formulas and the reference way differ"
+        );
     }
 }
 
@@ -245,13 +329,34 @@ impl World {
 fn stress_world(target: &str, name: &str) -> World {
     let root = example("stress");
     let url = fresh(target, name);
-    let dir = std::env::temp_dir().join(format!("quadra-formulas-{}-gen-{name}-{}", std::process::id(), if target == "sqlite" { "s" } else { "p" }));
+    let dir = std::env::temp_dir().join(format!(
+        "quadra-formulas-{}-gen-{name}-{}",
+        std::process::id(),
+        if target == "sqlite" { "s" } else { "p" }
+    ));
     let _ = std::fs::remove_dir_all(&dir);
-    let st = std::process::Command::new(env!("CARGO_BIN_EXE_quadra")).args(["bench", "gen", "--scale", "tiny", "--out"]).arg(&dir).output().unwrap();
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_quadra"))
+        .args(["bench", "gen", "--scale", "tiny", "--out"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
     let w = World::new(&root, url.clone());
     quadra_store::ops::init(&url, w.model(), &w.checked.report, clock()).unwrap();
-    quadra_store::bulk::import_dir(&url, w.model(), &w.checked.report, &dir, clock(), None, &mut |_| {}).unwrap();
+    quadra_store::bulk::import_dir(
+        &url,
+        w.model(),
+        &w.checked.report,
+        &dir,
+        clock(),
+        None,
+        &mut |_| {},
+    )
+    .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     World::new(&root, url)
 }
@@ -262,7 +367,12 @@ fn stress_classification(w: &World) {
         .schema
         .tables
         .iter()
-        .flat_map(|t| t.fields.iter().filter(|f| f.formula && f.incremental).map(move |f| format!("{}.{}", t.name, f.field)))
+        .flat_map(|t| {
+            t.fields
+                .iter()
+                .filter(|f| f.formula && f.incremental)
+                .map(move |f| format!("{}.{}", t.name, f.field))
+        })
         .collect();
     for want in [
         "region.revenue",
@@ -287,7 +397,10 @@ fn stress_classification(w: &World) {
         "category.depth",
         "category.path",
     ] {
-        assert!(inc.iter().any(|x| x == want), "{want} is not incremental: {inc:?}");
+        assert!(
+            inc.iter().any(|x| x == want),
+            "{want} is not incremental: {inc:?}"
+        );
     }
 }
 
@@ -327,57 +440,93 @@ fn stress_op(w: &World, rng: &mut Rng) -> (J, Vec<(String, u64)>) {
     let (op, touched) = match k {
         0 | 1 => {
             let l = one(rng, &lines);
-            (json!({ "op": "update", "entity": "OrderLine", "id": l, "values": { "qty": qty(rng) } }), vec![("OrderLine".to_string(), l)])
+            (
+                json!({ "op": "update", "entity": "OrderLine", "id": l, "values": { "qty": qty(rng) } }),
+                vec![("OrderLine".to_string(), l)],
+            )
         }
         2 => {
             let l = one(rng, &lines);
-            (json!({ "op": "update", "entity": "OrderLine", "id": l, "values": { "discount": format!("{}%", rng.below(40)), "price": format!("{}.{} EUR/pcs", 1 + rng.below(90), rng.below(100)) } }), vec![("OrderLine".to_string(), l)])
+            (
+                json!({ "op": "update", "entity": "OrderLine", "id": l, "values": { "discount": format!("{}%", rng.below(40)), "price": format!("{}.{} EUR/pcs", 1 + rng.below(90), rng.below(100)) } }),
+                vec![("OrderLine".to_string(), l)],
+            )
         }
         3 => {
             let o = one(rng, &open);
             let p = one(rng, &products);
-            (json!({ "op": "create", "entity": "OrderLine", "values": { "order": o, "product": p, "qty": qty(rng) } }), vec![("Order".to_string(), o), ("Product".to_string(), p)])
+            (
+                json!({ "op": "create", "entity": "OrderLine", "values": { "order": o, "product": p, "qty": qty(rng) } }),
+                vec![("Order".to_string(), o), ("Product".to_string(), p)],
+            )
         }
         4 | 5 => {
             let l = one(rng, &confirmed);
-            (json!({ "op": "create", "entity": "Shipment", "values": { "line": l, "qty": format!("{} pcs", 1 + rng.below(3)), "date": "2026-12-01", "carrier": "Rail" } }), vec![("OrderLine".to_string(), l)])
+            (
+                json!({ "op": "create", "entity": "Shipment", "values": { "line": l, "qty": format!("{} pcs", 1 + rng.below(3)), "date": "2026-12-01", "carrier": "Rail" } }),
+                vec![("OrderLine".to_string(), l)],
+            )
         }
         6 => {
             let s = one(rng, &shipments);
-            (json!({ "op": "update", "entity": "Shipment", "id": s, "values": { "qty": format!("{} pcs", 1 + rng.below(4)) } }), vec![("Shipment".to_string(), s)])
+            (
+                json!({ "op": "update", "entity": "Shipment", "id": s, "values": { "qty": format!("{} pcs", 1 + rng.below(4)) } }),
+                vec![("Shipment".to_string(), s)],
+            )
         }
         7 | 8 => {
             let c = one(rng, &customers);
             let to = one(rng, &regions);
-            (json!({ "op": "update", "entity": "Customer", "id": c, "values": { "region": to } }), vec![("Customer".to_string(), c), ("Region".to_string(), to)])
+            (
+                json!({ "op": "update", "entity": "Customer", "id": c, "values": { "region": to } }),
+                vec![("Customer".to_string(), c), ("Region".to_string(), to)],
+            )
         }
         9 => {
             let p = one(rng, &products);
             let c = one(rng, &categories);
-            (json!({ "op": "update", "entity": "Product", "id": p, "values": { "category": c } }), vec![("Product".to_string(), p), ("Category".to_string(), c)])
+            (
+                json!({ "op": "update", "entity": "Product", "id": p, "values": { "category": c } }),
+                vec![("Product".to_string(), p), ("Category".to_string(), c)],
+            )
         }
         10 => {
             let c = one(rng, &categories);
             let p = one(rng, &categories);
-            (json!({ "op": "update", "entity": "Category", "id": c, "values": { "parent": p } }), vec![("Category".to_string(), c)])
+            (
+                json!({ "op": "update", "entity": "Category", "id": c, "values": { "parent": p } }),
+                vec![("Category".to_string(), c)],
+            )
         }
         11 => {
             let o = one(rng, &open);
             let action = ["confirm", "cancel", "ship"][rng.below(3)];
-            (json!({ "op": "action", "entity": "Order", "id": o, "action": action }), vec![("Order".to_string(), o)])
+            (
+                json!({ "op": "action", "entity": "Order", "id": o, "action": action }),
+                vec![("Order".to_string(), o)],
+            )
         }
         12 => {
             let c = one(rng, &customers);
-            (json!({ "op": "update", "entity": "Customer", "id": c, "values": { "active": rng.below(4) != 0, "credit_limit": format!("{}.00 EUR", 1000 + 1000 * rng.below(60)) } }), vec![("Customer".to_string(), c)])
+            (
+                json!({ "op": "update", "entity": "Customer", "id": c, "values": { "active": rng.below(4) != 0, "credit_limit": format!("{}.00 EUR", 1000 + 1000 * rng.below(60)) } }),
+                vec![("Customer".to_string(), c)],
+            )
         }
         13 => {
             let p = one(rng, &products);
-            (json!({ "op": "update", "entity": "Product", "id": p, "values": { "active": rng.below(3) != 0 } }), vec![("Product".to_string(), p)])
+            (
+                json!({ "op": "update", "entity": "Product", "id": p, "values": { "active": rng.below(3) != 0 } }),
+                vec![("Product".to_string(), p)],
+            )
         }
         14 => {
             // refused: a quantity must be positive
             let l = one(rng, &lines);
-            (json!({ "op": "update", "entity": "OrderLine", "id": l, "values": { "qty": "0 pcs" } }), vec![("OrderLine".to_string(), l)])
+            (
+                json!({ "op": "update", "entity": "OrderLine", "id": l, "values": { "qty": "0 pcs" } }),
+                vec![("OrderLine".to_string(), l)],
+            )
         }
         _ => {
             // several writes in one commit: a line moved to another order, quantities changed
@@ -386,7 +535,11 @@ fn stress_op(w: &World, rng: &mut Rng) -> (J, Vec<(String, u64)>) {
             let l2 = one(rng, &lines);
             (
                 json!([{ "op": "update", "entity": "OrderLine", "id": l, "values": { "order": o } }, { "op": "update", "entity": "OrderLine", "id": l2, "values": { "qty": qty(rng) } }]),
-                vec![("OrderLine".to_string(), l), ("OrderLine".to_string(), l2), ("Order".to_string(), o)],
+                vec![
+                    ("OrderLine".to_string(), l),
+                    ("OrderLine".to_string(), l2),
+                    ("Order".to_string(), o),
+                ],
             )
         }
     };
@@ -427,7 +580,15 @@ fn neighbourhood(w: &World, touched: &[(String, u64)], rng: &mut Rng) -> Vec<(St
             add(&mut out, "Region", i.store.read(id, "region", None));
         }
     }
-    for e in ["Region", "Customer", "Order", "OrderLine", "Category", "Product", "Tag"] {
+    for e in [
+        "Region",
+        "Customer",
+        "Order",
+        "OrderLine",
+        "Category",
+        "Product",
+        "Tag",
+    ] {
         let ids = i.ids(e, None);
         for _ in 0..2 {
             if let Some(id) = rng.pick(&ids) {
@@ -468,46 +629,86 @@ fn stress_sequence(w: &World, steps: usize, seed: u64) {
         n(&quadra_runtime::FORMULAS_BY_DELTA),
         n(&quadra_runtime::FORMULAS_COMPUTED)
     );
-    assert!(done > steps / 3 && refused > 0, "{done} commits done, {refused} refused: the sequence should do both");
+    assert!(
+        done > steps / 3 && refused > 0,
+        "{done} commits done, {refused} refused: the sequence should do both"
+    );
 }
 
 /// Two transactions read at the same snapshot: the second is refused when it relied on a value
 /// the first changed, as the reference refuses it; when it is not refused, nothing is lost.
 fn stress_conflicts(w: &World) {
     let admin = w.user("admin");
-    let lines_of = |order: u64| w.ids(&format!("SELECT CAST(\"id\" AS TEXT) FROM \"order_line\" WHERE \"order_id\" = {order} ORDER BY \"id\""));
+    let lines_of = |order: u64| {
+        w.ids(&format!("SELECT CAST(\"id\" AS TEXT) FROM \"order_line\" WHERE \"order_id\" = {order} ORDER BY \"id\""))
+    };
     let order = w.ids("SELECT CAST(o.\"id\" AS TEXT) FROM \"order\" o WHERE o.\"state\" = 'Confirmed' AND (SELECT COUNT(*) FROM \"order_line\" l WHERE l.\"order_id\" = o.\"id\") >= 2 ORDER BY o.\"id\" LIMIT 1")[0];
     let ls = lines_of(order);
-    let customer = w.ids(&format!("SELECT CAST(\"customer_id\" AS TEXT) FROM \"order\" WHERE \"id\" = {order}"))[0];
-    let region = w.ids(&format!("SELECT CAST(\"region_id\" AS TEXT) FROM \"customer\" WHERE \"id\" = {customer}"))[0];
+    let customer = w.ids(&format!(
+        "SELECT CAST(\"customer_id\" AS TEXT) FROM \"order\" WHERE \"id\" = {order}"
+    ))[0];
+    let region = w.ids(&format!(
+        "SELECT CAST(\"region_id\" AS TEXT) FROM \"customer\" WHERE \"id\" = {customer}"
+    ))[0];
     let other_order = w.ids(&format!("SELECT CAST(o.\"id\" AS TEXT) FROM \"order\" o JOIN \"customer\" c ON c.\"id\" = o.\"customer_id\" WHERE o.\"state\" = 'Confirmed' AND c.\"region_id\" = {region} AND o.\"customer_id\" <> {customer} ORDER BY o.\"id\" LIMIT 1"))[0];
     let other_line = lines_of(other_order)[0];
     let far = w.ids(&format!("SELECT CAST(o.\"id\" AS TEXT) FROM \"order\" o JOIN \"customer\" c ON c.\"id\" = o.\"customer_id\" WHERE o.\"state\" = 'Draft' AND c.\"region_id\" <> {region} ORDER BY o.\"id\" LIMIT 1"))[0];
     let qty = |l: u64, q: &str| json!([{ "op": "update", "entity": "OrderLine", "id": l, "values": { "qty": q } }]);
     let cases: Vec<(&str, J, J, bool)> = vec![
         // the same order's total, the same customer's and region's rollups
-        ("two lines of one order", qty(ls[0], "7 pcs"), qty(ls[1], "9 pcs"), true),
+        (
+            "two lines of one order",
+            qty(ls[0], "7 pcs"),
+            qty(ls[1], "9 pcs"),
+            true,
+        ),
         // two customers of one region: the region's revenue
-        ("two customers of one region", qty(ls[0], "8 pcs"), qty(other_line, "11 pcs"), true),
+        (
+            "two customers of one region",
+            qty(ls[0], "8 pcs"),
+            qty(other_line, "11 pcs"),
+            true,
+        ),
         // the same line twice
-        ("one line twice", qty(ls[1], "3 pcs"), qty(ls[1], "4 pcs"), true),
+        (
+            "one line twice",
+            qty(ls[1], "3 pcs"),
+            qty(ls[1], "4 pcs"),
+            true,
+        ),
         // a draft order of another region: no rollup in common but the category's
-        ("another region", qty(ls[0], "6 pcs"), json!([{ "op": "update", "entity": "Order", "id": far, "values": { "priority": "High" } }]), false),
+        (
+            "another region",
+            qty(ls[0], "6 pcs"),
+            json!([{ "op": "update", "entity": "Order", "id": far, "values": { "priority": "High" } }]),
+            false,
+        ),
     ];
     for (what, first, second, must) in cases {
         let mut outcomes = Vec::new();
         for fast in [true, false] {
             let base = w.head();
-            assert_eq!(w.commit_at(fast, admin, Some(base), &first), Outcome::Done, "{what}: the first commit");
+            assert_eq!(
+                w.commit_at(fast, admin, Some(base), &first),
+                Outcome::Done,
+                "{what}: the first commit"
+            );
             let out = w.commit_at(fast, admin, Some(base), &second);
             outcomes.push(out);
             w.verify();
         }
         let (fast, reference) = (&outcomes[0], &outcomes[1]);
         if must {
-            assert_eq!(*fast, Outcome::Conflict, "{what}: the second commit must be refused");
+            assert_eq!(
+                *fast,
+                Outcome::Conflict,
+                "{what}: the second commit must be refused"
+            );
         }
-        assert!(*fast != Outcome::Conflict || *reference == Outcome::Conflict, "{what}: refused where the reference is not: {outcomes:?}");
+        assert!(
+            *fast != Outcome::Conflict || *reference == Outcome::Conflict,
+            "{what}: refused where the reference is not: {outcomes:?}"
+        );
     }
 }
 
@@ -515,10 +716,26 @@ fn stress_on(target: &str, steps: usize) {
     let w = stress_world(target, "stress");
     stress_classification(&w);
     let admin = w.user("admin");
-    let sample: Vec<(String, u64)> = ["Region", "Customer", "Order", "OrderLine", "Shipment", "Category", "Product", "Tag"]
-        .iter()
-        .flat_map(|e| w.ids(&format!("SELECT CAST(\"id\" AS TEXT) FROM \"{}\" ORDER BY \"id\" LIMIT 4", quadra_store::schema::snake(e))).into_iter().map(move |id| (e.to_string(), id)))
-        .collect();
+    let sample: Vec<(String, u64)> = [
+        "Region",
+        "Customer",
+        "Order",
+        "OrderLine",
+        "Shipment",
+        "Category",
+        "Product",
+        "Tag",
+    ]
+    .iter()
+    .flat_map(|e| {
+        w.ids(&format!(
+            "SELECT CAST(\"id\" AS TEXT) FROM \"{}\" ORDER BY \"id\" LIMIT 4",
+            quadra_store::schema::snake(e)
+        ))
+        .into_iter()
+        .map(move |id| (e.to_string(), id))
+    })
+    .collect();
     stress_reads(&w, admin, &sample);
     // cancelled orders (frozen): their formulas as of then
     for id in w.ids("SELECT CAST(\"id\" AS TEXT) FROM \"order\" WHERE \"state\" = 'Cancelled' ORDER BY \"id\" LIMIT 5") {
@@ -531,7 +748,10 @@ fn stress_on(target: &str, steps: usize) {
 }
 
 fn steps() -> usize {
-    std::env::var("QUADRA_FORMULA_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(60)
+    std::env::var("QUADRA_FORMULA_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60)
 }
 
 #[test]
@@ -548,14 +768,17 @@ fn stress_formulas_on_postgres() {
     stress_on(&pg, steps());
 }
 
-
 // ---- a fuzzer driven by the model (any project) ------------------------------------------------
 
 /// The records of the concrete entities of the model, by entity.
 fn records_by_entity(i: &mut Interp) -> Vec<(String, Vec<u64>)> {
     let m = i.m;
     let mut out = Vec::new();
-    for e in m.entities.iter().filter(|e| e.kind == quadra_ir::EntityKind::Entity && !e.is_ledger && !e.temporary) {
+    for e in m
+        .entities
+        .iter()
+        .filter(|e| e.kind == quadra_ir::EntityKind::Entity && !e.is_ledger && !e.temporary)
+    {
         let ids = i.ids(&e.name, None);
         if !ids.is_empty() {
             out.push((e.name.clone(), ids));
@@ -580,15 +803,28 @@ fn nudge(rng: &mut Rng, v: &V, f: &quadra_ir::Field, all: &[(String, Vec<u64>)])
         V::Int(n) => V::Int((n + rng.below(7) as i64 - 3).max(0)),
         V::Dec(_) => V::Dec(small(rng) / Decimal::from(4)),
         V::Pct(_) => V::Pct(Decimal::from(rng.below(30) as i64) / Decimal::from(100)),
-        V::Money { cur, .. } => V::Money { amt: small(rng) * Decimal::from(5) + Decimal::new(rng.below(100) as i64, 2), cur: cur.clone() },
-        V::Qty { unit, .. } => V::Qty { v: small(rng), unit: unit.clone() },
-        V::Price { cur, per, .. } => V::Price { amt: small(rng) + Decimal::new(50, 2), cur: cur.clone(), per: per.clone() },
+        V::Money { cur, .. } => V::Money {
+            amt: small(rng) * Decimal::from(5) + Decimal::new(rng.below(100) as i64, 2),
+            cur: cur.clone(),
+        },
+        V::Qty { unit, .. } => V::Qty {
+            v: small(rng),
+            unit: unit.clone(),
+        },
+        V::Price { cur, per, .. } => V::Price {
+            amt: small(rng) + Decimal::new(50, 2),
+            cur: cur.clone(),
+            per: per.clone(),
+        },
         V::Bool(b) => V::Bool(!b),
         V::Date(d) => V::Date(*d + chrono::Duration::days(rng.below(60) as i64 - 30)),
         V::Ref { .. } => {
             let target = ty_entity(f.ty.as_ref())?;
             let ids = &all.iter().find(|(e, _)| *e == target)?.1;
-            V::Ref { ent: Rc::from(target.as_str()), id: rng.pick(ids)? }
+            V::Ref {
+                ent: Rc::from(target.as_str()),
+                id: rng.pick(ids)?,
+            }
         }
         _ => return None,
     })
@@ -602,17 +838,34 @@ fn fuzz_once(i: &mut Interp, rng: &mut Rng) -> Result<Vec<(String, u64)>, Flow> 
     let (ent, ids) = rng.pick(&all).ok_or(Flow::Fail("no records".into()))?;
     let e = m.entity(&ent).unwrap();
     let id = rng.pick(&ids).unwrap();
-    let rec = V::Ref { ent: Rc::from(ent.as_str()), id };
+    let rec = V::Ref {
+        ent: Rc::from(ent.as_str()),
+        id,
+    };
     let flow_fields: Vec<&str> = e.flows.iter().map(|f| f.field.as_str()).collect();
     let stored: Vec<&quadra_ir::Field> = m
         .all_fields(e)
         .into_iter()
-        .filter(|f| f.formula.is_none() && !f.per_company && f.kind == quadra_ir::FieldKind::Stored && !flow_fields.contains(&f.name.as_str()) && !matches!(f.ty, Some(quadra_ir::Ty::List(_)) | Some(quadra_ir::Ty::Set(_))))
+        .filter(|f| {
+            f.formula.is_none()
+                && !f.per_company
+                && f.kind == quadra_ir::FieldKind::Stored
+                && !flow_fields.contains(&f.name.as_str())
+                && !matches!(
+                    f.ty,
+                    Some(quadra_ir::Ty::List(_)) | Some(quadra_ir::Ty::Set(_))
+                )
+        })
         .collect();
     match rng.below(10) {
         // run an action (or a transition) without parameters
         0 | 1 => {
-            let mut names: Vec<(String, bool)> = e.actions.iter().filter(|a| a.params.is_empty()).map(|a| (a.name.clone(), true)).collect();
+            let mut names: Vec<(String, bool)> = e
+                .actions
+                .iter()
+                .filter(|a| a.params.is_empty())
+                .map(|a| (a.name.clone(), true))
+                .collect();
             for fl in &e.flows {
                 for t in &fl.transitions {
                     if let Some(b) = &t.by {
@@ -622,8 +875,14 @@ fn fuzz_once(i: &mut Interp, rng: &mut Rng) -> Result<Vec<(String, u64)>, Flow> 
                     }
                 }
             }
-            let Some((name, is_action)) = rng.pick(&names) else { return Ok(vec![(ent, id)]) };
-            let action = if is_action { e.actions.iter().find(|a| a.name == name) } else { None };
+            let Some((name, is_action)) = rng.pick(&names) else {
+                return Ok(vec![(ent, id)]);
+            };
+            let action = if is_action {
+                e.actions.iter().find(|a| a.name == name)
+            } else {
+                None
+            };
             i.run_action(&rec, &ent, &name, action, Vec::new(), Vec::new())?;
         }
         // a copy of a line of a document (an entity with a parent), unique fields aside
@@ -637,11 +896,16 @@ fn fuzz_once(i: &mut Interp, rng: &mut Rng) -> Result<Vec<(String, u64)>, Flow> 
                 }
             }
             let new = i.create(&ent, args)?;
-            return Ok(vec![(ent, new.as_ref_id().unwrap_or(id)), (e.name.clone(), id)]);
+            return Ok(vec![
+                (ent, new.as_ref_id().unwrap_or(id)),
+                (e.name.clone(), id),
+            ]);
         }
         // a field nudged
         _ => {
-            let Some(f) = rng.pick(&stored) else { return Ok(vec![(ent, id)]) };
+            let Some(f) = rng.pick(&stored) else {
+                return Ok(vec![(ent, id)]);
+            };
             if f.unique {
                 return Ok(vec![(ent, id)]);
             }
@@ -660,7 +924,8 @@ fn related(w: &World, touched: &[(String, u64)], rng: &mut Rng) -> Vec<(String, 
     let mut i = w.interp(false, None, None);
     let m = w.model();
     let mut out: Vec<(String, u64)> = Vec::new();
-    let mut todo: Vec<(String, u64, usize)> = touched.iter().map(|(e, id)| (e.clone(), *id, 0)).collect();
+    let mut todo: Vec<(String, u64, usize)> =
+        touched.iter().map(|(e, id)| (e.clone(), *id, 0)).collect();
     while let Some((e, id, depth)) = todo.pop() {
         if out.iter().any(|(x, y)| *x == e && *y == id) || !i.store.exists(id, None) {
             continue;
@@ -670,12 +935,16 @@ fn related(w: &World, touched: &[(String, u64)], rng: &mut Rng) -> Vec<(String, 
         if depth >= 4 {
             continue;
         }
-        let Some(ent) = m.entity(&actual) else { continue };
+        let Some(ent) = m.entity(&actual) else {
+            continue;
+        };
         for f in m.all_fields(ent) {
             if f.formula.is_some() {
                 continue;
             }
-            if let (Some(target), Some(V::Ref { id: t, .. })) = (ty_entity(f.ty.as_ref()), i.store.read(id, &f.name, None)) {
+            if let (Some(target), Some(V::Ref { id: t, .. })) =
+                (ty_entity(f.ty.as_ref()), i.store.read(id, &f.name, None))
+            {
                 todo.push((target, t, depth + 1));
             }
         }
@@ -696,7 +965,10 @@ fn fuzz(w: &World, user: u64, steps: usize, seed: u64) {
     let (mut done, mut refused) = (0, 0);
     for step in 0..steps {
         let mut i = w.interp(true, Some(user), None);
-        let db = quadra_store::Database::with(Pooled::own(Conn::open(&w.url).unwrap()), w.schema.clone());
+        let db = quadra_store::Database::with(
+            Pooled::own(Conn::open(&w.url).unwrap()),
+            w.schema.clone(),
+        );
         i.materialize = quadra_store::materialized_formulas(&db.schema);
         i.sink = Some(Box::new(quadra_store::Sink { db, model }));
         let before = w.head();
@@ -783,11 +1055,16 @@ fn verify_altered(target: &str) {
     let (a, b) = w.verify_both();
     assert!(a.is_empty() && b.is_empty(), "{a:?} {b:?}");
     let one = |sql: &str| w.ids(sql)[0];
-    let line = one("SELECT CAST(\"id\" AS TEXT) FROM \"order_line\" ORDER BY \"id\" LIMIT 1 OFFSET 20");
-    let order = one(&format!("SELECT CAST(\"order_id\" AS TEXT) FROM \"order_line\" WHERE \"id\" = {line}"));
-    let customer = one("SELECT CAST(\"id\" AS TEXT) FROM \"customer\" ORDER BY \"id\" LIMIT 1 OFFSET 3");
+    let line =
+        one("SELECT CAST(\"id\" AS TEXT) FROM \"order_line\" ORDER BY \"id\" LIMIT 1 OFFSET 20");
+    let order = one(&format!(
+        "SELECT CAST(\"order_id\" AS TEXT) FROM \"order_line\" WHERE \"id\" = {line}"
+    ));
+    let customer =
+        one("SELECT CAST(\"id\" AS TEXT) FROM \"customer\" ORDER BY \"id\" LIMIT 1 OFFSET 3");
     let region = one("SELECT CAST(\"id\" AS TEXT) FROM \"region\" ORDER BY \"id\" LIMIT 1");
-    let shipment = one("SELECT CAST(\"id\" AS TEXT) FROM \"shipment\" ORDER BY \"id\" DESC LIMIT 1");
+    let shipment =
+        one("SELECT CAST(\"id\" AS TEXT) FROM \"shipment\" ORDER BY \"id\" DESC LIMIT 1");
     let category = one("SELECT CAST(\"id\" AS TEXT) FROM \"category\" WHERE \"parent_id\" IS NOT NULL ORDER BY \"id\" LIMIT 1");
     let alterations: Vec<(&str, String)> = vec![
         // a formula column of a line (its order's total reads it)
@@ -812,7 +1089,10 @@ fn verify_altered(target: &str) {
         drop(c);
         let (a, b) = w.verify_both();
         assert!(!a.is_empty(), "{what}: nothing found");
-        assert_eq!(a, b, "{what}: the streamed verify and the in-memory one differ");
+        assert_eq!(
+            a, b,
+            "{what}: the streamed verify and the in-memory one differ"
+        );
     }
     cleanup(target, &w.url);
 }
@@ -824,7 +1104,9 @@ fn verify_streamed_on_sqlite() {
 
 #[test]
 fn verify_streamed_on_postgres() {
-    let Ok(pg) = std::env::var("QUADRA_TEST_PG") else { return };
+    let Ok(pg) = std::env::var("QUADRA_TEST_PG") else {
+        return;
+    };
     verify_altered(&pg);
 }
 
@@ -839,8 +1121,21 @@ fn ledger_on(target: &str) {
     let w = World::new(&root, url.clone());
     quadra_store::ops::init(&url, w.model(), &w.checked.report, clock()).unwrap();
     let w = World::new(&root, url);
-    let inc: Vec<String> = w.schema.tables.iter().flat_map(|t| t.fields.iter().filter(|f| f.formula && f.incremental).map(move |f| format!("{}.{}", t.name, f.field))).collect();
-    assert!(inc.iter().any(|x| x == "product.stock"), "Product.stock is not incremental: {inc:?}");
+    let inc: Vec<String> = w
+        .schema
+        .tables
+        .iter()
+        .flat_map(|t| {
+            t.fields
+                .iter()
+                .filter(|f| f.formula && f.incremental)
+                .map(move |f| format!("{}.{}", t.name, f.field))
+        })
+        .collect();
+    assert!(
+        inc.iter().any(|x| x == "product.stock"),
+        "Product.stock is not incremental: {inc:?}"
+    );
     let user = 0;
     let done = |ops: J| assert_eq!(w.commit(user, &ops), Outcome::Done, "{ops}");
     done(json!([
@@ -861,24 +1156,41 @@ fn ledger_on(target: &str) {
     };
     check("a restock");
     let (pen, ink) = (products[0], products[1]);
-    done(json!([{ "op": "create", "entity": "Restock", "values": { "product": ink, "qty": "5 pcs" } }, { "op": "create", "entity": "Restock", "values": { "product": pen, "qty": "3 pcs" } }]));
+    done(
+        json!([{ "op": "create", "entity": "Restock", "values": { "product": ink, "qty": "5 pcs" } }, { "op": "create", "entity": "Restock", "values": { "product": pen, "qty": "3 pcs" } }]),
+    );
     check("two restocks in one commit");
     // a restock changed: its rows taken back, posted again
     let r = w.ids("SELECT CAST(\"id\" AS TEXT) FROM \"restock\" ORDER BY \"id\"")[0];
     done(json!([{ "op": "update", "entity": "Restock", "id": r, "values": { "qty": "12 pcs" } }]));
     check("a restock changed");
-    for (n, (p, q)) in [(pen, "4 pcs"), (ink, "2 pcs"), (pen, "6 pcs")].iter().enumerate() {
-        done(json!([{ "op": "create", "entity": "Order", "ref": "o", "values": { "customer": customer, "date": "2026-11-01", "lines": [{ "product": p, "qty": q }] } }]));
-        let o = *w.ids("SELECT CAST(\"id\" AS TEXT) FROM \"order\" ORDER BY \"id\" DESC LIMIT 1").first().unwrap();
+    for (n, (p, q)) in [(pen, "4 pcs"), (ink, "2 pcs"), (pen, "6 pcs")]
+        .iter()
+        .enumerate()
+    {
+        done(
+            json!([{ "op": "create", "entity": "Order", "ref": "o", "values": { "customer": customer, "date": "2026-11-01", "lines": [{ "product": p, "qty": q }] } }]),
+        );
+        let o = *w
+            .ids("SELECT CAST(\"id\" AS TEXT) FROM \"order\" ORDER BY \"id\" DESC LIMIT 1")
+            .first()
+            .unwrap();
         done(json!([{ "op": "action", "entity": "Order", "id": o, "action": "confirm" }]));
         done(json!([{ "op": "action", "entity": "Order", "id": o, "action": "ship" }]));
         check(&format!("order {n} shipped"));
     }
     // more than the stock: refused by the ledger's check, nothing written
-    done(json!([{ "op": "create", "entity": "Order", "values": { "customer": customer, "date": "2026-11-02", "lines": [{ "product": ink, "qty": "50 pcs" }] } }]));
-    let o = *w.ids("SELECT CAST(\"id\" AS TEXT) FROM \"order\" ORDER BY \"id\" DESC LIMIT 1").first().unwrap();
+    done(
+        json!([{ "op": "create", "entity": "Order", "values": { "customer": customer, "date": "2026-11-02", "lines": [{ "product": ink, "qty": "50 pcs" }] } }]),
+    );
+    let o = *w
+        .ids("SELECT CAST(\"id\" AS TEXT) FROM \"order\" ORDER BY \"id\" DESC LIMIT 1")
+        .first()
+        .unwrap();
     done(json!([{ "op": "action", "entity": "Order", "id": o, "action": "confirm" }]));
-    assert!(matches!(w.commit(user, &json!([{ "op": "action", "entity": "Order", "id": o, "action": "ship" }])), Outcome::Refused(m) if m.contains("Not enough stock")));
+    assert!(
+        matches!(w.commit(user, &json!([{ "op": "action", "entity": "Order", "id": o, "action": "ship" }])), Outcome::Refused(m) if m.contains("Not enough stock"))
+    );
     check("a shipment refused");
     // the stock read in a transaction that posts (before and after its rows are posted, at
     // the checks): as the reference reads it
@@ -899,7 +1211,10 @@ fn ledger_on(target: &str) {
         assert!(matches!(r, Err(Flow::Fail(_))));
         seen.push(vals);
     }
-    assert_eq!(seen[0], seen[1], "the stock in a transaction that posts, with the stored value and the reference way");
+    assert_eq!(
+        seen[0], seen[1],
+        "the stock in a transaction that posts, with the stored value and the reference way"
+    );
     cleanup(target, &w.url);
 }
 
@@ -910,6 +1225,8 @@ fn ledger_formulas_on_sqlite() {
 
 #[test]
 fn ledger_formulas_on_postgres() {
-    let Ok(pg) = std::env::var("QUADRA_TEST_PG") else { return };
+    let Ok(pg) = std::env::var("QUADRA_TEST_PG") else {
+        return;
+    };
     ledger_on(&pg);
 }

@@ -9,19 +9,32 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(60)))
         .http_status_as_error(false)
-        .user_agent(format!("quadra/{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS))
+        .user_agent(format!(
+            "quadra/{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS
+        ))
         .build()
         .into()
 }
 
 /// A request with a JSON body or none; the answer's status and JSON (`null` if it is not JSON).
-pub fn json(method: &str, url: &str, bearer: Option<&str>, body: Option<&Value>) -> Result<(u16, Value), String> {
+pub fn json(
+    method: &str,
+    url: &str,
+    bearer: Option<&str>,
+    body: Option<&Value>,
+) -> Result<(u16, Value), String> {
     let a = agent();
     let auth = bearer.map(|t| format!("Bearer {t}"));
     let version = env!("CARGO_PKG_VERSION");
     let res = match method {
         "GET" | "DELETE" => {
-            let mut r = if method == "GET" { a.get(url) } else { a.delete(url) };
+            let mut r = if method == "GET" {
+                a.get(url)
+            } else {
+                a.delete(url)
+            };
             r = r.header("x-quadra-version", version);
             if let Some(h) = &auth {
                 r = r.header("authorization", h);
@@ -29,7 +42,11 @@ pub fn json(method: &str, url: &str, bearer: Option<&str>, body: Option<&Value>)
             r.call()
         }
         _ => {
-            let mut r = if method == "PATCH" { a.patch(url) } else { a.post(url) };
+            let mut r = if method == "PATCH" {
+                a.patch(url)
+            } else {
+                a.post(url)
+            };
             r = r.header("x-quadra-version", version);
             if let Some(h) = &auth {
                 r = r.header("authorization", h);
@@ -66,7 +83,10 @@ pub fn get_json(url: &str) -> Result<(u16, Value), String> {
 
 /// The body of a GET that must succeed (a download).
 pub fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let mut res = agent().get(url).call().map_err(|e| format!("cannot reach {}: {e}", host(url)))?;
+    let mut res = agent()
+        .get(url)
+        .call()
+        .map_err(|e| format!("cannot reach {}: {e}", host(url)))?;
     if res.status().as_u16() != 200 {
         return Err(format!("{url}: HTTP {}", res.status().as_u16()));
     }
@@ -81,5 +101,8 @@ pub fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn host(url: &str) -> &str {
-    url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url)
+    url.split("://")
+        .nth(1)
+        .and_then(|r| r.split('/').next())
+        .unwrap_or(url)
 }
