@@ -214,19 +214,30 @@ fn sign_in_by_email_code_on_two_tenants() {
 
     // usage: what each tenant's requests used, taken once; the same request counts the same
     let q = json!({ "entity": "User", "fields": ["login"] });
+    // a request's usage is added just after its answer leaves: taken once it is there
+    let taken = || -> HashMap<String, quadra_server::Usage> {
+        for _ in 0..200 {
+            let u: HashMap<String, quadra_server::Usage> = host.take_usage().into_iter().collect();
+            if u.get("ta").is_some_and(|a| a.requests > 0) {
+                return u;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the usage of the request never came");
+    };
     // once to warm the caches: a request served from the cache reads fewer rows
     http(port, "a.test", "POST", "/v1/query", Some(q.clone()), Some(&session));
-    host.take_usage();
+    taken();
     http(port, "a.test", "POST", "/v1/query", Some(q.clone()), Some(&session));
-    let one: HashMap<String, quadra_server::Usage> = host.take_usage().into_iter().collect();
+    let one = taken();
     let a1 = one["ta"];
     // (b may still finish the work of its start in the background: it had no request)
     assert_eq!(one.get("tb").map_or(0, |u| u.requests), 0, "b had no request: {one:?}");
     assert_eq!(a1.requests, 1, "{a1:?}");
     assert!(a1.rows_read > 0, "{a1:?}");
-    assert!(host.take_usage().is_empty(), "taken once");
+    assert!(!host.take_usage().iter().any(|(t, u)| t == "ta" && u.requests > 0), "taken once");
     http(port, "a.test", "POST", "/v1/query", Some(q), Some(&session));
-    let a2 = host.take_usage().into_iter().find(|(t, _)| t == "ta").unwrap().1;
+    let a2 = taken()["ta"];
     assert_eq!((a2.requests, a2.steps, a2.rows_read, a2.rows_written), (a1.requests, a1.steps, a1.rows_read, a1.rows_written));
     // a stopped tenant's usage is kept for the next call
     http(port, "a.test", "POST", "/v1/query", Some(json!({ "entity": "Note", "fields": ["text"] })), Some(&session));
