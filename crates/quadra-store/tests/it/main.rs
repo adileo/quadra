@@ -1,6 +1,7 @@
 //! The integration tests of quadra-store, as one binary (one link instead of one per file):
 //! `cargo test -p quadra-store --test it [filter]`.
 
+mod archive;
 mod crash;
 mod deploy;
 mod due;

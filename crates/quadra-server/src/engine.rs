@@ -4027,6 +4027,15 @@ impl Engine {
         if limit.is_some() {
             rows.reverse();
         }
+        // the oldest values may be in the archives of the history (`quadra db archive`): read
+        // back with the last page, before the others
+        let first_archived = rows.len();
+        if !more {
+            let mut old = self.archived_history(id);
+            old.extend(rows);
+            rows = old;
+        }
+        let archived_count = rows.len() - first_archived;
         let mut logins: HashMap<u64, String> = HashMap::new();
         let mut out = Vec::new();
         for r in rows {
@@ -4053,12 +4062,66 @@ impl Engine {
                 ),
                 None => None,
             };
-            out.push(json!({ "tx": tx, "at": r[3], "user": user, "cause": r[5], "field": field, "value": cell(&mut i, &v) }));
+            let mut entry = json!({ "tx": tx, "at": r[3], "user": user, "cause": r[5], "field": field, "value": cell(&mut i, &v) });
+            if out.len() < archived_count {
+                entry["archived"] = json!(true);
+            }
+            out.push(entry);
         }
         Ok(reply(
             200,
             json!({ "entity": actual, "id": id, "entries": out, "before": if more { oldest } else { None } }),
         ))
+    }
+
+    /// The entries of a record's history in the archives, oldest first, as the history query
+    /// gives them (tx, field, value, at, user, cause, seq). None when there are no archives, or
+    /// they cannot be read (said once in the log).
+    fn archived_history(&mut self, id: u64) -> Vec<Vec<Option<String>>> {
+        let Ok(checkpoints) = quadra_store::archive::checkpoints(&mut self.conn) else {
+            return Vec::new();
+        };
+        if checkpoints.is_empty() {
+            return Vec::new();
+        }
+        let Ok(files) = self.files() else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for c in &checkpoints {
+            let read = files
+                .blobs
+                .get(&c.archive)
+                .and_then(|b| b.ok_or("not in the store of files".into()))
+                .and_then(|b| quadra_store::archive::read(c, &b));
+            match read {
+                Ok(r) => rows.extend(r.into_iter().filter(|r| r.2 == id as i64)),
+                Err(e) => eprintln!("archives: {}: {e}", c.archive),
+            }
+        }
+        rows.sort_by_key(|r| r.0);
+        let mut out = Vec::new();
+        for (seq, tx, _, field, value, _, _) in rows {
+            let c = self
+                .conn
+                .query(
+                    "SELECT \"at\", CAST(\"user_id\" AS TEXT), \"cause\" FROM \"_quadra_commits\" WHERE \"tx\" = ?bigint",
+                    &[quadra_store::conn::Sql::Int(tx)],
+                )
+                .ok()
+                .and_then(|r| r.into_iter().next())
+                .unwrap_or_else(|| vec![None, None, None]);
+            out.push(vec![
+                Some(tx.to_string()),
+                Some(field),
+                value,
+                c[0].clone(),
+                c[1].clone(),
+                c[2].clone(),
+                Some(seq.to_string()),
+            ]);
+        }
+        out
     }
 
     // ---- writing --------------------------------------------------------------------------
