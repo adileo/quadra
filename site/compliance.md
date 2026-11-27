@@ -35,8 +35,10 @@ pageClass: q-v2 q-safe-page
 | Change management | Code in git, checked by `quadra check`, tested, previewed on the real data and deployed. Migrations run in one transaction or not at all. | <span class="q-avail">Available</span> |
 | Consistent KPI definitions | Certified metrics: a change of meaning, anywhere in the model, stops the build until it is approved. | <span class="q-avail">Available</span> |
 | Traceability of goods | Append-only ledgers keyed by product, location and lot: one step back, one step forward. | <span class="q-avail">Available</span> |
-| Proof of who wrote the history | Commits signed with a key, and timestamped by an external authority. | <span class="q-soon">Coming soon</span> |
-| Right to erasure (GDPR) | Personal data erased on request, while the history stays verifiable. | <span class="q-soon">Coming soon</span> |
+| Proof of who wrote the history | Every commit signed with an Ed25519 key kept outside the database; `quadra db verify` checks every signature. | <span class="q-avail">Available</span> |
+| Trusted timestamps | The head of the chain sealed by an external timestamp authority. | <span class="q-soon">Coming soon</span> |
+| Right to erasure (GDPR) | `erase` empties a person's data everywhere (tables, history, log, archives, files), while the history stays verifiable. Data the law requires you to keep is protected by `retain`. | <span class="q-avail">Available</span> |
+| Data retention | `retain` and `expire` on entities and fields: kept as long as the law asks, erased when it's no longer needed. A person's data can be exported (GDPR art. 15 and 20). | <span class="q-avail">Available</span> |
 | Electronic signatures | Signatures with a meaning (approved, reviewed), bound to the record and to the history. | <span class="q-soon">Coming soon</span> |
 
 </div>
@@ -90,20 +92,12 @@ pageClass: q-v2 q-safe-page
 
 ## Coming soon
 
-<p class="q-lead">The next steps make the history provable to an outsider, and reconcile it with privacy law.</p>
+<p class="q-lead">The next steps make the history provable to an outsider at a point in time, and give records signatures with a meaning.</p>
 
 <div class="q-cards q-cards--2">
   <div class="q-card">
-    <h4>Signed commits <span class="q-soon">Coming soon</span></h4>
-    <p>Today the hash chain shows that the past was not altered. With a signing key, every commit will also prove which system wrote it, and <code>quadra db verify</code> will check the signatures.</p>
-  </div>
-  <div class="q-card">
     <h4>Trusted timestamps <span class="q-soon">Coming soon</span></h4>
     <p>The head of the chain sealed at regular intervals by an external timestamp authority (RFC 3161, eIDAS qualified where required): proof that the history existed at that time.</p>
-  </div>
-  <div class="q-card">
-    <h4>Right to erasure <span class="q-soon">Coming soon</span></h4>
-    <p>Personal fields encrypted with a key per person. Erasing the key makes the data unreadable everywhere, backups included, while the chain still verifies. Records the law requires you to keep are protected by retention rules.</p>
   </div>
   <div class="q-card">
     <h4>Electronic signatures <span class="q-soon">Coming soon</span></h4>

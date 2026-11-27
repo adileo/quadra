@@ -6,7 +6,8 @@ You've built a small but complete business application: a catalog with prices pe
 customers with credit limits, orders with a life cycle, invoices and payments that follow
 them, stock and receivables in ledgers, permissions for each role, a database with a verified
 history, an API, the tools to evolve all of it safely, and the connections to the web shop,
-the carrier, the till, the bank and the accountant, and the invoices and labels it prints.
+the carrier, the till, the bank and the accountant, the invoices and labels it prints, and
+the data of people it keeps only as long as it should.
 
 Here is where to go from here.
 

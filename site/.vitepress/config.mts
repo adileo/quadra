@@ -61,6 +61,7 @@ const reference = pages("reference", [
   "cli",
   "http-api",
   "storage",
+  "retention",
 ]);
 
 const sidebarDocs: DefaultTheme.SidebarItem[] = [

@@ -1,0 +1,61 @@
+from tests.fixtures import shop, shop_with_orders, demo
+from documents.invoice import InvoicePdf
+from documents.label import ParcelLabel
+
+
+test "an invoice renders":
+    use demo
+    let inv = cafe.orders.flat_map(o => o.invoices).first() ?? fail "no invoice"
+    let pdf = render(InvoicePdf(inv))
+    expect pdf.pages == 1
+    expect pdf.text.contains("Caffè Centrale")
+    expect pdf.text.contains("House blend")
+    expect pdf.type == "application/pdf"
+    expect render(InvoicePdf(inv)).hash == pdf.hash
+
+
+test "a posted invoice keeps its PDF":
+    use demo
+    let inv = cafe.orders.flat_map(o => o.invoices).first() ?? fail "no invoice"
+    expect inv.pdf == "sha256:" + sign(render(InvoicePdf(inv)), "company").hash
+    let draft = Invoice(customer=anna, lines=[InvoiceLine(product=mug, qty=1 pcs)])
+    expect draft.pdf == none
+    draft.post()
+    expect draft.pdf != none
+
+
+test "a parcel label, as PDF and as ZPL":
+    use shop
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    let pdf = render(ParcelLabel(o))
+    expect pdf.pages == 1
+    expect pdf.text.contains("Anna Rossi")
+    let z = zpl(ParcelLabel(o))
+    expect z.starts_with("^XA")
+    expect z.contains("^PW799")
+    expect z.contains(">;>800376104250021234569")
+
+
+test "an invoice signed by the company":
+    use demo
+    let inv = cafe.orders.flat_map(o => o.invoices).first() ?? fail "no invoice"
+    let pdf = sign(render(InvoicePdf(inv)), "company")
+    expect pdf.hash != render(InvoicePdf(inv)).hash
+    expect sign(render(InvoicePdf(inv)), "company").hash == pdf.hash
+    let p7m = p7m(render(InvoicePdf(inv)), "company")
+    expect p7m.name.ends_with(".p7m")
+
+
+test "the customer gets the invoice by email":
+    use shop_with_orders
+    cafe.email = "bar@caffecentrale.example"
+    let inv = order.create_invoice()
+    inv.post()
+    expect sent InvoiceEmail(invoice=inv, to="bar@caffecentrale.example")
+
+
+test "a shipped order's label is printed":
+    use shop_with_orders
+    order.ship()
+    expect sent LabelToPrint(order=order)

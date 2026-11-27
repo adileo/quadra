@@ -649,7 +649,7 @@ fn erase(args: &[String]) -> ExitCode {
             &mut |k, b| files.blobs.put(k, b, "application/gzip", "attachment"),
         )?;
         if n > 0 {
-            println!("  {n} older values taken out of the archives of the history");
+            println!("  {n} older value{} taken out of the archives of the history", if n == 1 { "" } else { "s" });
         }
         if fields.is_empty() {
             println!("✓ {ent}#{id}: nothing to erase (its personal fields are empty)");
@@ -767,7 +767,7 @@ fn db(args: &[String]) -> ExitCode {
             match r {
                 None => println!("nothing to archive: no value was replaced before {}", before.format("%Y-%m-%d")),
                 Some(c) => {
-                    println!("✓ commit {}: {} values replaced before {} moved to {}", c.tx, c.rows, before.format("%Y-%m-%d"), c.archive);
+                    println!("✓ commit {}: {} value{} replaced before {} moved to {}", c.tx, c.rows, if c.rows == 1 { "" } else { "s" }, before.format("%Y-%m-%d"), c.archive);
                     println!("  sha256 {}", c.sha256);
                     println!("  `quadra db verify --full` reads it back and checks every commit");
                 }
@@ -794,11 +794,12 @@ fn db(args: &[String]) -> ExitCode {
             let (erased, signed, key) = quadra_store::verify::facts(&url)?;
             if problems.is_empty() {
                 println!("✓ hash chain intact, tables match the history ({records} records)");
+                let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
                 if erased > 0 {
-                    println!("✓ {erased} values erased, their digests kept");
+                    println!("✓ {} erased, {} kept", plural(erased, "value", "values"), if erased == 1 { "its digest" } else { "their digests" });
                 }
                 if let Some(k) = key {
-                    println!("✓ {signed} commits signed, the last ones by the key {}…", &k[..12]);
+                    println!("✓ {} signed, the last ones by the key {}…", plural(signed, "commit", "commits"), &k[..12]);
                 }
                 if let Some(last) = checkpoints.last() {
                     if archived.is_some() {

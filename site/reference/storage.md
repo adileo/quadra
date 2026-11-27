@@ -27,8 +27,10 @@ databases.
 
 | Table | Content |
 |---|---|
-| `_quadra_commits` | one row per transaction: `tx`, `at`, `user_id`, `cause`, `prev_hash`, `hash` |
-| `_quadra_history` | every value written to every field, with its transaction, in order |
+| `_quadra_commits` | one row per transaction: `tx`, `at`, `user_id`, `cause`, `prev_hash`, `hash`, and `signature` when the commits are signed |
+| `_quadra_history` | every value written to every field, with its transaction, in order, and its `salt`; an erased value has no value nor salt, only its `digest` |
+| `_quadra_erasures`, `_quadra_erased` | what was erased, by which commit and why; what is left of the records taken away ([Retention and erasure](/reference/retention)) |
+| `_quadra_keys`, `_quadra_checkpoints` | the keys that sign the commits; the archives of the history |
 | `_quadra_records` | every record: entity, creation (transaction, time, user), `frozen_tx`, cause, warnings; `last_tx`, the last transaction that changed its row in any way (a field, its metadata, a computed value), and `version_tx`, the last one that wrote its fields when its projection row reads back exactly (0: the record is read from its history) |
 | `_quadra_ledger_rows` | every ledger row: ledger, transaction, date, source, columns |
 | `_quadra_postings` | what each record currently posts to each ledger |
@@ -39,9 +41,10 @@ databases.
 | `_quadra_outbox` | the events emitted by `emit`, written with their commit, and whether they were delivered ([The outbox](/reference/flows-and-actions#the-outbox)); not part of the commit hash |
 | `_quadra_meta` | the schema fingerprint, the catalog of the deployed model (its tables, rules, formulas and indexes: what the next deploy compares with) and the engine's counters |
 
-Nothing in the history is ever updated or deleted. A correction is a new write; a rename is
-a mapping applied when reading, so the signatures of past commits stay valid; a reverted
-change is a new transaction.
+Nothing in the history is ever updated or deleted, but for erasure: a correction is a new
+write; a rename is a mapping applied when reading, so the signatures of past commits stay
+valid; a reverted change is a new transaction. An erasure (`erase`, a retention that ends)
+removes values and keeps their digests ([Retention and erasure](/reference/retention)).
 
 ### The signed commit log
 
@@ -49,8 +52,13 @@ Every transaction of the engine is one database transaction, which writes its hi
 ledger rows and a commit row with
 
 ```text
-hash = sha256(prev_hash | tx | at | user | cause | the values and ledger rows written)
+hash = sha256(prev_hash | tx | at | user | cause | the digests of the values, the ledger rows written)
 ```
+
+The digest of a value is `sha256(salt | value)`, with a random salt per value: an erased value
+keeps its digest, and the chain stays valid ([The digests in the chain](/reference/retention#the-digests-in-the-chain)).
+With a signing key, each commit also carries an Ed25519 signature of its hash
+([Signed commits](/reference/retention#signed-commits)).
 
 Each commit includes the hash of the previous one, so altering, removing or reordering
 anything in the past breaks the chain. `quadra db verify` recomputes the chain and reports,

@@ -1,0 +1,9 @@
+# The data of people: what the web shop's contact form collects is kept six months; a customer
+# who asks is forgotten (`Customer.forget`), unless invoices keep them.
+
+
+entity Inquiry:
+    expire 6 months after created_at
+    name: Text? personal
+    email: Email? personal
+    message: Text?

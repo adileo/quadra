@@ -1,0 +1,16 @@
+# A change is a data script with a reason, a requester and an approval.
+# It can be previewed, is applied once, and can be reverted by a new transaction.
+
+from catalog import Product
+from security import Accountant
+
+change coffee_prices_2027:
+    reason: "Green coffee costs more: +5% on coffee, rounded to 10 cents"
+    requested_by: "olivia"
+    approved_by: role Accountant                # someone else, with this role, must approve
+
+    for p in Product.where(p => p.category?.name == "Coffee" and p.active):
+        p.price = (p.price * 1.05).round(step=0.10)
+
+    expect:
+        affected(Product) <= 10                 # a safety net against a wrong filter

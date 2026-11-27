@@ -1,0 +1,84 @@
+# Tests send nothing and receive nothing: they play the other side.
+
+from tests.fixtures import shop, shop_with_orders
+
+
+const WEB_ORDER = """
+{"id": "820982911946154508", "name": "#1001",
+ "customer": {"name": "Bruno Neri", "email": "bruno@example.com"},
+ "line_items": [{"sku": "BEANS-01", "quantity": 2}, {"sku": "MUG-01", "quantity": 4}]}
+"""
+
+
+test "an order from the web shop is confirmed":
+    use shop
+    receive WebOrderIn WEB_ORDER
+    let o = Order.where(x => x.notes == "web order #1001").first() ?? fail "no order"
+    expect o.state is Confirmed
+    expect o.customer.name == "Bruno Neri"
+    expect o.lines.count() == 2
+    expect beans.reserved == 2 kg
+
+
+test "the same order sent twice is handled once":
+    use shop
+    receive WebOrderIn WEB_ORDER
+    receive WebOrderIn WEB_ORDER
+    expect Order.count() == 1
+
+
+test "a known customer is found by email":
+    use shop
+    receive WebOrderIn """
+        {"id": "7", "name": "#1002", "customer": {"name": "Anna R.", "email": "anna@example.com"},
+         "line_items": [{"sku": "TEA-01", "quantity": 0.5}]}"""
+    expect anna.orders.count() == 1
+    expect Customer.count() == 2
+
+
+test "an unknown product rejects the whole order":
+    use shop
+    expect_error "unknown product DECAF-01":
+        receive WebOrderIn """
+            {"id": "8", "name": "#1003", "customer": {"name": "Bruno", "email": "b@example.com"},
+             "line_items": [{"sku": "BEANS-01", "quantity": 1}, {"sku": "DECAF-01", "quantity": 1}]}"""
+    expect Order.count() == 0
+    expect Customer.count() == 2
+
+
+test "shipping books a parcel and keeps its tracking number":
+    use shop
+    let order = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    order.confirm()
+    order.ship()
+    expect sent ParcelRequested(order=order, city="Milano", zip="20121")
+    deliver ParcelRequested reply CarrierLabel(tracking="1Z999AA10123456784")
+    expect order.tracking == "1Z999AA10123456784"
+
+
+test "the customer is told":
+    use shop_with_orders
+    cafe.email = "bar@caffecentrale.example"
+    order.ship()
+    expect sent ShippingNotice(to="bar@caffecentrale.example", order=order)
+
+
+test "a parcel the carrier refuses is noted on the order":
+    use shop
+    let order = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    order.confirm()
+    order.ship()
+    deliver ParcelRequested failed "422: the postal code does not exist"
+    expect order.notes == "the carrier refused the parcel: 422: the postal code does not exist"
+
+
+test "a product that changes is sent to the web shop":
+    use shop
+    mug.price = 8.00 EUR/pcs
+    expect sent PublishProductToWebshop(record=mug)
+
+
+test "an order without an address books no parcel":
+    use shop_with_orders                    # Caffè Centrale has no address
+    order.ship()
+    expect not sent ParcelRequested

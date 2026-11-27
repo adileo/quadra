@@ -38,6 +38,7 @@ An entity's body is a list of **members**:
 |---|---|
 | fields and formulas | [below](#fields) |
 | `check`, `warn`, `unique (…)`, `frozen when …`, `live …` | [Rules](/reference/rules) |
+| `retain 10 years after date`, `expire 2 days after created_at`, `history 1 year` | [Retention and erasure](/reference/retention) |
 | `flow field:` and `action name:` | [Flows and actions](/reference/flows-and-actions) |
 | `post to Ledger:` | [Ledgers](/reference/ledgers) |
 | `fn name(…):` | [methods](#functions) |
@@ -111,6 +112,9 @@ Modifiers follow the type, in any order:
 | `where v => cond` | The value must satisfy the condition. For a list or a set, each element must. | `code: Code where c => c.len() == 3` |
 | `required when cond` | On an optional field: a value is required while `cond` holds. Reading it gives `T`, not `T?`. | `vat_number: VatNumber? required when kind is Organization` |
 | `unique` | No two records may have the same value (`none` excepted). | `login: Code unique` |
+| `personal` | Data about a person: `erase` empties it. Optional fields only. | `email: Email? personal` |
+| `expire N unit after field` | Emptied when the time ends ([Retention and erasure](/reference/retention)). Optional fields only. | `notes: Text? expire 30 days after created_at` |
+| `retain N unit after field` | Kept at least that long: `erase` leaves it until then. | `vat_number: VatNumber? personal retain 10 years after created_at` |
 | `parent` | The record is a line of the referenced document (composition). | `order: SalesOrder parent` |
 | `per company` | One value per company. | `list_price: Price<company.currency, uom> per company` |
 | `via field` | The inverse of a collection goes through this field of the other entity. | `contacts: [Partner] via parent` |

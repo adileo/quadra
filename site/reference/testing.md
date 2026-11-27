@@ -195,6 +195,8 @@ Then it runs the rules that read the clock on every record, as the server's swee
 their time comes: a `becomes now() >= shipped_at + 24 hours` that the new time makes true
 fires at the `clock` statement, in a transaction of its own, before the statements that
 follow ([Waits, joins, timeouts](/reference/flows-and-actions#waits-joins-timeouts-and-cancellations)).
+The retentions that end are applied there too: a field whose `expire` came is emptied, a
+record whose entity's `expire` came goes away ([Retention and erasure](/reference/retention#when-a-retention-ends)).
 
 ```quadra
 clock 2026-03-03 08:59

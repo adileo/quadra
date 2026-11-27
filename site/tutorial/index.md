@@ -30,7 +30,8 @@ its code compiles with zero errors and all of its tests pass.
 | [13. Talking to other systems](./13-talking-to-other-systems) | `[vars]`, connections, `inbound`, `outbound`, `publish`, records `from json`, `receive` / `expect sent` / `deliver` | orders from a web shop, parcels, emails |
 | [14. Files, formats and databases](./14-files-formats-and-databases) | SFTP and FTP, `from csv` and `from fixed`, `atomic`, `write`, `insert`, on-premise agents | the till, the bank, the accountant |
 | [15. Documents, labels and signatures](./15-documents-labels-and-signatures) | `.qdp` files, `document`, `label`, `render`, `zpl`, `attach`, signers | invoices in PDF, parcel labels, signed files |
-| [Next steps](./16-next-steps) | where to go from here | |
+| [16. Retention, erasure and a signed history](./16-retention-erasure-and-signed-history) | `retain`, `expire`, `personal`, `erase`, signed commits, archives | GDPR requests, invoices kept ten years |
+| [Next steps](./17-next-steps) | where to go from here | |
 
 ## How each step works
 

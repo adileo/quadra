@@ -254,7 +254,9 @@ One record, as of `?base=N` if given:
 | `history` | whether the user may read the history |
 
 The entity in the URL may be a trait the record implements. `404` if the record does not
-exist, `403` if the user may not read it.
+exist, `403` if the user may not read it, `410` if its retention took it away, with when and
+why: `{"error": "Candidate#12 was erased on 2026-07-11 09:00:00: expire: Candidate#12 (6
+months after last_contact)"}` ([Retention and erasure](/reference/retention)).
 
 A collection computed from the other side comes as a page: its first 50 records the user may
 read, in id order (`v`, `names`), how many there are (`count`; `"estimated": true` beyond
@@ -275,7 +277,9 @@ Every write of every field, oldest first: `{"tx", "at", "user", "cause", "field"
 Fields renamed by a migration appear under their current name; hidden fields are left out.
 Needs `read history` (or `all`) on the entity: otherwise `403`. With `?limit=50`, the 50 newest
 entries (oldest first among them) and `before`: pass it as `?before=` for the older ones
-(`null` when there are none).
+(`null` when there are none). Values erased come as `null`; values moved to an archive of the
+history ([Archives](/reference/retention#archives-quadra-db-archive)) come back with the last
+page, marked `"archived": true`.
 
 ### `GET /v1/records/{Entity}/{id}/files/{field}`
 
@@ -361,6 +365,7 @@ Content-Type: application/json
 | `create` | `entity`, `values`, and optionally `ref`: a name for the new record, usable by later operations (`{"ref": "so"}`) and returned in `created` |
 | `update` | `entity`, `id`, `values` |
 | `action` | `entity`, `id`, `action`, and optionally `args` (named parameters) |
+| `erase` | `entity`, `id`, `reason`: the record's `personal` fields emptied ([Retention and erasure](#retention-and-erasure)); needs no `base` |
 
 All the operations are **one transaction**: everything is written or nothing is. Rules are
 checked at the end, as for any transaction ([Rules](/reference/rules#when-rules-are-checked)).
@@ -418,6 +423,15 @@ checks it and the size again: a file refused is `422` with why
 and nothing is written. An upload is for the user who asked for it and for its field, and is
 named once (`upload:6f0c…: the upload was already used: upload the file again`); one never
 named is removed after 24 hours. A `File` field takes only an upload, or a file it already has.
+
+### Retention and erasure
+
+| Request | |
+|---|---|
+| `POST /v1/records/{Entity}/{id}/erase {"reason": "…"}` | `erase` of the record: its `personal` fields and its lines' emptied, their past values out of the history. Needs the `erase` permission (`403` otherwise); `422` while a retention keeps it, with the date: `Customer#22 cannot be erased before 2036-11-27: Invoice#23 refers to it and is kept 10 years after date`. The same as a `POST /v1/tx` with the `erase` operation; the `Idempotency-Key` is optional here |
+| `GET /v1/records/{Entity}/{id}/export` | what the record holds about its person (GDPR art. 15 and 20): the record, its lines, the history of its `personal` fields, the records that refer to it. Needs `read` and `read history`. The export is a commit of the chain (`export: Customer#22`) |
+
+See [Retention and erasure](/reference/retention).
 
 ### Concurrency: `base` and 409
 

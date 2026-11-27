@@ -1,0 +1,22 @@
+# The bank's statements: every credit that names an invoice becomes its payment.
+
+from invoices import Invoice, Payment
+
+
+# A movement of the statement: a fixed-width record, its fields by column.
+record BankMovement from fixed:
+    kind: Code at "1..2"                    # 62: a movement; other kinds are headers and totals
+    value_date: Date at "3..8" format "%d%m%y"
+    amount: Decimal at "9..21" decimals 2   # 0000000008792 is 87.92
+    sign: Code at "22"                      # C credit, D debit
+    reference: Text at "23..72"             # what the customer wrote: "INV/2026/00001 thanks"
+
+
+inbound BankStatement via bank as m: BankMovement:
+    pull "*.txt" every 1 hours
+    atomic per row                          # each movement stands alone
+    if m.kind == "62" and m.sign == "C":
+        let invoice = Invoice.where(i => i.state is Posted and m.reference.contains(i.number ?? "?"))
+            .first() ?? fail f"no posted invoice named in `{m.reference}`"
+        Payment(invoice=invoice, date=m.value_date, amount=(1.00 EUR * m.amount).round(),
+            method=Transfer)

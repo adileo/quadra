@@ -69,12 +69,14 @@ hide | show target[, target…]
 | `create` | creating records |
 | `edit` | changing fields (`edit Entity` covers every field) |
 | `run` | running an action (`run Entity.action`) |
+| `erase` | erasing the personal data of a record (`erase Customer`: [Retention and erasure](/reference/retention#erase)) |
 | `all` | every verb |
 | `hide` | hides fields from the role's users: `hide Product.cost` |
 | `show` | gives back fields that another role of the user hides: `show Product.cost` |
 | `read history` | the history of records (every version and cause) |
 
-There is no `delete`: records are not deleted in Quadra, they are cancelled, reversed or
+There is no `delete`: records are not deleted in Quadra (only a retention that ends takes
+them away: [Retention and erasure](/reference/retention)), they are cancelled, reversed or
 deactivated by an action, so `delete Order` is an error (`records are not deleted in Quadra,
 so there is no delete permission: …`); permit the action instead (`run Order.cancel`).
 `derived` is not a permission either. `hide` and `show` stand alone on their line, inside a

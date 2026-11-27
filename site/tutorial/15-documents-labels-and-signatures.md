@@ -335,4 +335,4 @@ itself is valid.) As `sam`, the clerk, who may not read invoices:
 - In outbound blocks, documents go out attached to emails, written as files, or printed
   (`kind = "printer"`, `print(…)`).
 
-[Next steps →](./16-next-steps)
+[Next: retention, erasure and a signed history →](./16-retention-erasure-and-signed-history)

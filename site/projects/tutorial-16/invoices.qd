@@ -1,0 +1,105 @@
+# Invoices and payments: documents that arrive after the order is confirmed.
+
+from customers import Customer
+from catalog import Product
+from orders import Order, OrderLine
+from receivables import Receivables
+
+
+entity Invoice:
+    retain 10 years after date                # art. 2220 of the civil code
+    number: Code? unique
+    customer: Customer
+    date: Date default today()
+    lines: [InvoiceLine]
+    shipping: Money<EUR> default 0 EUR
+    payments: [Payment]
+    state: enum(Draft, Posted, Cancelled) default Draft
+    pdf: File?                              # the invoice as sent, once posted
+
+    subtotal = lines.sum(l => l.amount)
+    vat = lines.group_by(l => l.vat).sum(g => (g.items.sum(l => l.amount) * g.key).round())
+    total = subtotal + vat + shipping
+    paid = payments.sum(p => p.amount)
+    due = total - paid
+    payment_status: enum(Unpaid, Partial, Paid) = when:
+        paid == 0 EUR       => Unpaid
+        due > 0 EUR         => Partial
+        else                => Paid
+
+    check due >= 0 EUR, "Paid more than the invoice total"
+
+    # A posted invoice never changes, except for what happens to it later: its payments.
+    frozen when state is not Draft live paid, due, payment_status
+
+    flow state:
+        Draft -> Posted                 by post
+        Draft | Posted -> Cancelled     by cancel unless paid > 0 EUR
+
+    action post:
+        require lines.count() > 0, "An invoice needs at least one line"
+        number = next_number(current.company, "INV")
+
+    # If the invoice leaves Posted (it is cancelled), its rows are reversed automatically.
+    post to Receivables when state is Posted:
+        add(customer=customer, amount=total)
+
+
+entity InvoiceLine:
+    invoice: Invoice parent
+    order_line: OrderLine?                  # where it comes from, if anywhere
+    product: Product
+    qty: Qty<product.uom> where > 0
+    price: Price<EUR, product.uom> default product.price
+    discount: Percent where 0%..100% default 0%
+    vat: Percent default product.vat
+
+    amount = (qty * price * (1 - discount)).round()
+
+
+entity Payment:
+    invoice: Invoice
+    date: Date default today()
+    amount: Money<EUR> where > 0
+    method: enum(Card, Transfer, Cash) default Card     # was free text: see migrations/
+
+    post to Receivables:
+        add(customer=invoice.customer, amount=-amount)
+
+
+extend OrderLine:
+    # The lines are frozen with their order, the invoices come later: these follow the data.
+    live invoiced, to_invoice
+    invoice_lines: [InvoiceLine] via order_line
+    invoiced = invoice_lines.where(i => i.invoice.state is Posted).sum(i => i.qty.to(product.uom))
+    to_invoice = qty - invoiced
+
+
+extend Order:
+    # The order is frozen when confirmed, the invoices come later: these follow the data.
+    live invoices, invoice_status
+    invoices = lines.flat_map(l => l.invoice_lines).map(i => i.invoice).distinct()
+    invoice_status: enum(NotInvoiced, ToInvoice, Invoiced) = when:
+        state not in {Confirmed, Shipped}       => NotInvoiced
+        lines.all(l => l.to_invoice <= 0)       => Invoiced
+        else                                    => ToInvoice
+
+    action create_invoice -> Invoice:
+        require state in {Confirmed, Shipped}, "Only confirmed orders can be invoiced"
+        let todo = lines.where(l => l.to_invoice > 0)
+        require todo.any(), "Nothing left to invoice"
+        return Invoice(customer=customer,
+            shipping=shipping if invoices.count() == 0 else 0 EUR,
+            lines=todo.map(l => InvoiceLine(order_line=l, product=l.product, qty=l.to_invoice,
+                price=l.price, discount=l.discount, vat=l.vat)))
+
+
+extend Customer:
+    # four hops: customer → orders → lines → invoice lines → invoices
+    posted_invoices = orders
+        .flat_map(o => o.lines)
+        .flat_map(l => l.invoice_lines)
+        .map(i => i.invoice)
+        .distinct()
+        .where(i => i.state is Posted)
+        .count()

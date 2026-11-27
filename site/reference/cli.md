@@ -299,6 +299,9 @@ When there is nothing to do:
 `schema up to date, no pending migrations: nothing to migrate`.
 See [Migrations and changes](/reference/migrations-and-changes#how-a-migration-is-applied).
 
+A new `expire` that would erase existing records at once is refused, with how many, unless
+`--allow-expire` ([A deploy that erases at once](/reference/retention#a-deploy-that-erases-at-once)).
+
 ### `quadra db verify`
 
 ```text
@@ -321,6 +324,40 @@ check is done again reading those records from their history and with the values
 for them, until nothing changes: the findings are those of computing every formula from the
 history.
 
+With archives of the history ([`quadra db archive`](#quadra-db-archive)), the commits before
+the last checkpoint are checked by their links and signatures; `--full` reads the archives
+back from the store of files and computes every commit. When the commits are signed, every
+signature is checked, and that the chain ends with the key loaded (`QUADRA_SIGNING_KEY`,
+`.quadra/signing.key`) or the one given with `--key <public key>`:
+
+```text
+✓ hash chain intact, tables match the history (26 records)
+✓ 3 values erased, their digests kept
+✓ 812 commits signed, the last ones by the key ade3018dc186…
+```
+
+### `quadra db key`
+
+```bash
+quadra db key init        # the first key: commits are signed from now on
+quadra db key             # the public key, and where the private key is
+quadra db key rotate      # a new key, recorded by a commit signed by the old one
+```
+
+The private key goes to `.quadra/signing.key` (or `QUADRA_SIGNING_KEY_FILE`); with
+`QUADRA_SIGNING_KEY` set, it is printed to be put there instead. See
+[Signed commits](/reference/retention#signed-commits).
+
+### `quadra db archive`
+
+```bash
+quadra db archive --before 2028-01-01
+```
+
+The values of the history replaced before the date move to an archive in the project's store
+of files, and a checkpoint commit names it. Run with the server stopped. See
+[Archives](/reference/retention#archives-quadra-db-archive).
+
 ### `quadra db provisional`
 
 ```text
@@ -336,7 +373,9 @@ migrations, with their reason and deadline (`EXPIRED on …` once past it), or
 Re-evaluates the rules that read the clock on every record: automatic transitions,
 `becomes` reactions, postings, checks. With a database, rules are otherwise evaluated only
 where data changed, so a rule like `when due < today()` needs this periodic pass.
-`quadra serve` runs it every hour (`--sweep-every`). Prints
+`quadra serve` runs it every hour (`--sweep-every`). It also applies the retentions that ended
+(`expire`), and once a day the `history` of the entities that have one
+([Retention and erasure](/reference/retention#when-a-retention-ends)). Prints
 `✓ time-driven rules applied in transaction N`, or `✓ nothing changed` (and then nothing is
 written: no empty commit).
 
@@ -424,6 +463,19 @@ login or a team is unknown. Files of the previous format (1, without folders) ar
 The imported views are checked against the model when the server starts (renames applied,
 what no longer fits marked broken).
 `✓ 2 teams, 3 folders, 14 views and apps written to views.json` · `✓ 2 teams, 3 folders, 14 views and apps imported (checked against the model when the server starts)`.
+
+## Personal data: `quadra erase`, `quadra subject export`
+
+```bash
+quadra erase Customer 22 --reason "she asked on 2026-11-27"
+quadra subject export Customer 22 > anna.json
+```
+
+`erase` empties the `personal` fields of the record and its lines, and takes their past values
+out of the history and of its archives; refused while a retention keeps it, with the date.
+`subject export` prints, as JSON, what the record holds about its person: the record, its
+lines, the history of its personal fields, the records that refer to it. Both are commits of
+the chain. See [Retention and erasure](/reference/retention#erase).
 
 ## Data changes: `quadra change`
 

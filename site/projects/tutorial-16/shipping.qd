@@ -1,0 +1,45 @@
+# Shipping: book a parcel with the carrier, keep its tracking number, tell the customer.
+
+from orders import Order, ShippingNotice
+
+
+event ParcelRequested(order: Order, number: Text, name: Text, street: Text, city: Text, zip: Text)
+
+on Order enters Shipped as o:
+    if let a = o.ship_to:
+        emit ParcelRequested(order=o, number=o.number ?? "", name=o.customer.name,
+            street=a.street, city=a.city, zip=a.zip)
+
+
+# The carrier's API, in its own words.
+record CarrierParcel from json:
+    reference: Text
+    name: Text at "recipient.name"
+    street: Text at "recipient.address.street"
+    city: Text at "recipient.address.city"
+    zip: Text at "recipient.address.postal_code"
+
+record CarrierLabel from json:
+    tracking: Text at "tracking_number"
+
+
+outbound ParcelRequested via carrier as e:
+    reply CarrierLabel                      # the answer, read as a CarrierLabel
+    retry for 2 days
+    key f"parcel-{e.number}"                # booked twice by mistake? the carrier ignores it
+    post("/parcels", CarrierParcel(reference=e.number, name=e.name,
+        street=e.street, city=e.city, zip=e.zip))
+
+on ParcelRequested delivered as d:
+    d.event.order.tracking = d.reply?.tracking
+
+on ParcelRequested failed as f:
+    f.event.order.notes = f"the carrier refused the parcel: {f.error}"
+
+
+# The email that Order.ship emits, sent through our mail server.
+outbound ShippingNotice via mail as e:
+    expires after 2 days                    # an email that late is not worth sending
+    let number = e.order.number ?? ""
+    email(to=e.to, subject=f"Your order {number} is on its way",
+        body=f"Hello {e.order.customer.name},\n\nyour order {number} has left our shop.\n\n{env.SHOP_EMAIL}")
