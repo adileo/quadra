@@ -1,0 +1,16 @@
+[package]
+name = "quadra-label"
+description = "Barcodes (Code 128, GS1-128, SSCC, EAN-13, QR, Data Matrix) and labels rendered to SVG, ZPL and PDF: pure and deterministic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qrcode = { version = "0.14", default-features = false }
+pdf-writer = "0.15"
+png = "0.18"
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+rxing = { version = "0.9", default-features = false, features = ["decoders", "oned", "qrcode", "datamatrix", "encoding_rs"] }
