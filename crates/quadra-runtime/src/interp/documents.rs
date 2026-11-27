@@ -7,6 +7,7 @@
 use super::{fail, Ctx, Interp, R};
 use crate::value::{text, V};
 use quadra_ir::*;
+#[cfg(feature = "pdf")]
 use quadra_print::{Align, Block, Column, Doc, Style};
 use std::rc::Rc;
 
@@ -33,11 +34,22 @@ impl<'m> Interp<'m> {
         if d.label {
             return self.render_label(d, &mut ctx, &ident, zpl);
         }
+        self.render_pdf(d, &mut ctx, &ident)
+    }
+
+    #[cfg(not(feature = "pdf"))]
+    fn render_pdf(&mut self, d: &Document, _ctx: &mut Ctx, _ident: &str) -> R<V> {
+        fail(format!("`{}` is rendered to PDF by the server and by `quadra test` on your machine: the PDF engine is not in the Sandbox (labels are)", d.name))
+    }
+
+    #[cfg(feature = "pdf")]
+    fn render_pdf(&mut self, d: &Document, ctx: &mut Ctx, ident: &str) -> R<V> {
+        let name = d.name.as_str();
         let mut doc = Doc::default();
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        let body = self.blocks(&d.items, &mut ctx, &mut doc, &mut files, true)?;
+        let body = self.blocks(&d.items, ctx, &mut doc, &mut files, true)?;
         doc.body = body;
-        let pdf = quadra_print::render(&doc, &files, &ident)
+        let pdf = quadra_print::render(&doc, &files, ident)
             .or_else(|e| fail(format!("`{name}` could not be laid out: {e}")))?;
         let file = file_name(doc.title.as_deref().unwrap_or(name), "pdf");
         Ok(rendered(
@@ -262,6 +274,7 @@ impl<'m> Interp<'m> {
         })
     }
 
+    #[cfg(feature = "pdf")]
     fn style(&mut self, opts: &[PrintOpt], ctx: &mut Ctx) -> R<Style> {
         Ok(Style {
             size: self.num_opt(opts, "size", ctx)?,
@@ -281,6 +294,7 @@ impl<'m> Interp<'m> {
         }
     }
 
+    #[cfg(feature = "pdf")]
     fn blocks(
         &mut self,
         items: &[PrintItem],
@@ -628,6 +642,12 @@ impl<'m> Interp<'m> {
     /// `pgp_sign(x, "key")`, `pgp_encrypt(x, "bank")`: signed with the signer of quadra.toml,
     /// at the clock's time (the same document, signer and time: the same bytes, but OpenPGP
     /// encryption).
+    #[cfg(not(feature = "sign"))]
+    pub fn sign_call(&mut self, n: &str, _pos: Vec<V>) -> R<V> {
+        fail(format!("`{n}` signs on the server and in `quadra test` on your machine: signatures are not in the Sandbox"))
+    }
+
+    #[cfg(feature = "sign")]
     pub fn sign_call(&mut self, n: &str, pos: Vec<V>) -> R<V> {
         let (Some(x), Some(V::Text(by))) = (pos.first(), pos.get(1)) else {
             return fail(format!(
@@ -736,6 +756,7 @@ impl<'m> Interp<'m> {
         }
     }
 
+    #[cfg(feature = "sign")]
     /// The bytes of what is signed: a document rendered, a record `from xml` or `from json`
     /// (its document), or text. With its name, type, pages and text.
     fn doc_bytes(&mut self, x: &V) -> R<(String, String, Vec<u8>, usize, String)> {

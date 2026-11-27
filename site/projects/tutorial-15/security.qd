@@ -1,0 +1,42 @@
+# Who can do what. Without a rule that allows it, nothing is visible or editable.
+# `me` is the signed-in user; `where` filters the rows a rule applies to.
+
+from customers import Customer
+from catalog import Product, Category, Tag, Supplier, SupplierOffer
+from orders import Order
+from invoices import Invoice, Payment
+from stock import Restock
+
+
+role Owner:
+    all *                                   # everything (but `deny` rules still apply)
+
+
+role Staff:
+    read Product, Category, Tag, Uom, UomCategory, Currency
+
+
+role Clerk is Staff:
+    read, create Customer
+    edit Customer.name, Customer.email, Customer.address
+    read, create, edit Order where o => o.created_by == me
+    run Order.confirm, Order.cancel where o => o.created_by == me
+    hide Product.cost, Product.margin
+
+
+role Warehouse is Staff:
+    read Order
+    run Order.ship
+    read, create Restock
+    run Restock.receive
+
+
+role Accountant is Staff:
+    read Customer, Order, Supplier, SupplierOffer
+    edit Customer.credit_limit
+    all Invoice, Payment
+    run Order.create_invoice, Invoice.post, Invoice.cancel
+
+
+# Separation of duties: holds for everybody, whatever roles they have.
+deny run Invoice.cancel where i => i.created_by == me

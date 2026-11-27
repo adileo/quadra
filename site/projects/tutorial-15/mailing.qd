@@ -1,0 +1,18 @@
+# Each invoice posted goes to the customer by email, the PDF attached and signed.
+
+from invoices import Invoice
+from documents.invoice import InvoicePdf
+
+
+event InvoiceEmail(invoice: Invoice, to: Email, number: Text)
+
+on Invoice enters Posted as i:
+    if let to = i.customer.email:
+        emit InvoiceEmail(invoice=i, to=to, number=i.number ?? "")
+
+
+outbound InvoiceEmail via mail as e:
+    let pdf = sign(render(InvoicePdf(e.invoice)), "company")
+    email(to=e.to, subject="Invoice " + e.number,
+        body="Hello " + e.invoice.customer.name + ",\n\nyour invoice is attached.\n\nBeans & Leaves",
+        attachments=[pdf])

@@ -20,10 +20,18 @@ quick-xml = "0.42"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
 # documents of `.qdp` files, rendered to PDF by an embedded Typst
-quadra-print = { path = "../quadra-print" }
+quadra-print = { path = "../quadra-print", optional = true }
 # labels (PDF and ZPL) and barcodes
 quadra-label = { path = "../quadra-label" }
 # signatures of documents (PAdES, CAdES, XAdES, OpenPGP)
-quadra-sign = { path = "../quadra-sign" }
+quadra-sign = { path = "../quadra-sign", optional = true }
 base64 = "0.22"
 sha2 = "0.10"
+
+[features]
+default = ["pdf", "sign"]
+# documents rendered to PDF (Typst, with its fonts): the server and the CLI; the sandbox of the
+# website leaves it out (it would be ten times larger) and renders labels only
+pdf = ["dep:quadra-print"]
+# signatures of documents (PAdES, CAdES, XAdES, OpenPGP): the server and the CLI
+sign = ["dep:quadra-sign"]

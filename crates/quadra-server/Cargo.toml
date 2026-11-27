@@ -12,7 +12,7 @@ quadra-syntax.workspace = true
 quadra-ir.workspace = true
 quadra-types.workspace = true
 quadra-analysis.workspace = true
-quadra-runtime.workspace = true
+quadra-runtime = { workspace = true, features = ["pdf", "sign"] }
 quadra-store.workspace = true
 quadra-api.workspace = true
 quadra-qdi.workspace = true

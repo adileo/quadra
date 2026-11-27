@@ -1,0 +1,41 @@
+# The invoice as the customer receives it.
+
+from invoices import Invoice
+
+
+document InvoicePdf(inv: Invoice):
+    let number = inv.number ?? "draft"
+    title "Invoice " + number
+    page A4 margin 18
+    font "Libertinus Serif" size 10
+    header:
+        row widths [2, 1]:
+            text "Beans & Leaves" size 16 bold
+            text "Via Roma 1, 20121 Milano" align right size 8
+    footer:
+        pages "Page {page} of {pages}" align center size 8
+    heading "Invoice " + number level 1
+    text inv.customer.name bold
+    if let a = inv.customer.address:
+        text a.street
+    text "Date: " + f"{inv.date}"
+    space 6
+    table inv.lines as l:
+        column "Product" width 3: l.product.name
+        column "Qty" align right: l.qty
+        column "Price" align right: l.price
+        column "Amount" align right: l.amount
+    totals:
+        item "Subtotal": inv.subtotal
+        item "VAT": inv.vat
+        item "Shipping": inv.shipping
+        item "Total" bold: inv.total
+    barcode "https://beans.example.com/i/" + number type qr height 22 align right
+    if inv.payment_status is Paid:
+        text "Paid, thank you." italic
+    else:
+        text "Due: " + f"{inv.due}"
+
+
+# Once posted, the invoice is rendered and kept: the same bytes for as long as it exists.
+attach InvoicePdf to Invoice.pdf signed "company" when state is Posted

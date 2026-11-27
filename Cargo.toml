@@ -17,7 +17,9 @@ quadra-lsp = { path = "crates/quadra-lsp" }
 quadra-ir = { path = "crates/quadra-ir" }
 quadra-types = { path = "crates/quadra-types" }
 quadra-analysis = { path = "crates/quadra-analysis" }
-quadra-runtime = { path = "crates/quadra-runtime" }
+# the PDF engine (Typst and its fonts, `pdf`) is turned on by the server and the CLI, not by
+# the sandbox of the website
+quadra-runtime = { path = "crates/quadra-runtime", default-features = false }
 quadra-store = { path = "crates/quadra-store" }
 quadra-server = { path = "crates/quadra-server" }
 quadra-api = { path = "crates/quadra-api" }
