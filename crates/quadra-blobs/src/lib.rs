@@ -242,6 +242,11 @@ pub fn open(root: &Path, m: &Manifest, values: &BTreeMap<String, String>) -> Res
                 .ok_or(format!("[files]: the variable {v} has no value here")),
         }
     };
+    // a host keeping each project's files in a place of its own (the cloud: the tenant's
+    // bucket) says where with QUADRA_FILES_URL and its keys, over what quadra.toml says
+    if let Some(url) = values.get("QUADRA_FILES_URL").filter(|u| !u.is_empty()) {
+        return open_host(url, values);
+    }
     let Some(d) = &m.files else {
         return open_folder(&root.join(".quadra").join("files"), None);
     };
@@ -289,6 +294,43 @@ pub fn open(root: &Path, m: &Manifest, values: &BTreeMap<String, String>) -> Res
     let f = Arc::new(Files {
         blobs: Box::new(s3::S3::new(spec)?),
         cdn,
+    });
+    all.insert(id, f.clone());
+    Ok(f)
+}
+
+/// The store a host gives: `QUADRA_FILES_URL` (`s3://bucket/prefix`), `QUADRA_FILES_ENDPOINT`,
+/// `QUADRA_FILES_REGION`, `QUADRA_FILES_KEY`, `QUADRA_FILES_SECRET`.
+fn open_host(url: &str, values: &BTreeMap<String, String>) -> Result<Arc<Files>> {
+    let get = |k: &str| values.get(k).cloned().filter(|v| !v.is_empty());
+    let rest = url
+        .strip_prefix("s3://")
+        .ok_or(format!("QUADRA_FILES_URL `{url}` is s3://bucket/prefix"))?;
+    let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+    let spec = s3::Spec {
+        bucket: bucket.to_string(),
+        prefix: prefix.trim_matches('/').to_string(),
+        endpoint: get("QUADRA_FILES_ENDPOINT"),
+        region: get("QUADRA_FILES_REGION"),
+        key: get("QUADRA_FILES_KEY").ok_or("QUADRA_FILES_KEY is not set")?,
+        secret: get("QUADRA_FILES_SECRET").ok_or("QUADRA_FILES_SECRET is not set")?,
+    };
+    let id = format!(
+        "host s3 {} {} {:?} {:?} {} {}",
+        spec.bucket,
+        spec.prefix,
+        spec.endpoint,
+        spec.region,
+        spec.key,
+        sha256_hex(spec.secret.as_bytes())
+    );
+    let mut all = opened().lock().map_err(|_| "the stores of files")?;
+    if let Some(f) = all.get(&id) {
+        return Ok(f.clone());
+    }
+    let f = Arc::new(Files {
+        blobs: Box::new(s3::S3::new(spec)?),
+        cdn: None,
     });
     all.insert(id, f.clone());
     Ok(f)

@@ -483,6 +483,11 @@ fn engine_thread(
                         .as_ref()
                         .map(|d| d.destinations(&tenant))
                         .unwrap_or((Vec::new(), quadra_store::sequencer::Rule::Local));
+                    // the key a host gives the project (the cloud: QUADRA_SIGNING_KEY of its
+                    // environment) signs its commits from now on
+                    if let Some(k) = cfg.outside.env.get("QUADRA_SIGNING_KEY") {
+                        signing_key(&cfg.url, k)?;
+                    }
                     let options = quadra_store::sequencer::Options {
                         max_bytes: cfg.limits.max_bytes,
                         statement_timeout: cfg.limits.job,
@@ -981,6 +986,26 @@ async fn query(
         Ok(who) => call(&t, who, Req::Query(body)).await,
         Err(r) => r,
     }
+}
+
+/// The key of `QUADRA_SIGNING_KEY` loaded, and made the one that signs the database's commits
+/// when another (or none) does: a commit of its own, before the sequencer starts.
+fn signing_key(url: &str, secret: &str) -> Result<(), String> {
+    let public =
+        quadra_store::signing::load(secret).map_err(|e| format!("QUADRA_SIGNING_KEY: {e}"))?;
+    let mut conn = quadra_store::Conn::open(url)?;
+    if quadra_store::signing::active(&mut conn)?.as_deref() == Some(public.as_str()) {
+        return Ok(());
+    }
+    drop(conn);
+    let schema = std::rc::Rc::new(quadra_store::schema::Schema::default());
+    let mut db = quadra_store::Database::open_with(url, schema)?;
+    let now = chrono::Utc::now().naive_utc();
+    db.set_signing_key(
+        secret,
+        now - chrono::Duration::nanoseconds(now.and_utc().timestamp_subsec_nanos() as i64),
+    )?;
+    Ok(())
 }
 
 async fn record(

@@ -655,6 +655,19 @@ pub fn env_cmd(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        _ => Err("usage: quadra cloud env list | set <NAME> [value] | unset <NAME> | pull   [--environment label] [--project name]".into()),
+        // signed commits (phase 19): the platform makes the key, kept as QUADRA_SIGNING_KEY
+        Some("sign") => {
+            let name = project_arg(&args[1..], &with_value)?;
+            let v = call("POST", &format!("/v1/projects/{name}/env/signing{which}"), Some(&t), None)?
+                .map_err(refusal)?;
+            println!(
+                "✓ {}: its commits are signed from its next start, by the key {}",
+                v["environment"].as_str().unwrap_or(""),
+                v["public_key"].as_str().unwrap_or("")
+            );
+            println!("  keep the public key: `quadra db verify --key` checks a copy of the data against it");
+            Ok(())
+        }
+        _ => Err("usage: quadra cloud env list | set <NAME> [value] | unset <NAME> | pull | sign   [--environment label] [--project name]".into()),
     }
 }
