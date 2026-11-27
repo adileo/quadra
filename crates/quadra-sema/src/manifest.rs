@@ -555,6 +555,45 @@ pub struct Manifest {
     /// `[integrations] log_days`: how long the log of the deliveries and of the messages
     /// received is kept (their final states stay)
     pub log_days: Option<u32>,
+    /// `[files]`: where the files of `File` fields are kept (none: `.quadra/files` in the
+    /// project)
+    pub files: Option<FilesDecl>,
+}
+
+/// `[files]`: an S3 compatible bucket for the files of `File` fields, and a CDN in front of
+/// it.
+///
+/// ```toml
+/// [files]
+/// url = "s3://acme-files/prod"
+/// endpoint = "https://fsn1.your-objectstorage.com"
+/// region = "eu-central"
+/// key = { var = "FILES_KEY" }
+/// secret = { var = "FILES_SECRET" }
+/// cdn = "https://files.acme.example.com"
+/// cdn_secret = { var = "CDN_TOKEN_KEY" }
+/// ```
+///
+/// `url` may also be a folder of this machine (`file:/srv/acme/files`, or relative to the
+/// project). The keys are always secret variables.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FilesDecl {
+    pub url: Setting,
+    /// the S3 endpoint (AWS when not said)
+    pub endpoint: Option<Setting>,
+    pub region: Option<Setting>,
+    /// secret variables: the access key and its secret
+    pub key: Option<String>,
+    pub secret: Option<String>,
+    /// downloads through a CDN: its address, and the secret variable its tokens are signed with
+    pub cdn: Option<Setting>,
+    pub cdn_secret: Option<String>,
+}
+
+impl Default for Setting {
+    fn default() -> Self {
+        Setting::Literal(String::new())
+    }
 }
 
 /// `[signers.company]`: a certificate and its key (a PKCS#12 file, in base64, and its
@@ -770,6 +809,9 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             m.signers.push(sd);
         }
     }
+    if let Some(f) = doc.get("files") {
+        m.files = Some(files(&m, f)?);
+    }
     if let Some(conns) = doc.get("connections") {
         let conns = conns
             .as_table()
@@ -779,6 +821,59 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         }
     }
     Ok(m)
+}
+
+/// `[files]`: `url` (`s3://bucket/prefix` or `file:folder`), and for S3 `endpoint`,
+/// `region`, `key`, `secret`; `cdn` with `cdn_secret`.
+fn files(m: &Manifest, v: &toml::Value) -> Result<FilesDecl, String> {
+    let at = "quadra.toml, [files]";
+    let t = v.as_table().ok_or(format!("{at}: [files] is a table"))?;
+    let mut d = FilesDecl::default();
+    let mut url = None;
+    for (k, v) in t {
+        match k.as_str() {
+            "url" => url = Some(setting(m, at, k, v)?),
+            "endpoint" => d.endpoint = Some(setting(m, at, k, v)?),
+            "region" => d.region = Some(setting(m, at, k, v)?),
+            "key" => d.key = Some(credential(m, at, k, v)?),
+            "secret" => d.secret = Some(credential(m, at, k, v)?),
+            "cdn" => d.cdn = Some(setting(m, at, k, v)?),
+            "cdn_secret" => d.cdn_secret = Some(credential(m, at, k, v)?),
+            other => {
+                return Err(format!(
+                    "{at}: `{other}` is not a setting of the files (url, endpoint, region, key, secret, cdn, cdn_secret)"
+                ))
+            }
+        }
+    }
+    d.url = url.ok_or(format!(
+        "{at}: url says where the files are: `s3://bucket/prefix`, or a folder (`file:/srv/files`)"
+    ))?;
+    if let Setting::Literal(u) = &d.url {
+        if let Some(rest) = u.strip_prefix("s3://") {
+            if rest.split('/').next().unwrap_or("").is_empty() {
+                return Err(format!(
+                    "{at}: url `{u}` has no bucket (`s3://bucket/prefix`)"
+                ));
+            }
+        } else if !u.starts_with("file:") {
+            return Err(format!(
+                "{at}: url `{u}` is `s3://bucket/prefix` or a folder (`file:/srv/files`)"
+            ));
+        }
+    }
+    let s3 = !matches!(&d.url, Setting::Literal(u) if u.starts_with("file:"));
+    if s3 && (d.key.is_none() || d.secret.is_none()) {
+        return Err(format!(
+            "{at}: a bucket is reached with `key` and `secret` (secret variables: `key = {{ var = \"FILES_KEY\" }}`)"
+        ));
+    }
+    if d.cdn.is_some() != d.cdn_secret.is_some() {
+        return Err(format!(
+            "{at}: `cdn` goes with `cdn_secret`, the secret variable its download tokens are signed with"
+        ));
+    }
+    Ok(d)
 }
 
 fn var(name: &str, decl: &toml::Value) -> Result<Var, String> {
@@ -2121,5 +2216,48 @@ from = "Acme <noreply@acme.example.com>"
         assert_eq!(v.get("C").unwrap(), "q");
         assert_eq!(v.get("D").unwrap(), "v");
         assert!(!v.contains_key("E"));
+    }
+
+    #[test]
+    fn the_files_settings() {
+        let m = parse("[vars]\nK = { secret = true }\nS = { secret = true }\nC = { secret = true }\n\n[files]\nurl = \"s3://acme/prod\"\nendpoint = \"http://localhost:9000\"\nregion = \"us-east-1\"\nkey = { var = \"K\" }\nsecret = { var = \"S\" }\ncdn = \"https://files.acme.example.com\"\ncdn_secret = { var = \"C\" }\n").unwrap();
+        let f = m.files.unwrap();
+        assert_eq!(f.url, Setting::Literal("s3://acme/prod".into()));
+        assert_eq!(
+            (f.key.as_deref(), f.secret.as_deref()),
+            (Some("K"), Some("S"))
+        );
+        assert_eq!(f.cdn_secret.as_deref(), Some("C"));
+        assert!(parse("[files]\nurl = \"file:/srv/files\"\n")
+            .unwrap()
+            .files
+            .is_some());
+        for (toml, says) in [
+            ("[files]\nurl = \"s3://acme\"\n", "with `key` and `secret`"),
+            (
+                "[files]\nurl = \"ftp://x\"\n",
+                "is `s3://bucket/prefix` or a folder",
+            ),
+            ("[files]\nurl = \"s3:///p\"\n", "has no bucket"),
+            (
+                "[files]\nendpoint = \"x\"\n",
+                "url says where the files are",
+            ),
+            (
+                "[files]\nurl = \"file:x\"\nbucket = 1\n",
+                "`bucket` is not a setting of the files",
+            ),
+            (
+                "[vars]\nK = {}\n[files]\nurl = \"s3://a\"\nkey = { var = \"K\" }\n",
+                "K must be declared `secret = true`",
+            ),
+            (
+                "[files]\nurl = \"file:x\"\ncdn = \"https://c\"\n",
+                "`cdn` goes with `cdn_secret`",
+            ),
+        ] {
+            let e = parse(toml).unwrap_err();
+            assert!(e.contains(says), "{toml}: {e}");
+        }
     }
 }
