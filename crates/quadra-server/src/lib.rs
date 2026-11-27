@@ -85,6 +85,11 @@ impl Slot {
 /// live events.
 struct Tenant {
     id: String,
+    /// its limits and the credentials found valid lately: its own (they go when it sleeps, and
+    /// one busy tenant does not fill another's)
+    limiter: Mutex<HashMap<String, (f64, Instant)>>,
+    failures: Mutex<HashMap<String, (f64, Instant)>>,
+    known: Mutex<HashMap<String, (Principal, Instant)>>,
     /// the engines' configuration
     config: Config,
     /// `writers[0]` is the first engine; more only on PostgreSQL
@@ -539,14 +544,6 @@ struct App {
     /// requests per second a credential may make
     rate: f64,
     durability: Option<Arc<dyn Durability>>,
-    /// requests per valid credential (`tenant/hash`): (tokens, last refill)
-    limiter: Mutex<HashMap<String, (f64, Instant)>>,
-    /// failed authentications per tenant and client (`tenant/client`), and per tenant (a
-    /// larger allowance, for the engine's sake): (tokens, last refill)
-    failures: Mutex<HashMap<String, (f64, Instant)>>,
-    /// credentials found valid lately (`tenant/hash` → who, until when): a request with one
-    /// does not wait for the engine, and still gets in while a flood of wrong ones is refused
-    known: Mutex<HashMap<String, (Principal, Instant)>>,
     /// what tenants stopped since the host last asked had used
     used: Mutex<HashMap<String, Usage>>,
     /// clients told apart by `X-Forwarded-For`
@@ -677,14 +674,15 @@ impl App {
         Ok(t)
     }
 
-    /// One request more for `key` (a sign-in attempt, a code asked): false past the rate.
-    fn allow(&self, key: &str) -> bool {
-        take(&self.limiter, key, RATE, BURST)
+    /// One request more for `key` of a tenant (a sign-in attempt, a code asked): false past
+    /// the rate.
+    fn allow(&self, t: &Tenant, key: &str) -> bool {
+        take(&t.limiter, key, RATE, BURST)
     }
 
     /// One request more of a valid credential: false past the host's rate.
-    fn allow_credential(&self, key: &str) -> bool {
-        take(&self.limiter, key, self.rate, self.rate * BURST / RATE)
+    fn allow_credential(&self, t: &Tenant, key: &str) -> bool {
+        take(&t.limiter, key, self.rate, self.rate * BURST / RATE)
     }
 
     /// The key of a credential of a tenant: its hash, never the secret itself.
@@ -692,15 +690,18 @@ impl App {
         format!("{}/{}", t.id, quadra_store::auth::sha256_hex(secret))
     }
 
-    fn known(&self, key: &str) -> Option<Principal> {
-        let m = self.known.lock().unwrap();
+    /// A credential of the tenant found valid lately (`tenant/hash` → who, until when): a
+    /// request with one does not wait for the engine, and still gets in while a flood of wrong
+    /// ones is refused.
+    fn known(&self, t: &Tenant, key: &str) -> Option<Principal> {
+        let m = t.known.lock().unwrap();
         m.get(key)
             .filter(|(_, until)| *until > Instant::now())
             .map(|(p, _)| p.clone())
     }
 
-    fn remember(&self, key: String, who: &Principal) {
-        let mut m = self.known.lock().unwrap();
+    fn remember(&self, t: &Tenant, key: String, who: &Principal) {
+        let mut m = t.known.lock().unwrap();
         let now = Instant::now();
         if m.len() >= MAX_ENTRIES {
             m.retain(|_, (_, until)| *until > now);
@@ -710,8 +711,8 @@ impl App {
         }
     }
 
-    fn forget(&self, key: &str) {
-        self.known.lock().unwrap().remove(key);
+    fn forget(&self, t: &Tenant, key: &str) {
+        t.known.lock().unwrap().remove(key);
     }
 
     /// Who sends a request, for the limits on failures: the address `X-Forwarded-For` gives
@@ -774,7 +775,7 @@ async fn authenticate(
         (None, None) => return Err(fail(401, "authentication required")),
     };
     let key = App::credential(t, &secret);
-    let who = match app.known(&key) {
+    let who = match app.known(t, &key) {
         Some(who) => who,
         None => {
             // a flood of wrong credentials stops here instead of filling the engine's queue:
@@ -785,8 +786,8 @@ async fn authenticate(
             } else {
                 FAIL_RATE
             };
-            if !has_token(&app.failures, &client, FAIL_RATE)
-                || !has_token(&app.failures, &t.id, tenant_rate)
+            if !has_token(&t.failures, &client, FAIL_RATE)
+                || !has_token(&t.failures, &t.id, tenant_rate)
             {
                 return Err(fail(
                     429,
@@ -795,14 +796,14 @@ async fn authenticate(
             }
             match t.ask(|reply| Job::Auth { secret, reply }).await.flatten() {
                 Some(who) => {
-                    app.remember(key.clone(), &who);
+                    app.remember(t, key.clone(), &who);
                     who
                 }
                 None => {
-                    take(&app.failures, &client, FAIL_RATE, FAIL_BURST);
+                    take(&t.failures, &client, FAIL_RATE, FAIL_BURST);
                     if app.forwarded_for {
                         take(
-                            &app.failures,
+                            &t.failures,
                             &t.id,
                             FAIL_RATE * FAIL_TENANT,
                             FAIL_BURST * FAIL_TENANT,
@@ -813,7 +814,7 @@ async fn authenticate(
             }
         }
     };
-    if !app.allow_credential(&key) {
+    if !app.allow_credential(t, &key) {
         return Err(fail(429, "too many requests"));
     }
     if from_cookie && method != Method::GET {
@@ -1355,7 +1356,7 @@ async fn dev_login(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>) 
         return fail(404, "not found");
     }
     let login = body["login"].as_str().unwrap_or("").to_string();
-    if !app.allow(&format!("{}/login:{login}", t.id)) {
+    if !app.allow(&t, &format!("{}/login:{login}", t.id)) {
         return fail(429, "too many requests");
     }
     match t.ask(|reply| Job::DevLogin { login, reply }).await {
@@ -1414,7 +1415,9 @@ async fn code_start(
     if login.is_empty() || login.len() > 254 {
         return fail(400, "an email address or a login");
     }
-    if !app.allow(&format!("{}/code:{login}", t.id)) || !app.allow(&format!("{}/code", t.id)) {
+    if !app.allow(&t, &format!("{}/code:{login}", t.id))
+        || !app.allow(&t, &format!("{}/code", t.id))
+    {
         return fail(429, "too many requests");
     }
     let Some(mut r) = t.ask(|reply| Job::CodeStart { login, reply }).await else {
@@ -1443,7 +1446,7 @@ async fn code_verify(State(app): State<Shared>, Ten(t): Ten, Json(body): Json<J>
     }
     let id = body["login_id"].as_str().unwrap_or("").to_string();
     let code = body["code"].as_str().unwrap_or("").to_string();
-    if !app.allow(&format!("{}/verify:{id}", t.id)) {
+    if !app.allow(&t, &format!("{}/verify:{id}", t.id)) {
         return fail(429, "too many requests");
     }
     match t.ask(|reply| Job::CodeVerify { id, code, reply }).await {
@@ -1515,7 +1518,7 @@ async fn logout(
         return r;
     }
     if let Some(secret) = cookie(&headers, COOKIE) {
-        app.forget(&App::credential(&t, &secret));
+        app.forget(&t, &App::credential(&t, &secret));
         t.send(Job::Logout { secret });
     }
     let mut r = json_response(200, json!({ "ok": true }));
@@ -1694,6 +1697,9 @@ fn start(spec: TenantSpec, durability: Option<Arc<dyn Durability>>) -> Arc<Tenan
     );
     let t = Arc::new(Tenant {
         id: spec.id.clone(),
+        limiter: Mutex::new(HashMap::new()),
+        failures: Mutex::new(HashMap::new()),
+        known: Mutex::new(HashMap::new()),
         config: cfg.clone(),
         writers: Mutex::new(vec![first]),
         readers: Mutex::new(Vec::new()),
@@ -1878,9 +1884,6 @@ impl Host {
             sign_in: options.sign_in,
             rate: options.requests_per_second.unwrap_or(RATE),
             durability: options.durability.clone(),
-            limiter: Mutex::new(HashMap::new()),
-            failures: Mutex::new(HashMap::new()),
-            known: Mutex::new(HashMap::new()),
             used: Mutex::new(HashMap::new()),
             forwarded_for: options.forwarded_for,
         });
