@@ -1892,7 +1892,7 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
     const AT_ONCE: usize = 4;
     let mut seen = None;
     loop {
-        let (plans, next) = match t
+        let (plans, next, serves) = match t
             .ask(|reply| Job::Deliveries {
                 limit: BATCH,
                 reply,
@@ -1902,10 +1902,19 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
             Some(Ok(x)) => x,
             Some(Err(e)) => {
                 eprintln!("{}: deliveries: {e}", t.id);
-                (Vec::new(), None)
+                (Vec::new(), None, true)
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, true),
         };
+        // a model without any `outbound`: nothing to look at after each commit (an engine job
+        // per commit would only hold up the others, and a stop); looked at again in a minute,
+        // in case the code changed (`quadra dev`)
+        if !serves {
+            if !t.pause(Duration::from_secs(60)).await {
+                return;
+            }
+            continue;
+        }
         let busy = !plans.is_empty();
         let mut set = tokio::task::JoinSet::new();
         let mut plans = plans.into_iter();
@@ -2258,7 +2267,7 @@ impl Host {
         // an event waiting to be tried again wakes it too
         let delivery = if t.config.outside.deliver {
             match t.ask(|reply| Job::Deliveries { limit: 0, reply }).await {
-                Some(Ok((_, next))) => next.map(until),
+                Some(Ok((_, next, _))) => next.map(until),
                 _ => None,
             }
         } else {

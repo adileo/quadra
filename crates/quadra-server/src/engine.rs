@@ -371,11 +371,19 @@ pub enum Job {
         reply: oneshot::Sender<Result<Option<chrono::NaiveDateTime>, ()>>,
     },
     /// the host's deliveries (`crate::deliver`): the plans of up to `limit` due events of the
-    /// outbox, and when the next pending one is due after them (`None`: none pending)
+    /// outbox, when the next pending one is due after them (`None`: none pending), and whether
+    /// the model has any `outbound` at all
     Deliveries {
         limit: usize,
         reply: oneshot::Sender<
-            Result<(Vec<crate::deliver::Plan>, Option<chrono::NaiveDateTime>), String>,
+            Result<
+                (
+                    Vec<crate::deliver::Plan>,
+                    Option<chrono::NaiveDateTime>,
+                    bool,
+                ),
+                String,
+            >,
         >,
     },
     /// what came of the delivery of event `id`, written through the sequencer
@@ -697,13 +705,20 @@ impl Engine {
     fn deliveries(
         &mut self,
         limit: usize,
-    ) -> Result<(Vec<crate::deliver::Plan>, Option<chrono::NaiveDateTime>), String> {
+    ) -> Result<
+        (
+            Vec<crate::deliver::Plan>,
+            Option<chrono::NaiveDateTime>,
+            bool,
+        ),
+        String,
+    > {
         let checked = self.checked.clone();
         let Some(model) = checked.model.as_ref() else {
-            return Ok((Vec::new(), None));
+            return Ok((Vec::new(), None, false));
         };
         if model.outbounds.is_empty() {
-            return Ok((Vec::new(), None));
+            return Ok((Vec::new(), None, false));
         }
         let events: Vec<String> = model.outbounds.iter().map(|o| o.event.clone()).collect();
         let at = now();
@@ -734,7 +749,7 @@ impl Engine {
             .collect();
         let next = quadra_store::deliveries::next_at(&mut self.conn, &events)?
             .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S").unwrap_or(at));
-        Ok((plans, next))
+        Ok((plans, next, true))
     }
 
     /// Where an interpreter's commits go: the tenant's sequencer, or the database directly.
