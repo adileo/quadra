@@ -3295,25 +3295,28 @@ impl Engine {
                     format!("base {b} is ahead of the latest commit ({latest})"),
                 ));
             }
-            let targets: Vec<u64> = ops
-                .iter()
-                .filter(|o| o["op"] != json!("create"))
-                .filter_map(|o| o["id"].as_u64())
-                .collect();
-            let conflicts = self.changed_since(model, &targets, b)?;
-            if !conflicts.is_empty() {
-                return Ok(reply(
-                    409,
-                    json!({ "error": "changed by others since you read it: review their changes and try again", "conflicts": conflicts }),
-                ));
-            }
         }
-        // a commit of another engine (PostgreSQL) may land while this one runs: then it runs
-        // again on it
+        let targets: Vec<u64> = ops
+            .iter()
+            .filter(|o| o["op"] != json!("create"))
+            .filter_map(|o| o["id"].as_u64())
+            .collect();
+        // a commit of another engine may land while this one runs: then it runs again on it
         let mut attempt = 0;
         loop {
             attempt += 1;
             let mut i = self.interp(model, Some(who), None)?;
+            // checked on the data this attempt runs on: a commit that lands later changes what
+            // it read (the records it changes among them), and it runs again, checked again
+            if let Some(b) = base {
+                let conflicts = self.changed_since(model, &targets, b)?;
+                if !conflicts.is_empty() {
+                    return Ok(reply(
+                        409,
+                        json!({ "error": "changed by others since you read it: review their changes and try again", "conflicts": conflicts }),
+                    ));
+                }
+            }
             let conn = Pooled::take(&self.pool, &self.url).map_err(|e| (500, e))?;
             let db = Database::with(conn, self.schema.clone());
             i.materialize = materialized_formulas(&db.schema);
