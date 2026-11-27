@@ -484,12 +484,34 @@ impl Consent {
 pub struct Manifest {
     pub vars: Vec<Var>,
     pub connections: Vec<Connection>,
+    /// `[signers.<name>]`: the certificates and keys documents are signed with
+    pub signers: Vec<SignerDecl>,
     /// `[integrations] log_days`: how long the log of the deliveries and of the messages
     /// received is kept (their final states stay)
     pub log_days: Option<u32>,
 }
 
+/// `[signers.company]`: a certificate and its key (a PKCS#12 file, in base64, and its
+/// password: PAdES, CAdES, XAdES), or an OpenPGP key (`pgp_key`, `passphrase`) to sign with,
+/// or the public key of someone files are encrypted for (`pgp_public`). Every credential comes
+/// from a secret variable; `reason` and `location` go in a PDF's signature.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SignerDecl {
+    pub name: String,
+    pub p12: Option<String>,
+    pub password: Option<String>,
+    pub pgp_key: Option<String>,
+    pub passphrase: Option<String>,
+    pub pgp_public: Option<Setting>,
+    pub reason: Option<String>,
+    pub location: Option<String>,
+}
+
 impl Manifest {
+    pub fn signer(&self, name: &str) -> Option<&SignerDecl> {
+        self.signers.iter().find(|s| s.name == name)
+    }
+
     /// The days the log of the integrations is kept: 90 when not said.
     pub fn log_days(&self) -> u32 {
         self.log_days.unwrap_or(90)
@@ -634,6 +656,52 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
                     ))
                 }
             }
+        }
+    }
+    if let Some(signers) = doc.get("signers") {
+        let t = signers
+            .as_table()
+            .ok_or("quadra.toml: [signers] is a table of signers ([signers.name])")?;
+        for (name, decl) in t {
+            let at = format!("quadra.toml, [signers.{name}]");
+            if !is_connection_name(name) {
+                return Err(format!(
+                    "{at}: a signer's name is in lower case letters, digits and `_` (`company`)"
+                ));
+            }
+            let d = decl
+                .as_table()
+                .ok_or(format!("{at}: a signer is a table"))?;
+            let mut sd = SignerDecl {
+                name: name.clone(),
+                ..Default::default()
+            };
+            for (k, v) in d {
+                match k.as_str() {
+                    "p12" => sd.p12 = Some(credential(&m, &at, k, v)?),
+                    "password" => sd.password = Some(credential(&m, &at, k, v)?),
+                    "pgp_key" => sd.pgp_key = Some(credential(&m, &at, k, v)?),
+                    "passphrase" => sd.passphrase = Some(credential(&m, &at, k, v)?),
+                    "pgp_public" => sd.pgp_public = Some(setting(&m, &at, k, v)?),
+                    "reason" | "location" => {
+                        let t = v.as_str().ok_or(format!("{at}: {k} is text"))?.to_string();
+                        if k == "reason" { sd.reason = Some(t) } else { sd.location = Some(t) }
+                    }
+                    other => return Err(format!("{at}: `{other}` is not a setting of a signer (p12, password, pgp_key, passphrase, pgp_public, reason, location)")),
+                }
+            }
+            let kinds = [
+                sd.p12.is_some(),
+                sd.pgp_key.is_some(),
+                sd.pgp_public.is_some(),
+            ];
+            if kinds.iter().filter(|k| **k).count() != 1 {
+                return Err(format!("{at}: a signer has one of `p12` (a certificate, with its `password`), `pgp_key` (with its `passphrase`, if any) or `pgp_public`"));
+            }
+            if sd.p12.is_some() && sd.password.is_none() {
+                return Err(format!("{at}: the `p12` file opens with its `password`"));
+            }
+            m.signers.push(sd);
         }
     }
     if let Some(conns) = doc.get("connections") {

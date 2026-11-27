@@ -3334,6 +3334,11 @@ impl<'m> Checker<'m> {
             "render" | "zpl" if !self.m.fns.iter().any(|f| f.name == n) => {
                 return self.check_render(n, args, span);
             }
+            "sign" | "p7m" | "xades" | "pgp_sign" | "pgp_encrypt"
+                if !self.m.fns.iter().any(|f| f.name == n) =>
+            {
+                return self.check_sign(n, args, span);
+            }
             // the request of an `outbound … as e:` block (`check_outbounds`)
             // a file to a folder of an sftp or ftp connection: `write("out/a.csv", rows.csv())`;
             // a row to an exchange table of a database: `insert("EXCHANGE", ErpOrder(…))`

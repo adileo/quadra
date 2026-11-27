@@ -1685,7 +1685,13 @@ pub fn attach_render(
                     }
                 }
             }
-            match interp.render_document(&a.document, vec![rec], false) {
+            let doc = interp
+                .render_document(&a.document, vec![rec], false)
+                .and_then(|d| match &a.signer {
+                    Some(by) => interp.sign_call("sign", vec![d, quadra_runtime::value::text(by)]),
+                    None => Ok(d),
+                });
+            match doc {
                 Ok(V::Tuple(t)) => {
                     let get = |k: &str| {
                         t.iter()

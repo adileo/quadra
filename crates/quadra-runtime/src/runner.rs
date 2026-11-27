@@ -671,6 +671,12 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
                 let doc = self
                     .interp
                     .render_document(&a.document, vec![rec.clone()], false)
+                    .and_then(|d| match &a.signer {
+                        Some(by) => self
+                            .interp
+                            .sign_call("sign", vec![d, crate::value::text(by)]),
+                        None => Ok(d),
+                    })
                     .map_err(|e| {
                         format!(
                             "attach {} to {}#{id}: {}",

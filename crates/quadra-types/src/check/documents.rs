@@ -308,6 +308,22 @@ impl<'m> Checker<'m> {
                 }
             }
         }
+        if let Some(by) = &a.signer {
+            match m.manifest.signer(by) {
+                None => self.error(
+                    a.span,
+                    format!("no signer `{by}` in quadra.toml ([signers.{by}])"),
+                ),
+                Some(sd) if sd.p12.is_none() => self.error(
+                    a.span,
+                    format!("`{by}` has no certificate (`p12`): a PDF is signed with one"),
+                ),
+                _ => {}
+            }
+            if d.label {
+                self.error(a.span, "a label is not signed: `signed` is for documents");
+            }
+        }
         if let Some(w) = &a.when {
             let saved = std::mem::replace(&mut self.context, format!("attach {}", a.document));
             self.entity = Some(e);
@@ -799,6 +815,86 @@ impl<'m> Checker<'m> {
         } else {
             rendered()
         }
+    }
+}
+
+impl<'m> Checker<'m> {
+    /// `sign(doc, "company")`, `p7m`, `xades`, `pgp_sign`, `pgp_encrypt`: what they sign, and a
+    /// signer of quadra.toml with the key they need.
+    pub(super) fn check_sign(&mut self, n: &str, args: &[Arg], span: Span) -> T {
+        let ts: Vec<T> = args.iter().map(|a| self.infer(&a.value)).collect();
+        let ret = match n {
+            "xades" | "pgp_sign" => T::Text("Text"),
+            _ => rendered(),
+        };
+        if args.len() != 2 || args.iter().any(|a| a.name.is_some()) {
+            self.error(span, format!("`{n}` takes what it signs and the signer of quadra.toml: `{n}(doc, \"company\")`"));
+            return ret;
+        }
+        let ok = ["outbound ", "test ", "fixture ", "endpoint "]
+            .iter()
+            .any(|c| self.context.starts_with(c))
+            || self.context.is_empty();
+        if !ok {
+            self.error(span, format!("`{n}` signs with a key: it runs after the commit, in an `outbound … as e:` block, or in a test (not in {})", self.context));
+        }
+        let what_ok = match (n, ts[0].unopt()) {
+            ("sign", T::Tuple(_)) => true,
+            ("xades", T::Ent(r)) => self
+                .m
+                .entity(r)
+                .is_some_and(|e| e.format.as_deref() == Some("xml")),
+            ("xades", T::Text(_)) => true,
+            (_, T::Tuple(_) | T::Text(_) | T::Unknown) => {
+                n != "sign" || matches!(ts[0], T::Unknown)
+            }
+            (_, T::Ent(r)) => n != "sign" && self.m.entity(r).is_some_and(|e| e.format.is_some()),
+            _ => false,
+        };
+        if !what_ok {
+            self.error(args[0].value.span, match n {
+                "sign" => "`sign` signs a PDF (PAdES): `sign(render(InvoicePdf(inv)), \"company\")`",
+                "xades" => "`xades` signs an XML document: a record `from xml`, or its text",
+                _ => "what is signed is a document (`render(…)`), a record with a format, or text",
+            });
+        }
+        let by = match &args[1].value.kind {
+            ExprKind::Lit(Lit::Str(s)) => s.clone(),
+            _ => {
+                self.error(
+                    args[1].value.span,
+                    format!("the signer is named as written: `{n}(…, \"company\")`"),
+                );
+                return ret;
+            }
+        };
+        let Some(sd) = self.m.manifest.signer(&by) else {
+            self.error(
+                args[1].value.span,
+                format!("no signer `{by}` in quadra.toml ([signers.{by}])"),
+            );
+            return ret;
+        };
+        let need = match n {
+            "pgp_sign" => sd.pgp_key.is_some(),
+            "pgp_encrypt" => sd.pgp_public.is_some(),
+            _ => sd.p12.is_some(),
+        };
+        if !need {
+            self.error(
+                args[1].value.span,
+                match n {
+                    "pgp_sign" => {
+                        format!("`{by}` has no `pgp_key`: an OpenPGP signature needs one")
+                    }
+                    "pgp_encrypt" => {
+                        format!("`{by}` has no `pgp_public`: files are encrypted for a public key")
+                    }
+                    _ => format!("`{by}` has no certificate (`p12`): `{n}` signs with one"),
+                },
+            );
+        }
+        ret
     }
 }
 

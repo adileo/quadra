@@ -387,10 +387,16 @@ impl<'a> Lower<'a> {
                     }
                 }
                 let when = when_node.map(|e| self.expr(&e));
+                let signer = item
+                    .children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .find(|t| t.kind() == STRING)
+                    .map(|t| unquote(t.text()));
                 self.model.attaches.push(Attach {
                     document,
                     entity: entity.to_string(),
                     field: field.to_string(),
+                    signer,
                     when,
                     span,
                 });

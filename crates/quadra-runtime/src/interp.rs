@@ -3443,6 +3443,14 @@ impl<'m> Interp<'m> {
             let (pos, _) = self.eval_args(args, ctx)?;
             return self.apply(&f, pos);
         }
+        // signatures of documents, by a signer of quadra.toml
+        if matches!(n, "sign" | "p7m" | "xades" | "pgp_sign" | "pgp_encrypt")
+            && !self.m.fns.iter().any(|f| f.name == n)
+            && ctx.local(n).is_none()
+        {
+            let (pos, _) = self.eval_args(args, ctx)?;
+            return self.sign_call(n, pos);
+        }
         // `render(InvoicePdf(inv))`, `zpl(ParcelLabel(p))`: a document of a `.qdp` file
         if matches!(n, "render" | "zpl") && !self.m.fns.iter().any(|f| f.name == n) {
             if let [Arg {

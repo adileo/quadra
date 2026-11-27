@@ -23,5 +23,7 @@ chrono-tz = "0.10"
 quadra-print = { path = "../quadra-print" }
 # labels (PDF and ZPL) and barcodes
 quadra-label = { path = "../quadra-label" }
+# signatures of documents (PAdES, CAdES, XAdES, OpenPGP)
+quadra-sign = { path = "../quadra-sign" }
 base64 = "0.22"
 sha2 = "0.10"

@@ -1122,6 +1122,8 @@ pub struct Attach {
     pub document: String,
     pub entity: String,
     pub field: String,
+    /// `signed "company"`: signed (PAdES) by that signer of quadra.toml before it is kept
+    pub signer: Option<String>,
     pub when: Option<Expr>,
     pub span: Span,
 }

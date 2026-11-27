@@ -981,6 +981,11 @@ fn attach(p: &mut Parser) {
     name_ref(p);
     p.bump_ctx(); // `to`
     path(p);
+    // `signed "company"`: the document signed (PAdES) by a signer of quadra.toml
+    if p.at_ctx("signed") {
+        p.bump_ctx();
+        p.expect(STRING);
+    }
     if p.eat(WHEN_KW) {
         expr(p);
     }

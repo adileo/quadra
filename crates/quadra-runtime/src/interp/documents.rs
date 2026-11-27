@@ -623,6 +623,169 @@ impl<'m> Interp<'m> {
     }
 }
 
+impl<'m> Interp<'m> {
+    /// `sign(doc, "company")`, `p7m(x, "company")`, `xades(x, "company")`,
+    /// `pgp_sign(x, "key")`, `pgp_encrypt(x, "bank")`: signed with the signer of quadra.toml,
+    /// at the clock's time (the same document, signer and time: the same bytes, but OpenPGP
+    /// encryption).
+    pub fn sign_call(&mut self, n: &str, pos: Vec<V>) -> R<V> {
+        let (Some(x), Some(V::Text(by))) = (pos.first(), pos.get(1)) else {
+            return fail(format!(
+                "`{n}` takes what it signs and the signer: `{n}(doc, \"company\")`"
+            ));
+        };
+        let m = self.m;
+        let Some(sd) = m.manifest.signer(by) else {
+            return fail(format!("no signer `{by}` in quadra.toml ([signers.{by}])"));
+        };
+        let value = |var: &Option<String>| -> R<String> {
+            let Some(v) = var else {
+                return fail(format!("the signer `{by}` has no key for `{n}`"));
+            };
+            match m.manifest.value(&m.env, v) {
+                Some(s) => Ok(s.to_string()),
+                None => fail(format!(
+                    "the signer `{by}` needs {v}, which is not set where the app runs"
+                )),
+            }
+        };
+        let time = quadra_sign::SigningTime::from_unix_seconds(
+            self.clock.and_utc().timestamp().max(0) as u64,
+        );
+        let (name, ctype, bytes, pages, text_of) = self.doc_bytes(x)?;
+        let x509 = |p12: &Option<String>, pw: &Option<String>| -> R<quadra_sign::Signer> {
+            use base64::Engine as _;
+            let raw = value(p12)?;
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(raw.split_whitespace().collect::<String>())
+                .or_else(|_| fail(format!("the `p12` of `{by}` is the .p12 file in base64")))?;
+            quadra_sign::Signer::from_pkcs12(&der, &value(pw)?)
+                .or_else(|e| fail(format!("the signer `{by}`: {e}")))
+        };
+        let err = |e: String| fail::<V>(format!("{n} by `{by}`: {e}"));
+        match n {
+            "sign" => {
+                if ctype != "application/pdf" {
+                    return fail("`sign` signs a PDF (PAdES): `sign(render(InvoicePdf(inv)), \"company\")`; other content: `p7m`");
+                }
+                let s = x509(&sd.p12, &sd.password)?;
+                let info = quadra_sign::PadesInfo {
+                    reason: sd.reason.clone(),
+                    location: sd.location.clone(),
+                    name: None,
+                };
+                match quadra_sign::pades(&bytes, &s, time, &info) {
+                    Ok(b) => Ok(rendered(&name, &ctype, pages, &b, &text_of)),
+                    Err(e) => err(e),
+                }
+            }
+            "p7m" => {
+                let s = x509(&sd.p12, &sd.password)?;
+                match quadra_sign::cades_p7m(&bytes, &s, time) {
+                    Ok(b) => Ok(rendered(
+                        &format!("{name}.p7m"),
+                        "application/pkcs7-mime",
+                        pages,
+                        &b,
+                        &text_of,
+                    )),
+                    Err(e) => err(e),
+                }
+            }
+            "xades" => {
+                let s = x509(&sd.p12, &sd.password)?;
+                let xml =
+                    String::from_utf8(bytes).or_else(|_| fail("`xades` signs an XML document"))?;
+                match quadra_sign::xades_enveloped(&xml, &s, time) {
+                    Ok(t) => Ok(text(&t)),
+                    Err(e) => err(e),
+                }
+            }
+            "pgp_sign" => {
+                let key = value(&sd.pgp_key)?;
+                let pass = match &sd.passphrase {
+                    Some(_) => Some(value(&sd.passphrase)?),
+                    None => None,
+                };
+                match quadra_sign::pgp_sign_detached(&bytes, &key, pass.as_deref(), time) {
+                    Ok(t) => Ok(text(&t)),
+                    Err(e) => err(e),
+                }
+            }
+            _ => {
+                let public = match &sd.pgp_public {
+                    Some(quadra_sema::manifest::Setting::Literal(t)) => t.clone(),
+                    Some(quadra_sema::manifest::Setting::Var(v)) => value(&Some(v.clone()))?,
+                    None => {
+                        return fail(format!(
+                            "`{by}` has no `pgp_public`: files are encrypted for a public key"
+                        ))
+                    }
+                };
+                match quadra_sign::pgp_encrypt(&bytes, &[public.as_str()], None, time) {
+                    Ok(b) => Ok(rendered(
+                        &format!("{name}.pgp"),
+                        "application/pgp-encrypted",
+                        pages,
+                        &b,
+                        "",
+                    )),
+                    Err(e) => err(e),
+                }
+            }
+        }
+    }
+
+    /// The bytes of what is signed: a document rendered, a record `from xml` or `from json`
+    /// (its document), or text. With its name, type, pages and text.
+    fn doc_bytes(&mut self, x: &V) -> R<(String, String, Vec<u8>, usize, String)> {
+        match x {
+            V::Tuple(f) if f.iter().any(|(k, _)| k.as_deref() == Some("content")) => {
+                use base64::Engine as _;
+                let get = |k: &str| {
+                    f.iter()
+                        .find(|(n, _)| n.as_deref() == Some(k))
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(V::None)
+                };
+                let s = |v: V| match v {
+                    V::Text(t) => t.to_string(),
+                    other => other.to_string(),
+                };
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(s(get("content")))
+                    .or_else(|_| fail("the document's bytes are not readable"))?;
+                let pages = match get("pages") {
+                    V::Int(n) => n as usize,
+                    _ => 0,
+                };
+                Ok((s(get("name")), s(get("type")), bytes, pages, s(get("text"))))
+            }
+            rec @ V::Rec { ent, .. } => {
+                let (body, ctype) = crate::formats::render(self.m, rec).or_else(fail)?;
+                let ext = if ctype.contains("xml") { "xml" } else { "json" };
+                Ok((
+                    format!("{ent}.{ext}"),
+                    ctype.to_string(),
+                    body.into_bytes(),
+                    0,
+                    String::new(),
+                ))
+            }
+            V::Text(t) => Ok((
+                "document.txt".into(),
+                "text/plain".into(),
+                t.as_bytes().to_vec(),
+                0,
+                t.to_string(),
+            )),
+            other => fail(format!(
+                "a document, a record `from xml` or text is signed, not {other}"
+            )),
+        }
+    }
+}
+
 /// A file name from a title: letters, digits, `-` and `_` (`Invoice INV/2026/00001` →
 /// `Invoice-INV-2026-00001.pdf`).
 pub(crate) fn file_name(title: &str, ext: &str) -> String {
