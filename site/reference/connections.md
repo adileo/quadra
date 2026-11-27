@@ -1141,6 +1141,167 @@ EBCDIC with its packed numbers, byte for byte. The file is written under a hidde
 the same folder (`.a.dat.quadra-….part`) and renamed into place once complete: whoever
 reads the folder never sees half a file. A file already there is replaced.
 
+## Databases of other systems
+
+An ERP, a warehouse system, an AS/400 that publishes nothing over HTTP can still be read and
+written where its data is: its database. Quadra reads a table a piece at a time, from where it
+stopped, and writes rows into tables agreed for the exchange; it never runs other SQL there.
+
+```toml
+[vars]
+ERP_DB_PASSWORD = { secret = true }
+WMS_DB_PASSWORD = { secret = true }
+AS400_PASSWORD = { secret = true }
+
+[connections.erp_db]
+kind = "postgres"
+url = "postgres://erp-db.example.com:5432/erp"
+user = "quadra"
+password = { var = "ERP_DB_PASSWORD" }
+
+[connections.wms_db]
+kind = "mysql"                                   # or "sqlserver": sqlserver://host:1433/database
+url = "mysql://wms.example.com:3306/wms"
+user = "quadra"
+password = { var = "WMS_DB_PASSWORD" }
+timeout = "60s"
+
+[connections.as400]
+kind = "odbc"
+url = "DSN=AS400;CommitMode=0"                  # the DSN of the agent's machine, or a whole connection string
+user = "QUADRA"
+password = { var = "AS400_PASSWORD" }
+location = "agent:milano"                       # ODBC runs only in an agent
+insecure = true                                 # the agent is in the same network
+```
+
+| Key | Meaning |
+|---|---|
+| `kind` | `postgres`, `mysql`, `sqlserver`, `odbc` |
+| `url` | `postgres://host:5432/database`, `mysql://host:3306/database`, `sqlserver://host:1433/database`, without credentials; for `odbc` the DSN (`DSN=AS400`) or a connection string (`Driver={IBM i Access ODBC Driver};System=as400.local`) |
+| `user`, `password` | the login; the password from a secret variable. For `odbc` they are added to the connection string as `UID` and `PWD` |
+| `timeout` | of connecting and of each query, from `"1s"` to `"600s"`; `"30s"` when not given |
+| `insecure` | `true`: no TLS, for a database in the same network as the agent that reaches it. Without it the connection is TLS, the server's certificate checked against the authorities the system trusts |
+| `location` | `"agent:<name>"`: reached by that on-premise agent, in the database's own network, which holds the credentials |
+
+Give Quadra a user of its own on the database, allowed to read the tables it pulls and to
+insert into the exchange tables, and nothing else.
+
+### Reading a table: `pull "TABLE"`
+
+```quadra
+record ErpOrder from json:
+    id: Int at "ORDER_ID"
+    number: Text at "ORDER_NO"
+    customer: Text at "CUSTOMER_CODE"
+    total: Decimal at "TOTAL"
+    changed: DateTime at "UPDATED_AT"
+
+inbound OrderIn via erp_db as m: ErpOrder:
+    pull "erp.orders" every 5 minutes
+    cursor m.changed
+    let o = Order(number=m.number, total=m.total)
+```
+
+| Rule | Detail |
+|---|---|
+| `pull "TABLE"` | a table or a view, with its schema (`erp.orders`, `ERPLIB.ORDERS`): letters, digits, `_` and `$`. The name is quoted as written, so it is case-sensitive: on PostgreSQL a table created without quotes has a lower-case name (`orders`, not `ORDERS`) |
+| `cursor m.field` | needed: the column the rows are read in the order of (the field's `at`, else its name). Each pull reads `SELECT * FROM table WHERE column >= <cursor> ORDER BY column`, 1000 rows at most, the cursor bound as a parameter and compared in the column's type; the first pull reads the rows whose column is not null |
+| The cursor | after a pull, the value of the last row's column, kept with the messages in one write: a server that stops starts again from there, never from the start, and loses nothing |
+| `>=` | the rows of the last value are read again and are duplicates, dropped quietly; a row written later with that same value is not lost, as it would be with `>`. A whole page of one value (a batch written in one instant) is read with all the rows of that value, up to 100,000 |
+| Which column | one that grows with each new or changed row: a time of change set by the database (`UPDATED_AT`, with fractions of a second) or a growing id. A row changed without changing that column is not read again |
+| More rows | a pull that brings a full page pulls again at once, held back while two pages of the table wait in the inbox: a table of a million rows comes in at the speed the inbound handles it, a page at a time, without filling the inbox |
+| A row | is a message: its key is the table, its cursor and the hash of its columns, unless the inbound has `key`. A row changed later (a new cursor, other values) is a new message |
+
+Each row is a JSON object of its columns, read as the inbound's record `from json`: a field
+reads the column of its `at`, else of its name, exactly as the database names it. A field whose
+column is not in the table stops the pull, with the reason in the log of the inbound
+(`quadra inbox log 0`), before any row is kept:
+
+```text
+the table erp.orders has no column `CUSTOMER_CODE` (the field `customer` of ErpOrder); its columns: ORDER_ID, ORDER_NO, CUSTOMER, TOTAL, UPDATED_AT
+```
+
+| In the database | In the row |
+|---|---|
+| integers | a number; one beyond ±2^53 (9007199254740991) as a string, read the same by an `Int` field |
+| `NUMERIC`, `DECIMAL` | a string with the exact digits (`"1234567890.10"`), read by a `Decimal` field without rounding |
+| floating point, and SQL Server's `MONEY` | a number (for `MONEY` exact to the cent below about 10^11; cast it to `DECIMAL` in a view for more) |
+| boolean, `BIT` | `true` or `false` (MySQL's `BOOLEAN` is a `TINYINT`: `0` or `1`) |
+| text | a string |
+| `DATE`, `TIME` | `"2026-11-27"`, `"10:14:03.5"` |
+| a time without zone (`TIMESTAMP`, `DATETIME`, `DATETIME2`) | `"2026-11-27T10:14:03.123456"`, read as UTC by a `DateTime` field |
+| a time with zone (`TIMESTAMPTZ`, `DATETIMEOFFSET`, MySQL's `TIMESTAMP`) | `"2026-11-27T09:14:03Z"`, `"2026-11-27T10:14:03+01:00"` |
+| binary | base64 |
+| `JSON`, `JSONB` | the JSON itself: a field can be a record `from json` |
+| `UUID`, `UNIQUEIDENTIFIER` | a string |
+| `NULL` | `null`: an optional field is none, any other fails the message (`rejected`) |
+| others (intervals, arrays, geometry) | refused with the column's name: read them through a view that casts them to text |
+
+On ODBC every value comes as the driver writes it, typed by the column (`DECIMAL` as its exact
+text, a timestamp `"2026-11-27T10:14:03.123456"`).
+
+### Writing: `insert(table, record)`
+
+```quadra
+record ErpOrderRow from json:
+    number: Text at "ORDER_NO"
+    customer: Text at "CUSTOMER_CODE"
+    total: Decimal at "TOTAL"
+    placed: DateTime at "PLACED_AT"
+
+event OrderPlaced(order: Order)
+
+outbound OrderPlaced via erp_db as e:
+    let o = e.order
+    insert("erp.exchange_orders", ErpOrderRow(number=o.number, customer=o.customer.code, total=o.total, placed=o.placed_at))
+```
+
+```sql
+CREATE TABLE erp.exchange_orders (
+    "ORDER_NO" VARCHAR(20) NOT NULL,
+    "CUSTOMER_CODE" VARCHAR(20) NOT NULL,
+    "TOTAL" NUMERIC(14, 2) NOT NULL,
+    "PLACED_AT" TIMESTAMP NOT NULL,
+    quadra_key VARCHAR(100) UNIQUE,        -- each event once
+    taken_at TIMESTAMP                     -- set by the other system when it takes the row
+);
+```
+
+| Rule | Detail |
+|---|---|
+| One row | the block ends with `insert`: one `INSERT` of the record's columns (its fields' `at`, else their names) into the table named in the code, its values bound as parameters and read by the database in each column's type (a `Decimal` exactly, a `DateTime` in UTC). The record is `from json`, flat |
+| Each event once | a table with a column `quadra_key` gets the event's idempotency key there. An event sent again (the answer lost, a restart) whose key is already in the table is delivered and not written again; with `UNIQUE` on the column, two attempts at once cannot both write it either. Without the column, an event sent again is a second row |
+| Refused | a column the table does not have (with the table's columns in the error), a table that is not there, a value the column does not take: the event fails for good, the reason in its log. A database that does not answer, a timeout, a deadlock: tried again |
+| Credentials refused | for good, like a malformed row: correct them and `quadra outbox retry` |
+
+**Only exchange tables.** Write only into tables made for the exchange and agreed with the
+other system, which reads them with its own programs, checks them and takes them in; never into
+its application tables. A row written there directly skips the rules, the numbering and the
+side effects of the system that owns them. On an AS/400 this is the rule without exception:
+writing into the files of the application bypasses its RPG programs, so the system's own
+checks and updates never happen. Ask for an exchange file (with its library, its columns and
+who clears it), and give Quadra's user the right to insert there only.
+
+### ODBC and the AS/400
+
+`kind = "odbc"` reaches any database with an ODBC driver: DB2 for i on the AS/400 above all.
+The driver is installed where the connection runs, so an ODBC connection has
+`location = "agent:<name>"`: the agent on a machine of the company's network, with unixODBC and
+the IBM i Access ODBC Driver, runs its pulls and its inserts. A server built without ODBC
+(Quadra Cloud) leaves them waiting, saying so. On ODBC a page is read with `FETCH FIRST n ROWS ONLY`.
+A file that is not journaled takes inserts only without commitment control: `CommitMode=0` in
+the connection string of the IBM i Access driver.
+
+### Where a database is reached
+
+On Quadra Cloud a connection reaches public addresses only: a database name that resolves to a
+private, loopback or link-local address is refused (`… is not a public address`), so is one in
+the url. A database inside a company's network, which is where they nearly always are, is
+reached through an agent there (`location = "agent:<name>"`), with `insecure = true` when the
+database has no TLS: the agent reaches it in its own network, with the credentials it holds.
+Connections are kept open between pulls for two minutes.
+
 ## `endpoint`: answered at once
 
 Some systems ask and wait for the answer: a cash register asks for a price, a checkout for the
@@ -1408,167 +1569,6 @@ The same rules as the server's deliveries: at least once (use `key` to ignore wh
 seen), the same states and the same log, with `pull:<user>` as the connection. Only a token
 of a user who may edit `User.roles` takes the outbox: its events may carry anything the app
 sends out.
-
-## Databases of other systems
-
-An ERP, a warehouse system, an AS/400 that publishes nothing over HTTP can still be read and
-written where its data is: its database. Quadra reads a table a piece at a time, from where it
-stopped, and writes rows into tables agreed for the exchange; it never runs other SQL there.
-
-```toml
-[vars]
-ERP_DB_PASSWORD = { secret = true }
-WMS_DB_PASSWORD = { secret = true }
-AS400_PASSWORD = { secret = true }
-
-[connections.erp_db]
-kind = "postgres"
-url = "postgres://erp-db.example.com:5432/erp"
-user = "quadra"
-password = { var = "ERP_DB_PASSWORD" }
-
-[connections.wms_db]
-kind = "mysql"                                   # or "sqlserver": sqlserver://host:1433/database
-url = "mysql://wms.example.com:3306/wms"
-user = "quadra"
-password = { var = "WMS_DB_PASSWORD" }
-timeout = "60s"
-
-[connections.as400]
-kind = "odbc"
-url = "DSN=AS400;CommitMode=0"                  # the DSN of the agent's machine, or a whole connection string
-user = "QUADRA"
-password = { var = "AS400_PASSWORD" }
-location = "agent:milano"                       # ODBC runs only in an agent
-insecure = true                                 # the agent is in the same network
-```
-
-| Key | Meaning |
-|---|---|
-| `kind` | `postgres`, `mysql`, `sqlserver`, `odbc` |
-| `url` | `postgres://host:5432/database`, `mysql://host:3306/database`, `sqlserver://host:1433/database`, without credentials; for `odbc` the DSN (`DSN=AS400`) or a connection string (`Driver={IBM i Access ODBC Driver};System=as400.local`) |
-| `user`, `password` | the login; the password from a secret variable. For `odbc` they are added to the connection string as `UID` and `PWD` |
-| `timeout` | of connecting and of each query, from `"1s"` to `"600s"`; `"30s"` when not given |
-| `insecure` | `true`: no TLS, for a database in the same network as the agent that reaches it. Without it the connection is TLS, the server's certificate checked against the authorities the system trusts |
-| `location` | `"agent:<name>"`: reached by that on-premise agent, in the database's own network, which holds the credentials |
-
-Give Quadra a user of its own on the database, allowed to read the tables it pulls and to
-insert into the exchange tables, and nothing else.
-
-### Reading a table: `pull "TABLE"`
-
-```quadra
-record ErpOrder from json:
-    id: Int at "ORDER_ID"
-    number: Text at "ORDER_NO"
-    customer: Text at "CUSTOMER_CODE"
-    total: Decimal at "TOTAL"
-    changed: DateTime at "UPDATED_AT"
-
-inbound OrderIn via erp_db as m: ErpOrder:
-    pull "erp.orders" every 5 minutes
-    cursor m.changed
-    let o = Order(number=m.number, total=m.total)
-```
-
-| Rule | Detail |
-|---|---|
-| `pull "TABLE"` | a table or a view, with its schema (`erp.orders`, `ERPLIB.ORDERS`): letters, digits, `_` and `$`. The name is quoted as written, so it is case-sensitive: on PostgreSQL a table created without quotes has a lower-case name (`orders`, not `ORDERS`) |
-| `cursor m.field` | needed: the column the rows are read in the order of (the field's `at`, else its name). Each pull reads `SELECT * FROM table WHERE column >= <cursor> ORDER BY column`, 1000 rows at most, the cursor bound as a parameter and compared in the column's type; the first pull reads the rows whose column is not null |
-| The cursor | after a pull, the value of the last row's column, kept with the messages in one write: a server that stops starts again from there, never from the start, and loses nothing |
-| `>=` | the rows of the last value are read again and are duplicates, dropped quietly; a row written later with that same value is not lost, as it would be with `>`. A whole page of one value (a batch written in one instant) is read with all the rows of that value, up to 100,000 |
-| Which column | one that grows with each new or changed row: a time of change set by the database (`UPDATED_AT`, with fractions of a second) or a growing id. A row changed without changing that column is not read again |
-| More rows | a pull that brings a full page pulls again at once, held back while two pages of the table wait in the inbox: a table of a million rows comes in at the speed the inbound handles it, a page at a time, without filling the inbox |
-| A row | is a message: its key is the table, its cursor and the hash of its columns, unless the inbound has `key`. A row changed later (a new cursor, other values) is a new message |
-
-Each row is a JSON object of its columns, read as the inbound's record `from json`: a field
-reads the column of its `at`, else of its name, exactly as the database names it. A field whose
-column is not in the table stops the pull, with the reason in the log of the inbound
-(`quadra inbox log 0`), before any row is kept:
-
-```text
-the table erp.orders has no column `CUSTOMER_CODE` (the field `customer` of ErpOrder); its columns: ORDER_ID, ORDER_NO, CUSTOMER, TOTAL, UPDATED_AT
-```
-
-| In the database | In the row |
-|---|---|
-| integers | a number; one beyond ±2^53 (9007199254740991) as a string, read the same by an `Int` field |
-| `NUMERIC`, `DECIMAL` | a string with the exact digits (`"1234567890.10"`), read by a `Decimal` field without rounding |
-| floating point, and SQL Server's `MONEY` | a number (for `MONEY` exact to the cent below about 10^11; cast it to `DECIMAL` in a view for more) |
-| boolean, `BIT` | `true` or `false` (MySQL's `BOOLEAN` is a `TINYINT`: `0` or `1`) |
-| text | a string |
-| `DATE`, `TIME` | `"2026-11-27"`, `"10:14:03.5"` |
-| a time without zone (`TIMESTAMP`, `DATETIME`, `DATETIME2`) | `"2026-11-27T10:14:03.123456"`, read as UTC by a `DateTime` field |
-| a time with zone (`TIMESTAMPTZ`, `DATETIMEOFFSET`, MySQL's `TIMESTAMP`) | `"2026-11-27T09:14:03Z"`, `"2026-11-27T10:14:03+01:00"` |
-| binary | base64 |
-| `JSON`, `JSONB` | the JSON itself: a field can be a record `from json` |
-| `UUID`, `UNIQUEIDENTIFIER` | a string |
-| `NULL` | `null`: an optional field is none, any other fails the message (`rejected`) |
-| others (intervals, arrays, geometry) | refused with the column's name: read them through a view that casts them to text |
-
-On ODBC every value comes as the driver writes it, typed by the column (`DECIMAL` as its exact
-text, a timestamp `"2026-11-27T10:14:03.123456"`).
-
-### Writing: `insert(table, record)`
-
-```quadra
-record ErpOrderRow from json:
-    number: Text at "ORDER_NO"
-    customer: Text at "CUSTOMER_CODE"
-    total: Decimal at "TOTAL"
-    placed: DateTime at "PLACED_AT"
-
-event OrderPlaced(order: Order)
-
-outbound OrderPlaced via erp_db as e:
-    let o = e.order
-    insert("erp.exchange_orders", ErpOrderRow(number=o.number, customer=o.customer.code, total=o.total, placed=o.placed_at))
-```
-
-```sql
-CREATE TABLE erp.exchange_orders (
-    "ORDER_NO" VARCHAR(20) NOT NULL,
-    "CUSTOMER_CODE" VARCHAR(20) NOT NULL,
-    "TOTAL" NUMERIC(14, 2) NOT NULL,
-    "PLACED_AT" TIMESTAMP NOT NULL,
-    quadra_key VARCHAR(100) UNIQUE,        -- each event once
-    taken_at TIMESTAMP                     -- set by the other system when it takes the row
-);
-```
-
-| Rule | Detail |
-|---|---|
-| One row | the block ends with `insert`: one `INSERT` of the record's columns (its fields' `at`, else their names) into the table named in the code, its values bound as parameters and read by the database in each column's type (a `Decimal` exactly, a `DateTime` in UTC). The record is `from json`, flat |
-| Each event once | a table with a column `quadra_key` gets the event's idempotency key there. An event sent again (the answer lost, a restart) whose key is already in the table is delivered and not written again; with `UNIQUE` on the column, two attempts at once cannot both write it either. Without the column, an event sent again is a second row |
-| Refused | a column the table does not have (with the table's columns in the error), a table that is not there, a value the column does not take: the event fails for good, the reason in its log. A database that does not answer, a timeout, a deadlock: tried again |
-| Credentials refused | for good, like a malformed row: correct them and `quadra outbox retry` |
-
-**Only exchange tables.** Write only into tables made for the exchange and agreed with the
-other system, which reads them with its own programs, checks them and takes them in; never into
-its application tables. A row written there directly skips the rules, the numbering and the
-side effects of the system that owns them. On an AS/400 this is the rule without exception:
-writing into the files of the application bypasses its RPG programs, so the system's own
-checks and updates never happen. Ask for an exchange file (with its library, its columns and
-who clears it), and give Quadra's user the right to insert there only.
-
-### ODBC and the AS/400
-
-`kind = "odbc"` reaches any database with an ODBC driver: DB2 for i on the AS/400 above all.
-The driver is installed where the connection runs, so an ODBC connection has
-`location = "agent:<name>"`: the agent on a machine of the company's network, with unixODBC and
-the IBM i Access ODBC Driver, runs its pulls and its inserts. A server built without ODBC
-(Quadra Cloud) leaves them waiting, saying so. On ODBC a page is read with `FETCH FIRST n ROWS ONLY`.
-A file that is not journaled takes inserts only without commitment control: `CommitMode=0` in
-the connection string of the IBM i Access driver.
-
-### Where a database is reached
-
-On Quadra Cloud a connection reaches public addresses only: a database name that resolves to a
-private, loopback or link-local address is refused (`… is not a public address`), so is one in
-the url. A database inside a company's network, which is where they nearly always are, is
-reached through an agent there (`location = "agent:<name>"`), with `insecure = true` when the
-database has no TLS: the agent reaches it in its own network, with the credentials it holds.
-Connections are kept open between pulls for two minutes.
 
 ## On Quadra Cloud
 
