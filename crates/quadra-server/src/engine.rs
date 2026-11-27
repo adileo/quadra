@@ -73,6 +73,31 @@ fn encode(s: &str) -> String {
         .collect()
 }
 
+/// What an inbound's lines say of a message (`ordered by`, `latest by … using`), read from
+/// its record when it comes. A value that cannot be read leaves the message without it.
+fn marks_of(
+    model: &quadra_ir::Model,
+    i: &quadra_ir::Inbound,
+    doc: &quadra_runtime::V,
+) -> quadra_store::deliveries::Marks {
+    let eval = |e: &quadra_ir::Expr| -> Option<String> {
+        let mut interp = quadra_runtime::Interp::new(model);
+        let mut ctx = quadra_runtime::Ctx::default();
+        ctx.bind(&i.binding, doc.clone());
+        interp.eval(e, &mut ctx).ok().and_then(|v| match v {
+            quadra_runtime::V::None => None,
+            quadra_runtime::V::Text(t) => Some(t.to_string()),
+            quadra_runtime::V::DateTime(t) => Some(t.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
+            other => Some(other.to_string()),
+        })
+    };
+    quadra_store::deliveries::Marks {
+        lane: i.ordered.as_ref().and_then(eval),
+        latest: i.latest.as_ref().and_then(|(k, _)| eval(k)),
+        version: i.latest.as_ref().and_then(|(_, u)| eval(u)),
+    }
+}
+
 /// A checked project, its model given the values of the variables where it runs.
 pub(crate) fn with_env(
     mut checked: Checked,
@@ -1318,6 +1343,10 @@ impl Engine {
             }
             _ => hash.clone(),
         };
+        let marks = parsed
+            .as_ref()
+            .map(|d| marks_of(model, i, d))
+            .unwrap_or_default();
         let error = parsed.err().map(|e| format!("{}: {e}", i.ty));
         let (name, conn, at2, body_s) = (
             i.name.clone(),
@@ -1335,6 +1364,7 @@ impl Engine {
                 &body_s,
                 &at2,
                 error.as_deref(),
+                &marks,
             )
         });
         use quadra_store::deliveries::Received;
@@ -1480,9 +1510,9 @@ impl Engine {
             hash.clone(),
             text.clone(),
         );
-        let id = match self
-            .side(move |cn| quadra_store::deliveries::receive(cn, &n, &c, &k, &h, &b, &t, None))
-        {
+        let id = match self.side(move |cn| {
+            quadra_store::deliveries::receive(cn, &n, &c, &k, &h, &b, &t, None, &Default::default())
+        }) {
             Ok(quadra_store::deliveries::Received::New(id)) => id,
             Ok(_) => {
                 return Some((
@@ -1569,6 +1599,14 @@ impl Engine {
                 Err(e) => eprintln!("pull {}: {e}", i.name),
             }
         }
+        // a message to try again (`retry for`) is due then too
+        if let Some(n) = quadra_store::deliveries::inbox_next_at(&mut self.conn)
+            .ok()
+            .flatten()
+            .and_then(|n| chrono::NaiveDateTime::parse_from_str(&n, "%Y-%m-%dT%H:%M:%S").ok())
+        {
+            next = Some(next.map_or(n, |x| x.min(n)));
+        }
         (out, next)
     }
 
@@ -1646,7 +1684,13 @@ impl Engine {
                 None,
             );
         };
-        let mut kept: Vec<(String, String, String, Option<String>)> = Vec::new();
+        let mut kept: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            quadra_store::deliveries::Marks,
+        )> = Vec::new();
         let mut cursor: Option<String> = None;
         for item in items {
             let text = item.to_string();
@@ -1673,8 +1717,12 @@ impl Engine {
                     }
                 }
             }
+            let marks = parsed
+                .as_ref()
+                .map(|d| marks_of(model, i, d))
+                .unwrap_or_default();
             let error = parsed.err().map(|e| format!("{}: {e}", i.ty));
-            kept.push((key, hash, text, error));
+            kept.push((key, hash, text, error, marks));
         }
         let (n, c, t, nx) = (
             name.clone(),
@@ -1684,7 +1732,7 @@ impl Engine {
         );
         let r = self.side(move |cn| {
             let mut new = 0;
-            for (key, hash, text, error) in &kept {
+            for (key, hash, text, error, marks) in &kept {
                 if let quadra_store::deliveries::Received::New(_) =
                     quadra_store::deliveries::receive(
                         cn,
@@ -1695,6 +1743,7 @@ impl Engine {
                         text,
                         &t,
                         error.as_deref(),
+                        marks,
                     )?
                 {
                     new += 1;
@@ -1720,7 +1769,8 @@ impl Engine {
         if model.inbounds.is_empty() {
             return (0, false);
         }
-        let messages = match quadra_store::deliveries::to_handle(&mut self.conn, limit) {
+        let now_s = now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let messages = match quadra_store::deliveries::to_handle(&mut self.conn, &now_s, limit) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("inbox: {e}");
@@ -1732,6 +1782,26 @@ impl Engine {
             let at = now();
             let stamp = at.format("%Y-%m-%dT%H:%M:%S").to_string();
             let name = m.inbound.clone();
+            let inbound = model.inbounds.iter().find(|i| i.name == m.inbound);
+            // `latest by … using`: one as new or newer handled already, this one is superseded
+            if let (Some(_), Some(latest), Some(version)) = (
+                inbound.and_then(|i| i.latest.as_ref()),
+                &m.marks.latest,
+                &m.marks.version,
+            ) {
+                let newer =
+                    quadra_store::deliveries::handled_versions(&mut self.conn, &name, latest)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|(_, v)| quadra_store::deliveries::as_new(v, version));
+                if let Some((by, _)) = newer {
+                    let id = m.id;
+                    let _ = self.side(move |c| {
+                        quadra_store::deliveries::inbox_supersede(c, id, &name, &stamp, by)
+                    });
+                    continue;
+                }
+            }
             let result: Result<u64, String> = (|| {
                 let i = model
                     .inbounds
@@ -1764,6 +1834,48 @@ impl Engine {
                 eprintln!("inbound {name}#{}: {e}", m.id);
             }
             let id = m.id;
+            // `retry for`: tried again later, while the time lasts
+            let mut result = result;
+            if let (Err(e), Some(i)) = (&result, inbound) {
+                let seconds = |e: &quadra_ir::Expr| match quadra_store::ops::eval_fixed(model, e) {
+                    Ok(quadra_runtime::V::Duration(s)) => Some(s.max(1) as u64),
+                    _ => None,
+                };
+                if let Some(for_s) = i.retry_for.as_ref().and_then(seconds) {
+                    let came =
+                        chrono::NaiveDateTime::parse_from_str(&m.received_at, "%Y-%m-%dT%H:%M:%S")
+                            .unwrap_or(at);
+                    let (mut first, mut max) = (30, 3600);
+                    if let Some(quadra_ir::Expr {
+                        kind: quadra_ir::ExprKind::Binary { lhs, rhs, .. },
+                        ..
+                    }) = &i.backoff
+                    {
+                        if let (Some(a), Some(b)) = (seconds(lhs), seconds(rhs)) {
+                            (first, max) = (a, b);
+                        }
+                    }
+                    let jitter =
+                        ((m.id.wrapping_mul(2654435761) ^ m.attempts) % 1000) as f64 / 1000.0;
+                    let wait = quadra_store::deliveries::backoff_between(
+                        m.attempts + 1,
+                        jitter,
+                        first,
+                        max,
+                    );
+                    let next = at + chrono::Duration::from_std(wait).unwrap_or_default();
+                    let until =
+                        came + chrono::Duration::seconds(for_s.min(10 * 365 * 86_400) as i64);
+                    if next <= until {
+                        let (e, nx) = (e.clone(), next.format("%Y-%m-%dT%H:%M:%S").to_string());
+                        let _ = self.side(move |c| {
+                            quadra_store::deliveries::inbox_later(c, id, &name, &stamp, &e, &nx)
+                        });
+                        continue;
+                    }
+                    result = Err(format!("{e} (tried for {})", crate::deliver::human(for_s)));
+                }
+            }
             let _ = self.side(move |c| {
                 quadra_store::deliveries::handled(
                     c,

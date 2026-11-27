@@ -1796,3 +1796,175 @@ fn a_client_certificate_is_shown_to_a_server_of_a_private_authority() {
     assert_eq!(clients.lock().unwrap().clone(), ["1 certificate"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const SYNCING: &str = "entity Product:\n    sku: Text\n    stock: Int default 0\n\nrecord StockIn from json:\n    sku: Text\n    stock: Int\n    at: Text\n\nrecord MoveIn from json:\n    id: Text\n    sku: Text\n    qty: Int\n\ninbound StockFromShop via hooks path \"/stock\" as m: StockIn:\n    latest by m.sku using m.at\n    retry for 1 hours\n    backoff 1 seconds .. 1 seconds\n    let p = Product.where(x => x.sku == m.sku).first() ?? fail \"unknown sku\"\n    p.stock = m.stock\n\ninbound MoveFromShop via hooks path \"/moves\" as m: MoveIn:\n    key m.id\n    ordered by m.sku\n    retry for 1 hours\n    backoff 1 seconds .. 1 seconds\n    let p = Product.where(x => x.sku == m.sku).first() ?? fail \"unknown sku\"\n    p.stock = p.stock + m.qty\n";
+
+/// POST /in/hooks/<path>, signed with HMAC-SHA256 of the body.
+fn send_to(port: u16, path: &str, body: &str) -> u16 {
+    let sig = quadra_server::deliver::sign("s3cret", body);
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    s.write_all(format!("POST /in/hooks{path} HTTP/1.1\r\nHost: d.test\r\nConnection: close\r\nX-Signature: {sig}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    raw.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// (id, inbound, state, tx) of every message of the inbox.
+fn inbox_rows(cfg: &Config) -> Vec<(String, String, String, Option<u64>)> {
+    Conn::open(&cfg.url)
+        .unwrap()
+        .query("SELECT CAST(\"id\" AS TEXT), \"inbound\", \"state\", CAST(\"tx\" AS TEXT) FROM \"_quadra_inbox\" ORDER BY \"id\"", &[])
+        .unwrap()
+        .into_iter()
+        .map(|r| {
+            (
+                r[0].clone().unwrap_or_default(),
+                r[1].clone().unwrap_or_default(),
+                r[2].clone().unwrap_or_default(),
+                r[3].as_deref().and_then(|t| t.parse().ok()),
+            )
+        })
+        .collect()
+}
+
+fn stock(cfg: &Config, sku: &str) -> Option<String> {
+    Conn::open(&cfg.url)
+        .unwrap()
+        .query(
+            "SELECT CAST(\"stock\" AS TEXT) FROM \"product\" WHERE \"sku\" = ?text",
+            &[quadra_store::conn::Sql::Text(sku.into())],
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .and_then(|r| r[0].clone())
+}
+
+fn until(what: &str, ok: impl Fn() -> bool) {
+    let start = Instant::now();
+    while !ok() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "waited for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn an_inbound_retries_keeps_the_order_of_a_key_and_drops_what_is_older() {
+    let dir = temp("syncing");
+    let (cfg, token) = project_full(
+        &dir,
+        9,
+        SYNCING,
+        "inbound_signature = \"hmac\"\ninbound_secret = { var = \"HOOK_SECRET\" }\n",
+    );
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/tx",
+        Some(json!({ "ops": [
+        { "op": "create", "entity": "Product", "values": { "sku": "P1" } },
+        { "op": "create", "entity": "Product", "values": { "sku": "P8" } },
+    ] })),
+    );
+    assert_eq!(s, 200, "{v}");
+    // the newest stock of P1, then an older one that arrives late: superseded
+    assert_eq!(
+        send_to(
+            port,
+            "/stock",
+            "{\"sku\": \"P1\", \"stock\": 5, \"at\": \"2026-01-02T10:00:00\"}"
+        ),
+        202
+    );
+    until("the first stock", || {
+        stock(&cfg, "P1").as_deref() == Some("5")
+    });
+    assert_eq!(
+        send_to(
+            port,
+            "/stock",
+            "{\"sku\": \"P1\", \"stock\": 3, \"at\": \"2026-01-02T09:00:00\"}"
+        ),
+        202
+    );
+    until("the late one", || {
+        inbox_rows(&cfg).iter().any(|r| r.2 == "superseded")
+    });
+    assert_eq!(stock(&cfg, "P1").as_deref(), Some("5"));
+    // moves of P9, which does not exist yet: the first fails and is tried again, the second
+    // waits behind it; a move of P8 goes at once
+    assert_eq!(
+        send_to(
+            port,
+            "/moves",
+            "{\"id\": \"m1\", \"sku\": \"P9\", \"qty\": 2}"
+        ),
+        202
+    );
+    assert_eq!(
+        send_to(
+            port,
+            "/moves",
+            "{\"id\": \"m2\", \"sku\": \"P9\", \"qty\": 3}"
+        ),
+        202
+    );
+    assert_eq!(
+        send_to(
+            port,
+            "/moves",
+            "{\"id\": \"m3\", \"sku\": \"P8\", \"qty\": 1}"
+        ),
+        202
+    );
+    until("the move of P8", || {
+        stock(&cfg, "P8").as_deref() == Some("1")
+    });
+    let rows = inbox_rows(&cfg);
+    let state = |id: &str| rows.iter().find(|r| r.0 == id).unwrap().2.clone();
+    assert_eq!(
+        (state("3"), state("4")),
+        ("received".into(), "received".into())
+    );
+    let mut c = Conn::open(&cfg.url).unwrap();
+    let log = quadra_store::deliveries::inbox_log(&mut c, 3).unwrap();
+    assert!(
+        log.iter().any(|s| s
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("tried again at")),
+        "{log:?}"
+    );
+    assert!(quadra_store::deliveries::inbox_log(&mut c, 4)
+        .unwrap()
+        .iter()
+        .all(|s| s.step != "handle"));
+    // P9 comes: the first is handled at its next try, then the second
+    let (s, v) = call(
+        port,
+        &token,
+        "POST",
+        "/v1/tx",
+        Some(
+            json!({ "ops": [{ "op": "create", "entity": "Product", "values": { "sku": "P9" } }] }),
+        ),
+    );
+    assert_eq!(s, 200, "{v}");
+    until("the moves of P9", || {
+        stock(&cfg, "P9").as_deref() == Some("5")
+    });
+    let rows = inbox_rows(&cfg);
+    let tx = |id: &str| rows.iter().find(|r| r.0 == id).unwrap().3.unwrap();
+    assert!(tx("3") < tx("4"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

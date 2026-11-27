@@ -867,6 +867,16 @@ pub struct Inbound {
     pub key: Option<Expr>,
     /// `pull "/orders?since={cursor}" every 5 minutes`: the messages are fetched, not sent
     pub pull: Option<Pull>,
+    /// `retry for 1 hour`: a message whose code fails is tried again until then (since it came)
+    pub retry_for: Option<Expr>,
+    /// `backoff 30 seconds .. 10 minutes`: the waits between those tries
+    pub backoff: Option<Expr>,
+    /// `ordered by m.order_id`: one at a time per value, in the order received; one not done
+    /// (waiting to be tried again, rejected) holds back the next of its value
+    pub ordered: Option<Expr>,
+    /// `latest by m.product using m.updated_at`: a message older (by `using`) than one of the
+    /// same value already handled is `superseded`, not handled
+    pub latest: Option<(Expr, Expr)>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

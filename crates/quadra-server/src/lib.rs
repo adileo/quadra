@@ -1937,9 +1937,11 @@ fn start(
 async fn inbox(t: Arc<Tenant>, egress: Option<Arc<Egress>>) {
     loop {
         let mut next_pull = None;
-        if let Some(e) = &egress {
-            if let Some((pulls, next)) = t.ask(|reply| Job::Pulls { reply }).await {
-                next_pull = next;
+        // the pulls due (fetched only where events go out), and when the next pull or message
+        // to try again is due
+        if let Some((pulls, next)) = t.ask(|reply| Job::Pulls { reply }).await {
+            next_pull = next;
+            if let Some(e) = &egress {
                 for p in pulls {
                     let result = deliver::fetch(&e.client, &p, e.public_only).await;
                     let inbound = p.inbound.clone();
@@ -2589,15 +2591,12 @@ impl Host {
         } else {
             None
         };
-        // and a pull due (`inbound … pull`)
-        let pull = if t.config.outside.deliver {
-            match t.ask(|reply| Job::Pulls { reply }).await {
-                Some((due, _)) if !due.is_empty() => Some(Duration::ZERO),
-                Some((_, next)) => next.map(until),
-                None => None,
-            }
-        } else {
-            None
+        // and a pull due (`inbound … pull`), or a message to try again (`retry for`)
+        let deliver = t.config.outside.deliver;
+        let pull = match t.ask(|reply| Job::Pulls { reply }).await {
+            Some((due, _)) if deliver && !due.is_empty() => Some(Duration::ZERO),
+            Some((_, next)) => next.map(until),
+            None => None,
         };
         [sweep, delivery, pull].into_iter().flatten().min()
     }

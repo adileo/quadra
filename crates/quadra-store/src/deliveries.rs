@@ -633,12 +633,25 @@ pub struct Message {
     pub error: Option<String>,
     pub done_at: Option<String>,
     pub tx: Option<u64>,
+    /// tried again then (`retry for`)
+    pub next_at: Option<String>,
+    pub marks: Marks,
 }
 
 /// Keeps a message received by `inbound` from `connection`, raw with its hash, unless one with
 /// the same key was received before (`key`: what the inbound says, else the hash). `error`: it
 /// cannot be read as its record (kept all the same, `rejected`, to be handled again after a
 /// deploy that reads it).
+#[allow(clippy::too_many_arguments)]
+/// What an inbound's lines say of a message, read when it comes: its value of `ordered by`,
+/// of `latest by` and of `using`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    pub lane: Option<String>,
+    pub latest: Option<String>,
+    pub version: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn receive(
     conn: &mut Conn,
@@ -649,6 +662,7 @@ pub fn receive(
     body: &str,
     now: &str,
     error: Option<&str>,
+    marks: &Marks,
 ) -> Result<Received, String> {
     if let Some(r) = conn
         .query(
@@ -682,8 +696,9 @@ pub fn receive(
     } else {
         "received"
     };
+    let opt = |v: &Option<String>| v.clone().map(Sql::Text).unwrap_or(Sql::Null);
     conn.exec(
-        "INSERT INTO \"_quadra_inbox\" (\"id\", \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", \"attempts\", \"error\") VALUES (?bigint, ?text, ?text, ?text, ?text, ?text, ?text, ?text, ?bigint, ?text)",
+        "INSERT INTO \"_quadra_inbox\" (\"id\", \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", \"attempts\", \"error\", \"lane\", \"latest\", \"version\") VALUES (?bigint, ?text, ?text, ?text, ?text, ?text, ?text, ?text, ?bigint, ?text, ?text, ?text, ?text)",
         &[
             Sql::Int(id),
             Sql::Text(inbound.to_string()),
@@ -695,6 +710,9 @@ pub fn receive(
             Sql::Text(state.to_string()),
             Sql::Int(0),
             error.map(|e| Sql::Text(e.to_string())).unwrap_or(Sql::Null),
+            opt(&marks.lane),
+            opt(&marks.latest),
+            opt(&marks.version),
         ],
     )?;
     log_dir(
@@ -758,17 +776,122 @@ fn message_of(r: &[Option<String>]) -> Message {
         error: r[9].clone(),
         done_at: r[10].clone(),
         tx: num(&r[11]),
+        next_at: r.get(12).cloned().flatten(),
+        marks: Marks {
+            lane: r.get(13).cloned().flatten(),
+            latest: r.get(14).cloned().flatten(),
+            version: r.get(15).cloned().flatten(),
+        },
     }
 }
 
-const MESSAGE: &str = "SELECT CAST(\"id\" AS TEXT), \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", CAST(\"attempts\" AS TEXT), \"error\", \"done_at\", CAST(\"tx\" AS TEXT) FROM \"_quadra_inbox\"";
+/// A message whose code failed, tried again at `next_at` (`retry for`): it stays `received`.
+pub fn inbox_later(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    now: &str,
+    error: &str,
+    next_at: &str,
+) -> Result<(), String> {
+    conn.exec(
+        "UPDATE \"_quadra_inbox\" SET \"attempts\" = \"attempts\" + 1, \"error\" = ?text, \"next_at\" = ?text WHERE \"id\" = ?bigint AND \"state\" = 'received'",
+        &[
+            Sql::Text(error.to_string()),
+            Sql::Text(next_at.to_string()),
+            Sql::Int(id as i64),
+        ],
+    )?;
+    log_dir(
+        conn,
+        "in",
+        id,
+        name,
+        now,
+        "handle",
+        "received",
+        None,
+        Some(error),
+        None,
+        Some(&format!("tried again at {next_at}")),
+    )
+}
 
-/// Messages received and not handled yet, oldest first, at most `limit`.
-pub fn to_handle(conn: &mut Conn, limit: usize) -> Result<Vec<Message>, String> {
+/// A message older than one of the same `latest by` already handled: `superseded`, not handled.
+pub fn inbox_supersede(
+    conn: &mut Conn,
+    id: u64,
+    name: &str,
+    now: &str,
+    by: u64,
+) -> Result<(), String> {
+    conn.exec(
+        "UPDATE \"_quadra_inbox\" SET \"state\" = 'superseded', \"done_at\" = ?text WHERE \"id\" = ?bigint AND \"state\" = 'received'",
+        &[Sql::Text(now.to_string()), Sql::Int(id as i64)],
+    )?;
+    log_dir(
+        conn,
+        "in",
+        id,
+        name,
+        now,
+        "handle",
+        "superseded",
+        None,
+        None,
+        None,
+        Some(&format!(
+            "message {by}, as new or newer, was handled already"
+        )),
+    )
+}
+
+/// The messages of `latest` handled already, with their `using`: what a newer one is compared to.
+pub fn handled_versions(
+    conn: &mut Conn,
+    inbound: &str,
+    latest: &str,
+) -> Result<Vec<(u64, String)>, String> {
     Ok(conn
         .query(
-            &format!("{MESSAGE} WHERE \"state\" = 'received' ORDER BY \"_quadra_inbox\".\"id\" LIMIT {limit}"),
+            "SELECT CAST(\"id\" AS TEXT), \"version\" FROM \"_quadra_inbox\" WHERE \"inbound\" = ?text AND \"latest\" = ?text AND \"state\" = 'done' AND \"version\" IS NOT NULL",
+            &[Sql::Text(inbound.to_string()), Sql::Text(latest.to_string())],
+        )?
+        .into_iter()
+        .filter_map(|r| Some((r[0].as_deref()?.parse().ok()?, r[1].clone()?)))
+        .collect())
+}
+
+/// When the next message waiting to be tried again is due (`retry for`).
+pub fn inbox_next_at(conn: &mut Conn) -> Result<Option<String>, String> {
+    Ok(conn
+        .query(
+            "SELECT MIN(\"next_at\") FROM \"_quadra_inbox\" WHERE \"state\" = 'received' AND \"next_at\" IS NOT NULL",
             &[],
+        )?
+        .into_iter()
+        .next()
+        .and_then(|r| r[0].clone()))
+}
+
+/// Whether version `a` (of `using`) is as new as `b` or newer: numbers by value, the rest
+/// (instants, dates, text) as text, which sorts them.
+pub fn as_new(a: &str, b: &str) -> bool {
+    match (a.parse::<f64>(), b.parse::<f64>()) {
+        (Ok(x), Ok(y)) => x >= y,
+        _ => a >= b,
+    }
+}
+
+const MESSAGE: &str = "SELECT CAST(\"id\" AS TEXT), \"inbound\", \"connection\", \"key\", \"hash\", \"body\", \"received_at\", \"state\", CAST(\"attempts\" AS TEXT), \"error\", \"done_at\", CAST(\"tx\" AS TEXT), \"next_at\", \"lane\", \"latest\", \"version\" FROM \"_quadra_inbox\"";
+
+/// Messages received and not handled yet whose time has come (`now`), oldest first, at most
+/// `limit`; of an `ordered by`, only the first of each value not done.
+pub fn to_handle(conn: &mut Conn, now: &str, limit: usize) -> Result<Vec<Message>, String> {
+    Ok(conn
+        .query(
+            &format!("{MESSAGE} WHERE \"state\" = 'received' AND (\"next_at\" IS NULL OR \"next_at\" <= ?text) AND (\"lane\" IS NULL OR NOT EXISTS (SELECT 1 FROM \"_quadra_inbox\" p WHERE p.\"inbound\" = \"_quadra_inbox\".\"inbound\" AND p.\"lane\" = \"_quadra_inbox\".\"lane\" AND p.\"id\" < \"_quadra_inbox\".\"id\" AND p.\"state\" IN ('received', 'rejected'))) ORDER BY \"_quadra_inbox\".\"id\" LIMIT {limit}"),
+            &[Sql::Text(now.to_string())],
         )?
         .iter()
         .map(|r| message_of(r))
@@ -847,7 +970,7 @@ pub fn inbox_retry(conn: &mut Conn, ids: &[u64], now: &str, by: &str) -> Result<
     let mut n = 0;
     for id in ids {
         let done = conn.exec(
-            "UPDATE \"_quadra_inbox\" SET \"state\" = 'received' WHERE \"id\" = ?bigint AND \"state\" IN ('rejected', 'skipped')",
+            "UPDATE \"_quadra_inbox\" SET \"state\" = 'received', \"next_at\" = NULL WHERE \"id\" = ?bigint AND \"state\" IN ('rejected', 'skipped', 'superseded')",
             &[Sql::Int(*id as i64)],
         )?;
         if done > 0 {

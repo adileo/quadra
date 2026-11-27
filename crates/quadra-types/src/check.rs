@@ -2323,6 +2323,55 @@ impl<'m> Checker<'m> {
             if let Some(c) = i.pull.as_ref().and_then(|p| p.cursor.as_ref()) {
                 self.infer(c);
             }
+            if let Some(r) = &i.retry_for {
+                let t = self.infer(r);
+                if !matches!(t, T::Duration | T::Unknown)
+                    || !matches!(r.kind, ExprKind::Quantity { .. })
+                {
+                    self.error(
+                        r.span,
+                        "`retry for` takes a fixed duration: `retry for 1 hour`",
+                    );
+                }
+            }
+            if let Some(b) = &i.backoff {
+                let ok = match &b.kind {
+                    ExprKind::Binary { lhs, rhs, .. } => {
+                        matches!(lhs.kind, ExprKind::Quantity { .. })
+                            && matches!(rhs.kind, ExprKind::Quantity { .. })
+                    }
+                    _ => false,
+                };
+                self.infer(b);
+                if !ok {
+                    self.error(
+                        b.span,
+                        "`backoff` takes two fixed durations: `backoff 30 seconds .. 10 minutes`",
+                    );
+                }
+                if i.retry_for.is_none() {
+                    self.error(
+                        b.span,
+                        "`backoff` is the wait between the tries of `retry for`",
+                    );
+                }
+            }
+            if let Some(o) = &i.ordered {
+                self.infer(o);
+            }
+            if let Some((k, u)) = &i.latest {
+                self.infer(k);
+                let t = self.infer(u);
+                if !matches!(
+                    t.unopt(),
+                    T::Date | T::DateTime | T::Num(_) | T::Text(_) | T::Unknown
+                ) {
+                    self.error(u.span, "`using` says which message is newer: a date, an instant, a number or a text that sorts (`m.updated_at`)");
+                }
+                if i.ordered.is_some() {
+                    self.error(k.span, "an inbound has `ordered by` or `latest by`: the newest only, or every one in order");
+                }
+            }
             if let Some(k) = &i.key {
                 let t = self.infer(k);
                 if !matches!(t.unopt(), T::Text(_) | T::Num(_) | T::Unknown) {

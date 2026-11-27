@@ -512,6 +512,29 @@ fn inbound(p: &mut Parser) {
                 // `cursor m.updated_at`: where the next pull starts
                 p.bump_ctx();
                 expr(p);
+            } else if p.at_ctx("retry") && p.nth(1) == FOR_KW {
+                // `retry for 1 hour`
+                p.bump_ctx();
+                p.bump();
+                expr(p);
+            } else if p.at_ctx("backoff") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
+                p.bump_ctx();
+                expr(p);
+            } else if p.at_ctx("ordered") && p.nth_at_ctx(1, "by") {
+                p.bump_ctx();
+                p.bump_ctx();
+                expr(p);
+            } else if p.at_ctx("latest") && p.nth_at_ctx(1, "by") {
+                // `latest by m.product using m.updated_at`
+                p.bump_ctx();
+                p.bump_ctx();
+                expr(p);
+                if p.at_ctx("using") {
+                    p.bump_ctx();
+                    expr(p);
+                } else {
+                    p.error("expected `using` and what says which is newer: `latest by m.product using m.updated_at`");
+                }
             } else {
                 c.abandon(p);
                 break;

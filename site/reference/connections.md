@@ -580,13 +580,45 @@ A timestamped signature more than five minutes old is refused. `inbound_secret_p
 also accepted while the sender switches to a new secret; `inbound_max_kb` is the largest body
 (1024 when not given).
 
-The messages, their states (`received`, `done`, `rejected`, `skipped`) and the log of each,
-with the same commands as the outbox:
+### The policy of an inbound
+
+Lines after `key`, before the code, say how its messages are handled when they do not come
+as the code expects:
+
+```quadra
+inbound StockIn via shop path "/inventory" as m: ShopStock:
+    latest by m.sku using m.updated_at       # an older update arriving late is dropped
+    retry for 1 hour                         # a product not here yet: tried again meanwhile
+    backoff 30 seconds .. 5 minutes
+    let p = Product.where(x => x.sku == m.sku).first() ?? fail "unknown sku"
+    p.stock = m.available
+
+inbound MovesIn via pos path "/moves" as m: PosMove:
+    key m.id
+    ordered by m.register                    # each register's moves one at a time, in order
+    let r = Register.where(x => x.code == m.register).first() ?? fail "unknown register"
+    r.record(m.amount)
+```
+
+| Line | Effect |
+|---|---|
+| `retry for D` | a message whose code fails is tried again, until `D` after it came; then `rejected` (`… (tried for 1 hour)`). It stays `received` meanwhile, each try in its log |
+| `backoff A .. B` | the waits between those tries: `A`, doubled each time up to `B` (30 seconds .. 1 hour when not said) |
+| `ordered by K` | one at a time per value of `K`, in the order received: a message waiting to be tried again, or rejected, holds back the next ones of its value (not the others) until it is done, retried or skipped |
+| `latest by K using T` | a message whose `T` is not newer than that of one of the same `K` already handled is `superseded`, not handled: a stock, a price, a status sent out of order. `T` is an instant, a date, a number or a text that sorts |
+
+Without `ordered by`, the messages are handled in the order received, and one that fails does
+not hold back the others. `ordered by` and `latest by` are read when the message comes, from
+its record; an inbound has one or the other.
+
+The messages, their states (`received`, `done`, `rejected`, `skipped`, `superseded`) and the
+log of each, with the same commands as the outbox:
 
 ```bash
 quadra inbox list --state rejected
 quadra inbox log 12
 quadra inbox retry 12                     # handled again by the code deployed now
+quadra inbox replay 12 --dry-run          # what the code of now would do with it, nothing written
 quadra inbox skip 13 --reason "a test order from the shop"
 ```
 

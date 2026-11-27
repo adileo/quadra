@@ -35,7 +35,7 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_outbox\" (\"id\" BIGINT PRIMARY KEY, \"tx\" BIGINT NOT NULL, \"event\" TEXT NOT NULL, \"fields\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL, \"delivered\" BOOLEAN NOT NULL, \"delivered_at\" TEXT, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"next_at\" TEXT, \"error\" TEXT, \"failed_at\" TEXT, \"state\" TEXT NOT NULL DEFAULT 'pending', \"lease_until\" TEXT, \"lane\" TEXT, \"latest\" TEXT)",
     // the messages received by an `inbound` (crate::deliveries): raw, with their hash, before
     // they are handled
-    "CREATE TABLE \"_quadra_inbox\" (\"id\" BIGINT PRIMARY KEY, \"inbound\" TEXT NOT NULL, \"connection\" TEXT NOT NULL, \"key\" TEXT NOT NULL, \"hash\" TEXT NOT NULL, \"body\" TEXT NOT NULL, \"received_at\" TEXT NOT NULL, \"state\" TEXT NOT NULL, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"error\" TEXT, \"done_at\" TEXT, \"tx\" BIGINT, \"response\" TEXT)",
+    "CREATE TABLE \"_quadra_inbox\" (\"id\" BIGINT PRIMARY KEY, \"inbound\" TEXT NOT NULL, \"connection\" TEXT NOT NULL, \"key\" TEXT NOT NULL, \"hash\" TEXT NOT NULL, \"body\" TEXT NOT NULL, \"received_at\" TEXT NOT NULL, \"state\" TEXT NOT NULL, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"error\" TEXT, \"done_at\" TEXT, \"tx\" BIGINT, \"response\" TEXT, \"next_at\" TEXT, \"lane\" TEXT, \"latest\" TEXT, \"version\" TEXT)",
     // where each `inbound … pull` is: its cursor, when it pulled and when it pulls next
     "CREATE TABLE \"_quadra_cursors\" (\"inbound\" TEXT PRIMARY KEY, \"cursor\" TEXT, \"pulled_at\" TEXT, \"next_at\" TEXT, \"error\" TEXT)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
@@ -414,6 +414,22 @@ impl Database {
                 .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"lane\" TEXT")?;
             self.conn
                 .batch("ALTER TABLE \"_quadra_outbox\" ADD COLUMN \"latest\" TEXT")?;
+        }
+        // the tries of an inbound's `retry for`, its `ordered by` and `latest by … using`
+        if self.conn.table_exists("_quadra_inbox")?
+            && self
+                .conn
+                .query(
+                    "SELECT t.\"next_at\" FROM \"_quadra_inbox\" t WHERE 1 = 0",
+                    &[],
+                )
+                .is_err()
+        {
+            for c in ["next_at", "lane", "latest", "version"] {
+                self.conn.batch(&format!(
+                    "ALTER TABLE \"_quadra_inbox\" ADD COLUMN \"{c}\" TEXT"
+                ))?;
+            }
         }
         // the lease of an event taken by an integration (`GET /v1/outbox`)
         if self.conn.table_exists("_quadra_outbox")?

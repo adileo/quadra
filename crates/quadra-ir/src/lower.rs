@@ -363,6 +363,23 @@ impl<'a> Lower<'a> {
                         cursor,
                     }
                 });
+                let retry_for = ast::children(item, OUTBOUND_CLAUSE)
+                    .find(|c| {
+                        ctx_words(c).first().map(String::as_str) == Some("retry")
+                            && ast::token(c, FOR_KW).is_some()
+                    })
+                    .and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                let backoff =
+                    clause("backoff").and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                let ordered =
+                    clause("ordered").and_then(|c| exprs(&c).first().map(|x| self.expr(x)));
+                let latest = clause("latest").and_then(|c| {
+                    let es = exprs(&c);
+                    match (es.first(), es.get(1)) {
+                        (Some(k), Some(u)) => Some((self.expr(k), self.expr(u))),
+                        _ => None,
+                    }
+                });
                 let body = ast::child(item, BLOCK)
                     .map(|b| self.stmts(&b))
                     .unwrap_or_default();
@@ -374,6 +391,10 @@ impl<'a> Lower<'a> {
                     ty,
                     key,
                     pull,
+                    retry_for,
+                    backoff,
+                    ordered,
+                    latest,
                     body,
                     span,
                 });
