@@ -109,7 +109,7 @@ fn now() -> chrono::NaiveDateTime {
     chrono::Local::now().naive_local()
 }
 
-fn temp(name: &str) -> PathBuf {
+pub(crate) fn temp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("quadra-deliver-{name}-{}", std::process::id()))
 }
 
@@ -128,7 +128,7 @@ fn project_full(dir: &Path, port: u16, code: &str, settings: &str) -> (Config, S
 }
 
 /// The same, with the connection's url.
-fn project_at(dir: &Path, url: &str, code: &str, settings: &str) -> (Config, String) {
+pub(crate) fn project_at(dir: &Path, url: &str, code: &str, settings: &str) -> (Config, String) {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
@@ -186,7 +186,7 @@ fn project_at(dir: &Path, url: &str, code: &str, settings: &str) -> (Config, Str
     (cfg, token)
 }
 
-fn serve(options: HostOptions, cfg: Config) -> (Host, tokio::runtime::Runtime, u16) {
+pub(crate) fn serve(options: HostOptions, cfg: Config) -> (Host, tokio::runtime::Runtime, u16) {
     let host = Host::new(
         options,
         Arc::new(One(TenantSpec {
@@ -615,7 +615,7 @@ fn every_attempt_is_in_the_log_with_its_answer() {
 }
 
 /// A JSON request to the host; the status and the body.
-fn call(port: u16, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
+pub(crate) fn call(port: u16, token: &str, method: &str, path: &str, body: Option<J>) -> (u16, J) {
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();

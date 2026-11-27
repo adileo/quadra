@@ -99,6 +99,13 @@ fn marks_of(
     }
 }
 
+/// `n` random bytes, as hex.
+fn agent_secret(n: usize) -> String {
+    let mut b = vec![0u8; n];
+    getrandom::fill(&mut b).expect("system random generator");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// The column of a table a pull's cursor reads (`cursor m.updated_at`: the field's `at`, else
 /// its name).
 fn cursor_column(
@@ -473,6 +480,18 @@ pub enum Job {
     Pulls {
         reply: oneshot::Sender<(Vec<crate::deliver::Pull>, Option<chrono::NaiveDateTime>)>,
     },
+    /// an agent registers with its one-time code: its name and the key it signs in with
+    AgentHello {
+        code: String,
+        version: String,
+        reply: oneshot::Sender<Result<(String, String), String>>,
+    },
+    /// the agent whose key this is, if it is registered and not revoked
+    AgentKey {
+        key: String,
+        version: String,
+        reply: oneshot::Sender<Option<String>>,
+    },
     /// what a pull brought: its messages kept in the inbox, its cursor moved; how many new
     Pulled {
         inbound: String,
@@ -610,6 +629,8 @@ pub struct Engine {
     sequencer: Option<quadra_store::Sequencer>,
     /// when the log of the integrations was last pruned (`[integrations] log_days`)
     pruned_at: Option<std::time::Instant>,
+    /// when each agent's visit was last written
+    agents_seen: HashMap<String, std::time::Instant>,
     /// the analysis of each model in use (the project's, an app's), shared by the requests: kept
     /// with the model it is of, so that it never outlives it
     statics: Vec<(Rc<Checked>, Rc<quadra_runtime::Statics>)>,
@@ -757,6 +778,7 @@ impl Engine {
             snapshot: false,
             sequencer: None,
             pruned_at: None,
+            agents_seen: HashMap::new(),
             statics: Vec::new(),
             tickets: Rc::new(RefCell::new(Vec::new())),
             unlogged: false,
@@ -1162,6 +1184,9 @@ impl Engine {
     ) -> Result<Reply, Fail> {
         if path.starts_with("/v1/integrations") {
             return self.integrations_api(who, path, query, body);
+        }
+        if path.starts_with("/v1/agents") {
+            return self.agents_api(who, path, body);
         }
         if !self.who(who)?.admin {
             return Err((
@@ -1710,6 +1735,112 @@ impl Engine {
             next = Some(next.map_or(n, |x| x.min(n)));
         }
         (out, next)
+    }
+
+    /// `/v1/agents`: the on-premise agents (admins only). `GET` lists them; `POST {name}` adds
+    /// one (or adds it again) and answers its one-time code, valid an hour; `POST
+    /// /v1/agents/<name>/revoke` revokes it (the host then drops what it waits for).
+    fn agents_api(&mut self, who: &Principal, path: &str, body: &J) -> Result<Reply, Fail> {
+        if !self.who(who)?.admin {
+            return Err((
+                403,
+                "only who may edit `User.roles` manages the agents".into(),
+            ));
+        }
+        let parts: Vec<&str> = path
+            .trim_start_matches("/v1/agents")
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .collect();
+        let at = now();
+        let stamp = |t: chrono::NaiveDateTime| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let by = format!("user:{}", who.user_id);
+        match parts.as_slice() {
+            [] if body.is_null() => {
+                let rows = quadra_store::agents::list(&mut self.conn).map_err(|e| (500, e))?;
+                let z = |o: &Option<String>| o.as_ref().map(|t| format!("{t}Z"));
+                Ok(self::reply(
+                    200,
+                    json!({
+                        "agents": rows.iter().map(|a| json!({
+                            "name": a.name, "created_at": format!("{}Z", a.created_at), "created_by": a.created_by,
+                            "registered_at": z(&a.registered_at), "revoked_at": z(&a.revoked_at),
+                            "code_expires": z(&a.code_expires), "version": a.version, "seen_at": z(&a.seen_at),
+                        })).collect::<Vec<_>>()
+                    }),
+                ))
+            }
+            [] => {
+                let name = body["name"].as_str().unwrap_or("").to_string();
+                let ok = (1..=40).contains(&name.len())
+                    && name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+                if !ok {
+                    return Err((400, "an agent's name is in lower case letters, digits and `_`, as in `location = \"agent:<name>\"` (`milano`)".into()));
+                }
+                let code = quadra_store::agents::new_code();
+                let expires = stamp(at + chrono::Duration::hours(1));
+                let (n, c, e, t) = (name.clone(), code.clone(), expires.clone(), stamp(at));
+                self.side(move |cn| quadra_store::agents::add(cn, &n, &c, &e, &t, &by))
+                    .map_err(|e| (500, e))?;
+                Ok(self::reply(
+                    200,
+                    json!({ "name": name, "code": code, "expires_at": format!("{expires}Z") }),
+                ))
+            }
+            [name, "revoke"] => {
+                let (n, t) = (name.to_string(), stamp(at));
+                let revoked = self
+                    .side(move |cn| quadra_store::agents::revoke(cn, &n, &t))
+                    .map_err(|e| (500, e))?;
+                if !revoked {
+                    return Err((404, format!("no agent `{name}` to revoke")));
+                }
+                Ok(self::reply(200, json!({ "name": name, "revoked": true })))
+            }
+            _ => Err((404, "no such agents call".into())),
+        }
+    }
+
+    /// An agent registers with its one-time code: its name and a new key, of which only the
+    /// hash is kept.
+    fn agent_hello(&mut self, code: &str, version: &str) -> Result<(String, String), String> {
+        let key = format!("qa_{}", agent_secret(32));
+        let (c, k, v, t) = (
+            code.trim().to_ascii_uppercase(),
+            key.clone(),
+            version.to_string(),
+            now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        );
+        match self.side(move |cn| quadra_store::agents::register(cn, &c, &k, &v, &t))? {
+            Some(name) => Ok((name, key)),
+            None => Err("the code is not valid: unknown, used already or expired (an hour)".into()),
+        }
+    }
+
+    /// The agent whose key this is (registered, not revoked); when it was seen is written at
+    /// most once a minute.
+    fn agent_key(&mut self, key: &str, version: &str) -> Option<String> {
+        let name = quadra_store::agents::by_key(&mut self.conn, key)
+            .ok()
+            .flatten()?;
+        let due = self
+            .agents_seen
+            .get(&name)
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(60));
+        if due {
+            self.agents_seen
+                .insert(name.clone(), std::time::Instant::now());
+            let (n, v, t) = (
+                name.clone(),
+                version.to_string(),
+                now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            );
+            let _ = self.side(move |cn| quadra_store::agents::seen(cn, &n, &v, &t));
+        }
+        Some(name)
     }
 
     /// The messages of `inbound` handled for good, to settle on the other side at its next pull.
@@ -2740,6 +2871,20 @@ impl Engine {
                 }
                 Job::Pulls { reply } => {
                     let _ = reply.send(self.pulls());
+                }
+                Job::AgentHello {
+                    code,
+                    version,
+                    reply,
+                } => {
+                    let _ = reply.send(self.agent_hello(&code, &version));
+                }
+                Job::AgentKey {
+                    key,
+                    version,
+                    reply,
+                } => {
+                    let _ = reply.send(self.agent_key(&key, &version));
                 }
                 Job::Pulled {
                     inbound,

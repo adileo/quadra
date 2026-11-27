@@ -37,6 +37,7 @@ const SYSTEM_DDL: &[&str] = &[
     // they are handled
     "CREATE TABLE \"_quadra_inbox\" (\"id\" BIGINT PRIMARY KEY, \"inbound\" TEXT NOT NULL, \"connection\" TEXT NOT NULL, \"key\" TEXT NOT NULL, \"hash\" TEXT NOT NULL, \"body\" TEXT NOT NULL, \"received_at\" TEXT NOT NULL, \"state\" TEXT NOT NULL, \"attempts\" BIGINT NOT NULL DEFAULT 0, \"error\" TEXT, \"done_at\" TEXT, \"tx\" BIGINT, \"response\" TEXT, \"next_at\" TEXT, \"lane\" TEXT, \"latest\" TEXT, \"version\" TEXT, \"origin\" TEXT, \"encoding\" TEXT, \"settled_at\" TEXT, \"report\" TEXT)",
     // where each `inbound … pull` is: its cursor, when it pulled and when it pulls next
+    "CREATE TABLE \"_quadra_agents\" (\"name\" TEXT PRIMARY KEY, \"code_hash\" TEXT, \"code_expires\" TEXT, \"key_hash\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"registered_at\" TEXT, \"revoked_at\" TEXT, \"version\" TEXT, \"seen_at\" TEXT)",
     "CREATE TABLE \"_quadra_cursors\" (\"inbound\" TEXT PRIMARY KEY, \"cursor\" TEXT, \"pulled_at\" TEXT, \"next_at\" TEXT, \"error\" TEXT)",
     // what happened to each message in or out, one row per step: attempts, retries, skips
     // (crate::deliveries), written with what it records and never changed

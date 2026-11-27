@@ -455,7 +455,19 @@ impl Manifest {
         self.vars
             .iter()
             .filter(|v| v.default.is_none() && !values.contains_key(&v.name))
+            .filter(|v| !self.only_for_agents(&v.name))
             .collect()
+    }
+
+    /// Whether the variable is used only by connections an agent runs (`location =
+    /// "agent:…"`): its value is the agent's, and the server need not have it.
+    pub fn only_for_agents(&self, name: &str) -> bool {
+        let users: Vec<&Connection> = self
+            .connections
+            .iter()
+            .filter(|c| c.vars().contains(&name))
+            .collect();
+        !users.is_empty() && users.iter().all(|c| c.agent.is_some())
     }
 
     /// Checks the values of an environment: every variable without a default has one, and each

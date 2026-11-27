@@ -13,6 +13,7 @@
 
 mod engine;
 
+pub mod agent;
 pub mod agents;
 pub mod deliver;
 pub mod inbound;
@@ -1394,6 +1395,226 @@ async fn outbox_api(
     }
 }
 
+/// `/v1/agents`: the on-premise agents, for an admin (`engine::agents_api`), with whether each
+/// is connected now and its version; adding one again or revoking it applies to the jobs at once.
+async fn agents_admin(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> Response {
+    let who = match authenticate(&app, &t, &method, &headers).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let body: J = if body.is_empty() {
+        J::Null
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(j) => j,
+            Err(e) => return fail(400, &format!("the body is not JSON: {e}")),
+        }
+    };
+    if method == Method::POST && body.is_null() && uri.path() == "/v1/agents" {
+        return fail(400, "the agent's name: `{\"name\": \"milano\"}`");
+    }
+    let path = uri.path().to_string();
+    let req = Req::Outbox {
+        path: path.clone(),
+        query: HashMap::new(),
+        body: body.clone(),
+    };
+    match ask_call(&t, who, req).await {
+        Ok(Some(Reply {
+            status,
+            body: mut answer,
+            ..
+        })) => {
+            if status == 200 {
+                if let Some(name) = path
+                    .strip_prefix("/v1/agents/")
+                    .and_then(|p| p.strip_suffix("/revoke"))
+                {
+                    t.agents.revoke(name);
+                } else if let Some(name) = answer["code"]
+                    .is_string()
+                    .then(|| answer["name"].as_str())
+                    .flatten()
+                {
+                    t.agents.restore(name);
+                }
+                // who is connected now, and with which version
+                if let Some(list) = answer["agents"].as_array_mut() {
+                    let live = t.agents.seen();
+                    for a in list {
+                        let l = live
+                            .iter()
+                            .find(|s| Some(s.name.as_str()) == a["name"].as_str());
+                        a["connected"] =
+                            json!(l.is_some_and(|s| s.connected) && a["revoked_at"].is_null());
+                        if let Some(l) = l {
+                            a["version"] = json!(l.version);
+                            a["seen_ago_s"] = json!(l.ago.as_secs());
+                        }
+                    }
+                }
+            }
+            (
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(answer),
+            )
+                .into_response()
+        }
+        Ok(None) => fail(503, "the engine is not available"),
+        Err(r) => r,
+    }
+}
+
+/// The agent of a request (`Authorization: Bearer qa_…`), if its key is valid.
+async fn agent_of(t: &Tenant, headers: &HeaderMap) -> Result<(String, String), Response> {
+    let key = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|k| k.starts_with("qa_"))
+        .ok_or_else(|| {
+            fail(
+                401,
+                "an agent signs in with its key: `Authorization: Bearer qa_…`",
+            )
+        })?
+        .to_string();
+    let version = headers
+        .get("Quadra-Agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(40)
+        .collect::<String>();
+    let v = version.clone();
+    match t
+        .ask(|reply| Job::AgentKey {
+            key,
+            version: v,
+            reply,
+        })
+        .await
+    {
+        Some(Some(name)) => Ok((name, version)),
+        Some(None) => Err(fail(
+            401,
+            "this agent is not registered here, or it was revoked",
+        )),
+        None => Err(fail(503, "the engine is not available")),
+    }
+}
+
+/// `POST /v1/agent/hello {code, version}`: an agent registers with its one-time code and gets
+/// its key (shown once: the agent keeps it).
+async fn agent_hello(Ten(t): Ten, body: axum::body::Bytes) -> Response {
+    let Ok(b) = serde_json::from_slice::<J>(&body) else {
+        return fail(400, "the body is `{\"code\": \"…\", \"version\": \"…\"}`");
+    };
+    let code = b["code"].as_str().unwrap_or("").to_string();
+    let version = b["version"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(40)
+        .collect::<String>();
+    match t
+        .ask(|reply| Job::AgentHello {
+            code,
+            version,
+            reply,
+        })
+        .await
+    {
+        Some(Ok((name, key))) => {
+            t.agents.restore(&name);
+            json_response(200, json!({ "name": name, "key": key }))
+        }
+        Some(Err(e)) => fail(401, &e),
+        None => fail(503, "the engine is not available"),
+    }
+}
+
+/// `GET /v1/agent/jobs?wait=20`: the jobs for this agent, the request held open up to `wait`
+/// seconds (25 at most) until there is one. A revoked agent is told so at once.
+async fn agent_jobs(
+    Ten(t): Ten,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let (name, version) = match agent_of(&t, &headers).await {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let wait = q
+        .get("wait")
+        .and_then(|w| w.parse::<u64>().ok())
+        .unwrap_or(20)
+        .min(25);
+    // in steps of 5 s, its key checked again at each: revoked even straight in the database
+    // (`quadra agent revoke`), it receives nothing more within 5 s
+    let until = Instant::now() + Duration::from_secs(wait);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match t
+            .agents
+            .take(&name, &version, left.min(Duration::from_secs(5)))
+            .await
+        {
+            None => return fail(401, "this agent was revoked"),
+            Some(jobs) if !jobs.is_empty() || left <= Duration::from_secs(5) => {
+                return json_response(
+                    200,
+                    json!({
+                        "agent": name,
+                        "jobs": jobs.into_iter().map(|(id, job)| json!({ "id": id, "job": job })).collect::<Vec<_>>(),
+                    }),
+                )
+            }
+            Some(_) => {
+                if let Err(r) = agent_of(&t, &headers).await {
+                    t.agents.revoke(&name);
+                    return r;
+                }
+            }
+        }
+    }
+}
+
+/// `POST /v1/agent/results {results: [{id, outcome}]}`: what came of the jobs.
+async fn agent_results(Ten(t): Ten, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let (name, _) = match agent_of(&t, &headers).await {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    #[derive(serde::Deserialize)]
+    struct One {
+        id: u64,
+        outcome: transport::Outcome,
+    }
+    #[derive(serde::Deserialize)]
+    struct All {
+        results: Vec<One>,
+    }
+    let all: All = match serde_json::from_slice(&body) {
+        Ok(a) => a,
+        Err(e) => return fail(400, &format!("the results: {e}")),
+    };
+    let mut taken = 0;
+    for r in all.results {
+        if t.agents.answer(&name, r.id, r.outcome) {
+            taken += 1;
+        }
+    }
+    json_response(200, json!({ "taken": taken }))
+}
+
 async fn views_api(
     State(app): State<Shared>,
     Ten(t): Ten,
@@ -2430,6 +2651,15 @@ impl Host {
             )
             .route("/v1/integrations", get(outbox_api))
             .route("/v1/integrations/{*rest}", get(outbox_api).post(outbox_api))
+            .route("/v1/agents", get(agents_admin).post(agents_admin))
+            .route("/v1/agents/{*rest}", post(agents_admin))
+            .route("/v1/agent/hello", post(agent_hello))
+            .route("/v1/agent/jobs", get(agent_jobs))
+            // what the jobs fetched: files and tables, as base64 (a file of 48 MB at most)
+            .route(
+                "/v1/agent/results",
+                post(agent_results).layer(DefaultBodyLimit::max(64 << 20)),
+            )
             .route("/v1/outbox", get(outbox_api))
             .route("/v1/outbox/ack", post(outbox_api))
             .route("/v1/outbox/nack", post(outbox_api))

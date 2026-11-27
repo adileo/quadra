@@ -14,6 +14,7 @@
 //!     quadra serve [path] [--url URL] [--port 8080] [--dev-login] [--secure-cookies] …
 //!     quadra token create <login> … | revoke <name>
 //!     quadra outbox list [--pending] [--state S] [--json] | log <id…> | delivered <id…> | retry <id…> | skip <id…> --reason R [path] [--url URL]
+//!     quadra agent run [--server URL --code CODE] | add <name> | list | revoke <name> | upgrade
 //!     quadra inbox list [--state S] [--json] | log <id…> | show <id…> | replay <id…> --dry-run | retry <id…> | skip <id…> --reason R [path] [--url URL]
 //!     quadra bench gen|run …           the stress benchmark of examples/stress
 //!     quadra parse <file>              print the syntax tree of a file
@@ -27,6 +28,7 @@ use codespan_reporting::term::{self, termcolor};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod agent;
 mod apps;
 mod bench;
 mod cloud;
@@ -72,6 +74,7 @@ fn main() -> ExitCode {
         Some("bench") => bench::bench(&args[1..]),
         Some("cloud") => cloud::main(&args[1..]),
         Some("upgrade") => upgrade::main(&args[1..]),
+        Some("agent") => agent::main(&args[1..]),
         Some("lsp") => {
             quadra_lsp::run_with(Some(quadra_store::hints::hints));
             ExitCode::SUCCESS

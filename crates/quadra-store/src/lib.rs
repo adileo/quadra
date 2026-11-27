@@ -4,6 +4,7 @@
 //! the truth (every write of every field, ledger rows, a signed commit log) and readable
 //! projections (one table per entity, with real constraints and materialized formulas).
 
+pub mod agents;
 pub mod auth;
 pub mod bulk;
 pub mod codec;
