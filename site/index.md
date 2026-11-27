@@ -514,6 +514,8 @@ entity OrderLine:
   </div>
 </div>
 
+<a class="q-more" href="/guide/what-quadra-is-not">And what Quadra is not: 100 things it will not do <span aria-hidden="true">→</span></a>
+
 </div>
 
 <div class="q-section">

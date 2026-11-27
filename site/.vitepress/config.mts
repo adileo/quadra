@@ -37,7 +37,7 @@ function pages(dir: string, order: string[] = []): DefaultTheme.SidebarItem[] {
   return names.map((n) => ({ text: titleOf(path.join(abs, `${n}.md`)).replace(/^Step \d+:\s*/i, ""), link: `/${dir}/${n}` }));
 }
 
-const guide = pages("guide", ["introduction", "installation", "quick-start"]);
+const guide = pages("guide", ["introduction", "installation", "quick-start", "what-quadra-is-not"]);
 const tutorial = pages("tutorial").map((p, i) => ({ ...p, text: `${String(i + 1).padStart(2, "0")} · ${p.text.replace(/^\d+\s*[·.:-]\s*/, "")}` }));
 const reference = pages("reference", [
   "projects-and-modules",
