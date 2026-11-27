@@ -940,7 +940,7 @@ impl State {
                 Some(d) if d.is_zero() => match rx.try_recv() {
                     Ok(m) => Some(m),
                     Err(TryRecvError::Empty) => {
-                        self.flush();
+                        self.guarded(|s| s.flush());
                         continue;
                     }
                     Err(TryRecvError::Disconnected) => None,
@@ -948,7 +948,7 @@ impl State {
                 Some(d) => match rx.recv_timeout(d) {
                     Ok(m) => Some(m),
                     Err(RecvTimeoutError::Timeout) => {
-                        self.flush();
+                        self.guarded(|s| s.flush());
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => None,
@@ -961,7 +961,7 @@ impl State {
                 }
                 return;
             };
-            if let Some(stopped) = self.handle(msg) {
+            if let Some(stopped) = self.guarded(|s| s.handle(msg)).flatten() {
                 self.flush_all();
                 // a snapshot asked for and not taken yet (after a deploy, writes past the
                 // sequencer): before the end, or the destinations could not rebuild what is now
@@ -986,6 +986,28 @@ impl State {
                 self.lock = None;
                 let _ = stopped.send(());
                 return;
+            }
+        }
+    }
+
+    /// A bug met on the sequencer's thread (in the code of a change outside the chain, in
+    /// conflict checks) does not stop it: what was open is rolled back, the transactions in
+    /// line are refused and the state read again from the database, with a snapshot for the
+    /// destinations (a batch written and not yet handed over would be missing from the log).
+    fn guarded<T>(&mut self, f: impl FnOnce(&mut State) -> T) -> Option<T> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
+            Ok(v) => Some(v),
+            Err(panic) => {
+                let why = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                eprintln!("sequencer: an internal error ({why}): the state is read again from the database");
+                crate::conn::side_end();
+                let _ = self.conn.batch("ROLLBACK");
+                self.restart("an internal error of the sequencer: try again");
+                None
             }
         }
     }

@@ -1525,3 +1525,54 @@ fn a_logout_revokes_its_own_session_only() {
         .unwrap()
         .is_some());
 }
+
+/// A bug met on the sequencer's thread fails what was running, and the sequencer goes on:
+/// nothing of it is written, the next commits go through and the log still rebuilds them.
+#[test]
+fn a_panic_on_the_sequencer_thread_does_not_stop_it() {
+    if std::env::var_os("QUADRA_SEQ_PG").is_some() {
+        return;
+    }
+    let p = project();
+    let url = fresh("panic");
+    init(&p, &url);
+    let dir = std::env::temp_dir().join(format!("quadra-seq-{}-panic-log", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let options = Options {
+        destinations: vec![Box::new(quadra_store::segments::Folder::new(&dir).unwrap())],
+        rule: Rule::All,
+        ..Default::default()
+    };
+    let s = Sequencer::start(&url, options).unwrap();
+    let checked = quadra_analysis::check(&p);
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    let commit = |name: &str| {
+        let mut i = engine(&url, m, r, Some(&s));
+        let c = first(&mut i, "Customer");
+        i.transaction(|i| i.set(&c, "name", V::Text(name.into()), None))
+            .map(|_| ())
+    };
+    commit("one").unwrap();
+    let r = s.side(|c| -> Result<(), String> {
+        c.exec("UPDATE \"_quadra_tokens\" SET \"name\" = 'x'", &[])?;
+        panic!("a bug");
+    });
+    assert!(r.is_err());
+    commit("two").unwrap();
+    s.stop();
+    let target = std::env::temp_dir().join(format!(
+        "quadra-seq-{}-panic-rebuilt.db",
+        std::process::id()
+    ));
+    quadra_store::segments::Folder::new(&dir)
+        .unwrap()
+        .restore(&target)
+        .unwrap();
+    let t = format!("sqlite:{}", target.display());
+    let mut c = quadra_store::Conn::open(&t).unwrap();
+    assert_eq!(
+        c.query("SELECT \"name\" FROM \"customer\"", &[]).unwrap()[0][0].as_deref(),
+        Some("two")
+    );
+    assert_eq!(verify(&p, &t), Vec::<String>::new());
+}
