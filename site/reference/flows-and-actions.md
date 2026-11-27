@@ -276,6 +276,79 @@ on Partner changes as p:
     PartnerReview(partner=p, due=today() + 7 days)     # every change is reviewed
 ```
 
+## Waits, joins, timeouts and cancellations
+
+A process that waits for several things, or for time to pass, is a record that carries its
+state and `becomes` reactions on it: there is no separate workflow engine, and nothing to
+schedule or unschedule.
+
+```quadra
+entity Order:
+    lines: [Line]
+    payments: [Payment]
+    approved: Bool default false
+    placed_at: DateTime default now()
+    shipped_at: DateTime? required when state in {Shipped, Completed}
+    cancel_reason: Text?
+    state: enum(Open, Shipped, Completed, Cancelled) default Open
+
+    paid = lines.count() > 0 and payments.sum(p => p.amount) >= lines.sum(l => l.amount)
+
+    flow state:
+        Open -> Shipped               by ship
+        Shipped -> Completed          by complete
+        Open | Shipped -> Cancelled   by cancel
+
+    action ship:
+        shipped_at = now()
+
+    action cancel(reason: Text):
+        cancel_reason = reason
+
+# a join: ships when the last of the three becomes true, whichever it is
+on Order becomes state is Open and approved and paid and lines.all(l => l.picked) as o converges:
+    Shipment(order=o)
+    o.ship()
+
+# a wait: a day after shipping
+on Order becomes state is Shipped and now() >= shipped_at + 24 hours as o converges:
+    ReviewRequest(order=o)
+    o.complete()
+
+# an escalation: not approved within 4 hours
+on Order becomes state is Open and not approved and now() >= placed_at + 4 hours as o:
+    Escalation(order=o)
+
+# a timeout: not paid within 48 hours
+on Order becomes state is Open and not paid and now() >= placed_at + 48 hours as o converges:
+    o.cancel("not paid within 48 hours")
+```
+
+| Pattern | Behaviour |
+|---|---|
+| Join | The reaction runs in the transaction that makes the last condition true, whichever comes last; inputs that arrive together in one transaction run it once. Inputs after it (another payment, a line added) do not run it again while the condition stays true. |
+| Wait | `now()` compared with a stored `DateTime`, moved by a duration (`shipped_at + 24 hours`), is a threshold: the server works out when the nearest one passes and sweeps then, not only at its hourly sweep. The reaction runs once, at that time and not before, even when no request touches the record. |
+| Timeout, escalation | A wait with a condition on the state: `state is Open and not paid and now() >= placed_at + 48 hours`. A payment that arrives after the deadline finds the order already cancelled. |
+| Cancellation | The waits name the states they wait in, so a record that moves out of them (cancelled) no longer matches: its waits never fire. |
+| Concurrent inputs | Many clients changing the inputs of one condition at once: the reaction runs exactly once (one record created, one event in the outbox). A client changing a record from a `base` that others changed since gets a `409` and sends it again from a new `base` ([HTTP API](/reference/http-api#concurrency-base-and-409)). |
+
+A tenant put to sleep by its host is woken for its waits: `Host::next_sweep` says when the
+nearest threshold passes, and `Host::sweep` runs the reactions due. In tests, `clock` moves
+the time and runs what became due at once, as the sweep would
+([Testing](/reference/testing#clock)).
+
+### Large transactions
+
+One transaction may create or change many records: an order created with 10,000 lines in one
+request, an action that changes all of them (and the join on them, which fires once), a
+reaction that creates 10,000 records. What bounds it is the time a request may take
+(`Limits::job`, two minutes by default for a server of one's own): past it the transaction
+fails as a whole with `timeout`, nothing of it is written, and the next requests are served.
+A request to `/v1/tx` carries at most 200 operations and 2 MB (a larger body is refused with
+`413`): lines written inline in one operation count in the 2 MB, not in the operations, so
+about 100,000 short lines fit in one request; a reaction that creates records has no such
+bound.
+
 ## The cause of every change
 
 Every write is recorded with its cause: the user, the action or reaction, the test
