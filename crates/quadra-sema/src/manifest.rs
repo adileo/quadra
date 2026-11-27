@@ -115,6 +115,27 @@ pub enum HttpAuth {
         /// basic authentication
         in_body: bool,
     },
+    /// OAuth2 with a user's consent (`oauth2_grant = "authorization_code"`): an admin grants
+    /// it once in the provider's page, the server keeps the tokens and refreshes them
+    Consent(Consent),
+}
+
+/// OAuth2 with the consent of a user (the *authorization code* grant, with PKCE), as an app of
+/// a shop or a mailbox of Gmail or Microsoft 365 asks it: an admin opens
+/// `/v1/connections/<name>/authorize`, agrees in the provider's page, and the server keeps the
+/// access and refresh tokens it gets back (encrypted, in the tenant's database).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Consent {
+    /// the provider's page that asks the user (`oauth2_authorize_url`); parameters of its own
+    /// (`access_type=offline`) may be written in it
+    pub authorize_url: Setting,
+    pub token_url: Setting,
+    pub client_id: Setting,
+    /// a secret variable
+    pub client_secret: String,
+    pub scope: Option<String>,
+    /// the client's id and secret in the form rather than as basic authentication
+    pub in_body: bool,
 }
 
 /// How the signature of a request (`signing_secret`) is written. Without `header`, Quadra's
@@ -191,7 +212,11 @@ pub enum ConnectionKind {
     Mail {
         url: Setting,
         user: Setting,
+        /// a secret variable: the password (`LOGIN`); none with `oauth`
         password: Option<String>,
+        /// OAuth2 with the user's consent instead of a password (`AUTHENTICATE XOAUTH2`:
+        /// Gmail, Microsoft 365)
+        oauth: Option<Consent>,
         timeout_s: u64,
         insecure: bool,
     },
@@ -350,6 +375,7 @@ impl Connection {
                         setting(client_id, &mut out);
                         out.push(client_secret);
                     }
+                    HttpAuth::Consent(c) => c.vars(&mut out),
                 }
                 if let Some(s) = signing_secret {
                     out.push(s);
@@ -415,14 +441,41 @@ impl Connection {
                 url,
                 user,
                 password,
+                oauth,
                 ..
             } => {
                 setting(url, &mut out);
                 setting(user, &mut out);
                 out.extend(password.iter().map(String::as_str));
+                if let Some(c) = oauth {
+                    c.vars(&mut out);
+                }
             }
         }
         out
+    }
+
+    /// Its OAuth2 with a user's consent, if it has one.
+    pub fn consent(&self) -> Option<&Consent> {
+        match &self.kind {
+            ConnectionKind::Http {
+                auth: HttpAuth::Consent(c),
+                ..
+            } => Some(c),
+            ConnectionKind::Mail { oauth, .. } => oauth.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+impl Consent {
+    fn vars<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for s in [&self.authorize_url, &self.token_url, &self.client_id] {
+            if let Setting::Var(v) = s {
+                out.push(v.as_str());
+            }
+        }
+        out.push(&self.client_secret);
     }
 }
 
@@ -747,6 +800,15 @@ fn other_kind(
     ];
     let extra: &[&str] = match kind {
         "sftp" => &["private_key", "known_host"],
+        "imap" => &[
+            "oauth2_grant",
+            "oauth2_authorize_url",
+            "oauth2_token_url",
+            "client_id",
+            "client_secret",
+            "scope",
+            "client_auth",
+        ],
         _ => &[],
     };
     for k in t.keys() {
@@ -852,13 +914,48 @@ fn other_kind(
                 insecure,
             }
         }
-        "imap" => ConnectionKind::Mail {
-            url,
-            user: user.ok_or(format!("{at}: user is needed"))?,
-            password: Some(password.ok_or(format!("{at}: password is needed"))?),
-            timeout_s,
-            insecure,
-        },
+        "imap" => {
+            let oauth = match t.get("oauth2_grant").map(|v| v.as_str()) {
+                None if t.contains_key("oauth2_authorize_url") || t.contains_key("oauth2_token_url") => {
+                    return Err(format!("{at}: a mailbox takes OAuth2 with the user's consent: oauth2_grant = \"authorization_code\""))
+                }
+                None => None,
+                Some(Some("authorization_code")) => Some(consent(m, at, t, insecure)?),
+                _ => {
+                    return Err(format!(
+                        "{at}: a mailbox takes OAuth2 with the user's consent only: oauth2_grant = \"authorization_code\" (Gmail, Microsoft 365)"
+                    ))
+                }
+            };
+            if oauth.is_none() {
+                for k in ["client_id", "client_secret", "scope", "client_auth"] {
+                    if t.contains_key(k) {
+                        return Err(format!(
+                            "{at}: {k} is for OAuth2: with oauth2_grant = \"authorization_code\""
+                        ));
+                    }
+                }
+            }
+            match (&password, &oauth) {
+                (None, None) => return Err(format!(
+                    "{at}: a password is needed, or OAuth2 (oauth2_grant = \"authorization_code\")"
+                )),
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "{at}: one authentication only: a password, or OAuth2"
+                    ))
+                }
+                _ => {}
+            }
+            ConnectionKind::Mail {
+                url,
+                user: user.ok_or(format!("{at}: user is needed"))?,
+                password,
+                oauth,
+                timeout_s,
+                insecure,
+            }
+        }
         _ => ConnectionKind::Database {
             engine: match kind {
                 "postgres" => DbEngine::Postgres,
@@ -872,6 +969,75 @@ fn other_kind(
             timeout_s,
             insecure,
         },
+    })
+}
+
+/// OAuth2 with the consent of a user: `oauth2_authorize_url`, `oauth2_token_url`, `client_id`,
+/// `client_secret`, `scope`, `client_auth`.
+fn consent(m: &Manifest, at: &str, t: &toml::Table, insecure: bool) -> Result<Consent, String> {
+    let url = |key: &str| -> Result<Setting, String> {
+        let s = setting(
+            m,
+            at,
+            key,
+            t.get(key)
+                .ok_or(format!("{at}: OAuth2 with the user's consent needs {key}"))?,
+        )?;
+        if let Setting::Literal(u) = &s {
+            if !(u.starts_with("https://") || insecure && u.starts_with("http://")) {
+                return Err(format!("{at}: {key} starts with https://"));
+            }
+        }
+        Ok(s)
+    };
+    let authorize_url = url("oauth2_authorize_url")?;
+    let token_url = url("oauth2_token_url")?;
+    let client_id = setting(
+        m,
+        at,
+        "client_id",
+        t.get("client_id")
+            .ok_or(format!("{at}: OAuth2 needs client_id"))?,
+    )?;
+    let client_secret = credential(
+        m,
+        at,
+        "client_secret",
+        t.get("client_secret")
+            .ok_or(format!("{at}: OAuth2 needs client_secret"))?,
+    )?;
+    let scope = match t.get("scope") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or(format!(
+                    "{at}: scope is text (\"read_orders write_orders\")"
+                ))?
+                .to_string(),
+        ),
+    };
+    let in_body = match t.get("client_auth").map(|v| v.as_str()) {
+        None | Some(Some("basic")) => false,
+        Some(Some("body")) => true,
+        _ => {
+            return Err(format!(
+                "{at}: client_auth is \"basic\" (the default) or \"body\""
+            ))
+        }
+    };
+    // the tokens stay where the consent was given: an agent would need them handed over
+    if t.contains_key("location") {
+        return Err(format!(
+            "{at}: OAuth2 with the user's consent runs on the server only: its tokens are not handed to an on-premise agent (remove location, or use a password or a token the agent holds)"
+        ));
+    }
+    Ok(Consent {
+        authorize_url,
+        token_url,
+        client_id,
+        client_secret,
+        scope,
+        in_body,
     })
 }
 
@@ -947,6 +1113,8 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
             "signature_prefix",
             "signature_timestamp_header",
             "oauth2_token_url",
+            "oauth2_grant",
+            "oauth2_authorize_url",
             "client_id",
             "client_secret",
             "scope",
@@ -1046,7 +1214,22 @@ fn connection(m: &Manifest, name: &str, decl: &toml::Value) -> Result<Connection
                 .ok_or(format!("{at}: api_key_header is the name of a header"))?
                 .to_string(),
         };
+        let grant = match t.get("oauth2_grant").map(|v| v.as_str()) {
+            None | Some(Some("client_credentials")) => false,
+            Some(Some("authorization_code")) => true,
+            _ => {
+                return Err(format!(
+                    "{at}: oauth2_grant is \"client_credentials\" (the default) or \"authorization_code\" (the user's consent)"
+                ))
+            }
+        };
+        if !grant && t.contains_key("oauth2_authorize_url") {
+            return Err(format!(
+                "{at}: oauth2_authorize_url is for the user's consent: oauth2_grant = \"authorization_code\""
+            ));
+        }
         let oauth = match t.get("oauth2_token_url") {
+            _ if grant => Some(HttpAuth::Consent(consent(m, &at, t, insecure)?)),
             None => {
                 for k in ["client_id", "client_secret", "scope", "client_auth"] {
                     if t.contains_key(k) {
@@ -1424,6 +1607,50 @@ from = "Acme <noreply@acme.example.com>"
         .contains("secret = true"));
         assert!(bad("kind = \"sftp\"\nurl = \"sftp://h\"\nuser = \"q\"\npassword = { var = \"PASS\" }\nknown_host = \"x\"\nlocation = \"milano\"\n").contains("agent:<name>"));
         assert!(bad("kind = \"gopher\"\nurl = \"x\"\n").contains("not known"));
+    }
+
+    #[test]
+    fn oauth2_with_the_users_consent_is_read_for_http_and_mailboxes() {
+        let vars = "[vars]\nID = {}\nSECRET = { secret = true }\nPASS = { secret = true }\n\n";
+        let ok = |c: &str| {
+            parse(&format!("{vars}[connections.x]\n{c}"))
+                .map(|m| m.connection("x").unwrap().clone())
+        };
+        let shop = ok("kind = \"http\"\nurl = \"https://acme.myshopify.com/admin/api\"\noauth2_grant = \"authorization_code\"\noauth2_authorize_url = \"https://acme.myshopify.com/admin/oauth/authorize\"\noauth2_token_url = \"https://acme.myshopify.com/admin/oauth/access_token\"\nclient_id = { var = \"ID\" }\nclient_secret = { var = \"SECRET\" }\nscope = \"read_orders\"\nclient_auth = \"body\"\n").unwrap();
+        let c = shop.consent().unwrap();
+        assert_eq!(c.scope.as_deref(), Some("read_orders"));
+        assert!(c.in_body);
+        assert_eq!(c.client_id, Setting::Var("ID".into()));
+        let mut used = shop.vars();
+        used.sort();
+        assert_eq!(used, ["ID", "SECRET"]);
+        let gmail = ok("kind = \"imap\"\nurl = \"imaps://imap.gmail.com\"\nuser = \"ops@acme.example.com\"\noauth2_grant = \"authorization_code\"\noauth2_authorize_url = \"https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent\"\noauth2_token_url = \"https://oauth2.googleapis.com/token\"\nclient_id = \"123.apps.googleusercontent.com\"\nclient_secret = { var = \"SECRET\" }\nscope = \"https://mail.google.com/\"\n").unwrap();
+        assert!(gmail.consent().is_some());
+        assert!(matches!(
+            gmail.kind,
+            ConnectionKind::Mail { password: None, .. }
+        ));
+        assert_eq!(gmail.vars(), ["SECRET"]);
+        // a password mailbox has none
+        let pec = ok("kind = \"imap\"\nurl = \"imaps://imap.pec.example.it\"\nuser = \"q\"\npassword = { var = \"PASS\" }\n").unwrap();
+        assert!(pec.consent().is_none());
+        let bad = |c: &str| ok(c).unwrap_err();
+        assert!(bad(
+            "kind = \"http\"\nurl = \"https://a\"\noauth2_authorize_url = \"https://a/auth\"\n"
+        )
+        .contains("oauth2_grant = \"authorization_code\""));
+        assert!(bad("kind = \"http\"\nurl = \"https://a\"\noauth2_grant = \"authorization_code\"\noauth2_token_url = \"https://a/t\"\nclient_id = \"x\"\nclient_secret = { var = \"SECRET\" }\n").contains("needs oauth2_authorize_url"));
+        assert!(
+            bad("kind = \"http\"\nurl = \"https://a\"\noauth2_grant = \"implicit\"\n")
+                .contains("oauth2_grant is")
+        );
+        assert!(bad("kind = \"http\"\nurl = \"https://a\"\noauth2_grant = \"authorization_code\"\noauth2_authorize_url = \"https://a/auth\"\noauth2_token_url = \"https://a/t\"\nclient_id = \"x\"\nclient_secret = { var = \"SECRET\" }\nbearer = { var = \"SECRET\" }\n").contains("one authentication only"));
+        assert!(bad("kind = \"http\"\nurl = \"https://a\"\noauth2_grant = \"authorization_code\"\noauth2_authorize_url = \"https://a/auth\"\noauth2_token_url = \"https://a/t\"\nclient_id = \"x\"\nclient_secret = { var = \"SECRET\" }\nlocation = \"agent:milano\"\n").contains("not handed to an on-premise agent"));
+        assert!(bad("kind = \"imap\"\nurl = \"imaps://h\"\nuser = \"q\"\n")
+            .contains("a password is needed, or OAuth2"));
+        assert!(bad("kind = \"imap\"\nurl = \"imaps://h\"\nuser = \"q\"\noauth2_grant = \"client_credentials\"\n").contains("consent only"));
+        assert!(bad("kind = \"imap\"\nurl = \"imaps://h\"\nuser = \"q\"\npassword = { var = \"PASS\" }\nclient_id = \"x\"\n").contains("for OAuth2"));
+        assert!(bad("kind = \"imap\"\nurl = \"imaps://h\"\nuser = \"q\"\npassword = { var = \"PASS\" }\noauth2_grant = \"authorization_code\"\noauth2_authorize_url = \"https://a/auth\"\noauth2_token_url = \"https://a/t\"\nclient_id = \"x\"\nclient_secret = { var = \"SECRET\" }\n").contains("one authentication only"));
     }
 
     #[test]

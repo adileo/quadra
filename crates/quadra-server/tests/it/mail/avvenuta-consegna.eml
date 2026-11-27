@@ -1,0 +1,85 @@
+Date: Fri, 27 Nov 2026 10:20:11 +0100
+X-Ricevuta: avvenuta-consegna
+X-Riferimento-Message-ID: <PEC-OUT-77@acme.example.it>
+Message-ID: <consegna.20261127102011.00042@pec.cliente.example.it>
+Subject: CONSEGNA: Ordine 77
+From: posta-certificata@pec.cliente.example.it
+To: acme@pec.example.it
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary="----=_SIGNED"
+
+This is an S/MIME signed message
+
+------=_SIGNED
+Content-Type: multipart/mixed; boundary="----=_MIXED"
+
+------=_MIXED
+Content-Type: multipart/alternative; boundary="----=_ALT"
+
+------=_ALT
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ricevuta di avvenuta consegna
+
+Il giorno 27/11/2026 alle ore 10:20:11 (+0100) il messaggio
+"Ordine 77" proveniente da "acme@pec.example.it"
+ed indirizzato a "clienti@pec.cliente.example.it"
+è stato consegnato nella casella di destinazione.
+Identificativo messaggio: opec21031.20261127101900.00077.01.1.1@pec.example.it
+------=_ALT
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Ricevuta di avvenuta consegna: Ordine 77</p></body></html>
+------=_ALT--
+
+------=_MIXED
+Content-Type: application/xml; name="daticert.xml"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="daticert.xml"
+
+PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCFET0NUWVBFIHBvc3RhY2Vy
+dCBTWVNURU0gInBvc3RhY2VydC5kdGQiPgo8cG9zdGFjZXJ0IHRpcG89ImF2dmVudXRhLWNvbnNl
+Z25hIiBlcnJvcmU9Im5lc3N1bm8iPgogIDxpbnRlc3RhemlvbmU+CiAgICA8bWl0dGVudGU+YWNt
+ZUBwZWMuZXhhbXBsZS5pdDwvbWl0dGVudGU+CiAgICA8ZGVzdGluYXRhcmkgdGlwbz0iY2VydGlm
+aWNhdG8iPmNsaWVudGlAcGVjLmNsaWVudGUuZXhhbXBsZS5pdDwvZGVzdGluYXRhcmk+CiAgICA8
+cmlzcG9zdGU+YWNtZUBwZWMuZXhhbXBsZS5pdDwvcmlzcG9zdGU+CiAgICA8b2dnZXR0bz5PcmRp
+bmUgNzc8L29nZ2V0dG8+CiAgPC9pbnRlc3RhemlvbmU+CiAgPGRhdGk+CiAgICA8Z2VzdG9yZS1l
+bWl0dGVudGU+Q2xpZW50ZSBQRUMgUy5wLkEuPC9nZXN0b3JlLWVtaXR0ZW50ZT4KICAgIDxkYXRh
+IHpvbmE9IiswMTAwIj4KICAgICAgPGdpb3Jubz4yNy8xMS8yMDI2PC9naW9ybm8+CiAgICAgIDxv
+cmE+MTA6MjA6MTE8L29yYT4KICAgIDwvZGF0YT4KICAgIDxpZGVudGlmaWNhdGl2bz5vcGVjMjEw
+MzEuMjAyNjExMjcxMDE5MDAuMDAwNzcuMDEuMS4xQHBlYy5leGFtcGxlLml0PC9pZGVudGlmaWNh
+dGl2bz4KICAgIDxtc2dpZD4mbHQ7UEVDLU9VVC03N0BhY21lLmV4YW1wbGUuaXQmZ3Q7PC9tc2dp
+ZD4KICAgIDxyaWNldnV0YSB0aXBvPSJjb21wbGV0YSIgLz4KICAgIDxjb25zZWduYT5jbGllbnRp
+QHBlYy5jbGllbnRlLmV4YW1wbGUuaXQ8L2NvbnNlZ25hPgogIDwvZGF0aT4KPC9wb3N0YWNlcnQ+
+Cg==
+
+------=_MIXED
+Content-Type: message/rfc822; name="postacert.eml"
+Content-Disposition: inline; filename="postacert.eml"
+
+Date: Fri, 27 Nov 2026 10:18:55 +0100
+From: acme@pec.example.it
+To: clienti@pec.cliente.example.it
+Subject: Ordine 77
+Message-ID: <PEC-OUT-77@acme.example.it>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+Confermiamo l'ordine 77.
+
+------=_MIXED--
+
+------=_SIGNED
+Content-Type: application/pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIGqQYJKoZIhvcNAQcCoIIGmjCCBpYCAQExDzANBglghkgBZQMEAgEFADALBgkqhkiG9w0BBwFu
+HxkIDByAW26LkWjrSDm3qvfHwAzqbfprJXJBmXMneG4fGQgMHIBbbouRaOtIObeq98fADOpt+msl
+ckGZcyd4bh8ZCAwcgFtui5Fo60g5t6r3x8AM6m36ayVyQZlzJ3huHxkIDByAW26LkWjrSDm3qvfH
+wAzqbfprJXJBmXMneG4fGQgMHIBbbouRaOtIObeq98fADOpt+mslckGZcyd4bh8ZCAwcgFtui5Fo
+60g5t6r3x8AM6m36ayVyQZlzJ3huHxkIDByAW26LkWjrSDm3qvfHwAzqbfprJXJBmXMneG4fGQgM
+HIBbbouRaOtIObeq98fADOpt+mslckGZcyd4
+------=_SIGNED--

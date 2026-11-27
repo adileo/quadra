@@ -1,0 +1,29 @@
+Return-Path: <orders@shop.example.com>
+Date: Fri, 27 Nov 2026 10:14:03 +0100
+From: Shop Orders <orders@shop.example.com>
+To: acme@example.com
+Subject: Order 1042
+Message-ID: <20261127.4711@shop.example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix"
+
+--mix
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset=UTF-8
+
+Thank you for your order 1042.
+--alt
+Content-Type: text/html; charset=UTF-8
+
+<p><b>Thank you</b> for your order 1042.</p>
+--alt--
+
+--mix
+Content-Type: text/csv; name="order-1042.csv"
+Content-Disposition: attachment; filename="order-1042.csv"
+Content-Transfer-Encoding: base64
+
+c2t1O3F0eQpBLTE7Mgo=
+--mix--

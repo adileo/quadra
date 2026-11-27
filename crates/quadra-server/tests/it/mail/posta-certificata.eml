@@ -1,0 +1,140 @@
+Return-Path: <posta-certificata@pec.example.it>
+Received: from mx.pec.example.it (mx.pec.example.it [192.0.2.25]) by pec.example.it; Fri, 27 Nov 2026 10:14:03 +0100
+Date: Fri, 27 Nov 2026 10:14:03 +0100
+X-Trasporto: posta-certificata
+X-Riferimento-Message-ID: <FAT2026118.20261127@mail.fornitore.example.it>
+Message-ID: <opec21031.20261127101403.04711.06.1.1@pec.example.it>
+Subject: POSTA CERTIFICATA: Fattura 2026/118
+From: "Per conto di: fatture@pec.fornitore.example.it" <posta-certificata@pec.example.it>
+Reply-To: fatture@pec.fornitore.example.it
+To: acme@pec.example.it
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary="----=_SIGNED"
+
+This is an S/MIME signed message
+
+------=_SIGNED
+Content-Type: multipart/mixed; boundary="----=_MIXED"
+
+------=_MIXED
+Content-Type: multipart/alternative; boundary="----=_ALT"
+
+------=_ALT
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Messaggio di posta certificata
+
+Il giorno 27/11/2026 alle ore 10:14:03 (+0100) il messaggio
+"Fattura 2026/118" è stato inviato da "fatture@pec.fornitore.example.it"
+indirizzato a:
+acme@pec.example.it
+Il messaggio originale è incluso in allegato.
+Identificativo messaggio: opec21031.20261127101403.04711.06.1.1@pec.example.it
+------=_ALT
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Messaggio di posta certificata: Fattura 2026/118</p></body></html>
+------=_ALT--
+
+------=_MIXED
+Content-Type: application/xml; name="daticert.xml"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="daticert.xml"
+
+PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCFET0NUWVBFIHBvc3RhY2Vy
+dCBTWVNURU0gInBvc3RhY2VydC5kdGQiPgo8cG9zdGFjZXJ0IHRpcG89InBvc3RhLWNlcnRpZmlj
+YXRhIiBlcnJvcmU9Im5lc3N1bm8iPgogIDxpbnRlc3RhemlvbmU+CiAgICA8bWl0dGVudGU+ZmF0
+dHVyZUBwZWMuZm9ybml0b3JlLmV4YW1wbGUuaXQ8L21pdHRlbnRlPgogICAgPGRlc3RpbmF0YXJp
+IHRpcG89ImNlcnRpZmljYXRvIj5hY21lQHBlYy5leGFtcGxlLml0PC9kZXN0aW5hdGFyaT4KICAg
+IDxyaXNwb3N0ZT5mYXR0dXJlQHBlYy5mb3JuaXRvcmUuZXhhbXBsZS5pdDwvcmlzcG9zdGU+CiAg
+ICA8b2dnZXR0bz5GYXR0dXJhIDIwMjYvMTE4PC9vZ2dldHRvPgogIDwvaW50ZXN0YXppb25lPgog
+IDxkYXRpPgogICAgPGdlc3RvcmUtZW1pdHRlbnRlPkV4YW1wbGUgUEVDIFMucC5BLjwvZ2VzdG9y
+ZS1lbWl0dGVudGU+CiAgICA8ZGF0YSB6b25hPSIrMDEwMCI+CiAgICAgIDxnaW9ybm8+MjcvMTEv
+MjAyNjwvZ2lvcm5vPgogICAgICA8b3JhPjEwOjE0OjAzPC9vcmE+CiAgICA8L2RhdGE+CiAgICA8
+aWRlbnRpZmljYXRpdm8+b3BlYzIxMDMxLjIwMjYxMTI3MTAxNDAzLjA0NzExLjA2LjEuMUBwZWMu
+ZXhhbXBsZS5pdDwvaWRlbnRpZmljYXRpdm8+CiAgICA8bXNnaWQ+Jmx0O0ZBVDIwMjYxMTguMjAy
+NjExMjdAbWFpbC5mb3JuaXRvcmUuZXhhbXBsZS5pdCZndDs8L21zZ2lkPgogIDwvZGF0aT4KPC9w
+b3N0YWNlcnQ+Cg==
+
+------=_MIXED
+Content-Type: message/rfc822; name="postacert.eml"
+Content-Disposition: inline; filename="postacert.eml"
+
+Date: Fri, 27 Nov 2026 10:13:58 +0100
+From: Fornitore Esempio <fatture@pec.fornitore.example.it>
+To: acme@pec.example.it
+Subject: Fattura 2026/118
+Message-ID: <FAT2026118.20261127@mail.fornitore.example.it>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="----=_ORIG"
+
+------=_ORIG
+Content-Type: text/plain; charset=UTF-8
+
+In allegato la fattura 2026/118.
+------=_ORIG
+Content-Type: application/xml; name="IT01234567890_00118.xml"
+Content-Disposition: attachment; filename="IT01234567890_00118.xml"
+Content-Transfer-Encoding: base64
+
+PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPHA6RmF0dHVyYUVsZXR0cm9u
+aWNhIHZlcnNpb25lPSJGUFIxMiIgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkv
+eG1sZHNpZyMiIHhtbG5zOnA9Imh0dHA6Ly9pdmFzZXJ2aXppLmFnZW56aWFlbnRyYXRlLmdvdi5p
+dC9kb2NzL3hzZC9mYXR0dXJlL3YxLjIiPgogIDxGYXR0dXJhRWxldHRyb25pY2FIZWFkZXI+CiAg
+ICA8RGF0aVRyYXNtaXNzaW9uZT4KICAgICAgPElkVHJhc21pdHRlbnRlPjxJZFBhZXNlPklUPC9J
+ZFBhZXNlPjxJZENvZGljZT4wMTIzNDU2Nzg5MDwvSWRDb2RpY2U+PC9JZFRyYXNtaXR0ZW50ZT4K
+ICAgICAgPFByb2dyZXNzaXZvSW52aW8+MDAxMTg8L1Byb2dyZXNzaXZvSW52aW8+CiAgICAgIDxG
+b3JtYXRvVHJhc21pc3Npb25lPkZQUjEyPC9Gb3JtYXRvVHJhc21pc3Npb25lPgogICAgICA8Q29k
+aWNlRGVzdGluYXRhcmlvPjAwMDAwMDA8L0NvZGljZURlc3RpbmF0YXJpbz4KICAgICAgPFBFQ0Rl
+c3RpbmF0YXJpbz5hY21lQHBlYy5leGFtcGxlLml0PC9QRUNEZXN0aW5hdGFyaW8+CiAgICA8L0Rh
+dGlUcmFzbWlzc2lvbmU+CiAgICA8Q2VkZW50ZVByZXN0YXRvcmU+CiAgICAgIDxEYXRpQW5hZ3Jh
+ZmljaT4KICAgICAgICA8SWRGaXNjYWxlSVZBPjxJZFBhZXNlPklUPC9JZFBhZXNlPjxJZENvZGlj
+ZT4wMTIzNDU2Nzg5MDwvSWRDb2RpY2U+PC9JZEZpc2NhbGVJVkE+CiAgICAgICAgPEFuYWdyYWZp
+Y2E+PERlbm9taW5hemlvbmU+Rm9ybml0b3JlIEVzZW1waW8gUy5yLmwuPC9EZW5vbWluYXppb25l
+PjwvQW5hZ3JhZmljYT4KICAgICAgICA8UmVnaW1lRmlzY2FsZT5SRjAxPC9SZWdpbWVGaXNjYWxl
+PgogICAgICA8L0RhdGlBbmFncmFmaWNpPgogICAgICA8U2VkZT48SW5kaXJpenpvPlZpYSBSb21h
+IDE8L0luZGlyaXp6bz48Q0FQPjIwMTIxPC9DQVA+PENvbXVuZT5NaWxhbm88L0NvbXVuZT48UHJv
+dmluY2lhPk1JPC9Qcm92aW5jaWE+PE5hemlvbmU+SVQ8L05hemlvbmU+PC9TZWRlPgogICAgPC9D
+ZWRlbnRlUHJlc3RhdG9yZT4KICAgIDxDZXNzaW9uYXJpb0NvbW1pdHRlbnRlPgogICAgICA8RGF0
+aUFuYWdyYWZpY2k+CiAgICAgICAgPElkRmlzY2FsZUlWQT48SWRQYWVzZT5JVDwvSWRQYWVzZT48
+SWRDb2RpY2U+MDk4NzY1NDMyMTA8L0lkQ29kaWNlPjwvSWRGaXNjYWxlSVZBPgogICAgICAgIDxB
+bmFncmFmaWNhPjxEZW5vbWluYXppb25lPkFjbWUgUy5wLkEuPC9EZW5vbWluYXppb25lPjwvQW5h
+Z3JhZmljYT4KICAgICAgPC9EYXRpQW5hZ3JhZmljaT4KICAgICAgPFNlZGU+PEluZGlyaXp6bz5D
+b3JzbyBJdGFsaWEgMTA8L0luZGlyaXp6bz48Q0FQPjEwMTIxPC9DQVA+PENvbXVuZT5Ub3Jpbm88
+L0NvbXVuZT48UHJvdmluY2lhPlRPPC9Qcm92aW5jaWE+PE5hemlvbmU+SVQ8L05hemlvbmU+PC9T
+ZWRlPgogICAgPC9DZXNzaW9uYXJpb0NvbW1pdHRlbnRlPgogIDwvRmF0dHVyYUVsZXR0cm9uaWNh
+SGVhZGVyPgogIDxGYXR0dXJhRWxldHRyb25pY2FCb2R5PgogICAgPERhdGlHZW5lcmFsaT4KICAg
+ICAgPERhdGlHZW5lcmFsaURvY3VtZW50bz4KICAgICAgICA8VGlwb0RvY3VtZW50bz5URDAxPC9U
+aXBvRG9jdW1lbnRvPgogICAgICAgIDxEaXZpc2E+RVVSPC9EaXZpc2E+CiAgICAgICAgPERhdGE+
+MjAyNi0xMS0yNzwvRGF0YT4KICAgICAgICA8TnVtZXJvPjIwMjYvMTE4PC9OdW1lcm8+CiAgICAg
+ICAgPEltcG9ydG9Ub3RhbGVEb2N1bWVudG8+MTIyMC4wMDwvSW1wb3J0b1RvdGFsZURvY3VtZW50
+bz4KICAgICAgPC9EYXRpR2VuZXJhbGlEb2N1bWVudG8+CiAgICA8L0RhdGlHZW5lcmFsaT4KICAg
+IDxEYXRpQmVuaVNlcnZpemk+CiAgICAgIDxEZXR0YWdsaW9MaW5lZT4KICAgICAgICA8TnVtZXJv
+TGluZWE+MTwvTnVtZXJvTGluZWE+CiAgICAgICAgPERlc2NyaXppb25lPkNvbnN1bGVuemEgbm92
+ZW1icmUgMjAyNjwvRGVzY3JpemlvbmU+CiAgICAgICAgPFF1YW50aXRhPjEuMDA8L1F1YW50aXRh
+PgogICAgICAgIDxQcmV6em9Vbml0YXJpbz4xMDAwLjAwPC9QcmV6em9Vbml0YXJpbz4KICAgICAg
+ICA8UHJlenpvVG90YWxlPjEwMDAuMDA8L1ByZXp6b1RvdGFsZT4KICAgICAgICA8QWxpcXVvdGFJ
+VkE+MjIuMDA8L0FsaXF1b3RhSVZBPgogICAgICA8L0RldHRhZ2xpb0xpbmVlPgogICAgICA8RGF0
+aVJpZXBpbG9nbz4KICAgICAgICA8QWxpcXVvdGFJVkE+MjIuMDA8L0FsaXF1b3RhSVZBPgogICAg
+ICAgIDxJbXBvbmliaWxlSW1wb3J0bz4xMDAwLjAwPC9JbXBvbmliaWxlSW1wb3J0bz4KICAgICAg
+ICA8SW1wb3N0YT4yMjAuMDA8L0ltcG9zdGE+CiAgICAgICAgPEVzaWdpYmlsaXRhSVZBPkk8L0Vz
+aWdpYmlsaXRhSVZBPgogICAgICA8L0RhdGlSaWVwaWxvZ28+CiAgICA8L0RhdGlCZW5pU2Vydml6
+aT4KICA8L0ZhdHR1cmFFbGV0dHJvbmljYUJvZHk+CjwvcDpGYXR0dXJhRWxldHRyb25pY2E+Cg==
+------=_ORIG--
+
+------=_MIXED--
+
+------=_SIGNED
+Content-Type: application/pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIGqQYJKoZIhvcNAQcCoIIGmjCCBpYCAQExDzANBglghkgBZQMEAgEFADALBgkqhkiG9w0BBwFu
+HxkIDByAW26LkWjrSDm3qvfHwAzqbfprJXJBmXMneG4fGQgMHIBbbouRaOtIObeq98fADOpt+msl
+ckGZcyd4bh8ZCAwcgFtui5Fo60g5t6r3x8AM6m36ayVyQZlzJ3huHxkIDByAW26LkWjrSDm3qvfH
+wAzqbfprJXJBmXMneG4fGQgMHIBbbouRaOtIObeq98fADOpt+mslckGZcyd4bh8ZCAwcgFtui5Fo
+60g5t6r3x8AM6m36ayVyQZlzJ3huHxkIDByAW26LkWjrSDm3qvfHwAzqbfprJXJBmXMneG4fGQgM
+HIBbbouRaOtIObeq98fADOpt+mslckGZcyd4
+------=_SIGNED--

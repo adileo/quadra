@@ -1,0 +1,69 @@
+Date: Fri, 27 Nov 2026 10:19:00 +0100
+X-Ricevuta: accettazione
+X-Riferimento-Message-ID: <PEC-OUT-77@acme.example.it>
+Message-ID: <opec21031.20261127101900.00077.01.1.1@pec.example.it>
+Subject: ACCETTAZIONE: Ordine 77
+From: posta-certificata@pec.example.it
+To: acme@pec.example.it
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary="----=_SIGNED"
+
+This is an S/MIME signed message
+
+------=_SIGNED
+Content-Type: multipart/mixed; boundary="----=_MIXED"
+
+------=_MIXED
+Content-Type: multipart/alternative; boundary="----=_ALT"
+
+------=_ALT
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ricevuta di accettazione
+
+Il giorno 27/11/2026 alle ore 10:19:00 (+0100) il messaggio
+"Ordine 77" proveniente da "acme@pec.example.it"
+ed indirizzato a:
+clienti@pec.cliente.example.it ("posta certificata")
+è stato accettato dal sistema ed inoltrato.
+Identificativo messaggio: opec21031.20261127101900.00077.01.1.1@pec.example.it
+------=_ALT
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Ricevuta di accettazione: Ordine 77</p></body></html>
+------=_ALT--
+
+------=_MIXED
+Content-Type: application/xml; name="daticert.xml"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="daticert.xml"
+
+PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCFET0NUWVBFIHBvc3RhY2Vy
+dCBTWVNURU0gInBvc3RhY2VydC5kdGQiPgo8cG9zdGFjZXJ0IHRpcG89ImFjY2V0dGF6aW9uZSIg
+ZXJyb3JlPSJuZXNzdW5vIj4KICA8aW50ZXN0YXppb25lPgogICAgPG1pdHRlbnRlPmFjbWVAcGVj
+LmV4YW1wbGUuaXQ8L21pdHRlbnRlPgogICAgPGRlc3RpbmF0YXJpIHRpcG89ImNlcnRpZmljYXRv
+Ij5jbGllbnRpQHBlYy5jbGllbnRlLmV4YW1wbGUuaXQ8L2Rlc3RpbmF0YXJpPgogICAgPHJpc3Bv
+c3RlPmFjbWVAcGVjLmV4YW1wbGUuaXQ8L3Jpc3Bvc3RlPgogICAgPG9nZ2V0dG8+T3JkaW5lIDc3
+PC9vZ2dldHRvPgogIDwvaW50ZXN0YXppb25lPgogIDxkYXRpPgogICAgPGdlc3RvcmUtZW1pdHRl
+bnRlPkV4YW1wbGUgUEVDIFMucC5BLjwvZ2VzdG9yZS1lbWl0dGVudGU+CiAgICA8ZGF0YSB6b25h
+PSIrMDEwMCI+CiAgICAgIDxnaW9ybm8+MjcvMTEvMjAyNjwvZ2lvcm5vPgogICAgICA8b3JhPjEw
+OjE5OjAwPC9vcmE+CiAgICA8L2RhdGE+CiAgICA8aWRlbnRpZmljYXRpdm8+b3BlYzIxMDMxLjIw
+MjYxMTI3MTAxOTAwLjAwMDc3LjAxLjEuMUBwZWMuZXhhbXBsZS5pdDwvaWRlbnRpZmljYXRpdm8+
+CiAgICA8bXNnaWQ+Jmx0O1BFQy1PVVQtNzdAYWNtZS5leGFtcGxlLml0Jmd0OzwvbXNnaWQ+CiAg
+PC9kYXRpPgo8L3Bvc3RhY2VydD4K
+------=_MIXED--
+
+------=_SIGNED
+Content-Type: application/pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIGqQYJKoZIhvcNAQcCoIIGmjCCBpYCAQExDzANBglghkgBZQMEAgEFADALBgkqhkiG9w0BBwFu
+HxkIDByAW26LkWjrSDm3qvfHwAzqbfprJXJBmXMneG4fGQgMHIBbbouRaOtIObeq98fADOpt+msl
+ckGZcyd4bh8ZCAwcgFtui5Fo60g5t6r3x8AM6m36ayVyQZlzJ3huHxkIDByAW26LkWjrSDm3qvfH
+wAzqbfprJXJBmXMneG4fGQgMHIBbbouRaOtIObeq98fADOpt+mslckGZcyd4bh8ZCAwcgFtui5Fo
+60g5t6r3x8AM6m36ayVyQZlzJ3huHxkIDByAW26LkWjrSDm3qvfHwAzqbfprJXJBmXMneG4fGQgM
+HIBbbouRaOtIObeq98fADOpt+mslckGZcyd4
+------=_SIGNED--

@@ -110,11 +110,14 @@ pub enum Ask {
     },
     /// a GET of `path` on an HTTP connection (an HTTP pull run by an agent): its answer
     Http { path: String },
-    /// the messages of `mailbox` not taken yet; those of `settle` moved or flagged
+    /// the messages of `mailbox` not taken yet (after the cursor `after`, the last one taken);
+    /// those of `settle` first moved out of it (`transport::mail`)
     Mail {
         mailbox: String,
         settle: Vec<Settle>,
         limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
     },
 }
 
@@ -220,6 +223,16 @@ pub enum Outcome {
 /// Runs a job here, with the values of `env`. `public_only`: no address of a private network
 /// (Quadra Cloud); an agent runs them in its own network.
 pub async fn run(job: &Job, env: &BTreeMap<String, String>, public_only: bool) -> Outcome {
+    run_with(job, env, public_only, None).await
+}
+
+/// [`run`], with the tokens of the connection's OAuth2 consent (only the server has them).
+pub async fn run_with(
+    job: &Job,
+    env: &BTreeMap<String, String>,
+    public_only: bool,
+    consent: Option<&crate::oauth::Use>,
+) -> Outcome {
     match job {
         Job::Fetch {
             conn,
@@ -247,7 +260,7 @@ pub async fn run(job: &Job, env: &BTreeMap<String, String>, public_only: bool) -
         },
         Job::Fetch { conn, ask } => match conn.open(env) {
             Err(e) => Outcome::Failed(Failed::Waiting(e)),
-            Ok(c) => match fetch(&c, ask, public_only).await {
+            Ok(c) => match fetch(&c, ask, public_only, consent).await {
                 Ok(f) => Outcome::Fetched(f),
                 Err(f) => Outcome::Failed(f),
             },
@@ -273,13 +286,20 @@ fn answered(r: Result<(u16, String, Option<u64>), Failed>) -> Outcome {
     }
 }
 
-async fn fetch(c: &Resolved, ask: &Ask, public_only: bool) -> Result<Fetched, Failed> {
+async fn fetch(
+    c: &Resolved,
+    ask: &Ask,
+    public_only: bool,
+    consent: Option<&crate::oauth::Use>,
+) -> Result<Fetched, Failed> {
     match (&c.connection.kind, ask) {
         (ConnectionKind::Files { .. }, Ask::Files { .. }) => {
             files::fetch(c, ask, public_only).await
         }
         (ConnectionKind::Database { .. }, Ask::Rows { .. }) => db::fetch(c, ask, public_only).await,
-        (ConnectionKind::Mail { .. }, Ask::Mail { .. }) => mail::fetch(c, ask, public_only).await,
+        (ConnectionKind::Mail { .. }, Ask::Mail { .. }) => {
+            mail::fetch(c, ask, public_only, consent).await
+        }
         _ => Err(Failed::Never(format!(
             "`{}` ({}) is not pulled that way",
             c.connection.name,

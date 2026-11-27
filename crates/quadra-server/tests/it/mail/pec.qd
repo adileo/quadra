@@ -1,0 +1,85 @@
+entity Invoice:
+    number: Text
+    supplier: Text
+    total: Decimal
+    pec_id: Text
+    file_name: Text
+
+entity SentPec:
+    message_id: Text
+    subject: Text
+    accepted_at: DateTime?
+    delivered_at: DateTime?
+
+entity PecReceipt:
+    kind: Text
+    pec_message_id: Text
+    at: DateTime
+    sent: SentPec?
+
+record MailAddress from json:
+    name: Text?
+    address: Text?
+
+record MailAttachment from json:
+    name: Text
+    content_type: Text
+    size: Int
+    sha256: Text
+    content: Text?
+    text: Text?
+
+record OriginalMail from json:
+    message_id: Text?
+    subject: Text?
+    sender: MailAddress? at "from"
+    attachments: [MailAttachment]
+
+record PecRecipient from json:
+    address: Text
+    kind: Text? at "type"
+
+record PecData from json:
+    kind: Text at "type"
+    message_id: Text?
+    id: Text?
+    sender: Text?
+    date: DateTime?
+    recipients: [PecRecipient]
+    original: OriginalMail?
+
+record PecMail from json:
+    message_id: Text?
+    subject: Text?
+    sender: MailAddress? at "from"
+    date: DateTime?
+    text: Text?
+    attachments: [MailAttachment]
+    pec: PecData?
+
+record FatturaPA from xml(root="p:FatturaElettronica"):
+    ns p "http://ivaservizi.agenziaentrate.gov.it/docs/xsd/fatture/v1.2"
+    number: Text at "FatturaElettronicaBody/DatiGenerali/DatiGeneraliDocumento/Numero"
+    total: Decimal at "FatturaElettronicaBody/DatiGenerali/DatiGeneraliDocumento/ImportoTotaleDocumento"
+    supplier: Text at "FatturaElettronicaHeader/CedentePrestatore/DatiAnagrafici/Anagrafica/Denominazione"
+
+inbound PecIn via pec as m: PecMail:
+    pull "INBOX" every 1 minutes
+    key m.message_id
+    let p = m.pec ?? fail "not a PEC"
+    if p.kind == "posta-certificata":
+        let o = p.original ?? fail "a PEC without its message"
+        for a in o.attachments:
+            if a.name.ends_with(".xml"):
+                let f = FatturaPA.parse(a.text ?? fail "an invoice that is not text")
+                let i = Invoice(number=f.number, supplier=f.supplier, total=f.total, pec_id=p.id ?? "", file_name=a.name)
+    else:
+        let id = p.message_id ?? fail "a receipt without the id of its message"
+        let at = p.date ?? fail "a receipt without a date"
+        let s = SentPec.where(x => x.message_id == id).first()
+        let r = PecReceipt(kind=p.kind, pec_message_id=id, at=at, sent=s)
+        if let sent = s:
+            if p.kind == "accettazione":
+                sent.accepted_at = at
+            if p.kind == "avvenuta-consegna":
+                sent.delivered_at = at

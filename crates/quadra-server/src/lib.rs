@@ -17,6 +17,7 @@ pub mod agent;
 pub mod agents;
 pub mod deliver;
 pub mod inbound;
+pub mod oauth;
 pub mod transport;
 pub use engine::{
     app_params, bind_for, open_requests, unhex, AppRequest, Config, Engines, Limits, Local,
@@ -2675,6 +2676,13 @@ impl Host {
                     .get(inbound_api)
                     .layer(axum::extract::DefaultBodyLimit::max(17 << 20)),
             )
+            .route("/v1/connections", get(outbox_api))
+            .route(
+                "/v1/connections/{name}/authorize",
+                get(oauth::http::authorize),
+            )
+            .route("/v1/connections/{name}/disconnect", post(outbox_api))
+            .route("/oauth/{connection}/callback", get(oauth::http::callback))
             .route("/v1/integrations", get(outbox_api))
             .route("/v1/integrations/{*rest}", get(outbox_api).post(outbox_api))
             .route("/v1/agents", get(agents_admin).post(agents_admin))
