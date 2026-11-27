@@ -266,6 +266,24 @@ durations are fixed (`3 days`); `unless`, `key`, `ordered by` and `latest by` ar
 event, the last three on the data as it was at the emit. Every decision (`expired`, `skipped`,
 `superseded`, a wait) is in the event's log.
 
+### Batches
+
+An API that takes many items in one call gets them in batches:
+
+```quadra
+outbound StockChanged via shop path "/inventory/bulk" batch 50 within 30 seconds as e:
+    latest by e.product
+    post("", ShopBulk(levels=e.map(x => ShopLevel(sku=x.product.code, available=x.available))))
+```
+
+| Rule | Detail |
+|---|---|
+| When | a batch goes once it has `50` events, or once its oldest has waited `30 seconds` (without `within`, at once with what is there) |
+| `e` | in the lines of policy, each event (they decide which events wait, expire or are superseded); in the code, the list of the batch's events, oldest first |
+| The data | read as it was at the last of the batch's emits |
+| The outcome | the same for each of its events: each is delivered or failed, with its own reactions; the `Idempotency-Key` is the batch's (`quadra-batch-…`), the same at every attempt |
+| Not with | `ordered by`, `key`, `reply`: a batch's events go together |
+
 ### Webhooks
 
 Without a block, through an HTTP connection an event is a `POST` of JSON to the connection's

@@ -824,6 +824,9 @@ pub struct Outbound {
     pub reply: Option<String>,
     /// the lines of policy at the top of the block
     pub policy: Policy,
+    /// `batch 50 within 30 seconds`: up to so many events in one request (the block's binding
+    /// is then the list of them), sent when full or when the oldest has waited that long
+    pub batch: Option<(u32, Option<Expr>)>,
     pub span: Span,
 }
 

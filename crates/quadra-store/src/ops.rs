@@ -878,6 +878,52 @@ pub fn eval_for_event(
         .map_err(|e| flow(&format!("outbound {}", outbound.event), e))
 }
 
+/// The request the block of a batched `outbound` builds for its events (`events`: their fields
+/// and the transactions that emitted them): the binding is the list of them, the data read as
+/// it was at the last of those transactions.
+pub fn build_batch_request(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    outbound: &quadra_ir::Outbound,
+    events: &[(serde_json::Value, u64)],
+) -> Result<V, String> {
+    let (Some(binding), Some(body)) = (&outbound.binding, &outbound.body) else {
+        return Err("this outbound has no block".into());
+    };
+    let db = Database::open(url, model, report)?;
+    let src = crate::source::DbSource::open(url, db.schema.clone(), None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.system += 1;
+    interp.building_request = true;
+    let list: Vec<V> = events
+        .iter()
+        .map(|(fields, _)| {
+            let parts: Vec<(Option<String>, V)> = fields
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| (Some(k.clone()), quadra_runtime::codec::from_json(v)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            V::Tuple(std::rc::Rc::new(parts))
+        })
+        .collect();
+    let mut ctx = Ctx {
+        as_of: events.iter().map(|(_, tx)| *tx).max(),
+        ..Default::default()
+    };
+    ctx.bind(binding, V::List(std::rc::Rc::new(list)));
+    interp
+        .eval(body, &mut ctx)
+        .map_err(|e| flow(&format!("the block of outbound {}", outbound.event), e))
+}
+
 /// The request the block of an `outbound … as e:` builds for one event, reading the data as
 /// it was at the emit (`eval_for_event`). Every attempt builds the same request.
 pub fn build_request(

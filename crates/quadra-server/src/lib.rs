@@ -2223,25 +2223,32 @@ async fn deliveries(t: Arc<Tenant>, egress: Arc<Egress>) {
                     pause.as_secs()
                 );
             }
-            match t
-                .ask(|reply| Job::Delivered {
-                    id: p.id,
-                    event: p.event.clone(),
-                    outcome,
-                    attempt,
-                    fields: p.fields.clone(),
-                    attempts: p.attempts,
-                    answer,
-                    reply,
-                })
-                .await
-            {
-                Some(Ok(())) => {}
-                Some(Err(e)) => eprintln!(
-                    "{}: {} #{}: the outcome was not written: {e}",
-                    t.id, p.event, p.id
-                ),
-                None => return,
+            // the same outcome for each event of a batch
+            let members: Vec<(u64, J, u64)> = std::iter::once((p.id, p.fields.clone(), p.attempts))
+                .chain(p.batch.iter().cloned())
+                .collect();
+            for (id, fields, attempts) in members {
+                let (o, a, ans) = (outcome.clone(), attempt.clone(), answer.clone());
+                match t
+                    .ask(|reply| Job::Delivered {
+                        id,
+                        event: p.event.clone(),
+                        outcome: o,
+                        attempt: a,
+                        fields,
+                        attempts,
+                        answer: ans,
+                        reply,
+                    })
+                    .await
+                {
+                    Some(Ok(())) => {}
+                    Some(Err(e)) => eprintln!(
+                        "{}: {} #{id}: the outcome was not written: {e}",
+                        t.id, p.event
+                    ),
+                    None => return,
+                }
             }
         }
         if sent {

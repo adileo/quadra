@@ -610,6 +610,19 @@ fn outbound(p: &mut Parser) {
         p.bump_ctx();
         p.expect(STRING);
     }
+    // `batch 50 within 30 seconds`: up to 50 events in one request
+    if p.at_ctx("batch") && p.nth(1) == NUMBER {
+        let c = p.start();
+        p.bump_ctx();
+        let n = p.start();
+        p.bump();
+        n.complete(p, LITERAL);
+        if p.at_ctx("within") {
+            p.bump_ctx();
+            expr(p);
+        }
+        c.complete(p, OUTBOUND_CLAUSE);
+    }
     // `as e:` and a block: lines of policy (`reply ErpAck`), then the code that builds the
     // request from the event
     if p.at(AS_KW) {

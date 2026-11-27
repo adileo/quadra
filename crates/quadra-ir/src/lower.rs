@@ -420,6 +420,23 @@ impl<'a> Lower<'a> {
                     };
                     *slot = value;
                 }
+                let batch = ast::children(item, OUTBOUND_CLAUSE)
+                    .find(|c| ctx_words(c).first().map(String::as_str) == Some("batch"))
+                    .map(|c| {
+                        let n = tokens(&c)
+                            .find(|t| t.kind() == NUMBER)
+                            .or_else(|| {
+                                ast::child(&c, LITERAL)
+                                    .and_then(|l| tokens(&l).find(|t| t.kind() == NUMBER))
+                            })
+                            .and_then(|t| t.text().parse::<u32>().ok())
+                            .unwrap_or(0);
+                        let within = exprs(&c)
+                            .into_iter()
+                            .find(|x| x.kind() != LITERAL)
+                            .map(|x| self.expr(&x));
+                        (n, within)
+                    });
                 // a block of policy lines only: the request stays the default one
                 let body = body.filter(|b| !matches!(&b.kind, ExprKind::Block(s) if s.is_empty()));
                 self.model.outbounds.push(Outbound {
@@ -430,6 +447,7 @@ impl<'a> Lower<'a> {
                     body,
                     reply,
                     policy,
+                    batch,
                     span,
                 });
             }

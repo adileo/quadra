@@ -831,8 +831,28 @@ impl Engine {
                 })?;
             }
         }
-        let due = quadra_store::deliveries::due(&mut self.conn, &events, &now_s, durable, limit)?;
+        // the events sent one by one, then those of each batch (up to its size)
+        let single: Vec<String> = model
+            .outbounds
+            .iter()
+            .filter(|o| o.batch.is_none())
+            .map(|o| o.event.clone())
+            .collect();
+        let mut due =
+            quadra_store::deliveries::due(&mut self.conn, &single, &now_s, durable, limit)?;
+        for o in model.outbounds.iter().filter(|o| o.batch.is_some()) {
+            let n = o.batch.as_ref().map_or(1, |b| b.0.max(1)) as usize;
+            due.extend(quadra_store::deliveries::due(
+                &mut self.conn,
+                std::slice::from_ref(&o.event),
+                &now_s,
+                durable,
+                n,
+            )?);
+        }
         let mut plans: Vec<crate::deliver::Plan> = Vec::new();
+        let mut groups: Vec<(&quadra_ir::Outbound, Vec<quadra_store::deliveries::Due>)> =
+            Vec::new();
         for d in due {
             let Some(o) = model.outbounds.iter().find(|o| o.event == d.event) else {
                 continue;
@@ -895,6 +915,14 @@ impl Engine {
                     })?;
                     continue;
                 }
+            }
+            // a batch: gathered, sent below
+            if o.batch.is_some() {
+                match groups.iter_mut().find(|(g, _)| g.event == o.event) {
+                    Some((_, list)) => list.push(d),
+                    None => groups.push((o, vec![d])),
+                }
+                continue;
             }
             let key = p.key.as_ref().map(|k| {
                 quadra_store::ops::eval_for_event(
@@ -972,8 +1000,70 @@ impl Engine {
             }
             plans.push(plan);
         }
+        // the batches full, or whose oldest event waited `within`; the others wait for that
+        let mut batch_next: Option<chrono::NaiveDateTime> = None;
+        for (o, list) in groups {
+            let (n, within) = o.batch.clone().unwrap_or((1, None));
+            let within_s = within
+                .as_ref()
+                .and_then(|w| match quadra_store::ops::eval_fixed(model, w) {
+                    Ok(quadra_runtime::V::Duration(s)) => Some(s.max(0)),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let oldest = list
+                .iter()
+                .filter_map(|d| {
+                    chrono::NaiveDateTime::parse_from_str(&d.created_at, "%Y-%m-%dT%H:%M:%S").ok()
+                })
+                .min()
+                .unwrap_or(at);
+            let ready_at = oldest + chrono::Duration::seconds(within_s);
+            if list.len() < n as usize && ready_at > at {
+                batch_next = Some(batch_next.map_or(ready_at, |b| b.min(ready_at)));
+                continue;
+            }
+            for chunk in list.chunks(n.max(1) as usize) {
+                let events: Vec<(J, u64)> =
+                    chunk.iter().map(|d| (d.fields.clone(), d.tx)).collect();
+                let built = quadra_store::ops::build_batch_request(
+                    &self.url,
+                    model,
+                    &checked.report,
+                    at,
+                    o,
+                    &events,
+                )
+                .and_then(|v| crate::deliver::built_of(&v));
+                let first = chunk[0].clone();
+                let key = format!(
+                    "quadra-batch-{}-{}-{}",
+                    first.commit.get(..16).unwrap_or(&first.commit),
+                    first.id,
+                    chunk.last().map_or(first.id, |d| d.id)
+                );
+                let mut plan = crate::deliver::plan(
+                    &model.manifest,
+                    &self.env,
+                    first,
+                    &o.connection,
+                    o.path.as_deref(),
+                    Some(built),
+                );
+                plan.set_key(&key);
+                plan.batch = chunk[1..]
+                    .iter()
+                    .map(|d| (d.id, d.fields.clone(), d.attempts))
+                    .collect();
+                plans.push(plan);
+            }
+        }
         let next = quadra_store::deliveries::next_at(&mut self.conn, &events)?
             .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S").unwrap_or(at));
+        let next = match (next, batch_next) {
+            (Some(a), Some(b)) => Some(a.min(b).max(at)),
+            (a, b) => a.or(b),
+        };
         Ok((plans, next, true))
     }
 

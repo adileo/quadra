@@ -2047,8 +2047,41 @@ impl<'m> Checker<'m> {
         let saved = std::mem::replace(&mut self.context, format!("outbound {}", o.event));
         self.entity = None;
         self.push();
-        self.bind(binding, T::Tuple(fields));
+        // a batch: the binding is the list of its events
+        if let Some((n, within)) = &o.batch {
+            if !(1..=1000).contains(n) {
+                self.error(o.span, "`batch N`: from 1 to 1000 events in one request");
+            }
+            if let Some(w) = within {
+                let t = self.infer(w);
+                if !matches!(t, T::Duration | T::Unknown)
+                    || !matches!(w.kind, ExprKind::Quantity { .. })
+                {
+                    self.error(
+                        w.span,
+                        "`within` takes a fixed duration: `within 30 seconds`",
+                    );
+                }
+            }
+            if o.policy.ordered.is_some() || o.policy.key.is_some() {
+                self.error(o.span, "a batch has no `ordered by` nor `key`: its events go together (`latest by` keeps only the newest of each)");
+            }
+            if o.reply.is_some() {
+                self.error(
+                    o.span,
+                    "a batch has no `reply`: its answer is about all of its events",
+                );
+            }
+            if body.is_none() {
+                self.error(o.span, "a batch is sent by its block: it builds one request from the list of its events");
+            }
+        }
+        // the lines of policy are about each event; the code of a batch, about the list
+        self.bind(binding, T::Tuple(fields.clone()));
         self.check_policy(o);
+        if o.batch.is_some() {
+            self.bind(binding, T::list(T::Tuple(fields)));
+        }
         if let Some(body) = body {
             self.infer(body);
         }

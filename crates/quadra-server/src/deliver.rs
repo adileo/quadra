@@ -47,6 +47,9 @@ pub struct Plan {
     pub retry: Retry,
     /// what its connection's other side accepts (`rate`, `concurrency`, `pause_after`)
     pub limits: quadra_sema::manifest::Limits,
+    /// a batch: the other events sent with this one (their ids, fields and attempts made),
+    /// each given the same outcome
+    pub batch: Vec<(u64, J, u64)>,
     pub send: Send,
 }
 
@@ -393,6 +396,7 @@ pub fn plan(
             .connection(connection)
             .map(|c| c.limits)
             .unwrap_or_default(),
+        batch: Vec::new(),
         send,
     };
     let value = |name: &str| -> Result<String, String> {
@@ -1130,6 +1134,7 @@ mod tests {
             fields: J::Null,
             retry: Retry::default(),
             limits: Default::default(),
+            batch: Vec::new(),
             send: Send::Broken("the variable TOKEN is not set where the app runs".into()),
         };
         let client = http_client(false);

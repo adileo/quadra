@@ -1389,3 +1389,53 @@ fn a_pull_fetches_the_messages_and_moves_its_cursor() {
     assert_eq!(paths.lock().unwrap()[0], "/orders.json?since=");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn batching(size: u32, within: &str) -> String {
+    format!("entity Order:\n    number: Text\n\nrecord Line from json:\n    number: Text\n\nrecord Bulk from json:\n    orders: [Line]\n\nevent OrderPlaced(order: Order)\n\non Order created as o:\n    emit OrderPlaced(order=o)\n\noutbound OrderPlaced via hooks path \"/bulk\" batch {size} within {within} as e:\n    post(\"\", Bulk(orders=e.map(x => Line(number=x.order.number))))\n")
+}
+
+#[test]
+fn a_batch_goes_when_full_or_when_its_oldest_waited() {
+    // full: three of five go together, the other two wait
+    let r = receiver(vec![200]);
+    let dir = temp("batch");
+    let (mut cfg, token) = project_with(&dir, r.port, &batching(3, "1 hours"));
+    cfg.outside.deliver = false;
+    {
+        let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+        for n in ["B1", "B2", "B3", "B4", "B5"] {
+            place_order(port, &token, n);
+        }
+    }
+    cfg.outside.deliver = true;
+    let (h, rt, port) = serve(HostOptions::default(), cfg.clone());
+    call(port, &token, "GET", "/v1/me", None);
+    let s = states(&cfg, |s| {
+        s.iter().filter(|x| *x == "delivered").count() == 3
+    });
+    assert_eq!(
+        s,
+        ["delivered", "delivered", "delivered", "pending", "pending"]
+    );
+    let got = r.got.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got[0].1,
+        "{\"orders\":[{\"number\":\"B1\"},{\"number\":\"B2\"},{\"number\":\"B3\"}]}"
+    );
+    assert!(got[0].0["idempotency-key"].starts_with("quadra-batch-"));
+    drop((h, rt));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // within a second: two go together once the first has waited
+    let r = receiver(vec![200]);
+    let dir = temp("batch-within");
+    let (cfg, token) = project_with(&dir, r.port, &batching(10, "1 seconds"));
+    let (_h, _rt, port) = serve(HostOptions::default(), cfg.clone());
+    place_order(port, &token, "W1");
+    place_order(port, &token, "W2");
+    let s = states(&cfg, |s| s.len() == 2 && s.iter().all(|x| x == "delivered"));
+    assert_eq!(s, ["delivered", "delivered"]);
+    assert_eq!(r.got.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
