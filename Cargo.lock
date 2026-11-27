@@ -4337,6 +4337,7 @@ dependencies = [
  "chrono-tz",
  "quadra-analysis",
  "quadra-ir",
+ "quadra-label",
  "quadra-print",
  "quadra-sema",
  "quadra-syntax",
