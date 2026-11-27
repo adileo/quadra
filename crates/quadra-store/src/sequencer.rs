@@ -1312,11 +1312,20 @@ impl State {
             let mut now = g.seen + g.own;
             // a lower bound (>=, >) can be broken by what takes away, an upper one by what adds
             let lower = !matches!(g.op, quadra_ir::BinOp::Lt | quadra_ir::BinOp::Le);
+            // the transactions after the base only (the newest are at the back), and none
+            // when the record was not written since it was read
+            let touched = self
+                .window
+                .rows
+                .get(&g.id)
+                .is_some_and(|last| *last > r.base);
             for s in self
                 .window
                 .seen
                 .iter()
-                .filter(|s| s.tx > r.base && !self.void.contains(&s.tx))
+                .rev()
+                .take_while(|s| touched && s.tx > r.base)
+                .filter(|s| !self.void.contains(&s.tx))
             {
                 if !s.writes.rows.iter().any(|(id, _)| *id == g.id) {
                     continue;
