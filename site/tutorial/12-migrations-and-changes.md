@@ -347,4 +347,4 @@ quadra test
   everything in one transaction.
 - A `change` is a reviewed, approved data script: `preview`, `apply --approved-by`, `revert`.
 
-[Next steps →](./13-next-steps)
+[Next: talking to other systems →](./13-talking-to-other-systems)

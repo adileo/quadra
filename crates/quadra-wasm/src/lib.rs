@@ -24,12 +24,22 @@ fn project(files: &str) -> Result<Project, String> {
     let map: serde_json::Map<String, J> =
         serde_json::from_str(files).map_err(|e| format!("files: {e}"))?;
     let root = Path::new(ROOT);
+    // the variables and connections: quadra.toml is not on a disk here, so it is read from
+    // the files sent
+    let manifest = match map.get("quadra.toml").and_then(|t| t.as_str()) {
+        Some(text) => {
+            quadra_sema::manifest::parse(text).map_err(|e| format!("quadra.toml: {e}"))?
+        }
+        None => Default::default(),
+    };
     let sources = map
         .into_iter()
         .filter(|(p, _)| p.ends_with(".qd"))
         .map(|(p, t)| (root.join(p), t.as_str().unwrap_or("").to_string()))
         .collect();
-    Ok(Project::from_sources(root, sources))
+    let mut project = Project::from_sources(root, sources);
+    project.manifest = manifest;
+    Ok(project)
 }
 
 fn rel(project: &Project, path: &Path) -> String {

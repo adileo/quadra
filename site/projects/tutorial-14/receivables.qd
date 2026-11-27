@@ -1,0 +1,12 @@
+# What each customer owes us. Invoices and payments post here (see invoices.qd).
+
+from customers import Customer
+
+
+ledger Receivables:
+    key customer: Customer
+    measure amount: Money<EUR>
+
+
+extend Customer:
+    balance: Money<EUR> = Receivables.where(r => r.customer == self).sum(r => r.amount)

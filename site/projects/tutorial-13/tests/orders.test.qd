@@ -1,0 +1,87 @@
+from tests.fixtures import shop, shop_with_orders
+
+
+test "an order's life: draft, confirmed, shipped":
+    use shop
+    clock 2026-11-21 10:30
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    expect o.state is Draft
+    expect o.date == 2026-11-21                     # today(), as set by the clock
+    expect o.deliver_by == 2026-11-24
+    expect o.number == none
+
+    o.confirm()
+    expect o.state is Confirmed
+    expect o.number == "SO/2026/00001"
+    expect o.confirmed_at == 2026-11-21 10:30
+    expect anna.open_total == 23.20 EUR
+
+    o.ship()
+    expect o.state is Shipped
+    expect anna.open_total == 0 EUR
+    expect anna.lifetime_value == 23.20 EUR
+
+
+test "actions refuse what the flow doesn't allow":
+    use shop
+    let empty = Order(customer=anna)
+    expect_error "An order needs at least one line":
+        empty.confirm()
+    expect empty.state is Draft                     # the transaction was rolled back
+
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    expect_error "Order.confirm is not allowed in state Confirmed":
+        o.confirm()
+    o.ship()
+    expect_error "Order.cancel is not allowed in state Shipped":
+        o.cancel(reason="Changed my mind")
+
+
+test "the credit limit is enforced at confirmation":
+    use shop
+    let big = Order(customer=anna, lines=[OrderLine(product=mug, qty=100 pcs)])
+    expect big.warnings == ["This order is over the customer's credit limit"]
+    expect_error "Credit limit exceeded":
+        big.confirm()
+    expect big.state is Draft
+    big.cancel(reason="Over the credit limit")
+    expect big.state is Cancelled
+
+
+test "a confirmed order is frozen":
+    use shop_with_orders
+    expect order.total == 187.92 EUR
+    expect_error "Order is frozen (state is not Draft): its OrderLine lines cannot change":
+        order.lines[0].qty = 6 kg
+    order.notes = "Deliver before 8am"              # listed in `except`
+
+    # the world moves on, the confirmed order does not
+    beans.vat = 4%
+    cafe.discount = 20%
+    expect order.total == 187.92 EUR
+    let next = Order(customer=cafe, lines=[OrderLine(product=beans, qty=5 kg)])
+    expect next.total == 74.88 EUR
+
+
+test "only active products can be confirmed":
+    use shop
+    let o = Order(customer=anna, lines=[OrderLine(product=sencha, qty=1 kg)])
+    sencha.active = false
+    expect_error "The order contains products we no longer sell":
+        o.confirm()
+
+
+test "cancelling a confirmed order":
+    use shop_with_orders
+    expect cafe.open_total == 187.92 EUR
+    order.cancel(reason="The customer called to cancel")
+    expect order.state is Cancelled
+    expect order.cancel_reason == "The customer called to cancel"
+    expect cafe.open_total == 0 EUR
+
+
+test "why: every record knows where it comes from":
+    use shop_with_orders
+    let inv = order.create_invoice()
+    expect why(inv).contains("because Order.create_invoice")

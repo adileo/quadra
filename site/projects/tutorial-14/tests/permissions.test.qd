@@ -1,0 +1,48 @@
+# Without `as`, a test runs as the system and every rule is skipped.
+# `as login:` runs a statement with the permissions of that user.
+
+from tests.fixtures import shop
+
+
+test "clerks sell, warehouse ships, accountants invoice":
+    use shop
+    let o = as sam: Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    as sam: o.confirm()
+    expect_error "permission denied: wes cannot create Order":
+        as wes: Order(customer=anna)
+    as wes: o.ship()
+    let inv = as alex: o.create_invoice()
+    as alex: inv.post()
+    expect why(inv).contains("alex")
+
+
+test "row rules: a clerk works on their own orders":
+    use shop
+    let o = as sam: Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    as sam: o.notes = "Gift wrap"
+    expect_error "permission denied: kim cannot edit Order.notes":
+        as kim: o.notes = "Not mine"
+    expect_error "permission denied: kim cannot run Order.cancel":
+        as kim: o.cancel(reason="Not mine either")
+
+
+test "field rules: who may change what":
+    use shop
+    as sam: anna.email = "anna.rossi@example.com"
+    expect_error "permission denied: sam cannot edit Customer.credit_limit":
+        as sam: anna.credit_limit = 900.00 EUR
+    as alex: anna.credit_limit = 900.00 EUR
+    expect_error "permission denied: sam cannot edit Product.price":
+        as sam: mug.price = 1.00 EUR/pcs
+
+
+test "separation of duties":
+    use shop
+    let o = Order(customer=anna, lines=[OrderLine(product=mug, qty=2 pcs)])
+    o.confirm()
+    let inv = as alex: o.create_invoice()
+    as alex: inv.post()
+    expect_error "permission denied: deny run Invoice.cancel (alex)":
+        as alex: inv.cancel()
+    as olivia: inv.cancel()
+    expect inv.state is Cancelled

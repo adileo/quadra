@@ -1,0 +1,31 @@
+test "prices, quantities and units":
+    let beans = Product(sku="BEANS-01", origin="BR", name="House blend", uom=kg, price=18.00 EUR/kg, vat=10%)
+    let mug = Product(sku="MUG-01", origin="IT", name="Espresso mug", price=7.50 EUR/pcs)
+    expect mug.uom == pcs                           # the default
+    expect mug.price_for(3 pcs) == 22.50 EUR
+    expect beans.price_for(250 g) == 4.50 EUR       # grams are converted to kilograms
+    let parcel = 1500 g
+    expect parcel.to(kg) == 1.5 kg
+
+test "money is exact":
+    expect 10.00 EUR * 22% == 2.20 EUR
+    let third = 10.00 EUR / 3
+    expect third.round() == 3.33 EUR
+    expect 0.10 EUR + 0.20 EUR == 0.30 EUR          # no floating point surprises
+
+test "dates and durations":
+    expect 2026-11-21 + 30 days == 2026-12-21
+    expect 2026-12-21 - 2026-11-21 == 30 days
+
+test "the compiler catches unit and currency mistakes":
+    expect_compile_error "cannot add Money<EUR> and Money<USD>":
+        let x = 10.00 EUR + 5.00 USD
+    expect_compile_error "cannot add Qty<kg> and Qty<pcs>":
+        let y = 2 kg + 3 pcs
+    expect_compile_error "cannot multiply Qty<kg> by Price<EUR, pcs>":
+        let z = 2 kg * 7.50 EUR/pcs
+    expect_compile_error "must be rounded with .round()":
+        fn total(p: Product, q: Qty<p.uom>) -> Money<EUR>:
+            return q * p.price
+    expect_compile_error "cannot store Int in a field of type Money<EUR>":
+        let c = Customer(name="Bob", credit_limit=500)

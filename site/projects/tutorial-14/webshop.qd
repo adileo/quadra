@@ -1,0 +1,49 @@
+# The web shop: its orders come in, our products and stock go out.
+
+from customers import Customer
+from catalog import Product
+from orders import Order, OrderLine
+
+
+# What the web shop sends, in its own words: a record says where each field is in its JSON.
+record WebLine from json:
+    sku: Code
+    quantity: Decimal
+
+record WebOrder from json:
+    id: Text
+    number: Text at "name"                  # the web shop calls it `name`: "#1001"
+    email: Email at "customer.email"        # a path into nested objects
+    customer: Text at "customer.name"
+    lines: [WebLine] at "line_items"
+
+
+# The web shop POSTs each new order to https://<our app>/in/webshop/orders.
+inbound WebOrderIn via webshop path "/orders" as m: WebOrder:
+    key m.id                                # sent twice? handled once
+    let customer = Customer.where(c => c.email == m.email).first()
+        ?? Customer(name=m.customer, email=m.email)
+    let order = Order(customer=customer, notes=f"web order {m.number}")
+    for l in m.lines:
+        let p = Product.where(x => x.sku == l.sku).first() ?? fail f"unknown product {l.sku}"
+        OrderLine(order=order, product=p, qty=Qty(l.quantity, p.uom))
+    order.confirm()
+
+
+# What we send to the web shop for each product.
+record WebProduct from json:
+    sku: Code
+    name: Text
+    price: Decimal
+    unit: Text
+    available: Decimal
+
+
+# Keep the web shop's catalog in step with ours: a product goes out when it changes.
+publish Product to webshop as p:
+    when p.active
+    on name, price, active                  # a change of these fields sends it again
+    debounce 30 seconds                     # ten edits in a row: only the last state goes
+    put(f"/products/{p.sku}", WebProduct(sku=p.sku, name=p.name,
+        price=p.price * Qty(1, p.uom) / 1 EUR, unit=f"{p.uom}",
+        available=p.available / Qty(1, p.uom)))

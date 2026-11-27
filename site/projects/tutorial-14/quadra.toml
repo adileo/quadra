@@ -1,0 +1,63 @@
+[project]
+name = "shop"
+title = "Tutorial 14 · Files, formats and databases"
+
+# Values that depend on where the app runs. Secrets are never written here: they come from the
+# environment (or a .env file), and only a connection can use them.
+[vars]
+WEBSHOP_TOKEN = { secret = true, description = "the API token of the web shop" }
+WEBSHOP_HOOK_SECRET = { secret = true, description = "signs the web shop's webhooks" }
+CARRIER_KEY = { secret = true, description = "the carrier's API key" }
+SMTP_PASSWORD = { secret = true }
+TILL_SFTP_KEY = { secret = true, description = "the private key the till's SFTP server knows us by" }
+BANK_FTP_PASSWORD = { secret = true }
+ACCOUNTING_DB_PASSWORD = { secret = true }
+SHOP_EMAIL = { default = "shop@beans.example.com", test = "test@beans.example.com" }
+
+# The online shop: it sends us its orders, we send it our products and stock.
+[connections.webshop]
+kind = "http"
+url = "https://beans.example.com/api"
+bearer = { var = "WEBSHOP_TOKEN" }
+inbound_signature = "hmac"
+inbound_secret = { var = "WEBSHOP_HOOK_SECRET" }
+
+# The carrier: we book a parcel, it answers with a tracking number.
+[connections.carrier]
+kind = "http"
+url = "https://api.carrier.example.com/v2"
+api_key = { var = "CARRIER_KEY" }
+rate = "5/s"
+
+# Our mail server.
+[connections.mail]
+kind = "smtp"
+url = "smtps://smtp.example.com:465"
+user = "shop@beans.example.com"
+password = { var = "SMTP_PASSWORD" }
+from = "Beans & Leaves <shop@beans.example.com>"
+
+# The till at the counter: an SFTP server in the shop's network, reached by our agent there.
+[connections.till]
+kind = "sftp"
+url = "sftp://till.local/data"
+user = "quadra"
+private_key = { var = "TILL_SFTP_KEY" }
+known_host = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+location = "agent:backoffice"
+
+# The bank: its statements, on FTP over TLS.
+[connections.bank]
+kind = "ftp"
+url = "ftps://ftp.bank.example.com/statements"
+user = "beans-and-leaves"
+password = { var = "BANK_FTP_PASSWORD" }
+
+# The accountant's software: a PostgreSQL database in the back office, reached by the agent.
+[connections.accounting]
+kind = "postgres"
+url = "postgres://accounts.local:5432/books"
+user = "quadra"
+password = { var = "ACCOUNTING_DB_PASSWORD" }
+location = "agent:backoffice"
+insecure = true                             # no TLS inside the back office
