@@ -3,5 +3,6 @@
 
 mod examples;
 mod integrations;
+mod orchestration;
 mod regressions;
 mod timezones;

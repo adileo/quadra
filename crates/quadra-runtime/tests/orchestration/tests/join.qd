@@ -1,0 +1,59 @@
+test "payment last":
+    clock 2026-03-02 09:00
+    let o = order("P")
+    o.approve()
+    for l in o.lines:
+        l.pick()
+    expect Shipment.count() == 0
+    Payment(order=o, amount=20)
+    expect Shipment.count() == 0           # 20 of 50: not paid yet
+    Payment(order=o, amount=30)
+    expect Shipment.count() == 1
+    expect o.state is Shipped
+    expect o.shipped_at == 2026-03-02 09:00
+
+test "approval last":
+    clock 2026-03-02 09:00
+    let o = order("A")
+    Payment(order=o, amount=50)
+    for l in o.lines:
+        l.pick()
+    expect Shipment.count() == 0
+    o.approve()
+    expect Shipment.count() == 1
+    expect o.state is Shipped
+
+test "the last line picked last":
+    clock 2026-03-02 09:00
+    let o = order("L")
+    o.approve()
+    Payment(order=o, amount=50)
+    o.lines.first()?.pick()
+    expect Shipment.count() == 0
+    o.lines.last()?.pick()
+    expect Shipment.count() == 1
+
+test "every input in one transaction":
+    clock 2026-03-02 09:00
+    let o = order("T")
+    for step in [1]:                       # one statement: one transaction
+        o.approve()
+        Payment(order=o, amount=50)
+        for l in o.lines:
+            l.pick()
+    expect Shipment.count() == 1
+    expect o.state is Shipped
+
+test "inputs after the join do not ship again":
+    clock 2026-03-02 09:00
+    let o = order("X")
+    o.approve()
+    Payment(order=o, amount=50)
+    for l in o.lines:
+        l.pick()
+    expect Shipment.count() == 1
+    Payment(order=o, amount=50)            # paid twice
+    Line(order=o, sku="C", amount=5)        # a line added later, not picked
+    o.lines.last()?.pick()
+    expect Shipment.count() == 1
+    expect o.state is Shipped
