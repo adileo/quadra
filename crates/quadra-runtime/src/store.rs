@@ -282,6 +282,9 @@ pub struct Erasure {
     /// whole history: it is the audit of what the record was; a record in the trash): only its
     /// rows go
     pub keep_values: bool,
+    /// `whole`: nothing is left of the record but the entry of its commit (`delete` of an
+    /// entity with `history none`): no row of `_quadra_erased`, no fields named
+    pub traceless: bool,
 }
 
 /// A checkpoint of the history (`[data] archive_after`, `quadra db archive`): the rows `seqs`

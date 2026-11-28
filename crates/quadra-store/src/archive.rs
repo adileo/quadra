@@ -15,7 +15,7 @@
 //! value in force of any field.
 
 use crate::conn::Sql;
-use crate::db::{commit_hash, Database};
+use crate::db::Database;
 use chrono::NaiveDateTime;
 use quadra_ir::Model;
 use quadra_types::Report;

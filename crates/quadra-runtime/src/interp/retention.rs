@@ -222,6 +222,7 @@ impl<'m> Interp<'m> {
             before: None,
             last: None,
             keep_values: false,
+            traceless: false,
         });
         Ok(())
     }
@@ -422,6 +423,7 @@ impl<'m> Interp<'m> {
                         before: None,
                         last: Some(keep),
                         keep_values: false,
+                        traceless: false,
                     });
                     Ok(())
                 })
@@ -455,6 +457,7 @@ impl<'m> Interp<'m> {
                         before: Some(before),
                         last: None,
                         keep_values: false,
+                        traceless: false,
                     });
                     Ok(())
                 })
@@ -533,6 +536,7 @@ impl<'m> Interp<'m> {
                 before: None,
                 last: None,
                 keep_values: false,
+                traceless: false,
             });
         }
         Ok(true)
@@ -675,16 +679,23 @@ impl<'m> Interp<'m> {
                 }
             }
             self.store.remove_record(gid);
+            // `history none` deleted for good: nothing left but its commit's entry
+            let traceless = trash.is_none() && ge_e.keep == Keep::None;
             self.store.erasures.push(Erasure {
                 id: gid,
                 ent: Rc::from(ge.as_str()),
-                fields: stored,
+                fields: if traceless { Vec::new() } else { stored },
                 whole: true,
-                reason: reason.clone(),
+                reason: if traceless {
+                    String::new()
+                } else {
+                    reason.clone()
+                },
                 by: self.user,
                 before: None,
                 last: None,
                 keep_values,
+                traceless,
             });
         }
         Ok(())
@@ -791,6 +802,7 @@ impl<'m> Interp<'m> {
                                 before: None,
                                 last: None,
                                 keep_values: false,
+                                traceless: false,
                             });
                         }
                     }

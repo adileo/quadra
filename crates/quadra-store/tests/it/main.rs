@@ -14,4 +14,5 @@ mod limits;
 mod messages;
 mod sequencer;
 mod signing;
+mod space;
 mod storage;

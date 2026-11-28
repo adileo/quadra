@@ -2243,10 +2243,12 @@ impl Database {
                         vec![Sql::Int(id)],
                     )?;
                 }
-                self.wexec(
-                    format!("{ERASE}INSERT INTO \"_quadra_erased\" (\"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", \"erased_tx\", \"erased_at\", \"cause\") SELECT \"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", ?bigint, ?text, ?text FROM \"_quadra_records\" WHERE \"id\" = ?bigint"),
-                    vec![Sql::Int(tx as i64), Sql::Text(at.clone()), Sql::Text(er.reason.clone()), Sql::Int(id)],
-                )?;
+                if !er.traceless {
+                    self.wexec(
+                        format!("{ERASE}INSERT INTO \"_quadra_erased\" (\"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", \"erased_tx\", \"erased_at\", \"cause\") SELECT \"id\", \"entity\", \"created_tx\", \"created_at\", \"created_by\", ?bigint, ?text, ?text FROM \"_quadra_records\" WHERE \"id\" = ?bigint"),
+                        vec![Sql::Int(tx as i64), Sql::Text(at.clone()), Sql::Text(er.reason.clone()), Sql::Int(id)],
+                    )?;
+                }
                 self.wexec(
                     format!("{ERASE}DELETE FROM \"_quadra_records\" WHERE \"id\" = ?bigint"),
                     vec![Sql::Int(id)],
