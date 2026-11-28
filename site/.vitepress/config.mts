@@ -64,6 +64,54 @@ const reference = pages("reference", [
   "retention",
 ]);
 
+const hostname = "https://quadra.run";
+
+/** The first paragraph of a page, as one plain line: its summary in llms.txt. */
+function summaryOf(file: string): string {
+  const text = fs.readFileSync(file, "utf8");
+  const described = text.match(/^---\n[\s\S]*?\ndescription:\s*(.+)\n[\s\S]*?---/);
+  if (described) return described[1].replace(/^["']|["']$/g, "").trim();
+  const body = text.replace(/^---\n[\s\S]*?\n---\n/, "");
+  const after = body.split(/^#\s+.+$/m)[1] ?? body;
+  const para = after.split(/\n\s*\n/).map((p) => p.trim()).find((p) => p && !/^[<|`:#>!-]/.test(p)) ?? "";
+  const line = para.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[*`]/g, "").replace(/\s+/g, " ").trim();
+  return line.length > 220 ? line.slice(0, 217).replace(/\s+\S*$/, "") + "…" : line;
+}
+
+/** llms.txt (an index for AI agents) and llms-full.txt (every page of the docs, as Markdown). */
+function writeLlms(outDir: string) {
+  const sections: [string, string[]][] = [
+    ["Start here", ["/guide/introduction", "/guide/installation", "/guide/quick-start", "/guide/what-quadra-is-not", "/safe-by-design", "/compliance"]],
+    ["Tutorial", ["/tutorial/", ...tutorial.map((p) => p.link!)]],
+    ["Reference", ["/reference/", ...reference.map((p) => p.link!)]],
+  ];
+  const fileOf = (link: string) => path.join(site, link.endsWith("/") ? `${link}index.md` : `${link}.md`);
+  const index = [
+    "# Quadra",
+    "",
+    "> Quadra is a programming language for finance and operations: the rules of a business written as code (entities, formulas, rules, flows, ledgers, permissions), from which the engine builds the database, the API and the app. Rules are checked on every entry, every number is traceable and every change is on record. The engine is open source; Quadra Studio is the app built from the code.",
+    "",
+    "Files are `.qd` (the model) and `.qdi` (interfaces). `quadra check` checks a project, `quadra test` runs its tests, `quadra dev` runs it with Quadra Studio. The full documentation as one file: " + hostname + "/llms-full.txt",
+    "",
+  ];
+  const full: string[] = [];
+  for (const [name, links] of sections) {
+    index.push(`## ${name}`, "");
+    for (const link of links) {
+      const file = fileOf(link);
+      if (!fs.existsSync(file)) continue;
+      const summary = summaryOf(file);
+      index.push(`- [${titleOf(file).replace(/^Step \d+:\s*/i, "")}](${hostname}${link})${summary ? `: ${summary}` : ""}`);
+      const md = fs.readFileSync(file, "utf8").replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+      full.push(`<!-- ${hostname}${link} -->\n\n${md}`);
+    }
+    index.push("");
+  }
+  index.push("## Optional", "", `- [Sandbox](${hostname}/sandbox): write Quadra in the browser and run it`, `- [Source code](https://github.com/adileo/quadra)`, `- [Quadra Cloud](https://app.quadra.run)`, "");
+  fs.writeFileSync(path.join(outDir, "llms.txt"), index.join("\n"));
+  fs.writeFileSync(path.join(outDir, "llms-full.txt"), full.join("\n\n---\n\n") + "\n");
+}
+
 const sidebarDocs: DefaultTheme.SidebarItem[] = [
   { text: "Getting started", items: guide },
   { text: "Tutorial", link: "/tutorial/", collapsed: false, items: tutorial },
@@ -75,6 +123,8 @@ export default defineConfig({
   titleTemplate: ":title · Quadra",
   description: "Programming language for finance and operations. As easy as a spreadsheet, more solid than an ERP: rules checked on every entry, every number traceable, every change on record.",
   cleanUrls: true,
+  sitemap: { hostname },
+  buildEnd: (config) => writeLlms(config.outDir),
   srcExclude: ["README.md", "projects/**", "scripts/**", "archive/**"],
   lang: "en",
   appearance: true,
