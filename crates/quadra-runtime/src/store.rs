@@ -299,6 +299,19 @@ pub struct CheckpointWrite {
     pub seqs: Vec<i64>,
 }
 
+/// Closed records moved to a volume (crate docs of quadra-store: cold): their rows copied to
+/// the volume `volume` (written before the commit), deleted from the database in use by the
+/// commit, which names the volume in its hash. `merged`: older volumes whose records are in
+/// this one too.
+#[derive(Clone, Debug)]
+pub struct ColdMove {
+    pub volume: String,
+    pub sha256: String,
+    /// (entity, record)
+    pub records: Vec<(String, Id)>,
+    pub merged: Vec<String>,
+}
+
 /// A record in the trash (`deletable, trash 30 days`): out of every table and list, kept whole
 /// to be restored until `until`, then deleted for good by the sweep.
 #[derive(Clone, Debug)]
@@ -370,6 +383,8 @@ pub struct Store {
     pub untrashed: Vec<Id>,
     /// the checkpoint this transaction makes, if any
     pub checkpoint: Option<CheckpointWrite>,
+    /// the closed records this transaction moves to a volume, if any
+    pub cold_move: Option<ColdMove>,
     /// Records created or written in the current transaction.
     pub dirty: BTreeSet<Id>,
     /// Records unfrozen in the current transaction (`frozen when` stopped holding).

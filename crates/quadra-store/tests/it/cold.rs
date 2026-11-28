@@ -100,3 +100,264 @@ fn a_record_is_closed_when_nothing_can_change_it() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const SHOP: &str = r#"
+entity Customer:
+    archive never
+    name: Text
+
+entity Order:
+    archive 1 year after date
+    code: Text unique
+    customer: Customer
+    date: Date
+    paid: Decimal default 0
+    note: Text?
+    lines: [Line]
+    total = lines.sum(l => l.amount)
+    state: enum(Open, Done) default Open
+    flow state:
+        Open -> Done by finish
+
+    action finish:
+        note = "done"
+
+entity Line:
+    order: Order parent
+    amount: Decimal
+
+fn paid_some() -> Int:
+    return Order.where(o => o.paid >= 1).count()
+
+fn done() -> Int:
+    return Order.where(o => o.state is Done).count()
+
+fn amounts() -> Decimal:
+    return Line.all().sum(l => l.amount)
+"#;
+
+fn count(url: &str, sql: &str) -> usize {
+    quadra_store::Conn::open(url)
+        .unwrap()
+        .query(sql, &[])
+        .unwrap()
+        .len()
+}
+
+/// Closed records moved to a volume: out of the database in use, and every read still finds
+/// them (by id, `all()`, a query in SQL, a total, their lines); `unique` sees them; a write
+/// brings one back; the chain verifies.
+#[test]
+fn cold_records_are_read_as_before() {
+    let dir = std::env::temp_dir().join(format!("quadra-cold-move-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("p")).unwrap();
+    std::fs::write(dir.join("p/quadra.toml"), "[project]\nname = \"c\"\n").unwrap();
+    std::fs::write(dir.join("p/main.qd"), SHOP).unwrap();
+    let p = Project::load(&dir.join("p")).unwrap();
+    let checked = quadra_analysis::check(&p);
+    assert!(
+        checked.model.is_some(),
+        "{:?}",
+        checked
+            .diagnostics
+            .iter()
+            .map(|d| &d.message)
+            .collect::<Vec<_>>()
+    );
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    let url = format!("sqlite:{}", dir.join("data.db").display());
+    ops::init(&url, m, r, at(2026, 1, 1)).unwrap();
+    let mut i = ops::engine(&url, m, r, at(2026, 1, 10)).unwrap();
+    let date = V::Date(chrono::NaiveDate::from_ymd_opt(2026, 1, 10).unwrap());
+    let anna = i
+        .transaction(|i| i.create("Customer", vec![("name".into(), V::Text("Anna".into()))]))
+        .unwrap();
+    for k in 0..6 {
+        let o = i
+            .transaction(|i| {
+                let o = i.create(
+                    "Order",
+                    vec![
+                        ("code".into(), V::Text(format!("O{k}").into())),
+                        ("customer".into(), anna.clone()),
+                        ("date".into(), date.clone()),
+                        ("paid".into(), V::Dec(k.into())),
+                    ],
+                )?;
+                i.create(
+                    "Line",
+                    vec![
+                        ("order".into(), o.clone()),
+                        ("amount".into(), V::Dec((10 + k).into())),
+                    ],
+                )?;
+                Ok(o)
+            })
+            .unwrap();
+        if k < 4 {
+            i.transaction(|i| {
+                i.run_action(&o, "Order", "finish", None, Vec::new(), Vec::new())
+                    .map(|_| ())
+            })
+            .unwrap();
+        }
+    }
+    drop(i);
+    let before = |url: &str| {
+        let mut i = ops::engine(url, m, r, at(2027, 6, 1)).unwrap();
+        let ids = i.ids("Order", None);
+        let total: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                i.get(
+                    &V::Ref {
+                        ent: "Order".into(),
+                        id: *id,
+                    },
+                    "total",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .to_string()
+            })
+            .collect();
+        (ids.len(), total, i.ids("Line", None).len())
+    };
+    let seen = before(&url);
+    let mut kept = Vec::new();
+    let (vol, n) = ops::cold_run(&url, m, r, at(2027, 6, 1), None, &mut |k, b| {
+        kept.push((k.to_string(), b.len()));
+        Ok(())
+    })
+    .unwrap()
+    .expect("closed records");
+    // four orders done, with their lines
+    assert_eq!(n, 8, "{vol}");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(count(&url, "SELECT 1 FROM \"main\".\"order\""), 2);
+    assert_eq!(count(&url, "SELECT 1 FROM \"main\".\"line\""), 2);
+    assert_eq!(count(&url, "SELECT 1 FROM \"_quadra_cold\""), 8);
+    // every read as before
+    assert_eq!(before(&url), seen);
+    let mut i = ops::engine(&url, m, r, at(2027, 6, 2)).unwrap();
+    let q = |i: &mut quadra_runtime::Interp, name: &str| {
+        let f = m.function(name).unwrap();
+        let quadra_ir::StmtKind::Return(Some(e)) = &f.body.as_ref().unwrap()[0].kind else {
+            panic!("{name}")
+        };
+        i.eval(e, &mut quadra_runtime::Ctx::default())
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(q(&mut i, "paid_some"), "5");
+    assert_eq!(q(&mut i, "done"), "4");
+    assert_eq!(q(&mut i, "amounts"), "75");
+    // a code a cold order has is taken
+    let e = i
+        .transaction(|i| {
+            i.create(
+                "Order",
+                vec![
+                    ("code".into(), V::Text("O1".into())),
+                    ("customer".into(), anna.clone()),
+                    ("date".into(), date.clone()),
+                ],
+            )
+            .map(|_| ())
+        })
+        .unwrap_err();
+    assert!(
+        format!("{e:?}").contains("unique") || format!("{e:?}").contains("already"),
+        "{e:?}"
+    );
+    // written: back in use
+    let o1 = i
+        .ids("Order", None)
+        .into_iter()
+        .find(|id| i.store.read(*id, "code", None).map(|v| v.to_string()) == Some("O1".into()))
+        .unwrap();
+    i.transaction(|i| {
+        i.set(
+            &V::Ref {
+                ent: "Order".into(),
+                id: o1,
+            },
+            "note",
+            V::Text("a call".into()),
+            None,
+        )
+    })
+    .unwrap();
+    drop(i);
+    assert_eq!(count(&url, "SELECT 1 FROM \"main\".\"order\""), 3);
+    assert_eq!(count(&url, "SELECT 1 FROM \"_quadra_cold\""), 7);
+    let mut i = ops::engine(&url, m, r, at(2027, 6, 3)).unwrap();
+    assert_eq!(
+        i.store.read(o1, "note", None).map(|v| v.to_string()),
+        Some("a call".into())
+    );
+    assert_eq!(i.ids("Order", None).len(), 6);
+    drop(i);
+    let (problems, _) = ops::verify(&url, m, r, at(2027, 6, 4)).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+
+    // a deploy that changes only the customers: the orders stay cold
+    let deploy = |src: &str, t| {
+        std::fs::write(dir.join("p/main.qd"), src).unwrap();
+        let p = Project::load(&dir.join("p")).unwrap();
+        let c = quadra_analysis::check(&p);
+        assert!(
+            c.model.is_some(),
+            "{:?}",
+            c.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        ops::deploy(
+            &url,
+            c.model.as_ref().unwrap(),
+            &c.report,
+            &dir.join("p"),
+            t,
+            false,
+            "test",
+        )
+        .unwrap();
+        c
+    };
+    let c2 = deploy(
+        &SHOP.replace("    name: Text\n", "    name: Text\n    phone: Text?\n"),
+        at(2027, 7, 1),
+    );
+    assert_eq!(count(&url, "SELECT 1 FROM \"_quadra_cold\""), 7);
+    // one that adds a field with a default to the orders: they come back first
+    let c3 = deploy(
+        &SHOP
+            .replace("    name: Text\n", "    name: Text\n    phone: Text?\n")
+            .replace(
+                "    note: Text?\n",
+                "    note: Text?\n    channel: Text default \"shop\"\n",
+            ),
+        at(2027, 7, 2),
+    );
+    let _ = c2;
+    assert_eq!(
+        count(
+            &url,
+            "SELECT 1 FROM \"_quadra_cold\" WHERE \"entity\" = 'Order'"
+        ),
+        0
+    );
+    assert_eq!(count(&url, "SELECT 1 FROM \"main\".\"order\""), 6);
+    let (m3, r3) = (c3.model.as_ref().unwrap(), &c3.report);
+    let mut i = ops::engine(&url, m3, r3, at(2027, 7, 3)).unwrap();
+    let ids = i.ids("Order", None);
+    assert_eq!(ids.len(), 6);
+    assert!(ids.iter().all(
+        |id| i.store.read(*id, "channel", None).map(|v| v.to_string()) == Some("shop".into())
+    ));
+    drop(i);
+    let (problems, _) = ops::verify(&url, m3, r3, at(2027, 7, 4)).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+}

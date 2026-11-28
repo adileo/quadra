@@ -72,6 +72,8 @@ pub fn verify_with(
     archived: Option<Vec<crate::archive::Row>>,
 ) -> Result<(Vec<String>, usize), String> {
     let mut db = Database::open(url, model, report)?;
+    // the cold records with the others: their rows are in volumes (crate::cold)
+    crate::cold::shadow(&mut db.conn)?;
     // the chain on a connection of its own, while the tables are checked
     let chain_url = url.to_string();
     // (the key this thread expects, on that thread too)
@@ -80,7 +82,9 @@ pub fn verify_with(
         .name("quadra-verify-chain".into())
         .spawn(move || {
             crate::signing::expect(expected);
-            chain(&mut Conn::open(&chain_url)?, archived)
+            let mut c = Conn::open(&chain_url)?;
+            crate::cold::shadow(&mut c)?;
+            chain(&mut c, archived)
         })
         .map_err(|e| e.to_string())?;
     // every write of the history, those of a transaction without commit row too (as loading
@@ -166,6 +170,7 @@ fn chain(
     // the checkpoints: the commits up to the last one's `before_tx` are computed only with the
     // rows of the archives
     let checkpoints = crate::archive::checkpoints(conn)?;
+    let volumes = crate::cold::entries(conn)?;
     let archived_to = checkpoints
         .iter()
         .map(|c| c.before_tx as i64)
@@ -309,6 +314,9 @@ fn chain(
             }
             if let Some(e) = keys.entry(tx) {
                 h.entry(&e);
+            }
+            for (_, e) in volumes.iter().filter(|(t, _)| *t == tx) {
+                h.entry(e);
             }
             if let Some(c) = checkpoints.iter().find(|c| c.tx as i64 == tx) {
                 h.entry(&crate::archive::entry(c).to_string());

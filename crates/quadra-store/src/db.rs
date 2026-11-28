@@ -154,13 +154,15 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// be erased; signed commits (`_quadra_keys`); erasures (`_quadra_erasures`, `_quadra_erased`);
 /// `_quadra_files` without the bytes (they are in the store of files), `_quadra_uploads`.
 /// 16: `_quadra_trash`, the records of `deletable, trash …` deleted and not yet for good.
-const SYSTEM_VERSION: &str = "16";
+/// 17: `_quadra_cold`, `_quadra_volumes`: the records gone cold (crate::cold).
+const SYSTEM_VERSION: &str = "17";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
 fn system_ddl(d: Dialect) -> Vec<String> {
     SYSTEM_DDL
         .iter()
+        .chain(crate::cold::DDL)
         .map(|s| {
             if d == Dialect::Sqlite {
                 s.replacen("BIGINT PRIMARY KEY", "INTEGER PRIMARY KEY", 1)
@@ -231,6 +233,19 @@ pub struct Database {
     seeded_salts: Option<bool>,
     /// the public key signing its commits, read from `_quadra_meta` once (crate::signing)
     signing: Option<Option<String>>,
+    /// in a commit that brought cold records back: where their history is read (the rows in use
+    /// and those of their volumes, attached), until the statements that write them back run
+    cold_history: HashMap<
+        u64,
+        Vec<(
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        )>,
+    >,
 }
 
 #[derive(Debug)]
@@ -396,7 +411,9 @@ impl Database {
 
     /// A database over a connection already open (an engine's pool), with the schema of the
     /// model it serves: nothing is checked or upgraded.
-    pub fn with(conn: Pooled, schema: Rc<Schema>) -> Database {
+    pub fn with(mut conn: Pooled, schema: Rc<Schema>) -> Database {
+        // a connection that writes reads the database in use alone (crate::cold)
+        let _ = crate::cold::unshadow(&mut conn);
         let entity_tables = schema
             .tables
             .iter()
@@ -416,6 +433,7 @@ impl Database {
             recording: None,
             seeded_salts: None,
             signing: None,
+            cold_history: HashMap::new(),
             delta_ops: Vec::new(),
             url: None,
         }
@@ -1618,6 +1636,8 @@ impl Database {
     ) -> Result<Vec<J>, String> {
         let local = c.tx;
         let map = |t: u64| if t == local { tx } else { t };
+        // the cold records it writes, erases or deletes: back in the database in use first
+        self.thaw_written(c)?;
         let mut payload: Vec<J> = Vec::new();
         let mut touched: HashSet<u64> = HashSet::new();
         // history entries of this transaction (`history none`: the value in force only, outside
@@ -1906,6 +1926,41 @@ impl Database {
         self.flush()?;
         self.write_outbox(c, tx, outbox_from)?;
         self.write_trash(c, tx)?;
+        if let Some(k) = &c.after.cold_move {
+            // the records moved to the volume leave the database in use
+            for (ent, id) in &k.records {
+                for (t, key) in crate::cold::tables_of(&self.schema, ent) {
+                    self.wexec(
+                        format!("DELETE FROM {} WHERE {} = ?bigint", q(&t), q(key)),
+                        vec![Sql::Int(*id as i64)],
+                    )?;
+                }
+                self.wexec(
+                    "INSERT INTO \"_quadra_cold\" (\"id\", \"entity\", \"volume\") VALUES (?bigint, ?text, ?text)".into(),
+                    vec![Sql::Int(*id as i64), Sql::Text(ent.clone()), Sql::Text(k.volume.clone())],
+                )?;
+            }
+            for old in &k.merged {
+                self.wexec(
+                    "UPDATE \"_quadra_cold\" SET \"volume\" = ?text WHERE \"volume\" = ?text"
+                        .into(),
+                    vec![Sql::Text(k.volume.clone()), Sql::Text(old.clone())],
+                )?;
+                self.wexec(
+                    "UPDATE \"_quadra_volumes\" SET \"dropped_tx\" = ?bigint WHERE \"name\" = ?text".into(),
+                    vec![Sql::Int(tx as i64), Sql::Text(old.clone())],
+                )?;
+            }
+            self.wexec(
+                "INSERT INTO \"_quadra_volumes\" (\"name\", \"sha256\", \"tx\", \"records\") VALUES (?text, ?text, ?bigint, ?bigint)".into(),
+                vec![Sql::Text(k.volume.clone()), Sql::Text(k.sha256.clone()), Sql::Int(tx as i64), Sql::Int(k.records.len() as i64)],
+            )?;
+            payload.push(crate::cold::entry(
+                &k.volume,
+                &k.sha256,
+                k.records.len() as u64,
+            ));
+        }
         if let Some(k) = &c.after.checkpoint {
             // the rows moved to the archive leave the history; the checkpoint names them
             for chunk in k.seqs.chunks(500) {
@@ -2142,9 +2197,27 @@ impl Database {
                 )?;
                 continue;
             }
+            // a record brought back from the cold by this commit: its history from its volume
+            // (the statements that write it back may not have run yet)
+            let cold_rows: Vec<Vec<Option<String>>> = self
+                .cold_history
+                .get(&er.id)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|(_, f, _, _, d, t)| {
+                            d.is_none() && *t < tx as i64 && (er.whole || er.fields.contains(f))
+                        })
+                        .map(|(seq, _, v, salt, _, _)| {
+                            vec![Some(seq.to_string()), v.clone(), salt.clone()]
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let rows = if er.whole && er.keep_values {
                 // its history stays (the entity keeps it whole, or the record is in the trash)
                 Vec::new()
+            } else if !cold_rows.is_empty() {
+                cold_rows
             } else if er.whole {
                 self.conn.query(
                     "SELECT CAST(\"seq\" AS TEXT), \"value\", \"salt\" FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"digest\" IS NULL AND \"tx\" < ?bigint",
@@ -2321,6 +2394,79 @@ impl Database {
                 format!("{ERASE}UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint"),
                 vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],
             )?;
+        }
+        Ok(())
+    }
+
+    /// The cold records (crate::cold) a commit writes, erases or takes away: their rows written
+    /// back into the database in use, from their volumes, before its own writes.
+    fn thaw_written(&mut self, c: &Commit) -> Result<(), String> {
+        self.cold_history.clear();
+        if self.conn.dialect() != Dialect::Sqlite || c.after.cold_move.is_some() {
+            return Ok(());
+        }
+        let local = c.tx;
+        let mut ids: Vec<u64> = c
+            .after
+            .records
+            .values()
+            .filter(|r| r.created_tx != local && r.history.iter().any(|(t, _, _)| *t == local))
+            .map(|r| r.id)
+            .chain(c.after.erasures.iter().filter(|e| e.id != 0).map(|e| e.id))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let any = self
+            .conn
+            .query("SELECT 1 FROM \"main\".\"_quadra_cold\" LIMIT 1", &[])
+            .map(|r| !r.is_empty())
+            .unwrap_or(false);
+        if !any {
+            return Ok(());
+        }
+        ids.sort();
+        ids.dedup();
+        let Some(dir) = crate::cold::folder(&mut self.conn)? else {
+            return Ok(());
+        };
+        let mut by_volume: std::collections::BTreeMap<(String, String), Vec<u64>> =
+            Default::default();
+        for chunk in ids.chunks(500) {
+            let list: Vec<String> = chunk.iter().map(|i| i.to_string()).collect();
+            for r in self.conn.query(
+                &format!("SELECT CAST(\"id\" AS TEXT), \"entity\", \"volume\" FROM \"main\".\"_quadra_cold\" WHERE \"id\" IN ({})", list.join(", ")),
+                &[],
+            )? {
+                by_volume
+                    .entry((r[2].clone().unwrap_or_default(), r[1].clone().unwrap_or_default()))
+                    .or_default()
+                    .push(num(&r[0]) as u64);
+            }
+        }
+        for ((volume, ent), ids) in by_volume {
+            let file = dir.join(format!("{volume}.db"));
+            let tables = crate::cold::tables_of(&self.schema, &ent);
+            for sql in crate::cold::thaw_statements(&file, &tables, &ids)? {
+                self.wexec(sql, Vec::new())?;
+            }
+            // their history as the volume has it, for what this commit computes (the
+            // statements above may run later, through the sequencer)
+            let mut v = Conn::open(&format!("sqlite:{}", file.display()))?;
+            let list: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+            for r in v.query(
+                &format!("SELECT CAST(\"seq\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\", CAST(\"tx\" AS TEXT) FROM \"_quadra_history\" WHERE \"record_id\" IN ({})", list.join(", ")),
+                &[],
+            )? {
+                self.cold_history.entry(num(&r[1]) as u64).or_default().push((
+                    num(&r[0]),
+                    r[2].clone().unwrap_or_default(),
+                    r[3].clone(),
+                    r[4].clone(),
+                    r[5].clone(),
+                    num(&r[6]),
+                ));
+            }
         }
         Ok(())
     }
@@ -2733,6 +2879,14 @@ impl Database {
     /// Check the hash chain and that projections match the truth (`store` loaded from this
     /// database, with materialized formulas computed). Returns the problems found.
     pub fn verify(&mut self, model: &Model, store: &Store) -> Result<Vec<String>, String> {
+        // the cold records with the others (crate::cold); a connection that writes again after
+        crate::cold::shadow(&mut self.conn)?;
+        let r = self.verify_shadowed(model, store);
+        let _ = crate::cold::unshadow(&mut self.conn);
+        r
+    }
+
+    fn verify_shadowed(&mut self, model: &Model, store: &Store) -> Result<Vec<String>, String> {
         let mut problems = Vec::new();
         // 1. hash chain
         let mut by_tx: HashMap<i64, Vec<J>> = HashMap::new();
@@ -2766,6 +2920,7 @@ impl Database {
         }
         let mut keys = crate::signing::Keys::read(&mut self.conn)?;
         let checkpoints = crate::archive::checkpoints(&mut self.conn)?;
+        let volumes = crate::cold::entries(&mut self.conn)?;
         let archived_to = checkpoints
             .iter()
             .map(|c| c.before_tx as i64)
@@ -2781,6 +2936,9 @@ impl Database {
             let mut payload = by_tx.remove(&tx).unwrap_or_default();
             if let Some(e) = keys.entry(tx) {
                 payload.push(serde_json::from_str(&e).unwrap_or(J::Null));
+            }
+            for (_, e) in volumes.iter().filter(|(t, _)| *t == tx) {
+                payload.push(serde_json::from_str(e).unwrap_or(J::Null));
             }
             if let Some(c) = checkpoints.iter().find(|c| c.tx as i64 == tx) {
                 payload.push(crate::archive::entry(c));

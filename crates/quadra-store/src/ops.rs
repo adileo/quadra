@@ -407,6 +407,8 @@ fn migrate_with(
     // a new `expire` that would erase records at once needs `--allow-expire`
     if !dry {
         retention_check(url, model, report, time)?;
+        // the cold records of what changes, back in use first (crate::cold)
+        crate::cold::thaw_for_deploy(url, model, report, false)?;
     }
     match crate::deploy::deploy(url, model, report, root, time, dry, always, label)? {
         Ok(crate::deploy::Done::Nothing) => Ok(None),
@@ -447,6 +449,10 @@ fn migrate_full(
     always: bool,
     label: Option<&str>,
 ) -> Result<Option<MigrateReport>, String> {
+    // every table rebuilt: every cold record back in use first (crate::cold)
+    if !dry {
+        crate::cold::thaw_for_deploy(url, model, report, true)?;
+    }
     let mut db = Database::open(url, model, report)?;
     let status = db.status()?;
     if !status.initialized {
@@ -910,6 +916,150 @@ pub fn engine<'m>(
     interp.materialize = materialized_formulas(&db.schema);
     interp.sink = Some(Box::new(Sink { db, model }));
     Ok(interp)
+}
+
+/// The records closed now moved to a new volume (crate::cold), with their lines: the volume
+/// written beside the database and given to `put` (the store of files: `cold/<name>.db`), then
+/// a commit, through `sequencer` when there is one, takes them out of the database in use. With
+/// many volumes, the new one holds the records of the older ones too, which are dropped.
+/// Returns the volume and how many records went (none: nothing closed).
+pub fn cold_run(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+    put: &mut dyn FnMut(&str, &[u8]) -> Result<(), String>,
+) -> Result<Option<(String, usize)>, String> {
+    use sha2::Digest;
+    // which, and their versions as copied
+    let (records, versions) = with_engine(url, model, report, time, None, |i| {
+        let due = i.cold_due().map_err(|e| flow("cold", e))?;
+        let mut out: Vec<(String, u64)> = Vec::new();
+        for (ent, id) in due {
+            let lines = i.lines_of(&ent, id);
+            out.push((ent, id));
+            out.extend(lines);
+        }
+        let v: Vec<u64> = out
+            .iter()
+            .map(|(_, id)| {
+                i.store.exists(*id, None);
+                i.store.get(*id).map(|r| r.version()).unwrap_or(0)
+            })
+            .collect();
+        Ok((out, v))
+    })?;
+    if records.is_empty() {
+        return Ok(None);
+    }
+    let schema = Database::open(url, model, report)?.schema.clone();
+    let mut c = crate::Conn::open(url)?;
+    let dir =
+        crate::cold::folder(&mut c)?.ok_or("cold records are kept beside a SQLite database")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = format!("volume-{}", time.format("%Y%m%dT%H%M%S"));
+    let file = dir.join(format!("{name}.db"));
+    let _ = std::fs::remove_file(&file);
+    let old = crate::cold::volumes(&mut c)?;
+    // many volumes: one new with them all (a connection reads at most a few)
+    let merged: Vec<(String, std::path::PathBuf)> = if old.len() >= 6 { old } else { Vec::new() };
+    c.batch(&format!(
+        "ATTACH DATABASE '{}' AS \"volume\"",
+        file.display().to_string().replace('\'', "''")
+    ))?;
+    let r = (|| -> Result<(), String> {
+        let mut by_ent: std::collections::BTreeMap<&str, Vec<u64>> = Default::default();
+        for (ent, id) in &records {
+            by_ent.entry(ent.as_str()).or_default().push(*id);
+        }
+        for (ent, ids) in &by_ent {
+            for chunk in ids.chunks(500) {
+                let list: Vec<String> = chunk.iter().map(|i| i.to_string()).collect();
+                for (t, key) in crate::cold::tables_of(&schema, ent) {
+                    c.batch(&format!("CREATE TABLE IF NOT EXISTS \"volume\".\"{t}\" AS SELECT * FROM \"main\".\"{t}\" WHERE 0"))?;
+                    c.batch(&format!("INSERT INTO \"volume\".\"{t}\" SELECT * FROM \"main\".\"{t}\" WHERE \"{key}\" IN ({})", list.join(", ")))?;
+                }
+            }
+        }
+        for (old, path) in &merged {
+            c.batch(&format!(
+                "ATTACH DATABASE '{}' AS \"older\"",
+                path.display().to_string().replace('\'', "''")
+            ))?;
+            let tables: Vec<String> = c
+                .query(
+                    "SELECT \"name\" FROM \"older\".sqlite_master WHERE \"type\" = 'table'",
+                    &[],
+                )?
+                .into_iter()
+                .filter_map(|r| r[0].clone())
+                .collect();
+            for t in tables {
+                let key = if t == "_quadra_history" {
+                    "record_id"
+                } else if c
+                    .query(&format!("SELECT 1 FROM pragma_table_info('{t}', 'older') WHERE \"name\" = 'owner_id'"), &[])?
+                    .is_empty()
+                {
+                    "id"
+                } else {
+                    "owner_id"
+                };
+                c.batch(&format!("CREATE TABLE IF NOT EXISTS \"volume\".\"{t}\" AS SELECT * FROM \"older\".\"{t}\" WHERE 0"))?;
+                c.batch(&format!("INSERT INTO \"volume\".\"{t}\" SELECT * FROM \"older\".\"{t}\" WHERE \"{key}\" IN (SELECT \"id\" FROM \"main\".\"_quadra_cold\" WHERE \"volume\" = '{}')", old.replace('\'', "''")))?;
+            }
+            c.batch("DETACH DATABASE \"older\"")?;
+        }
+        Ok(())
+    })();
+    let _ = c.batch("DETACH DATABASE \"volume\"");
+    drop(c);
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&file);
+        return Err(e);
+    }
+    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    let sha: String = sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    put(&format!("cold/{name}.db"), &bytes)?;
+    let n = records.len();
+    let mv = quadra_runtime::store::ColdMove {
+        volume: name.clone(),
+        sha256: sha,
+        records: records.clone(),
+        merged: merged.iter().map(|(n, _)| n.clone()).collect(),
+    };
+    let done = with_engine(url, model, report, time, sequencer, |i| {
+        i.system += 1;
+        let r = i.with_cause(format!("cold: {n} closed records to {name}"), |i| {
+            i.transaction(|i| {
+                for ((ent, id), v) in records.iter().zip(&versions) {
+                    i.store.exists(*id, None);
+                    if i.store.get(*id).map(|r| r.version()) != Some(*v) {
+                        return Err(quadra_runtime::Flow::Fail(format!(
+                            "{ent}#{id} was written while it was copied to the volume: next time"
+                        )));
+                    }
+                }
+                i.store.cold_move = Some(mv.clone());
+                Ok(())
+            })
+        });
+        i.system -= 1;
+        r.map_err(|e| flow("cold", e))
+    });
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&file);
+        return Err(e);
+    }
+    // the volumes merged are no longer read
+    for (_, path) in &merged {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(Some((name, n)))
 }
 
 /// What would go cold now (`quadra db cold`), per entity with `archive …`.

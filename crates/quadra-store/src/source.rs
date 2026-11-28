@@ -857,6 +857,8 @@ impl DbSource {
         cache: Option<Rc<RefCell<Cache>>>,
         renames: Renames,
     ) -> Result<DbSource, String> {
+        // the cold records read with the others (crate::cold)
+        crate::cold::shadow(&mut conn)?;
         if let Some(c) = &cache {
             c.borrow_mut().sync(&mut conn, base)?;
         }

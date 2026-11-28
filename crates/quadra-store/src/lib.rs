@@ -9,6 +9,7 @@ pub mod archive;
 pub mod auth;
 pub mod bulk;
 pub mod codec;
+pub mod cold;
 pub mod conn;
 pub mod db;
 pub mod deliveries;
