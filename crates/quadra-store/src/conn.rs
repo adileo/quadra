@@ -182,11 +182,23 @@ impl Conn {
             }
             .map_err(|e| e.to_string())?;
             // another connection's checkpoint or write holds the file a moment: wait for it
-            // rather than fail at once ("database is locked")
+            // rather than fail at once ("database is locked"). What is deleted is overwritten
+            // with zeros: an erased value leaves no trace in the file's free pages
             c.execute_batch(
-                "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
+                "PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA foreign_keys = ON;",
             )
             .map_err(|e| e.to_string())?;
+            // a new file: the pages freed can go back to the file system (`reclaim`). Only
+            // before its first page is written; its copies keep it
+            let pages: i64 = c
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            if pages == 0 {
+                c.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")
+                    .map_err(|e| e.to_string())?;
+            }
+            c.execute_batch("PRAGMA journal_mode = WAL;")
+                .map_err(|e| e.to_string())?;
             // the file mapped in memory: every connection (every engine of a project) reads the
             // same pages from the system's cache instead of copying them into its own
             if path != ":memory:" {
@@ -947,4 +959,30 @@ fn side_record(sql: &str, params: &[Sql]) {
             }
         }
     })
+}
+
+/// The space of what was deleted given back to the file system, and the WAL written back into
+/// the file and emptied: the old images of the pages an erasure overwrote do not stay in it.
+/// A file made before `auto_vacuum` is turned into one with it first (a `VACUUM`, once).
+/// `Ok(false)`: a reader held the WAL, so it is not empty yet (try again). Nothing to do on
+/// Postgres.
+pub fn reclaim(c: &mut Conn) -> Result<bool, String> {
+    if c.dialect() != Dialect::Sqlite {
+        return Ok(true);
+    }
+    let first = |c: &mut Conn, q: &str| -> Result<Option<String>, String> {
+        Ok(c.query(q, &[])?
+            .into_iter()
+            .next()
+            .and_then(|r| r[0].clone()))
+    };
+    if first(c, "PRAGMA auto_vacuum")?.as_deref() == Some("0") {
+        c.batch("PRAGMA auto_vacuum = INCREMENTAL")?;
+        c.batch("VACUUM")?;
+    } else {
+        // (a row for each page freed: read to the end, or it frees one)
+        c.query("PRAGMA incremental_vacuum", &[])?;
+    }
+    // (`busy` is 1 while a reader holds the WAL)
+    Ok(first(c, "PRAGMA wal_checkpoint(TRUNCATE)")?.as_deref() == Some("0"))
 }

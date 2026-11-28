@@ -100,19 +100,20 @@ pub fn load_configured(root: Option<&std::path::Path>) -> Result<Option<String>,
     }
 }
 
-fn expected_key() -> &'static RwLock<Option<String>> {
-    static E: OnceLock<RwLock<Option<String>>> = OnceLock::new();
-    E.get_or_init(Default::default)
+thread_local! {
+    static EXPECTED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The public key the chains verified from now on must end with (`quadra db verify --key`, or
-/// the key loaded): a chain without it, or signed by another key, is a problem.
+/// The public key the chains verified from now on, on this thread, must end with (`quadra db
+/// verify --key`, or the key loaded): a chain without it, or signed by another key, is a
+/// problem. Per thread: a process that verifies the databases of several projects (a host's
+/// tenants, the tests) does not expect one project's key of another.
 pub fn expect(public: Option<String>) {
-    *expected_key().write().unwrap() = public;
+    EXPECTED.with(|e| *e.borrow_mut() = public);
 }
 
 pub(crate) fn expected() -> Option<String> {
-    expected_key().read().unwrap().clone()
+    EXPECTED.with(|e| e.borrow().clone())
 }
 
 /// The public key that signs the commits of the database, if any.

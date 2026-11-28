@@ -74,9 +74,14 @@ pub fn verify_with(
     let mut db = Database::open(url, model, report)?;
     // the chain on a connection of its own, while the tables are checked
     let chain_url = url.to_string();
+    // (the key this thread expects, on that thread too)
+    let expected = crate::signing::expected();
     let chain_check = std::thread::Builder::new()
         .name("quadra-verify-chain".into())
-        .spawn(move || chain(&mut Conn::open(&chain_url)?, archived))
+        .spawn(move || {
+            crate::signing::expect(expected);
+            chain(&mut Conn::open(&chain_url)?, archived)
+        })
         .map_err(|e| e.to_string())?;
     // every write of the history, those of a transaction without commit row too (as loading
     // the whole database reads them)

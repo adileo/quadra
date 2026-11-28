@@ -344,6 +344,7 @@ enum Msg {
         mpsc::Sender<Result<Box<dyn std::any::Any + Send>, String>>,
         Responder,
     ),
+    Reclaim,
     Stop(mpsc::Sender<()>),
 }
 
@@ -472,6 +473,12 @@ impl Sequencer {
         v.downcast::<T>()
             .map(|v| *v)
             .map_err(|_| "the sequencer answered with another type".into())
+    }
+
+    /// The space of what was deleted given back to the file system, and the WAL emptied, as
+    /// soon as nothing is pending (`conn::reclaim`).
+    pub fn reclaim(&self) {
+        let _ = self.tx.send(Msg::Reclaim);
     }
 
     /// How its log stands: what is written, what is kept, whether the destinations are down.
@@ -803,6 +810,10 @@ struct State {
     uploader: Option<Uploader>,
     /// when a snapshot is due for the destinations
     snapshot_due: Option<Instant>,
+    /// when to give the space of what was deleted back to the file system and empty the WAL
+    /// (`conn::reclaim`): after an erasure or a deletion, once a day, at the stop
+    reclaim_due: Option<Instant>,
+    reclaim_tries: u32,
     /// the size of the batches sent to the destinations since their last snapshot, and how many
     log_bytes: u64,
     log_segments: u64,
@@ -855,6 +866,8 @@ impl State {
             lock: Some(lock),
             uploader: None,
             snapshot_due: None,
+            reclaim_due: Some(Instant::now() + Duration::from_secs(3600)),
+            reclaim_tries: 0,
             log_bytes: 0,
             log_segments: 0,
             refused: 0,
@@ -1010,6 +1023,12 @@ impl State {
                 if let Some(u) = self.uploader.take() {
                     u.finish();
                 }
+                // the space of what was deleted given back first: a smaller file to upload
+                if self.conn.dialect() == Dialect::Sqlite {
+                    if let Err(e) = crate::conn::reclaim(&mut self.conn) {
+                        eprintln!("sequencer: the space of the file was not given back: {e}");
+                    }
+                }
                 // the WAL written back into the file before anyone takes the file (a hibernation
                 // uploads it whole): checked, and tried again while a reader holds it
                 if self.conn.dialect() == Dialect::Sqlite {
@@ -1056,12 +1075,19 @@ impl State {
     fn next_wait(&mut self) -> Option<Duration> {
         self.abandon_stale();
         if self.pending.is_empty() {
+            if self.reclaim_due.is_some_and(|d| d <= Instant::now()) {
+                self.reclaim();
+            }
             if let Some(due) = self.snapshot_due {
                 if due <= Instant::now() {
                     self.take_snapshot();
                 } else {
-                    return Some(due - Instant::now());
+                    let next = self.reclaim_due.map_or(due, |r| r.min(due));
+                    return Some(next.saturating_duration_since(Instant::now()));
                 }
+            }
+            if let Some(r) = self.reclaim_due {
+                return Some(r.saturating_duration_since(Instant::now()));
             }
         }
         let mut ready = 0;
@@ -1169,6 +1195,9 @@ impl State {
                 let first = self.next_id.max(self.ids_given) + 1;
                 self.ids_given = first + n - 1;
                 let _ = reply.send(first);
+            }
+            Msg::Reclaim => {
+                self.reclaim_due = Some(Instant::now());
             }
             Msg::Stop(reply) => return Some(reply),
         }
@@ -1453,6 +1482,7 @@ impl State {
         let from = self.durable + 1;
         let results = match self.write(&submitted) {
             Ok(executed) => {
+                self.note_erasures(&executed);
                 let first = from;
                 let last = submitted.last().unwrap().0;
                 self.durable = self.durable.max(last);
@@ -1544,6 +1574,7 @@ impl State {
             };
             let res = match res {
                 Ok(executed) => {
+                    self.note_erasures(&executed);
                     self.durable = self.durable.max(tx);
                     self.health
                         .written
@@ -1631,6 +1662,42 @@ impl State {
                 self.upload(first, last, statements, Vec::new());
             }
             let _ = kept.send(Ok(self.durable));
+        }
+    }
+
+    /// A batch that erased or deleted: the WAL that still holds the pages as they were is
+    /// written back and emptied, and the space given back, as soon as nothing is pending.
+    fn note_erasures(&mut self, statements: &[(String, Vec<Sql>)]) {
+        if statements.iter().any(|(sql, _)| {
+            sql.starts_with(crate::db::ERASE) || sql.starts_with("INSERT INTO \"_quadra_erasures\"")
+        }) {
+            self.reclaim_due = Some(Instant::now());
+        }
+    }
+
+    fn reclaim(&mut self) {
+        self.reclaim_due = None;
+        if self.conn.dialect() != Dialect::Sqlite {
+            return;
+        }
+        match crate::conn::reclaim(&mut self.conn) {
+            Ok(true) => {
+                self.reclaim_tries = 0;
+                // and again tomorrow: what the day deleted
+                self.reclaim_due = Some(Instant::now() + Duration::from_secs(24 * 3600));
+            }
+            // a reader held the WAL: again in a second, for a minute
+            Ok(false) if self.reclaim_tries < 60 => {
+                self.reclaim_tries += 1;
+                self.reclaim_due = Some(Instant::now() + Duration::from_secs(1));
+            }
+            Ok(false) => {
+                self.reclaim_tries = 0;
+                eprintln!(
+                    "sequencer: the WAL could not be emptied for a minute (a reader held it)"
+                );
+            }
+            Err(e) => eprintln!("sequencer: the space of the file was not given back: {e}"),
         }
     }
 

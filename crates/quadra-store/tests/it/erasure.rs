@@ -203,11 +203,8 @@ fn an_erasure_leaves_the_database_the_log_and_the_past() {
         "zeno.zanetti@example.com",
         "asked for a call",
     ];
-    // the database
-    let mut c = quadra_store::Conn::open(&url).unwrap();
-    c.batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
-    c.batch("VACUUM").unwrap();
-    drop(c);
+    // the database: its file as it is (no `VACUUM` here: `secure_delete` overwrote what was
+    // erased, and the sequencer emptied the WAL that held the pages as they were)
     let d = dump(&url);
     for t in secrets {
         assert!(!d.contains(t), "the database still holds {t}");
@@ -266,5 +263,49 @@ fn an_erasure_leaves_the_database_the_log_and_the_past() {
         quadra_store::ops::verify(&pc, m2, r2, clock()).unwrap().0,
         Vec::<String>::new()
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What is deleted gives its space back: a file that grew with 20,000 rows goes back to about
+/// its first size once they are deleted and `reclaim` runs; a file made before `auto_vacuum`
+/// is turned into one with it.
+#[test]
+fn deleted_rows_give_their_space_back() {
+    let dir = std::env::temp_dir().join(format!("quadra-reclaim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    for old in [false, true] {
+        let file = dir.join(format!("r{old}.db"));
+        if old {
+            // as a file of an earlier version: no auto_vacuum
+            let c = rusqlite::Connection::open(&file).unwrap();
+            c.execute_batch("CREATE TABLE t (v TEXT)").unwrap();
+        }
+        let url = format!("sqlite:{}", file.display());
+        let mut c = quadra_store::Conn::open(&url).unwrap();
+        c.batch("CREATE TABLE IF NOT EXISTS t (v TEXT)").unwrap();
+        quadra_store::conn::reclaim(&mut c).unwrap();
+        let empty = size(&file);
+        c.batch("BEGIN").unwrap();
+        for i in 0..20_000 {
+            c.batch(&format!(
+                "INSERT INTO t VALUES ('row {i} {}')",
+                "x".repeat(200)
+            ))
+            .unwrap();
+        }
+        c.batch("COMMIT").unwrap();
+        quadra_store::conn::reclaim(&mut c).unwrap();
+        let full = size(&file);
+        c.batch("DELETE FROM t").unwrap();
+        assert!(quadra_store::conn::reclaim(&mut c).unwrap());
+        let after = size(&file);
+        assert!(full > 4_000_000, "{full}");
+        assert!(
+            after < empty + 64 * 1024,
+            "old {old}: {empty} → {full} → {after}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

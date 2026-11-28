@@ -935,10 +935,16 @@ pub fn erase(
         id,
     };
     i.system += 1;
-    i.with_cause(format!("quadra erase by {who}"), |i| {
-        i.transaction(|i| i.erase(&rec, reason))
-    })
-    .map_err(|e| flow("erase", e))
+    let fields = i
+        .with_cause(format!("quadra erase by {who}"), |i| {
+            i.transaction(|i| i.erase(&rec, reason))
+        })
+        .map_err(|e| flow("erase", e))?;
+    drop(i);
+    // the pages as they were out of the WAL, their space given back
+    let mut c = crate::Conn::open(url)?;
+    crate::conn::reclaim(&mut c)?;
+    Ok(fields)
 }
 
 /// Re-evaluate the rules that read the clock (`today()`, `now()`) on every record: automatic
@@ -1031,6 +1037,12 @@ pub fn sweep_with(
             c.exec("INSERT INTO \"_quadra_meta\" (\"key\", \"value\") VALUES ('last_sweep', ?text) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\"", &[crate::conn::Sql::Text(at)]).map(|_| ())
         })?,
         None => Database::open(url, model, report)?.set_meta("last_sweep", &at)?,
+    }
+    // what this sweep erased or took away: its space given back, the WAL emptied (a
+    // sequencer does it by itself after such a batch, and once a day)
+    if sequencer.is_none() && !expired.is_empty() {
+        let mut c = crate::Conn::open(url)?;
+        crate::conn::reclaim(&mut c)?;
     }
     Ok(written)
 }

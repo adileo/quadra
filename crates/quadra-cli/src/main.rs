@@ -649,7 +649,10 @@ fn erase(args: &[String]) -> ExitCode {
             &mut |k, b| files.blobs.put(k, b, "application/gzip", "attachment"),
         )?;
         if n > 0 {
-            println!("  {n} older value{} taken out of the archives of the history", if n == 1 { "" } else { "s" });
+            println!(
+                "  {n} older value{} taken out of the archives of the history",
+                if n == 1 { "" } else { "s" }
+            );
         }
         if fields.is_empty() {
             println!("✓ {ent}#{id}: nothing to erase (its personal fields are empty)");
