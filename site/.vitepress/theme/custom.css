@@ -548,3 +548,17 @@
 .vp-doc a.q-host__btn { display: inline-flex; padding: 9px 16px; border-radius: 6px; background: var(--q-hl); color: #171717; font-size: 14px; font-weight: 500; text-decoration: none; transition: background-color 0.15s; }
 .vp-doc a.q-host__btn:hover { background: var(--q-hl-hover); color: #171717; }
 .q-host__note { font-size: 13px; color: var(--vp-c-text-3); }
+
+/* "Quadra handles all of this": two plain columns of what comes built in */
+.q-incl { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); gap: 32px 56px; margin-top: 36px; }
+.q-incl__head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: 17px; }
+.q-incl__head b { font-weight: 600; letter-spacing: -0.01em; }
+.q-incl__tag { font-family: var(--vp-font-family-mono); font-size: 12px; padding: 1px 6px; border-radius: 4px; background: var(--q-panel); color: var(--vp-c-text-2); }
+.q-incl__col--engine .q-incl__tag { background: var(--q-hl); color: #171717; }
+.vp-doc .q-incl__sub { margin: 6px 0 18px; font-size: 15px; color: var(--vp-c-text-2); }
+.vp-doc .q-incl__list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 32px; }
+.q-incl__groups { columns: 3 180px; column-gap: 32px; }
+.q-incl__group { break-inside: avoid; padding-bottom: 28px; }
+.q-incl__gname { font-family: var(--vp-font-family-mono); font-size: 12px; color: var(--vp-c-text-3); margin-bottom: 6px; white-space: nowrap; }
+.vp-doc .q-incl__list li { margin: 0; padding: 7px 0; border-top: 1px solid var(--q-line); font-size: 15px; line-height: 1.4; }
+@media (max-width: 960px) { .q-incl { grid-template-columns: minmax(0, 1fr); } }

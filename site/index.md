@@ -367,6 +367,89 @@ Every branch gets its own environment, with sample data or a copy of production.
 
 <div class="q-section">
 
+<div class="q-eyebrow">Batteries included</div>
+
+## Quadra handles all of this for you
+
+<div class="q-incl">
+  <div class="q-incl__col q-incl__col--engine">
+    <div class="q-incl__head"><b>Quadra Engine</b><span class="q-incl__tag">Open source</span></div>
+    <p class="q-incl__sub">The code: your rules, your data, everything underneath.</p>
+    <div class="q-incl__groups">
+      <div class="q-incl__group">
+        <div class="q-incl__gname">Data</div>
+        <ul class="q-incl__list">
+          <li>Entity Relations</li>
+          <li>Formulas</li>
+          <li>Validation Rules</li>
+          <li>Money and Units</li>
+          <li>Ledgers</li>
+          <li>Certified Metrics</li>
+          <li>Frozen Records</li>
+          <li>Migrations</li>
+          <li>Bulk Import / Export</li>
+          <li>Archive</li>
+          <li>Hot / Cold Storage</li>
+        </ul>
+      </div>
+      <div class="q-incl__group">
+        <div class="q-incl__gname">Access and compliance</div>
+        <ul class="q-incl__list">
+          <li>Authentication</li>
+          <li>Roles</li>
+          <li>Field-level Permissions</li>
+          <li>Signed History</li>
+          <li>Data Retention</li>
+          <li>Data Erasure (GDPR)</li>
+          <li>GDPR Data Export</li>
+        </ul>
+      </div>
+      <div class="q-incl__group">
+        <div class="q-incl__gname">Documents</div>
+        <ul class="q-incl__list">
+          <li>Documents / Files</li>
+          <li>PDF Generation</li>
+          <li>Label Printing</li>
+          <li>Document Signing</li>
+        </ul>
+      </div>
+      <div class="q-incl__group">
+        <div class="q-incl__gname">Automation</div>
+        <ul class="q-incl__list">
+          <li>Workflows</li>
+          <li>Timers and Deadlines</li>
+          <li>Events and Webhooks</li>
+          <li>Sending Emails / Messages</li>
+          <li>File Exchange</li>
+          <li>Talk to Other Systems</li>
+          <li>Backend API</li>
+        </ul>
+      </div>
+      <div class="q-incl__group">
+        <div class="q-incl__gname">Quality</div>
+        <ul class="q-incl__list">
+          <li>Tests and Fixtures</li>
+          <li>Compile-time Checks</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="q-incl__col">
+    <div class="q-incl__head"><b>Quadra Studio</b><span class="q-incl__tag">Free to use</span></div>
+    <p class="q-incl__sub">Use it as it is, or build your own frontend on the API.</p>
+    <div class="q-incl__gname">Interfaces</div>
+    <ul class="q-incl__list">
+      <li>Custom Views and Boards</li>
+      <li>Apps and Dashboards</li>
+      <li>Custom Interfaces</li>
+    </ul>
+  </div>
+</div>
+
+</div>
+
+<div class="q-section">
+
 <div class="q-eyebrow">Built to evolve</div>
 
 ## The builder is the tip of the iceberg
