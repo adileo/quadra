@@ -435,3 +435,57 @@ The pages freed go back to the file system once a day, and at once after an eras
 incremental `auto_vacuum`): a database that deleted half of its records is half as large the
 next day. A database made by an earlier version is turned into one that does this the first
 time (a `VACUUM`, once).
+
+## Hot and cold: `archive`
+
+::: warning Being built
+What is described here decides **which** records would go cold, and says so; moving them out
+of the database in use is the next part of the work.
+:::
+
+A database that grows for years keeps in use only what is needed: the records that are
+closed can go cold, to the archive of the project, and be read on demand, more slowly. A cold
+record is a slow record, not another one: `Invoice.all()`, totals and references still find
+it, and writing to it brings it back.
+
+```quadra
+entity Invoice:
+    archive 1 year after date
+    …
+
+entity Customer:
+    archive never                   # stays in use: it is read all the time
+```
+
+```toml
+[data]
+cold_after = "3 years"              # the project's entities: 3 years after their last write
+```
+
+A record is **closed**, and may go cold, when:
+
+- its term is over (`1 year after date`), and it was not written for as long;
+- no transition of its flows can take it out of its state now: an order still `Open` stays in
+  use, however old; an invoice `Posted` whose `cancel` says `unless paid > 0 EUR` is closed
+  once it is paid;
+- its lines go with it (a line has no `archive` of its own).
+
+The checker refuses what could never close (every state of a flow has an unguarded way out),
+an `archive` on a line or a ledger, and one that would come after the record's `expire`.
+
+```bash
+quadra db cold --at 2029-01-01
+```
+
+```text
+Invoice  (archive 1 year after date): 1840 of 2310 records closed now, about 14336 KB
+  470 open
+Order  (archive 2 years after updated_at): 3100 of 3600 records closed now, about 9216 KB
+  500 not yet
+```
+
+The editor says when a query may read the archive: `Order.where(o => o.total > 0)` reads
+every order, old ones too; a condition on the term's field (`o.date >= today() - 365 days`)
+keeps it to the recent ones, and a total kept by a formula (`sum` over a record's lines) does
+not read them at all.
+
