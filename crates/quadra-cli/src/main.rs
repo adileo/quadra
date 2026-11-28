@@ -766,6 +766,24 @@ fn db(args: &[String]) -> ExitCode {
                     .unwrap(),
                 None => now(),
             };
+            if rest.iter().any(|a| a == "--fetch") {
+                let files = files_store(&root)?;
+                let n = quadra_store::cold::fetch(&url, &mut |k| files.blobs.get(k))?;
+                println!("✓ {n} volume{} of the cold records brought from the store of files", if n == 1 { "" } else { "s" });
+                return Ok(());
+            }
+            if rest.iter().any(|a| a == "--run") {
+                let _writer = quadra_store::writer::acquire(&url)?;
+                let files = files_store(&root)?;
+                match ops::cold_run(&url, model, report, at, None, &mut |k, b| files.blobs.put(k, b, "application/vnd.sqlite3", "attachment"))? {
+                    None => println!("nothing is closed: no record goes cold"),
+                    Some((v, n)) => {
+                        println!("✓ {n} closed record{} moved to the volume {v}", if n == 1 { "" } else { "s" });
+                        println!("  read as before, more slowly; `quadra db verify` checks them with the others");
+                    }
+                }
+                return Ok(());
+            }
             let lines = ops::cold_report(&url, model, report, at)?;
             if lines.is_empty() {
                 println!("no entity goes cold: `archive 2 years after paid_at` on an entity, or `[data] cold_after` in quadra.toml");
@@ -785,7 +803,7 @@ fn db(args: &[String]) -> ExitCode {
                     println!("  {n} {why}");
                 }
             }
-            println!("(what would go cold: moving it is not done yet, phase 19e)");
+            println!("(`quadra db cold --run` moves them; the server does it once a day)");
             Ok(())
         }
         "archive" => {

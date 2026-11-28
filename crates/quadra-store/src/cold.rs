@@ -29,7 +29,12 @@ pub(crate) const DDL: &[&str] = &[
 
 /// The tables that hold rows of the records of `ent`, with the column naming the record.
 pub fn tables_of(schema: &Schema, ent: &str) -> Vec<(String, &'static str)> {
-    let mut out: Vec<(String, &'static str)> = schema
+    // (in the order rows can be deleted: what refers to a row before it)
+    let mut out: Vec<(String, &'static str)> = vec![
+        ("_quadra_history".into(), "record_id"),
+        ("_quadra_postings".into(), "record_id"),
+    ];
+    let mut rows: Vec<(String, &'static str)> = schema
         .tables
         .iter()
         .filter_map(|t| match &t.source {
@@ -41,8 +46,10 @@ pub fn tables_of(schema: &Schema, ent: &str) -> Vec<(String, &'static str)> {
             _ => None,
         })
         .collect();
+    // join and per-company tables before the entity's own
+    rows.sort_by_key(|(_, k)| *k != "owner_id");
+    out.extend(rows);
     out.push(("_quadra_records".into(), "id"));
-    out.push(("_quadra_history".into(), "record_id"));
     out
 }
 
@@ -424,6 +431,49 @@ pub fn thaw_for_deploy(
         }
         let _ = c.batch("DETACH DATABASE \"thawing\"");
         n += r?;
+    }
+    Ok(n)
+}
+
+/// The volumes in use whose file is not beside the database (a copy rebuilt from the log, a new
+/// machine): each fetched with `get` (from the store of files, `cold/<name>.db`) and checked
+/// against its SHA-256. Returns how many came.
+pub fn fetch(
+    url: &str,
+    get: &mut dyn FnMut(&str) -> Result<Option<Vec<u8>>, String>,
+) -> Result<usize, String> {
+    use sha2::Digest;
+    let mut c = Conn::open(url)?;
+    let Some(dir) = folder(&mut c)? else {
+        return Ok(0);
+    };
+    let mut n = 0;
+    for (name, file) in volumes(&mut c)? {
+        if file.exists() {
+            continue;
+        }
+        let bytes = get(&format!("cold/{name}.db"))?.ok_or(format!(
+            "the volume {name} is not in the store of files (cold/{name}.db)"
+        ))?;
+        let sha: String = sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let want = c
+            .query(
+                "SELECT \"sha256\" FROM \"main\".\"_quadra_volumes\" WHERE \"name\" = ?text",
+                &[Sql::Text(name.clone())],
+            )?
+            .into_iter()
+            .next()
+            .and_then(|r| r[0].clone())
+            .unwrap_or_default();
+        if sha != want {
+            return Err(format!("the volume {name} of the store of files is not the one its commit names (sha256 {sha}, not {want})"));
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
+        n += 1;
     }
     Ok(n)
 }

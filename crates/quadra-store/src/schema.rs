@@ -587,6 +587,34 @@ pub fn build(model: &Model, report: &Report) -> Schema {
     if markers {
         readable.clear();
     }
+    // references into what may go cold have no foreign key: a record in use may refer to a cold
+    // one (and the rows of a ledger, kept in use, to a cold invoice); the engine keeps them
+    let cold_tables: BTreeSet<String> = model
+        .entities
+        .iter()
+        .filter(|e| matches!(e.cold, Some(quadra_ir::Cold::After { .. })))
+        .filter_map(|e| {
+            tables
+                .iter()
+                .find(|t| matches!(&t.source, Source::Entity(x) if *x == e.name))
+                .map(|t| t.name.clone())
+        })
+        .collect();
+    let mut tables = tables;
+    if !cold_tables.is_empty() {
+        for t in tables.iter_mut() {
+            let owner_cold = matches!(&t.source, Source::Join(e, _) | Source::PerCompany(e, _) if model.entity(e).is_some_and(|x| matches!(x.cold, Some(quadra_ir::Cold::After { .. }))));
+            for c in t.columns.iter_mut() {
+                if c.references
+                    .as_ref()
+                    .is_some_and(|r| cold_tables.contains(r))
+                    || (owner_cold && c.name == "owner_id")
+                {
+                    c.references = None;
+                }
+            }
+        }
+    }
     let mut schema = Schema {
         tables,
         indexes: Vec::new(),

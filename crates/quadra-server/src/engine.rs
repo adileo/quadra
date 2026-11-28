@@ -707,6 +707,8 @@ pub struct Engine {
     sequencer: Option<quadra_store::Sequencer>,
     /// when the history was last archived (`[data] archive_after`)
     archived_at: Option<std::time::Instant>,
+    /// when the closed records last went cold (`archive …`)
+    cold_at: Option<std::time::Instant>,
     /// when the log of the integrations was last pruned (`[integrations] log_days`)
     pruned_at: Option<std::time::Instant>,
     /// the documents of an `attach` that could not be rendered (document, record): not tried
@@ -868,6 +870,7 @@ impl Engine {
             sequencer: None,
             pruned_at: None,
             archived_at: None,
+            cold_at: None,
             attach_failed: (0, Default::default()),
             uploads_pruned_at: None,
             agents_seen: HashMap::new(),
@@ -878,6 +881,10 @@ impl Engine {
             installed_any: false,
         };
         if first {
+            // the volumes of the cold records, beside the database before anything reads
+            if let Err(e) = engine.fetch_cold() {
+                eprintln!("cold: {e}");
+            }
             // the apps and views of the interface files, as the files say
             engine.install_interfaces(&project)?;
             // saved views checked against this model (renames of the migrations applied)
@@ -3301,6 +3308,7 @@ impl Engine {
                         eprintln!("sweep: {e}");
                     }
                     self.archive_due();
+                    self.cold_due();
                     if let Some(reply) = reply {
                         let _ = reply.send(r);
                     }
@@ -3926,6 +3934,67 @@ impl Engine {
     /// A record taken away by its retention: `410` with when and why.
     /// `[data] archive_after = "2 years"`: once a day, the history older than that moved to an
     /// archive in the store of files, with its checkpoint, through the sequencer.
+    /// Once a day: the closed records of the entities with `archive …` moved to a new volume,
+    /// written to the store of files first, through the sequencer (crate quadra_store::cold).
+    fn cold_due(&mut self) {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return;
+        };
+        if !model
+            .entities
+            .iter()
+            .any(|e| matches!(e.cold, Some(quadra_ir::Cold::After { .. })))
+        {
+            return;
+        }
+        if self
+            .cold_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(24 * 3600))
+        {
+            return;
+        }
+        self.cold_at = Some(std::time::Instant::now());
+        let files = match self.files() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("cold: {e}");
+                return;
+            }
+        };
+        let mut put = |key: &str, bytes: &[u8]| {
+            files
+                .blobs
+                .put(key, bytes, "application/vnd.sqlite3", "attachment")
+                .map_err(|e| e.to_string())
+        };
+        match quadra_store::ops::cold_run(
+            &self.url,
+            model,
+            &checked.report,
+            now(),
+            self.sequencer.as_ref(),
+            &mut put,
+        ) {
+            Ok(Some((v, n))) => eprintln!("cold: {n} closed records moved to the volume {v}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("cold: {e}"),
+        }
+    }
+
+    /// The volumes of the cold records not beside the database (a database rebuilt from its
+    /// log, another machine): brought from the store of files before anything reads.
+    pub(crate) fn fetch_cold(&self) -> Result<(), String> {
+        let files = match self.files() {
+            Ok(f) => f,
+            Err(_) => return Ok(()),
+        };
+        quadra_store::cold::fetch(&self.url, &mut |k| {
+            files.blobs.get(k).map_err(|e| e.to_string())
+        })
+        .map(|_| ())
+    }
+
     fn archive_due(&mut self) {
         let checked = self.checked.clone();
         let Some(model) = checked.model.as_ref() else {

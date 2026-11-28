@@ -361,3 +361,128 @@ fn cold_records_are_read_as_before() {
     assert_eq!(problems, Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Through the sequencer and its log (a server, the cloud): the move, a write that brings a
+/// record back, an erasure of a cold record (its value gone from the database in use and the
+/// view); a database rebuilt from the log reads the same, with the volume.
+#[test]
+fn cold_through_the_sequencer() {
+    use quadra_store::segments::Folder;
+    use quadra_store::sequencer::{Options, Rule};
+    quadra_store::db::seed_all_salts();
+    let dir = std::env::temp_dir().join(format!("quadra-cold-seq-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("p")).unwrap();
+    std::fs::write(dir.join("p/quadra.toml"), "[project]\nname = \"c\"\n").unwrap();
+    let src = SHOP.replace("entity Customer:\n    archive never\n    name: Text\n", "entity Customer:\n    archive never\n    name: Text\n\nentity Contact:\n    archive 1 year after created_at\n    email: Email? personal\n");
+    std::fs::write(dir.join("p/main.qd"), &src).unwrap();
+    let p = Project::load(&dir.join("p")).unwrap();
+    let checked = quadra_analysis::check(&p);
+    assert!(
+        checked.model.is_some(),
+        "{:?}",
+        checked
+            .diagnostics
+            .iter()
+            .map(|d| &d.message)
+            .collect::<Vec<_>>()
+    );
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    let url = format!("sqlite:{}", dir.join("data.db").display());
+    ops::init(&url, m, r, at(2026, 1, 1)).unwrap();
+    let log = dir.join("log");
+    let s = quadra_store::Sequencer::start(
+        &url,
+        Options {
+            destinations: vec![Box::new(Folder::new(&log).unwrap())],
+            rule: Rule::All,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let engine = |t| {
+        let mut i = ops::engine(&url, m, r, t).unwrap();
+        let db = quadra_store::Database::open(&url, m, r).unwrap();
+        i.sink = Some(Box::new(quadra_store::SequencedSink {
+            db,
+            model: m,
+            sequencer: s.clone(),
+            tickets: None,
+        }));
+        i
+    };
+    let mut i = engine(at(2026, 1, 10));
+    let ann = i
+        .transaction(|i| {
+            i.create(
+                "Contact",
+                vec![("email".into(), V::Text("ann@example.com".into()))],
+            )
+        })
+        .unwrap();
+    let bob = i
+        .transaction(|i| {
+            i.create(
+                "Contact",
+                vec![("email".into(), V::Text("bob@example.com".into()))],
+            )
+        })
+        .unwrap();
+    drop(i);
+    let (_, n) = ops::cold_run(&url, m, r, at(2027, 6, 1), Some(&s), &mut |_, _| Ok(()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(count(&url, "SELECT 1 FROM \"main\".\"contact\""), 0);
+    // erased while cold: back in use, and its value gone
+    let mut i = engine(at(2027, 6, 2));
+    i.transaction(|i| i.erase(&ann, "asked").map(|_| ()))
+        .unwrap();
+    drop(i);
+    let mut i = engine(at(2027, 6, 3));
+    let V::Ref { id: bob_id, .. } = &bob else {
+        panic!()
+    };
+    let V::Ref { id: ann_id, .. } = &ann else {
+        panic!()
+    };
+    assert_eq!(
+        i.store.read(*ann_id, "email", None).unwrap_or(V::None),
+        V::None
+    );
+    assert_eq!(
+        i.store.read(*bob_id, "email", None).map(|v| v.to_string()),
+        Some("bob@example.com".into())
+    );
+    drop(i);
+    assert_eq!(
+        count(
+            &url,
+            "SELECT 1 FROM \"main\".\"_quadra_history\" WHERE \"value\" LIKE '%ann@%'"
+        ),
+        0
+    );
+    s.stop();
+    let (problems, _) = ops::verify(&url, m, r, at(2027, 6, 4)).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    // rebuilt from the log: the same, with the volume beside it
+    let copy = dir.join("copy.db");
+    Folder::new(&log).unwrap().restore(&copy).unwrap();
+    let _ = std::fs::create_dir_all(dir.join("copy.db.cold"));
+    for e in std::fs::read_dir(dir.join("data.db.cold"))
+        .unwrap()
+        .flatten()
+    {
+        std::fs::copy(e.path(), dir.join("copy.db.cold").join(e.file_name())).unwrap();
+    }
+    let curl = format!("sqlite:{}", copy.display());
+    let (problems, _) = ops::verify(&curl, m, r, at(2027, 6, 4)).unwrap();
+    assert_eq!(problems, Vec::<String>::new());
+    let mut i = ops::engine(&curl, m, r, at(2027, 6, 5)).unwrap();
+    assert_eq!(
+        i.store.read(*bob_id, "email", None).map(|v| v.to_string()),
+        Some("bob@example.com".into())
+    );
+    assert_eq!(i.ids("Contact", None).len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

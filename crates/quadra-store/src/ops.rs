@@ -935,11 +935,41 @@ pub fn cold_run(
     // which, and their versions as copied
     let (records, versions) = with_engine(url, model, report, time, None, |i| {
         let due = i.cold_due().map_err(|e| flow("cold", e))?;
-        let mut out: Vec<(String, u64)> = Vec::new();
+        // each closed record with its lines; one that a record staying in use refers to stays
+        // in use too (its references hold it: an open order keeps its customer), until nothing
+        // more changes
+        let mut groups: Vec<Vec<(String, u64)>> = Vec::new();
         for (ent, id) in due {
-            let lines = i.lines_of(&ent, id);
-            out.push((ent, id));
-            out.extend(lines);
+            let mut g = vec![(ent.clone(), id)];
+            g.extend(i.lines_of(&ent, id));
+            groups.push(g);
+        }
+        let mut referrers: HashMap<u64, Vec<u64>> = HashMap::new();
+        for g in &groups {
+            for (ent, id) in g {
+                referrers.insert(
+                    *id,
+                    i.referring(ent, *id)
+                        .into_iter()
+                        .map(|(_, r, _)| r)
+                        .collect(),
+                );
+            }
+        }
+        loop {
+            let going: HashSet<u64> = groups.iter().flatten().map(|(_, id)| *id).collect();
+            let before = groups.len();
+            groups.retain(|g| {
+                g.iter()
+                    .all(|(_, id)| referrers[id].iter().all(|r| going.contains(r)))
+            });
+            if groups.len() == before {
+                break;
+            }
+        }
+        let mut out: Vec<(String, u64)> = Vec::new();
+        for g in groups {
+            out.extend(g);
         }
         let v: Vec<u64> = out
             .iter()
