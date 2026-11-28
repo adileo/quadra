@@ -266,4 +266,4 @@ quadra test
 - The history covers the digests of the values: an erasure keeps it verifiable.
 - `quadra db key init` signs every commit; `quadra db verify` checks the signatures.
 
-[Next steps →](./17-next-steps)
+[Step 17: Pages, history and the trash →](./17-pages-history-and-the-trash)

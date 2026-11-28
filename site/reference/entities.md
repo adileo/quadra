@@ -38,7 +38,7 @@ An entity's body is a list of **members**:
 |---|---|
 | fields and formulas | [below](#fields) |
 | `check`, `warn`, `unique (…)`, `frozen when …`, `live …` | [Rules](/reference/rules) |
-| `retain 10 years after date`, `expire 2 days after created_at`, `history 1 year` | [Retention and erasure](/reference/retention) |
+| `retain 10 years after date`, `expire 2 days after created_at`, `history 1 year`, `history last 10`, `history none`, `deletable, trash 30 days` | [Retention and erasure](/reference/retention) |
 | `flow field:` and `action name:` | [Flows and actions](/reference/flows-and-actions) |
 | `post to Ledger:` | [Ledgers](/reference/ledgers) |
 | `fn name(…):` | [methods](#functions) |
@@ -422,8 +422,19 @@ whose back-reference is `parent`) are copied too.
 let credit = inv.copy(kind=CustomerCredit, reverses=inv, date=today(), notes=reason)
 ```
 
-There is no delete: a record that should no longer count is cancelled, reversed or
-deactivated by the model (a state, an `active` flag).
+A record is not deleted unless its entity says so. A record that should no longer count is
+usually cancelled, reversed or deactivated by the model (a state, an `active` flag): an
+invoice, an order, a payment keep their place in the history. An entity whose records may
+go, the pages of a website, the sessions of a login, says `deletable`, and may keep a trash
+first ([Retention and erasure](/reference/retention#deleting-records-deletable)):
+
+```quadra
+entity Page:
+    deletable, trash 30 days
+    history last 10
+    slug: Text unique
+    title: Text
+```
 
 ## Temporary entities
 

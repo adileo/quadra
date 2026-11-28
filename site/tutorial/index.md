@@ -31,7 +31,8 @@ its code compiles with zero errors and all of its tests pass.
 | [14. Files, formats and databases](./14-files-formats-and-databases) | SFTP and FTP, `from csv` and `from fixed`, `atomic`, `write`, `insert`, on-premise agents | the till, the bank, the accountant |
 | [15. Documents, labels and signatures](./15-documents-labels-and-signatures) | `.qdp` files, `document`, `label`, `render`, `zpl`, `attach`, signers | invoices in PDF, parcel labels, signed files |
 | [16. Retention, erasure and a signed history](./16-retention-erasure-and-signed-history) | `retain`, `expire`, `personal`, `erase`, signed commits, archives | GDPR requests, invoices kept ten years |
-| [Next steps](./17-next-steps) | where to go from here | |
+| [17. Pages, history and the trash](./17-pages-history-and-the-trash) | `history last 10`, `history none`, `deletable`, the trash, `[data]` | a site edited often, baskets that go |
+| [Next steps](./18-next-steps) | where to go from here | |
 
 ## How each step works
 

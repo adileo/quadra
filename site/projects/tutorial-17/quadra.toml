@@ -1,0 +1,78 @@
+[project]
+name = "shop"
+title = "Tutorial 17 · Pages, history and the trash"
+
+# Values that depend on where the app runs. Secrets are never written here: they come from the
+# environment (or a .env file), and only a connection can use them.
+[vars]
+WEBSHOP_TOKEN = { secret = true, description = "the API token of the web shop" }
+WEBSHOP_HOOK_SECRET = { secret = true, description = "signs the web shop's webhooks" }
+CARRIER_KEY = { secret = true, description = "the carrier's API key" }
+SMTP_PASSWORD = { secret = true }
+TILL_SFTP_KEY = { secret = true, description = "the private key the till's SFTP server knows us by" }
+BANK_FTP_PASSWORD = { secret = true }
+ACCOUNTING_DB_PASSWORD = { secret = true }
+SIGN_P12 = { secret = true, description = "the company's signing certificate (.p12, base64)", test = "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" }
+SIGN_PASSWORD = { secret = true, test = "quadra-test" }
+SHOP_EMAIL = { default = "shop@beans.example.com", test = "test@beans.example.com" }
+
+# The online shop: it sends us its orders, we send it our products and stock.
+[connections.webshop]
+kind = "http"
+url = "https://beans.example.com/api"
+bearer = { var = "WEBSHOP_TOKEN" }
+inbound_signature = "hmac"
+inbound_secret = { var = "WEBSHOP_HOOK_SECRET" }
+
+# The carrier: we book a parcel, it answers with a tracking number.
+[connections.carrier]
+kind = "http"
+url = "https://api.carrier.example.com/v2"
+api_key = { var = "CARRIER_KEY" }
+rate = "5/s"
+
+# Our mail server.
+[connections.mail]
+kind = "smtp"
+url = "smtps://smtp.example.com:465"
+user = "shop@beans.example.com"
+password = { var = "SMTP_PASSWORD" }
+from = "Beans & Leaves <shop@beans.example.com>"
+
+# The till at the counter: an SFTP server in the shop's network, reached by our agent there.
+[connections.till]
+kind = "sftp"
+url = "sftp://till.local/data"
+user = "quadra"
+private_key = { var = "TILL_SFTP_KEY" }
+known_host = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+location = "agent:backoffice"
+
+# The bank: its statements, on FTP over TLS.
+[connections.bank]
+kind = "ftp"
+url = "ftps://ftp.bank.example.com/statements"
+user = "beans-and-leaves"
+password = { var = "BANK_FTP_PASSWORD" }
+
+# The accountant's software: a PostgreSQL database in the back office, reached by the agent.
+[connections.accounting]
+kind = "postgres"
+url = "postgres://accounts.local:5432/books"
+user = "quadra"
+password = { var = "ACCOUNTING_DB_PASSWORD" }
+location = "agent:backoffice"
+insecure = true                             # no TLS inside the back office
+
+# The company's signature, for invoices sent and files to the tax authority.
+[signers.company]
+p12 = { var = "SIGN_P12" }
+password = { var = "SIGN_PASSWORD" }
+reason = "Invoice"
+location = "Milano"
+
+# The thermal printer in the back office: raw printing on port 9100, reached by the agent there.
+[connections.zebra]
+kind = "printer"
+url = "tcp://192.168.1.50:9100"
+location = "agent:backoffice"

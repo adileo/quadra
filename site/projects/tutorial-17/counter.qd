@@ -1,0 +1,49 @@
+# The counter: what the till sells comes in as files, our prices go out to it the same way.
+
+from catalog import Product
+from stock import Stock
+
+
+# A sale at the counter, from the till's closing.
+entity CounterSale:
+    day: Date
+    till: Code
+    product: Product
+    qty: Qty<product.uom> where > 0
+    amount: Money<EUR>
+
+    post to Stock:
+        add(product=product, qty=-qty)
+
+
+# One row of the till's closing file, as the till writes it: semicolons, decimal commas,
+# Italian column names.
+record TillRow from csv(sep=";", decimal=","):
+    till: Code at "CASSA"
+    day: Date at "DATA" format "%d/%m/%Y"
+    sku: Code at "CODICE"
+    qty: Decimal at "QTA"
+    amount: Decimal at "IMPORTO" decimals 2
+
+
+# Every evening the till drops `closings/<day>.csv`; we look for new files every 15 minutes.
+inbound TillClosing via till as r: TillRow:
+    pull "closings/*.csv" every 15 minutes
+    atomic per file                         # a closing is one thing: all of it, or none
+    let p = Product.where(x => x.sku == r.sku).first() ?? fail f"unknown product {r.sku}"
+    CounterSale(day=r.day, till=r.till, product=p, qty=Qty(r.qty, p.uom),
+        amount=(1.00 EUR * r.amount).round())
+
+
+# The till's price list: one file per product, fixed-width, as the till reads it.
+record TillPrice from fixed:
+    sku: Code at "1..12"
+    name: Text at "13..42"
+    price: Decimal at "43..51" decimals 2
+    per_kg: Bool at "52" format "K/P"
+
+publish Product to till as p:
+    when p.active
+    on price, name
+    write(f"prices/{p.sku}.txt", [TillPrice(sku=p.sku, name=p.name,
+        price=p.price * Qty(1, p.uom) / 1 EUR, per_kg=p.uom == kg)])

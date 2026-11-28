@@ -1,0 +1,27 @@
+# The people we sell to.
+
+record Address:
+    street: Text
+    city: Text
+    zip: Text
+
+
+entity Customer:
+    name: Text unique where n => n.len() >= 2
+    kind: enum(Person, Business) default Person
+    email: Email? unique personal
+    vat_number: VatNumber? required when kind is Business
+    address: Address? personal
+    since: Date default today()
+    discount: Percent where 0%..30% default 0%
+    credit_limit: Money<EUR> where >= 0 default 500.00 EUR
+
+    referred_by: Customer?
+    referrals: [Customer] via referred_by
+
+    unique (vat_number) when kind is Business
+    check referred_by != self, "A customer cannot refer themselves"
+
+    # GDPR art. 17: their email and address emptied, everywhere, unless invoices keep them
+    action forget(reason: Text):
+        erase self, reason

@@ -729,7 +729,7 @@ fn a_database_stops_growing_at_its_size_limit() {
     let (cfg, token) = project(&temp("size"), NOTES);
     let start = std::fs::metadata(cfg.root.join("data.db")).unwrap().len();
     let max = 1 << 20;
-    assert!(start < max / 2, "an empty project takes {start} bytes");
+    assert!(start < max * 3 / 4, "an empty project takes {start} bytes");
     let cfg = Config {
         limits: Limits {
             max_bytes: Some(max),

@@ -1,0 +1,44 @@
+# The site's pages: deleted to the trash and back, gone for good after thirty days; the
+# baskets, gone in two days.
+
+from catalog import Product
+from site import Page, Section, Basket, Removed
+from tests.fixtures import shop
+
+
+test "a page goes to the trash and comes back":
+    use shop
+    let p = Page(slug="shipping", title="Shipping")
+    Section(page=p, heading="Italy", text="Two days")
+    delete p
+    expect Page.all().count() == 0
+    expect Section.all().count() == 0
+    expect Removed.all().first()?.slug == "shipping"
+    restore p
+    expect p.title == "Shipping"
+    expect p.sections.count() == 1
+
+
+test "the slug of a page in the trash is free":
+    use shop
+    let old = Page(slug="about", title="About us")
+    delete old
+    Page(slug="about", title="Who we are")
+    expect_error "unique":
+        restore old
+
+
+test "thirty days later the trash is empty":
+    clock 2026-03-01 09:00
+    let p = Page(slug="sale", title="Winter sale")
+    delete p
+    clock 2026-04-01 09:00
+    expect_error "is not in the trash":
+        restore p
+
+
+test "a basket is gone two days later":
+    clock 2026-03-01 09:00
+    Basket(qty=2)
+    clock 2026-03-03 09:01
+    expect Basket.all().count() == 0

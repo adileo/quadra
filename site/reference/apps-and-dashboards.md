@@ -270,8 +270,10 @@ grid has the focus (⌘S elsewhere saves the app in Edit mode); *Discard* drops 
 the entity page's: a value the field refuses is marked red with the message; if someone else
 changed one of those records since it was read, nothing is saved and the grid shows who
 changed what. A board's cards stay where they are without `move` (they are still selected by
-a click). There is no option to delete rows: records are not deleted in Quadra — to cancel or
-close one, add a **Button** running its action.
+a click). There is no option to delete rows: the record panel deletes a record of a `deletable`
+entity, for whoever has the `delete` permission ([Retention and
+erasure](/reference/retention#deleting-records-deletable)); to cancel or close one, add a
+**Button** running its action.
 
 Enabling editing grants nothing: each change is a `POST /v1/tx` of the person making it. A
 field they may not change, a formula, a frozen record or a field of another record

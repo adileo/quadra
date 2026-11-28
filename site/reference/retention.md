@@ -41,7 +41,9 @@ entity Contract:
 | `expire N unit after field` | an entity's line, or a field's modifier | erased at that moment, by itself |
 | `retain …, then expire` | an entity's line | both, the same term |
 | `personal` | a field's modifier | data about a person: `erase` empties it |
-| `history N unit` | an entity's line | the values replaced longer ago leave the history ([below](#a-shorter-history-history)) |
+| `history N unit` | an entity's line | the values replaced longer ago leave the history ([below](#how-much-history-history)) |
+| `history last N`, `history none`, `history full` | an entity's line, or `[data] history` for the project | the last N versions of each value, only the values in force, or all of them ([below](#how-much-history-history)) |
+| `deletable`, `deletable, trash N unit` | an entity's line | its records can be deleted, through a trash first ([below](#deleting-records-deletable)) |
 
 The unit is `hours`, `days`, `weeks`, `months` or `years` (`1 year` too). The time is counted
 from a stored `Date` or `DateTime` field of the record, or from `created_at` or `updated_at`.
@@ -268,19 +270,56 @@ key. A preview or a fork that turns it on gets a key of its own.
 The tables hold the values in force; what grows for years is the history of every value
 replaced.
 
-### A shorter history: `history`
+### How much history: `history`
+
+The history keeps every version of every value, by default. An entity says how much of it
+it needs:
 
 ```quadra
+entity Invoice:                 # (nothing said: every version, for ever)
+    number: Code
+
 entity Sensor:
-    history 1 year
+    history 1 year              # the versions replaced more than a year ago go
     reading: Decimal
+
+entity Page:
+    history last 10             # the last 10 versions of each value
+    body: Text
+
+entity Session:
+    history none                # only the values in force
+    token: Text
 ```
 
-Once a day, the sweep takes out of the history the values replaced more than a year ago
-(their digests stay). The value in force a year ago stays, and everything since. It suits
-entities that change often and whose old values nobody needs: readings, levels, positions.
-An entity that a frozen record reads cannot have it: a frozen record reads the world as it
-was when it froze.
+| | keeps | the chain covers | for |
+|---|---|---|---|
+| `history full` (the default) | every version, for ever | every value | what must be audited: invoices, payments, stock, users |
+| `history 1 year` | every version until a year after it was replaced | every value (the digests of those gone) | readings, levels, positions |
+| `history last 10` | the last 10 versions of each value | every value (the digests of those gone) | the pages of a site, documents edited often |
+| `history none` | the value in force of each field, nothing else | nothing of it: its commits, not its values | sessions, carts, caches, counters |
+
+Once a day the sweep takes the versions beyond what the entity keeps out of the history
+(their digests stay, the chain still verifies). An entity with `history none` writes no
+version: the history holds only a copy of each value in force, outside the chain, that a
+write replaces; its record deleted, nothing of it is left. What it loses:
+
+- "as it was then": the history tab of the studio shows what it keeps, or says it keeps none;
+- the frozen records that read it: an entity frozen records read keeps its history whole, and
+  the checker refuses `history last` or `none` on it (they read the world as it was when they
+  froze);
+- `quadra db verify` checks its commits, not its values.
+
+A project of a website, where most data is not audited, says it once:
+
+```toml
+[data]
+history = "last 10"         # the default of the project's entities: full, none, "last 10", "1 year"
+```
+
+An entity that says `history …` keeps what it says (`history full` for the users, the
+orders); the entities of the standard library and those frozen records read keep their whole
+history.
 
 ### Archives: `quadra db archive`
 
@@ -308,3 +347,91 @@ frozen records had.
 
 A value erased after it was archived leaves the archive too: the archive is written again
 without it, and is still the one its checkpoint names.
+
+The archive takes, with the values replaced, every value left of the records gone by then
+(expired, deleted for good: their digests), so what is left of them does not grow for ever.
+
+The sweep does it by itself, once a day, when the project says how old:
+
+```toml
+[data]
+archive_after = "2 years"
+```
+
+The checkpoint is a commit like the others, through the server's sequencer and its log: on
+Quadra Cloud it runs this way, in the tenant's bucket.
+
+## Deleting records: `deletable`
+
+Records are not deleted unless their entity says so: an invoice is cancelled or credited, and
+stays. The records of an entity that says `deletable` can be:
+
+```quadra
+entity Page:
+    deletable, trash 30 days        # to the trash first, for 30 days
+    history last 10
+    slug: Text unique
+    title: Text
+    blocks: [Block]
+
+entity Block:
+    page: Page parent
+    text: Text
+
+entity Session:
+    deletable                       # deleted for good at once
+    history none
+    token: Text
+
+role Editor:
+    read, create, edit, delete Page
+```
+
+| | |
+|---|---|
+| in code | `delete page`, `restore page` |
+| the API | `DELETE /v1/records/Page/12`, `POST /v1/records/Page/12/restore`, `GET /v1/trash`, or the operations `delete` and `restore` of `POST /v1/tx` ([HTTP API](/reference/http-api#deleting-records)) |
+| the studio | **Delete** in the record's panel; the **Trash**, with **Restore** |
+| who | the permission `delete Page` (it restores too) |
+
+A record deleted goes with its lines. The optional references to it become none; a required
+reference holds it, and so does a retention:
+
+```text
+Page#12 cannot be deleted: Comment#40 refers to it (`Comment.page` is required)
+Invoice#23 cannot be deleted before 2036-03-01: Invoice is kept 10 years after date
+```
+
+`on Page deleted as p:` runs first, while its values are there.
+
+**The trash.** With `trash 30 days`, a record deleted leaves every table, list and search,
+and its unique values are free (a new page may take its slug); it is kept whole, with its
+lines and the references it emptied. `restore` gives it back with its id, and puts those
+references back where they are still empty; it is refused when a value of it that is unique
+was taken meanwhile. Asked for by its id, the API answers `410` with until when. When its time
+is over, the sweep deletes it for good. In tests, `clock` does the same.
+
+**What is left of it** is what its entity's history keeps: everything with `history full` (it
+is the audit of what the record was, readable as of any earlier moment), nothing with `history
+last N` or `none` (the values go when it is deleted for good). A record of `history none`
+deleted for good leaves nothing but its commit: who deleted what, and when. The space it
+took goes back to the file system within the day ([below](#space-on-disk)).
+
+## Messages and events
+
+The messages an `inbound` received and the events an `outbound` sent are kept for a term once
+they are closed: 90 days and 30 days, or what the project says (`[data] inbox`, `outbox`), or
+what an `inbound` or an `outbound` says (`keep 10 years`, `keep forever`, `keep 30 days, then
+archive`). What is pending, failed or rejected stays ([Connections](/reference/connections#outbound)).
+
+## Space on disk
+
+What is erased, expired or deleted is overwritten with zeros in the database's file
+(`secure_delete`): an erased value leaves no trace in its free pages, nor in the copy a
+server uploads when it goes to sleep. After an erasure the server writes its WAL back into the
+file and empties it, at once.
+
+The pages freed go back to the file system once a day, and at once after an erasure (SQLite's
+incremental `auto_vacuum`): a database that deleted half of its records is half as large the
+next day. A database made by an earlier version is turned into one that does this the first
+time (a `VACUUM`, once).

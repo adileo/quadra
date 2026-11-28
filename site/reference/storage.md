@@ -29,7 +29,8 @@ databases.
 |---|---|
 | `_quadra_commits` | one row per transaction: `tx`, `at`, `user_id`, `cause`, `prev_hash`, `hash`, and `signature` when the commits are signed |
 | `_quadra_history` | every value written to every field, with its transaction, in order, and its `salt`; an erased value has no value nor salt, only its `digest` |
-| `_quadra_erasures`, `_quadra_erased` | what was erased, by which commit and why; what is left of the records taken away ([Retention and erasure](/reference/retention)) |
+| `_quadra_erasures`, `_quadra_erased` | what was erased, by which commit and why; what is left of the records taken away or deleted ([Retention and erasure](/reference/retention)) |
+| `_quadra_trash` | the records of `deletable, trash …` deleted and not yet for good: whole, with their lines and the references they emptied, until when; not part of the commit hash ([Deleting records](/reference/retention#deleting-records-deletable)) |
 | `_quadra_keys`, `_quadra_checkpoints` | the keys that sign the commits; the archives of the history |
 | `_quadra_records` | every record: entity, creation (transaction, time, user), `frozen_tx`, cause, warnings; `last_tx`, the last transaction that changed its row in any way (a field, its metadata, a computed value), and `version_tx`, the last one that wrote its fields when its projection row reads back exactly (0: the record is read from its history) |
 | `_quadra_ledger_rows` | every ledger row: ledger, transaction, date, source, columns |
@@ -44,7 +45,15 @@ databases.
 Nothing in the history is ever updated or deleted, but for erasure: a correction is a new
 write; a rename is a mapping applied when reading, so the signatures of past commits stay
 valid; a reverted change is a new transaction. An erasure (`erase`, a retention that ends)
-removes values and keeps their digests ([Retention and erasure](/reference/retention)).
+removes values and keeps their digests ([Retention and erasure](/reference/retention)). An
+entity may keep less: the last N versions of each value (`history last 10`), or only the
+values in force (`history none`: one row per value, outside the chain, replaced at each
+write); a checkpoint moves the history older than a date to an archive
+([Retention and erasure](/reference/retention#how-much-history-history)).
+
+On SQLite what is deleted is overwritten with zeros (`secure_delete`), and the pages freed go
+back to the file system once a day and after an erasure (incremental `auto_vacuum`): a
+database shrinks when its records go.
 
 ### The signed commit log
 

@@ -1,0 +1,89 @@
+# Files: the till's closings, the bank's statements, the prices for the till.
+
+from tests.fixtures import shop, shop_with_orders, demo
+
+
+const CLOSING = """CASSA;DATA;CODICE;QTA;IMPORTO
+T1;27/11/2026;MUG-01;2;15,00
+T1;27/11/2026;BEANS-01;0,5;9,00
+"""
+
+
+test "the till's file is read as rows":
+    let rows = TillRow.parse_rows(CLOSING)
+    expect rows.count() == 2
+    expect rows[1].qty == 0.5
+    expect rows.sum(r => r.amount) == 24.00
+    expect rows.csv().starts_with("CASSA;DATA;CODICE;QTA;IMPORTO\r\nT1;27/11/2026;MUG-01;2;15,00\r\n")
+    expect TillRow.parse_rows(rows.csv()) == rows       # written and read back: the same rows
+
+
+test "a closing becomes counter sales and leaves the stock":
+    use shop
+    receive TillClosing CLOSING
+    expect CounterSale.count() == 2
+    expect mug.on_hand == 48 pcs
+    expect beans.on_hand == 19.5 kg
+
+
+test "one bad row rejects the whole closing":
+    use shop
+    expect_error "unknown product DECAF-01":
+        receive TillClosing """CASSA;DATA;CODICE;QTA;IMPORTO
+T1;27/11/2026;MUG-01;2;15,00
+T1;27/11/2026;DECAF-01;1;9,00
+"""
+    expect CounterSale.count() == 0
+    expect mug.on_hand == 50 pcs
+
+
+test "a closing that sells more than we have is rejected":
+    use shop
+    expect_error "Not enough stock":
+        receive TillClosing """CASSA;DATA;CODICE;QTA;IMPORTO
+T1;27/11/2026;TEA-01;6;252,00
+"""
+
+
+test "a bank credit pays the invoice it names":
+    use demo
+    let inv = cafe.orders.flat_map(o => o.invoices).first() ?? fail "no invoice"
+    let number = inv.number ?? ""
+    let statement = [
+        BankMovement(kind="61", value_date=2026-11-27, amount=0, sign="C", reference="opening"),
+        BankMovement(kind="62", value_date=2026-11-27, amount=87.92, sign="C",
+            reference=f"{number} thank you"),
+        BankMovement(kind="62", value_date=2026-11-27, amount=12.00, sign="D", reference="bank fees"),
+    ]
+    receive BankStatement statement.fixed()
+    expect inv.payment_status is Paid
+    expect cafe.balance == 0 EUR
+
+
+test "a credit that names no invoice is refused alone":
+    use demo
+    let inv = cafe.orders.flat_map(o => o.invoices).first() ?? fail "no invoice"
+    receive BankStatement [
+        BankMovement(kind="62", value_date=2026-11-27, amount=5.00, sign="C", reference="a gift"),
+        BankMovement(kind="62", value_date=2026-11-27, amount=87.92, sign="C",
+            reference=inv.number ?? ""),
+    ].fixed()
+    expect inv.payment_status is Paid
+
+
+test "the till gets the new price of a product":
+    use shop
+    beans.price = 19.00 EUR/kg
+    expect sent PublishProductToTill(record=beans)
+
+
+test "a fixed-width record, column by column":
+    let p = TillPrice(sku="BEANS-01", name="House blend", price=19.00, per_kg=true)
+    expect [p].fixed() == "BEANS-01    House blend                   000001900K\r\n"
+
+
+test "a posted invoice goes to the accountant's database":
+    use shop_with_orders
+    let inv = order.create_invoice()
+    inv.post()
+    expect sent InvoicePosted(invoice=inv)

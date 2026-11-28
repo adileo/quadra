@@ -50,6 +50,7 @@ url = "sqlite:data/shop.db"
 | `[vars]` | The variables whose values depend on where the app runs, some of them secret: [Variables and connections](/reference/connections#variables). |
 | `[connections.<name>]` | The systems the app sends to (HTTP, SMTP): [Variables and connections](/reference/connections#connections). |
 | `[files]` | Where the files of `File` fields are kept: [Files](#files). |
+| `[data]` | How much the project keeps: `history` (the default of its entities: `full`, `none`, `"last 10"`, `"1 year"`), `inbox` and `outbox` (how long the messages received and the events sent are kept once closed: `"90 days"`, `"forever"`, `"30 days, then archive"`), `archive_after` (the history older than that moved to archives by the sweep, `"2 years"`): [Retention and erasure](/reference/retention#how-much-history-history). |
 
 When neither `--url` nor `[database] url` is given, the database is
 `sqlite:<root>/.quadra/data.db`. Database URLs are described in [Storage](/reference/storage#database-urls).

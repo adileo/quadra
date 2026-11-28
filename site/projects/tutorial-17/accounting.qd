@@ -1,0 +1,28 @@
+# The accountant's software reads the invoices we post from a table agreed for the exchange.
+
+from invoices import Invoice
+
+
+event InvoicePosted(invoice: Invoice, number: Text)
+
+on Invoice enters Posted as i:
+    emit InvoicePosted(invoice=i, number=i.number ?? "")
+
+
+# A row of the exchange table, its columns as the accountant's database names them.
+record AccountingInvoice from json:
+    number: Text at "DOC_NUMBER"
+    date: Date at "DOC_DATE"
+    customer: Text at "CUSTOMER"
+    vat_number: Text? at "VAT_NUMBER"
+    taxable: Decimal at "TAXABLE"
+    vat: Decimal at "VAT"
+    total: Decimal at "TOTAL"
+
+
+outbound InvoicePosted via accounting as e:
+    ordered by e.invoice.customer           # one customer's invoices in the order posted
+    let i = e.invoice
+    insert("exchange.invoices", AccountingInvoice(number=e.number, date=i.date,
+        customer=i.customer.name, vat_number=i.customer.vat_number,
+        taxable=(i.subtotal + i.shipping) / 1 EUR, vat=i.vat / 1 EUR, total=i.total / 1 EUR))

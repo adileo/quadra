@@ -1,0 +1,10 @@
+from tests.fixtures import demo
+
+
+test "the demo data is consistent":
+    use demo
+    expect Order.count() == 3
+    expect Invoice.count(i => i.state is Posted) == 2
+    expect cafe.balance == 87.92 EUR
+    expect anna.balance == 0 EUR
+    expect beans.on_hand == 15 kg

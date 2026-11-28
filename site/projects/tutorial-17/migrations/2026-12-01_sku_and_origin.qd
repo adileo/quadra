@@ -1,0 +1,35 @@
+# A migration travels with the code change it belongs to (same release).
+# `quadra db migrate --dry-run` runs it on the live data without writing; `quadra db migrate`
+# runs it in the same transaction that rebuilds the tables for the new model.
+
+migration sku_and_origin:
+    reason: "SKUs instead of codes; customs need the country of origin; payment methods become a closed list"
+
+    # 1. A rename: the history is not rewritten, old entries are read under the new name.
+    rename Product.code -> Product.sku
+
+    # 2. A change of type: every stored value goes through these arms (`old` is the previous model).
+    convert Payment.method from old.Text:
+        "card" | "Card"                 => Card
+        "transfer" | "bank transfer"    => Transfer
+        "cash"                          => Cash
+        other                           => fail f"Unknown payment method: {other}"
+
+    # 3. A new required field: fill it from a file, or with a provisional value.
+    backfill Product.origin:
+        for p in Product.all():
+            if let origin = ProductOrigin.find(x => x.sku == p.sku)?.origin:
+                p.origin = origin
+            else:
+                p.origin = provisional("XX", reason="Ask the supplier", until=2027-01-31)
+
+    # 4. If this does not hold, nothing is written.
+    verify:
+        Product.count(p => p.origin.is_provisional) <= 5
+
+
+# Data that exists only while the migration runs.
+temporary entity ProductOrigin:
+    sku: Code
+    origin: Code
+    load from "migrations/origins.csv"

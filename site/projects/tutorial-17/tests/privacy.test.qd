@@ -1,0 +1,37 @@
+# Retention and erasure: what invoices keep, what a customer who asks loses, what expires.
+
+from customers import Customer
+from privacy import Inquiry
+from tests.fixtures import demo, shop
+
+
+test "invoices keep their customer for ten years":
+    use demo
+    expect_error "cannot be erased before":
+        anna.forget("she asked on the phone")
+    expect anna.email == "anna@example.com"
+
+
+test "a customer without invoices is forgotten":
+    use shop
+    let bea = Customer(name="Bea Verdi", email="bea@example.com")
+    bea.forget("she asked by email")
+    expect bea.email == none
+    expect bea.address == none
+    expect bea.name == "Bea Verdi"
+
+
+test "an inquiry of the web shop is kept six months":
+    clock 2026-01-10 09:00
+    Inquiry(name="Bea", email="bea@example.com", message="Do you ship to Austria?")
+    clock 2027-01-01 09:00
+    expect Inquiry.all().count() == 0
+
+
+test "an inquiry is still there the day before":
+    clock 2026-01-10 09:00
+    Inquiry(name="Bea", email="bea@example.com", message="Do you ship to Austria?")
+    clock 2026-07-09 09:00
+    expect Inquiry.all().count() == 1
+    clock 2026-07-10 09:01
+    expect Inquiry.all().count() == 0

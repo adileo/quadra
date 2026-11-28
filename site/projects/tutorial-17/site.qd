@@ -1,0 +1,38 @@
+# The pages of the web shop's site: edited often, deleted sometimes, and nobody audits them;
+# the visitors' baskets, gone in two days.
+
+from catalog import Product
+
+
+# A page keeps its last ten versions; deleted, it stays thirty days in the trash.
+entity Page:
+    deletable, trash 30 days
+    history last 10
+    slug: Text unique where s => s.len() >= 2
+    title: Text
+    body: Text?
+    sections: [Section]
+
+
+entity Section:
+    page: Page parent
+    heading: Text
+    text: Text?
+
+
+# A visitor's basket: only what it holds now, gone for good two days after it was made.
+entity Basket:
+    deletable
+    history none
+    expire 2 days after created_at
+    product: Product?
+    qty: Int default 1
+
+
+# What was deleted, for the editors' weekly note.
+entity Removed:
+    slug: Text
+    title: Text
+
+on Page deleted as p:
+    Removed(slug=p.slug, title=p.title)

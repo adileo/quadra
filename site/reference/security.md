@@ -75,10 +75,12 @@ hide | show target[, target…]
 | `show` | gives back fields that another role of the user hides: `show Product.cost` |
 | `read history` | the history of records (every version and cause) |
 
-There is no `delete`: records are not deleted in Quadra (only a retention that ends takes
-them away: [Retention and erasure](/reference/retention)), they are cancelled, reversed or
-deactivated by an action, so `delete Order` is an error (`records are not deleted in Quadra,
-so there is no delete permission: …`); permit the action instead (`run Order.cancel`).
+`delete` is the permission of the entities whose records can be deleted (`deletable`:
+[Retention and erasure](/reference/retention#deleting-records-deletable)): `delete Page`
+lets a role delete a page, send it to the trash and restore it. On an entity that is not
+`deletable` it is an error (`records of Order are not deleted, so there is no `delete`
+permission on it: …`): its records are cancelled, reversed or deactivated by an action;
+permit the action instead (`run Order.cancel`).
 `derived` is not a permission either. `hide` and `show` stand alone on their line, inside a
 role.
 

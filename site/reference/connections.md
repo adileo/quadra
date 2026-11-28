@@ -880,13 +880,34 @@ server stops between sending and recording the answer, the event is sent again w
 `Idempotency-Key`, which the receiver should use to ignore what it has already seen.
 
 The log of every step, of the events going out and of the messages coming in, is kept 90
-days, then pruned; the events and messages themselves stay, with their final state, error and
-attempts. Another period:
+days, then pruned. Another period:
 
 ```toml
 [integrations]
 log_days = 365
 ```
+
+The events and messages themselves are kept for a term once they are closed: a message
+received 90 days after it was handled (or skipped), an event 30 days after it was delivered.
+What is pending, failed or rejected stays, until a person settles it; so does the latest of
+each `latest by`. A message keeps a thin row (its key, hash and state) for another term, so
+that the same message sent again is still known and not handled twice. Another term, for the
+whole project or for one `inbound` or `outbound`:
+
+```toml
+[data]
+inbox = "1 year"
+outbox = "30 days, then archive"   # written to an archive in the store of files first
+```
+
+```quadra
+inbound OrderIn via shop path "/orders" as m: ShopOrder:
+    keep 10 years                   # or `keep forever`, `keep 30 days, then archive`
+    …
+```
+
+An archive is a file of JSON lines, compressed, in the project's store of files
+(`archive/messages-<when>.jsonl.gz`); the pruning waits while it cannot be written.
 
 On Quadra Cloud connections only reach public addresses: a name that resolves to a private,
 loopback or link-local address (the clouds' metadata, `169.254.169.254`) is refused, and so
