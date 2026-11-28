@@ -513,6 +513,8 @@ Every branch gets its own environment, with sample data or a copy of production.
 
 <div class="q-works"><span>Works with</span><b>Claude</b><b>ChatGPT</b><b>Cursor</b><b>any MCP client</b></div>
 
+<AgentPrompt />
+
 </div>
 
 <div class="q-section">

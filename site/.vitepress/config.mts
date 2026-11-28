@@ -93,6 +93,17 @@ function writeLlms(outDir: string) {
     "",
     "Files are `.qd` (the model) and `.qdi` (interfaces). `quadra check` checks a project, `quadra test` runs its tests, `quadra dev` runs it with Quadra Studio. The full documentation as one file: " + hostname + "/llms-full.txt",
     "",
+    "## Get started",
+    "",
+    "Install the `quadra` command (compiler, test runner, database tools, server and Quadra Studio, in one program):",
+    "",
+    "- macOS and Linux: `curl -fsSL " + hostname + "/install.sh | sh`",
+    "- Windows (PowerShell): `irm " + hostname + "/install.ps1 | iex`",
+    "",
+    "Then, in an empty folder: `quadra init` creates a project and `quadra dev` runs it, with the database, the HTTP API and Quadra Studio on http://127.0.0.1:8080, updated at every save.",
+    "",
+    "To run it without servers, Quadra Cloud is free to start: sign up at https://app.quadra.run with an email address (no credit card required), then push the project from GitHub or the command line.",
+    "",
   ];
   const full: string[] = [];
   for (const [name, links] of sections) {
