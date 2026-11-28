@@ -280,6 +280,7 @@ quadra test                         # every test of the project in the current f
 quadra test examples/extended       # a project elsewhere
 quadra test --filter invoice        # tests whose name contains "invoice"
 quadra test --db sqlite             # each test on a fresh SQLite database
+quadra test --db sqlite --cold      # and before each statement, what is closed goes cold
 quadra test --db postgres://me@localhost:5432/quadra_test
 ```
 

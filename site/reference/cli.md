@@ -7,7 +7,7 @@ language server.
 quadra init [path] [--name n] [--db sqlite|postgres|postgres://…] [--yes] [--no-git]
 quadra dev [path] [--url URL] [--port N] [--fixture name] [--user login] [--reset] [--web dir]
 quadra check [path]
-quadra test [path] [--filter text] [--db sqlite|postgres://…]
+quadra test [path] [--filter text] [--db sqlite|postgres://…] [--cold]
 quadra trace <Entity.field> [path]
 quadra certify [name…] [--approved-by who] [path]
 quadra fmt [--check] [path]

@@ -493,6 +493,17 @@ a deploy that rebuilds every table); the others stay cold.
 A database that uses volumes has no foreign keys into the entities that may go cold: a
 record in use may refer to a cold one, and the engine keeps the references.
 
+### The same results: `quadra test --cold`
+
+```bash
+quadra test --db sqlite --cold
+```
+
+Before each statement of each test, every record that is closed goes cold, whatever its term
+(its state and what refers to it still count): the next statements read and write through the
+volumes. The tests must give the same results: a cold record is a slow record, not another
+one.
+
 ### What it costs
 
 The editor says when a query may read the cold records: `Order.where(o => o.total > 0)` reads
