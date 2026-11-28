@@ -32,6 +32,10 @@ pub struct DbBackend {
     index: usize,
     schema: Option<Rc<Schema>>,
     cache: Option<Rc<RefCell<Cache>>>,
+    /// `quadra test --cold`: before each statement, everything closed goes cold (whatever its
+    /// term), so the tests read and write through the volumes: the results must be the same
+    pub cold: bool,
+    model: Option<(quadra_ir::Model, Report)>,
 }
 
 impl DbBackend {
@@ -50,6 +54,8 @@ impl DbBackend {
             index: 0,
             schema: None,
             cache: None,
+            cold: false,
+            model: None,
         }
     }
 
@@ -112,6 +118,9 @@ impl TestBackend for DbBackend {
         db.seed_salts()?;
         interp.materialize = materialized_formulas(&db.schema);
         self.schema = Some(db.schema.clone());
+        if self.cold {
+            self.model = Some((model.clone(), report.clone()));
+        }
         interp.sink = Some(Box::new(Sink { db, model }));
         if self.lazy {
             self.cache = Some(Rc::new(RefCell::new(Cache::new(
@@ -124,6 +133,19 @@ impl TestBackend for DbBackend {
     }
 
     fn refresh<'m>(&mut self, interp: &mut Interp<'m>) -> Result<(), String> {
+        if self.cold && self.lazy {
+            if let Some((m, r)) = &self.model {
+                let url = self.url(self.index);
+                let time = interp.clock;
+                quadra_runtime::cold_force.with(|f| f.set(true));
+                let moved =
+                    crate::ops::cold_run(&url, m, r, time, None, &mut |_, _| Ok(()), &mut |_| {
+                        Ok(())
+                    });
+                quadra_runtime::cold_force.with(|f| f.set(false));
+                moved?;
+            }
+        }
         if self.lazy {
             interp.store = self.working_set()?;
         }

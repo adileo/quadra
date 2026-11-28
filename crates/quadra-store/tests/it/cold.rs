@@ -532,3 +532,34 @@ fn cold_through_the_sequencer() {
     assert_eq!(i.ids("Contact", None).len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `quadra test --db sqlite --cold`: before each statement everything closed goes cold
+/// (whatever its term), and the tests give the same results.
+#[test]
+fn tests_give_the_same_results_with_everything_cold() {
+    let dir = std::env::temp_dir().join(format!("quadra-cold-tests-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("p/tests")).unwrap();
+    std::fs::write(dir.join("p/quadra.toml"), "[project]\nname = \"c\"\n").unwrap();
+    std::fs::write(dir.join("p/main.qd"), SHOP).unwrap();
+    std::fs::write(
+        dir.join("p/tests/shop.test.qd"),
+        "test \"orders done go cold and are read as before\":\n    let anna = Customer(name=\"Anna\")\n    let o = Order(code=\"A\", customer=anna, date=today(), paid=5)\n    Line(order=o, amount=10)\n    Line(order=o, amount=5)\n    o.finish()\n    expect o.total == 15\n    expect Order.where(x => x.state is Done).count() == 1\n    Line(order=o, amount=1)\n    expect o.total == 16\n    let p = Order(code=\"B\", customer=anna, date=today())\n    expect_error \"unique\":\n        Order(code=\"A\", customer=anna, date=today())\n    expect amounts() == 16\n",
+    )
+    .unwrap();
+    let p = Project::load(&dir.join("p")).unwrap();
+    for cold in [false, true] {
+        let mut b = quadra_store::DbBackend::new("sqlite");
+        b.cold = cold;
+        let results = quadra_runtime::run_tests_with(&p, None, Some(&mut b))
+            .unwrap_or_else(|d| panic!("{:?}", d.iter().map(|d| &d.message).collect::<Vec<_>>()));
+        let failed: Vec<String> = results
+            .iter()
+            .filter(|r| !r.passed)
+            .map(|r| format!("{}: {:?}", r.name, r.message))
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(failed.is_empty(), "cold {cold}: {failed:#?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

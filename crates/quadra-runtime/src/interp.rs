@@ -21,6 +21,7 @@ mod documents;
 mod grouping;
 mod query;
 mod retention;
+pub use retention::COLD_FORCE as retention_cold_force;
 mod scripts;
 mod viewer;
 pub use query::{Groups, KeyVal, Page, Spec};

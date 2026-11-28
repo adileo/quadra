@@ -589,10 +589,35 @@ pub fn build(model: &Model, report: &Report) -> Schema {
     }
     // references into what may go cold have no foreign key: a record in use may refer to a cold
     // one (and the rows of a ledger, kept in use, to a cold invoice); the engine keeps them
-    let cold_tables: BTreeSet<String> = model
+    // (an entity that may go cold, and its lines, which go with it)
+    let mut coldable: BTreeSet<String> = model
         .entities
         .iter()
         .filter(|e| matches!(e.cold, Some(quadra_ir::Cold::After { .. })))
+        .map(|e| e.name.clone())
+        .collect();
+    loop {
+        let more: Vec<String> = model
+            .entities
+            .iter()
+            .filter(|e| !coldable.contains(&e.name))
+            .filter(|e| {
+                e.fields.iter().any(|f| {
+                    f.parent
+                        && matches!(&f.ty, Some(quadra_ir::Ty::Path { segments, .. }) if segments.last().is_some_and(|p| coldable.contains(p)))
+                })
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        coldable.extend(more);
+    }
+    let cold_tables: BTreeSet<String> = model
+        .entities
+        .iter()
+        .filter(|e| coldable.contains(&e.name))
         .filter_map(|e| {
             tables
                 .iter()
@@ -603,7 +628,7 @@ pub fn build(model: &Model, report: &Report) -> Schema {
     let mut tables = tables;
     if !cold_tables.is_empty() {
         for t in tables.iter_mut() {
-            let owner_cold = matches!(&t.source, Source::Join(e, _) | Source::PerCompany(e, _) if model.entity(e).is_some_and(|x| matches!(x.cold, Some(quadra_ir::Cold::After { .. }))));
+            let owner_cold = matches!(&t.source, Source::Join(e, _) | Source::PerCompany(e, _) if coldable.contains(e));
             for c in t.columns.iter_mut() {
                 if c.references
                     .as_ref()

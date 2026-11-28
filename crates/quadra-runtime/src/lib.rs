@@ -15,6 +15,7 @@ pub mod store;
 pub mod time;
 pub mod value;
 
+pub use interp::retention_cold_force as cold_force;
 pub use interp::unique_message;
 pub use interp::{expire_terms, term_key, Due};
 pub use interp::{

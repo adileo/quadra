@@ -1538,7 +1538,7 @@ fn prepare(db: &mut Database, mem: &Mem, per_commit: usize) -> Result<Prep, Stri
             }
         }
         let seq = db.conn.query(
-            "SELECT CAST(MAX(\"seq\") AS TEXT) FROM \"_quadra_history\"",
+            "SELECT CAST((SELECT MAX(\"s\") FROM (SELECT MAX(\"seq\") AS \"s\" FROM \"_quadra_history\" UNION ALL SELECT MAX(\"max_seq\") FROM \"_quadra_volumes\") \"x\") AS TEXT)",
             &[],
         )?;
         let seq: i64 = seq

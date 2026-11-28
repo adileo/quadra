@@ -999,6 +999,14 @@ impl Database {
 
     /// Rebuild the engine's store from the truth tables.
     pub fn load(&mut self) -> Result<Store, String> {
+        // the cold records with the others (crate::cold); a connection that writes again after
+        crate::cold::shadow(&mut self.conn)?;
+        let r = self.load_shadowed();
+        let _ = crate::cold::unshadow(&mut self.conn);
+        r
+    }
+
+    fn load_shadowed(&mut self) -> Result<Store, String> {
         let mut store = Store::default();
         for r in self.conn.query(
             "SELECT CAST(\"id\" AS TEXT), \"entity\", CAST(\"created_tx\" AS TEXT), \"created_at\", CAST(\"created_by\" AS TEXT), CAST(\"frozen_tx\" AS TEXT), \"cause\", \"warnings\" FROM \"_quadra_records\" ORDER BY \"_quadra_records\".\"id\"",
@@ -1952,8 +1960,8 @@ impl Database {
                 )?;
             }
             self.wexec(
-                "INSERT INTO \"_quadra_volumes\" (\"name\", \"sha256\", \"tx\", \"records\") VALUES (?text, ?text, ?bigint, ?bigint)".into(),
-                vec![Sql::Text(k.volume.clone()), Sql::Text(k.sha256.clone()), Sql::Int(tx as i64), Sql::Int((k.records.len() + k.kept) as i64)],
+                "INSERT INTO \"_quadra_volumes\" (\"name\", \"sha256\", \"tx\", \"records\", \"max_seq\") VALUES (?text, ?text, ?bigint, ?bigint, ?bigint)".into(),
+                vec![Sql::Text(k.volume.clone()), Sql::Text(k.sha256.clone()), Sql::Int(tx as i64), Sql::Int((k.records.len() + k.kept) as i64), Sql::Int(self.seq)],
             )?;
             payload.push(crate::cold::entry(
                 &k.volume,
@@ -2413,6 +2421,16 @@ impl Database {
             .filter(|r| r.created_tx != local && r.history.iter().any(|(t, _, _)| *t == local))
             .map(|r| r.id)
             .chain(c.after.erasures.iter().filter(|e| e.id != 0).map(|e| e.id))
+            // a record whose stored formula changes (a total of its lines): its row is written
+            .chain(c.after.materialized.iter().filter_map(|(k, v)| {
+                let stored = c
+                    .after
+                    .records
+                    .get(&k.0)
+                    .and_then(|r| r.formulas.get(&k.1))
+                    .or_else(|| c.before.materialized.get(k));
+                (stored != Some(v)).then_some(k.0)
+            }))
             .collect();
         if ids.is_empty() {
             return Ok(());
@@ -3492,7 +3510,7 @@ impl<'m> CommitSink for Sink<'m> {
             let r = db
                 .conn
                 .query(
-                    "SELECT CAST((SELECT MAX(\"seq\") FROM \"_quadra_history\") AS TEXT), (SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1), (SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'state')",
+                    "SELECT CAST((SELECT MAX(\"s\") FROM (SELECT MAX(\"seq\") AS \"s\" FROM \"_quadra_history\" UNION ALL SELECT MAX(\"max_seq\") FROM \"_quadra_volumes\") \"x\") AS TEXT), (SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1), (SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'state')",
                     &[],
                 )
                 .map_err(f)?;

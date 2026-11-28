@@ -962,7 +962,12 @@ pub fn cold_run(
         let mut groups: Vec<Vec<(String, u64)>> = Vec::new();
         for (ent, id) in due {
             let mut g = vec![(ent.clone(), id)];
-            g.extend(i.lines_of(&ent, id));
+            // (a line cold already, its record written since, stays in its volume)
+            g.extend(
+                i.lines_of(&ent, id)
+                    .into_iter()
+                    .filter(|(_, l)| !cold_now.contains(l)),
+            );
             groups.push(g);
         }
         let mut referrers: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -992,8 +997,13 @@ pub fn cold_run(
             }
         }
         let mut out: Vec<(String, u64)> = Vec::new();
+        let mut seen: HashSet<u64> = HashSet::new();
         for g in groups {
-            out.extend(g);
+            for (ent, id) in g {
+                if seen.insert(id) {
+                    out.push((ent, id));
+                }
+            }
         }
         let v: Vec<u64> = out
             .iter()
@@ -1017,7 +1027,17 @@ pub fn cold_run(
         return Ok(None);
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let name = format!("volume-{}", time.format("%Y%m%dT%H%M%S"));
+    // (numbered: two runs at the same instant, a test's clock, get two names)
+    let made: i64 = c
+        .query(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM \"main\".\"_quadra_volumes\"",
+            &[],
+        )?
+        .into_iter()
+        .next()
+        .and_then(|r| r[0].as_deref().and_then(|v| v.parse().ok()))
+        .unwrap_or(0);
+    let name = format!("volume-{}-{}", time.format("%Y%m%dT%H%M%S"), made + 1);
     let file = dir.join(format!("{name}.db"));
     let _ = std::fs::remove_file(&file);
     // many volumes: one new with them all (a connection reads at most a few)

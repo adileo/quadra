@@ -2014,7 +2014,7 @@ impl<'m> Run<'m> {
             let mut src = self.src.borrow_mut();
             let conn = src.conn();
             let seq = conn.query(
-                "SELECT CAST(MAX(\"seq\") AS TEXT) FROM \"_quadra_history\"",
+                "SELECT CAST((SELECT MAX(\"s\") FROM (SELECT MAX(\"seq\") AS \"s\" FROM \"_quadra_history\" UNION ALL SELECT MAX(\"max_seq\") FROM \"_quadra_volumes\") \"x\") AS TEXT)",
                 &[],
             )?;
             let seq: i64 = seq

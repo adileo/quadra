@@ -331,12 +331,28 @@ fn test(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(c) => return c,
     };
-    let mut backend = target.as_deref().map(quadra_store::DbBackend::new);
+    let cold = args.iter().any(|a| a == "--cold");
+    if cold && target.is_none() {
+        eprintln!("--cold runs the tests on a database: add --db sqlite");
+        return ExitCode::FAILURE;
+    }
+    let mut backend = target.as_deref().map(|t| {
+        let mut b = quadra_store::DbBackend::new(t);
+        b.cold = cold;
+        b
+    });
     let backend_ref = backend
         .as_mut()
         .map(|b| b as &mut dyn quadra_runtime::TestBackend);
     if let Some(t) = &target {
-        println!("database: {t} (a fresh database per test, reloaded and verified at the end)\n");
+        println!(
+            "database: {t} (a fresh database per test, reloaded and verified at the end){}\n",
+            if cold {
+                "; before each statement what is closed goes cold"
+            } else {
+                ""
+            }
+        );
     }
     match quadra_runtime::run_tests_with(&project, filter.as_deref(), backend_ref) {
         Err(diags) => {

@@ -944,7 +944,7 @@ impl State {
     /// Reads where the database stands; the window starts empty there.
     fn reload(&mut self) -> Result<(), String> {
         let r = self.conn.query(
-            "SELECT CAST((SELECT MAX(\"tx\") FROM \"_quadra_commits\") AS TEXT), CAST((SELECT MAX(\"seq\") FROM \"_quadra_history\") AS TEXT), (SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1), CAST((SELECT MAX(\"id\") FROM \"_quadra_outbox\") AS TEXT), (SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'state'), CAST((SELECT MAX(\"number\") FROM \"_quadra_batches\") AS TEXT)",
+            "SELECT CAST((SELECT MAX(\"tx\") FROM \"_quadra_commits\") AS TEXT), CAST((SELECT MAX(\"s\") FROM (SELECT MAX(\"seq\") AS \"s\" FROM \"_quadra_history\" UNION ALL SELECT MAX(\"max_seq\") FROM \"_quadra_volumes\") \"x\") AS TEXT), (SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1), CAST((SELECT MAX(\"id\") FROM \"_quadra_outbox\") AS TEXT), (SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'state'), CAST((SELECT MAX(\"number\") FROM \"_quadra_batches\") AS TEXT)",
             &[],
         )?;
         let row = r.into_iter().next().unwrap_or_default();

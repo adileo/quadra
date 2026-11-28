@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_cold\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"volume\" TEXT NOT NULL)",
-    "CREATE TABLE \"_quadra_volumes\" (\"name\" TEXT PRIMARY KEY, \"sha256\" TEXT NOT NULL, \"tx\" BIGINT NOT NULL, \"records\" BIGINT NOT NULL, \"dropped_tx\" BIGINT)",
+    // (`max_seq`: the highest number of a row of the history it took: the next ones are higher)
+    "CREATE TABLE \"_quadra_volumes\" (\"name\" TEXT PRIMARY KEY, \"sha256\" TEXT NOT NULL, \"tx\" BIGINT NOT NULL, \"records\" BIGINT NOT NULL, \"max_seq\" BIGINT NOT NULL DEFAULT 0, \"dropped_tx\" BIGINT)",
 ];
 
 /// The tables that hold rows of the records of `ent`, with the column naming the record.

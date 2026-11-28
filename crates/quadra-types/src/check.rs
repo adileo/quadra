@@ -17,7 +17,7 @@ pub fn check_model(model: &Model) -> Vec<Diagnostic> {
 pub type Node = (String, String);
 
 /// Everything the checker learned besides errors: who reads and who writes each field.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Report {
     pub diagnostics: Vec<Diagnostic>,
     /// formula / ledger column / metric → the fields it reads

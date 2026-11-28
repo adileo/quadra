@@ -14,6 +14,12 @@ use chrono::NaiveDateTime;
 use quadra_ir::*;
 use std::rc::Rc;
 
+thread_local! {
+    /// `quadra test --cold`: a record is closed whatever its term says (its state and what
+    /// refers to it still count), so that every test reads through the volumes.
+    pub static COLD_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// What has come due at a moment: a field to empty, or a whole record to take away.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Due {
@@ -829,7 +835,13 @@ impl<'m> Interp<'m> {
             id,
         };
         let now = self.clock;
-        let Some(end) = self.term_end(&rec, term)? else {
+        let forced = COLD_FORCE.with(|f| f.get());
+        let end = if forced {
+            Some(now)
+        } else {
+            self.term_end(&rec, term)?
+        };
+        let Some(end) = end else {
             return Ok(Err(format!("no date: `{}` has no value", term.after)));
         };
         if end > now {
@@ -842,7 +854,7 @@ impl<'m> Interp<'m> {
             )));
         }
         let mut since = end;
-        if term.after != "updated_at" {
+        if term.after != "updated_at" && !forced {
             let quiet = Term {
                 after: "updated_at".into(),
                 ..term.clone()
