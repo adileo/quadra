@@ -438,15 +438,10 @@ time (a `VACUUM`, once).
 
 ## Hot and cold: `archive`
 
-::: warning Being built
-What is described here decides **which** records would go cold, and says so; moving them out
-of the database in use is the next part of the work.
-:::
-
 A database that grows for years keeps in use only what is needed: the records that are
-closed can go cold, to the archive of the project, and be read on demand, more slowly. A cold
-record is a slow record, not another one: `Invoice.all()`, totals and references still find
-it, and writing to it brings it back.
+closed go cold, to volumes beside the database, and are read on demand, more slowly. A cold
+record is a slow record, not another one: `Invoice.all()`, queries, totals, searches,
+references and `unique` still find it, and writing to it brings it back.
 
 ```quadra
 entity Invoice:
@@ -462,30 +457,51 @@ entity Customer:
 cold_after = "3 years"              # the project's entities: 3 years after their last write
 ```
 
-A record is **closed**, and may go cold, when:
+A record is **closed**, and goes cold, when:
 
 - its term is over (`1 year after date`), and it was not written for as long;
 - no transition of its flows can take it out of its state now: an order still `Open` stays in
   use, however old; an invoice `Posted` whose `cancel` says `unless paid > 0 EUR` is closed
   once it is paid;
+- no record that stays in use refers to it: an open order keeps its customer and its
+  products in use (they would be read with it). A cold record may refer to one in use;
 - its lines go with it (a line has no `archive` of its own).
 
 The checker refuses what could never close (every state of a flow has an unguarded way out),
 an `archive` on a line or a ledger, and one that would come after the record's `expire`.
 
-```bash
-quadra db cold --at 2029-01-01
-```
+### Volumes
 
-```text
-Invoice  (archive 1 year after date): 1840 of 2310 records closed now, about 14336 KB
-  470 open
-Order  (archive 2 years after updated_at): 3100 of 3600 records closed now, about 9216 KB
-  500 not yet
-```
+Once a day the server moves the records closed since the last time to a new **volume**: a
+SQLite file with their rows (of their tables, their history, what they post), beside the
+database (`data.db.cold/`) and in the project's store of files (`cold/<volume>.db`, the
+tenant's bucket on Quadra Cloud). A volume never changes; a commit names it with its SHA-256,
+so `quadra db verify` checks the cold records with the others. With many volumes, the next one
+holds the records of the older ones too.
 
-The editor says when a query may read the archive: `Order.where(o => o.total > 0)` reads
+| | |
+|---|---|
+| `quadra db cold [--at 2029-01-01]` | how many records are closed now (or on that day), about how much they hold, and why the others are not |
+| `quadra db cold --run` | moves them now |
+| `quadra db cold --fetch` | brings the volumes not beside the database from the store of files (a database rebuilt from its log, another machine); the server does it before it reads |
+
+**Writing** to a cold record (an action, an update, `erase`, `delete`, a retention that ends)
+brings it back into the database in use first, in the same commit. **A deploy** brings back
+the cold records of the entities whose fields, formulas or defaults it changes (every one, for
+a deploy that rebuilds every table); the others stay cold.
+
+A database that uses volumes has no foreign keys into the entities that may go cold: a
+record in use may refer to a cold one, and the engine keeps the references.
+
+### What it costs
+
+The editor says when a query may read the cold records: `Order.where(o => o.total > 0)` reads
 every order, old ones too; a condition on the term's field (`o.date >= today() - 365 days`)
 keeps it to the recent ones, and a total kept by a formula (`sum` over a record's lines) does
 not read them at all.
 
+::: warning Not yet
+A value erased from a cold record leaves the database in use, but stays in its volume, which
+never changes, until the volume is written again without it (to come, as the archives of the
+history are). Volumes are fetched whole, not page by page.
+:::
