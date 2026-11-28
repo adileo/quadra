@@ -269,3 +269,61 @@ fn an_archive_leaves_the_tables_and_is_checked_by_its_checkpoint() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The checkpoint through the sequencer (the cloud, a server): a commit of the log like any
+/// other, so a database rebuilt from the log has it, and both verify.
+#[test]
+fn a_checkpoint_goes_through_the_sequencer_and_its_log() {
+    use quadra_store::segments::Folder;
+    use quadra_store::sequencer::{Options, Rule};
+    quadra_store::db::seed_all_salts();
+    let dir = tmp("sequenced");
+    let (p, url) = setup(&dir);
+    let checked = quadra_analysis::check(&p);
+    let (m, r) = (checked.model.as_ref().unwrap(), &checked.report);
+    ops::init(&url, m, r, at(2024, 1, 1)).unwrap();
+    for (n, d) in (1..=30).zip((0..30).map(|k| at(2024, 2, 1) + chrono::Duration::days(k))) {
+        set(
+            &url,
+            m,
+            r,
+            d,
+            "Note",
+            "text",
+            V::Text(format!("note {n}").into()),
+        );
+    }
+    let log = dir.join("log");
+    let options = Options {
+        destinations: vec![Box::new(Folder::new(&log).unwrap())],
+        rule: Rule::All,
+        ..Default::default()
+    };
+    let s = quadra_store::Sequencer::start(&url, options).unwrap();
+    let c = quadra_store::archive::archive_with(
+        &url,
+        m,
+        r,
+        at(2025, 1, 1),
+        at(2026, 12, 1),
+        Some(&s),
+        &mut |_, _| Ok(()),
+    )
+    .unwrap()
+    .expect("values to archive");
+    assert!(c.rows >= 29, "{} rows", c.rows);
+    s.stop();
+    assert_eq!(
+        ops::verify(&url, m, r, at(2026, 12, 1)).unwrap().0,
+        Vec::<String>::new()
+    );
+    let copy = dir.join("copy.db");
+    Folder::new(&log).unwrap().restore(&copy).unwrap();
+    let curl = format!("sqlite:{}", copy.display());
+    assert_eq!(history_rows(&curl), history_rows(&url));
+    assert_eq!(
+        ops::verify(&curl, m, r, at(2026, 12, 1)).unwrap().0,
+        Vec::<String>::new()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

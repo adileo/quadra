@@ -11,6 +11,7 @@ mod hints;
 mod history;
 mod import;
 mod limits;
+mod messages;
 mod sequencer;
 mod signing;
 mod storage;

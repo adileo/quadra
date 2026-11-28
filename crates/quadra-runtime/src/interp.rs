@@ -6213,6 +6213,7 @@ impl<'m> Interp<'m> {
         self.store.erasures.clear();
         self.store.trashed.clear();
         self.store.untrashed.clear();
+        self.store.checkpoint = None;
         let r = f(self).and_then(|v| {
             self.settle()?;
             self.thaw_records()?;
@@ -6228,6 +6229,7 @@ impl<'m> Interp<'m> {
                 && self.store.outbox.is_empty()
                 && self.store.erasures.is_empty()
                 && self.store.untrashed.is_empty()
+                && self.store.checkpoint.is_none()
             {
                 let (next, block) = (self.store.next_id, self.store.id_block());
                 self.store = snapshot.clone();

@@ -562,6 +562,7 @@ impl<'a> Lower<'a> {
                     latest,
                     atomic,
                     body,
+                    keep: keep_clause(item),
                     span,
                 });
             }
@@ -612,6 +613,7 @@ impl<'a> Lower<'a> {
                     policy,
                     batch,
                     publishes: None,
+                    keep: keep_clause(item),
                     span,
                 });
             }
@@ -1394,6 +1396,7 @@ impl<'a> Lower<'a> {
             policy,
             batch: None,
             publishes: Some(binding),
+            keep: None,
             span,
         });
     }
@@ -2389,4 +2392,28 @@ fn relocate(e: &mut Expr, span: Span) {
         }
         _ => {}
     }
+}
+
+/// The `keep …` line of an `inbound` or an `outbound`.
+fn keep_clause(item: &SyntaxNode) -> Option<quadra_sema::manifest::TermDecl> {
+    let c = ast::children(item, OUTBOUND_CLAUSE)
+        .find(|c| ctx_words(c).first().map(String::as_str) == Some("keep"))?;
+    let words = ctx_words(&c);
+    if words.iter().any(|w| w == "forever") {
+        return Some(quadra_sema::manifest::TermDecl::Forever);
+    }
+    let n: u32 = tokens(&c)
+        .find(|t| t.kind() == NUMBER)
+        .and_then(|t| t.text().replace('_', "").parse().ok())?;
+    let unit = tokens(&c)
+        .skip_while(|t| t.kind() != NUMBER)
+        .find(|t| t.kind() == IDENT || t.kind() == CONTEXT_KW)
+        .map(|t| t.text().to_string())?;
+    Some(quadra_sema::manifest::TermDecl::For {
+        n,
+        unit: quadra_sema::manifest::time_unit(&unit)
+            .map(str::to_string)
+            .unwrap_or(unit),
+        archive: words.iter().any(|w| w == "archive"),
+    })
 }

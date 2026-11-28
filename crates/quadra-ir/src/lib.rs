@@ -976,6 +976,10 @@ pub struct Outbound {
     /// made by `publish Product to shop as p:`: the name of the record (the event's field
     /// `record`), bound in the policy lines and the code besides the event
     pub publishes: Option<String>,
+    /// `keep 30 days`: how long an event is kept once delivered (none: the project's `[data]
+    /// outbox`)
+    #[serde(skip)]
+    pub keep: Option<quadra_sema::manifest::TermDecl>,
     pub span: Span,
 }
 
@@ -1007,6 +1011,10 @@ pub struct Inbound {
     /// `from csv` or `from fixed`) are committed
     pub atomic: Option<Atomic>,
     pub body: Vec<Stmt>,
+    /// `keep 1 year`: how long a message is kept once handled (none: the project's `[data]
+    /// inbox`)
+    #[serde(skip)]
+    pub keep: Option<quadra_sema::manifest::TermDecl>,
     pub span: Span,
 }
 

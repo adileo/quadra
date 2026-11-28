@@ -199,16 +199,31 @@ pub fn redact(
     Ok(n)
 }
 
-/// Moves to an archive the values of the history replaced by a write committed before
-/// `before`, except what a frozen record may read. `put(key, bytes)` keeps the archive (the
-/// project's store of files). Run with the project stopped, as migrations are. None: nothing to
-/// archive.
+/// `quadra db archive --before …` and the sweep's `[data] archive_after`: the values replaced
+/// before `before` (and every value of the records taken away or deleted by then: their
+/// digests) moved to an archive (`put` writes it, in the store of files), the checkpoint a
+/// commit of its own, through the project's sequencer when it has one. The values in force
+/// stay, and every value of the entities frozen records read (`Model::read_as_of`). None:
+/// nothing to archive.
 pub fn archive(
     url: &str,
     model: &Model,
     report: &Report,
     before: NaiveDateTime,
     time: NaiveDateTime,
+    put: &mut dyn FnMut(&str, &[u8]) -> Result<(), String>,
+) -> Result<Option<Checkpoint>, String> {
+    archive_with(url, model, report, before, time, None, put)
+}
+
+/// `archive`, committed through `sequencer` when there is one.
+pub fn archive_with(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    before: NaiveDateTime,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
     put: &mut dyn FnMut(&str, &[u8]) -> Result<(), String>,
 ) -> Result<Option<Checkpoint>, String> {
     let mut db = Database::open(url, model, report)?;
@@ -226,7 +241,7 @@ pub fn archive(
         String::new()
     } else {
         format!(
-            " AND r.\"entity\" NOT IN ({})",
+            " AND COALESCE(r.\"entity\", x.\"entity\") NOT IN ({})",
             whole
                 .iter()
                 .map(|k| format!("'{}'", k.replace('\'', "''")))
@@ -234,9 +249,11 @@ pub fn archive(
                 .join(", ")
         )
     };
+    // a value replaced by then; any value of a record gone by then (its digests: erased); never
+    // a value of `history none` (outside the chain)
     let rows = db.conn.query(
-        &format!("SELECT CAST(h.\"seq\" AS TEXT), CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT), h.\"field\", h.\"value\", h.\"salt\", h.\"digest\", r.\"entity\" FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE h.\"tx\" <= ?bigint{not_kept} AND EXISTS (SELECT 1 FROM \"_quadra_history\" h2 WHERE h2.\"record_id\" = h.\"record_id\" AND h2.\"field\" = h.\"field\" AND h2.\"seq\" > h.\"seq\" AND h2.\"tx\" <= ?bigint) ORDER BY h.\"seq\""),
-        &[Sql::Int(cut), Sql::Int(cut)],
+        &format!("SELECT CAST(h.\"seq\" AS TEXT), CAST(h.\"tx\" AS TEXT), CAST(h.\"record_id\" AS TEXT), h.\"field\", h.\"value\", h.\"salt\", h.\"digest\", COALESCE(r.\"entity\", x.\"entity\") FROM \"_quadra_history\" h LEFT JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" LEFT JOIN \"_quadra_erased\" x ON x.\"id\" = h.\"record_id\" WHERE h.\"tx\" <= ?bigint AND (h.\"salt\" IS NULL OR h.\"salt\" <> ''){not_kept} AND (EXISTS (SELECT 1 FROM \"_quadra_history\" h2 WHERE h2.\"record_id\" = h.\"record_id\" AND h2.\"field\" = h.\"field\" AND h2.\"seq\" > h.\"seq\" AND h2.\"tx\" <= ?bigint) OR (r.\"id\" IS NULL AND x.\"erased_tx\" <= ?bigint)) ORDER BY h.\"seq\""),
+        &[Sql::Int(cut), Sql::Int(cut), Sql::Int(cut)],
     )?;
     if rows.is_empty() {
         return Ok(None);
@@ -263,68 +280,46 @@ pub fn archive(
     let name = format!("archive/history-{cut:020}-{}.jsonl.gz", &sha[..12]);
     put(&name, &bytes)?;
     let seqs: Vec<i64> = rows.iter().map(|r| num(&r[0])).collect();
-    let mut c = Checkpoint {
-        tx: 0,
+    let n = seqs.len() as u64;
+    drop(db);
+    let cause = format!(
+        "archive: {n} values replaced before {}",
+        before.format("%Y-%m-%d")
+    );
+    let write = quadra_runtime::store::CheckpointWrite {
+        before_tx: cut as u64,
+        archive: name.clone(),
+        sha256: sha.clone(),
+        seqs,
+    };
+    let tx = crate::ops::with_engine(url, model, report, time, sequencer, |i| {
+        i.system += 1;
+        let r = i.with_cause(cause.clone(), |i| {
+            i.transaction(|i| {
+                i.store.checkpoint = Some(write.clone());
+                Ok(())
+            })
+        });
+        i.system -= 1;
+        r.map_err(|e| format!("archive: {e:?}"))?;
+        Ok(i.store.tx)
+    })?;
+    Ok(Some(Checkpoint {
+        tx,
         before_tx: cut as u64,
         archive: name,
         sha256: sha,
-        rows: seqs.len() as u64,
-    };
-    let key = crate::signing::active(&mut db.conn)?;
-    db.conn.batch("BEGIN")?;
-    let r = (|| -> Result<u64, String> {
-        for chunk in seqs.chunks(500) {
-            let list: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
-            db.conn.batch(&format!(
-                "DELETE FROM \"_quadra_history\" WHERE \"seq\" IN ({})",
-                list.join(", ")
-            ))?;
-        }
-        let head = crate::source::head(&mut db.conn)?;
-        let last = db.conn.query("SELECT \"hash\" FROM \"_quadra_commits\" ORDER BY \"_quadra_commits\".\"tx\" DESC LIMIT 1", &[])?;
-        let prev = last
-            .first()
-            .and_then(|r| r[0].clone())
-            .unwrap_or_else(|| "0".repeat(64));
-        let tx = head + 1;
-        c.tx = tx;
-        let at = time.format("%Y-%m-%dT%H:%M:%S").to_string();
-        let cause = format!(
-            "archive: {} values replaced before {}",
-            c.rows,
-            before.format("%Y-%m-%d")
-        );
-        let hash = commit_hash(&prev, tx, &at, None, &cause, &[entry(&c)]);
-        let signature = crate::signing::sign_commit(&key, &hash)?;
-        db.conn.exec(
-            "INSERT INTO \"_quadra_checkpoints\" (\"tx\", \"before_tx\", \"archive\", \"sha256\", \"rows\") VALUES (?bigint, ?bigint, ?text, ?text, ?bigint)",
-            &[Sql::Int(tx as i64), Sql::Int(cut), Sql::Text(c.archive.clone()), Sql::Text(c.sha256.clone()), Sql::Int(c.rows as i64)],
-        )?;
-        db.conn.exec(
-            "INSERT INTO \"_quadra_commits\" (\"tx\", \"at\", \"user_id\", \"cause\", \"prev_hash\", \"hash\", \"signature\") VALUES (?bigint, ?text, ?bigint, ?text, ?text, ?text, ?text)",
-            &[Sql::Int(tx as i64), Sql::Text(at), Sql::Null, Sql::Text(cause), Sql::Text(prev), Sql::Text(hash), signature],
-        )?;
-        let state = db.conn.query(
-            "SELECT CAST(\"value\" AS TEXT) FROM \"_quadra_meta\" WHERE \"key\" = 'state'",
-            &[],
-        )?;
-        let mut st: J = state
-            .first()
-            .and_then(|r| r[0].as_deref())
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_else(|| json!({ "next_id": 0 }));
-        st["tx"] = json!(tx);
-        db.set_meta("state", &st.to_string())?;
-        Ok(tx)
-    })();
-    match r {
-        Ok(_) => {
-            db.conn.batch("COMMIT")?;
-            Ok(Some(c))
-        }
-        Err(e) => {
-            let _ = db.conn.batch("ROLLBACK");
-            Err(e)
-        }
+        rows: n,
+    }))
+}
+
+/// JSON lines, compressed (`.jsonl.gz`): the archives of the messages and events whose term
+/// ended (`keep …, then archive`).
+pub fn gz_lines(lines: &[serde_json::Value]) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    for l in lines {
+        writeln!(gz, "{l}").map_err(|e| e.to_string())?;
     }
+    gz.finish().map_err(|e| e.to_string())
 }

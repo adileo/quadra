@@ -1062,6 +1062,90 @@ async fn erase(
     call(&t, who, Req::Tx { body, key }).await
 }
 
+/// `DELETE /v1/records/{E}/{id}`: a transaction with the `delete` operation (to the trash when
+/// the entity has one).
+async fn delete_record(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id)): Path<(String, u64)>,
+) -> Response {
+    let who = match authenticate(&app, &t, &method, &headers).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "delete-{entity}-{id}-{}",
+                quadra_store::auth::sha256_hex(&format!(
+                    "{entity}#{id}|{}",
+                    chrono::Utc::now().timestamp_millis()
+                ))[..16]
+                    .to_string()
+            )
+        });
+    let body = serde_json::json!({ "ops": [{ "op": "delete", "entity": entity, "id": id }] });
+    call(&t, who, Req::Tx { body, key }).await
+}
+
+/// `POST /v1/records/{E}/{id}/restore`: a record in the trash given back.
+async fn restore_record(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Path((entity, id)): Path<(String, u64)>,
+) -> Response {
+    let who = match authenticate(&app, &t, &method, &headers).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "restore-{entity}-{id}-{}",
+                quadra_store::auth::sha256_hex(&format!(
+                    "{entity}#{id}|{}",
+                    chrono::Utc::now().timestamp_millis()
+                ))[..16]
+                    .to_string()
+            )
+        });
+    let body = serde_json::json!({ "ops": [{ "op": "restore", "entity": entity, "id": id }] });
+    call(&t, who, Req::Tx { body, key }).await
+}
+
+/// `GET /v1/trash[?entity=E]`: the records in the trash.
+async fn trash(
+    State(app): State<Shared>,
+    Ten(t): Ten,
+    method: Method,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    match authenticate(&app, &t, &method, &headers).await {
+        Ok(who) => {
+            call(
+                &t,
+                who,
+                Req::Trash {
+                    entity: q.get("entity").cloned(),
+                },
+            )
+            .await
+        }
+        Err(r) => r,
+    }
+}
+
 /// `GET /v1/records/{E}/{id}/export`: what the record holds about its person (art. 15 and 20),
 /// the export itself a commit of the chain.
 async fn export(
@@ -3038,7 +3122,12 @@ impl Host {
             .route("/v1/me", get(me))
             .route("/v1/model", get(model))
             .route("/v1/query", post(query))
-            .route("/v1/records/{entity}/{id}", get(record))
+            .route(
+                "/v1/records/{entity}/{id}",
+                get(record).delete(delete_record),
+            )
+            .route("/v1/records/{entity}/{id}/restore", post(restore_record))
+            .route("/v1/trash", get(trash))
             .route("/v1/records/{entity}/{id}/history", get(history))
             .route("/v1/records/{entity}/{id}/erase", post(erase))
             .route("/v1/records/{entity}/{id}/export", get(export))

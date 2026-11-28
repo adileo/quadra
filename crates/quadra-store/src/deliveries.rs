@@ -1301,3 +1301,169 @@ mod tests {
         assert_eq!(backoff(1, 1.0).as_secs(), 36);
     }
 }
+
+// ---- how long the messages and the events are kept ------------------------------------------
+
+/// How long the closed messages of one `inbound` (or the closed events of one `outbound`)
+/// are kept: those closed before `before` go (none: kept for ever); `archive`: written to an
+/// archive in the store of files first. The rows of the messages received stay thin (key,
+/// hash, state) until `thin_before`, so that a message sent again is still known.
+#[derive(Clone, Debug)]
+pub struct Keep {
+    pub name: String,
+    pub before: Option<String>,
+    pub thin_before: Option<String>,
+    pub archive: bool,
+}
+
+/// Unless the project says otherwise (`[data] inbox`, `outbox`): 90 days and 30 days.
+pub const INBOX_DAYS: u32 = 90;
+pub const OUTBOX_DAYS: u32 = 30;
+
+fn keep_of(
+    name: &str,
+    own: Option<&quadra_sema::manifest::TermDecl>,
+    project: Option<&quadra_sema::manifest::TermDecl>,
+    days: u32,
+    now: chrono::NaiveDateTime,
+) -> Keep {
+    use quadra_sema::manifest::TermDecl;
+    let fallback = TermDecl::For {
+        n: days,
+        unit: "days".into(),
+        archive: false,
+    };
+    let t = own.or(project).unwrap_or(&fallback);
+    let stamp = |t: chrono::NaiveDateTime| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+    match t {
+        TermDecl::Forever => Keep {
+            name: name.to_string(),
+            before: None,
+            thin_before: None,
+            archive: false,
+        },
+        TermDecl::For { n, unit, archive } => {
+            let term = quadra_ir::Term {
+                n: *n as i64,
+                unit: unit.clone(),
+                after: String::new(),
+                span: quadra_ir::Span {
+                    file: quadra_sema::FileId(0),
+                    range: Default::default(),
+                },
+            };
+            let before = term.before(now);
+            Keep {
+                name: name.to_string(),
+                before: before.map(stamp),
+                thin_before: before.and_then(|b| term.before(b)).map(stamp),
+                archive: *archive,
+            }
+        }
+    }
+}
+
+/// The terms of the project's messages (`inbound … keep …`, `[data] inbox`) and events
+/// (`outbound … keep …`, `[data] outbox`), as of `now`.
+pub fn message_terms(
+    model: &quadra_ir::Model,
+    now: chrono::NaiveDateTime,
+) -> (Vec<Keep>, Vec<Keep>) {
+    let d = &model.manifest.data;
+    let inbox = model
+        .inbounds
+        .iter()
+        .map(|i| keep_of(&i.name, i.keep.as_ref(), d.inbox.as_ref(), INBOX_DAYS, now))
+        .collect();
+    let mut outbox: Vec<Keep> = Vec::new();
+    for o in &model.outbounds {
+        if outbox.iter().any(|k| k.name == o.event) {
+            continue;
+        }
+        outbox.push(keep_of(
+            &o.event,
+            o.keep.as_ref(),
+            d.outbox.as_ref(),
+            OUTBOX_DAYS,
+            now,
+        ));
+    }
+    (inbox, outbox)
+}
+
+/// A message received is closed (handled, skipped, superseded; a file settled), and not the
+/// latest of its lane (`latest by` compares with it).
+const INBOX_CLOSED: &str = "\"inbound\" = ?text AND \"state\" IN ('done', 'skipped', 'superseded') AND COALESCE(\"done_at\", \"received_at\") < ?text AND (\"origin\" IS NULL OR \"settled_at\" IS NOT NULL) AND (\"lane\" IS NULL OR \"id\" < (SELECT MAX(i2.\"id\") FROM \"_quadra_inbox\" i2 WHERE i2.\"inbound\" = \"_quadra_inbox\".\"inbound\" AND i2.\"lane\" = \"_quadra_inbox\".\"lane\"))";
+
+/// An event is closed (delivered, skipped, superseded), and not the latest of its lane.
+const OUTBOX_CLOSED: &str = "\"event\" = ?text AND \"state\" IN ('delivered', 'skipped', 'superseded') AND COALESCE(\"delivered_at\", \"created_at\") < ?text AND (\"lane\" IS NULL OR \"id\" < (SELECT MAX(o2.\"id\") FROM \"_quadra_outbox\" o2 WHERE o2.\"event\" = \"_quadra_outbox\".\"event\" AND o2.\"lane\" = \"_quadra_outbox\".\"lane\"))";
+
+/// The messages and events whose term ended and that go to an archive first (`keep …, then
+/// archive`), as JSON lines: `("inbox" | "outbox", row)`, at most `limit`.
+pub fn to_archive(
+    conn: &mut Conn,
+    inbox: &[Keep],
+    outbox: &[Keep],
+    limit: usize,
+) -> Result<Vec<(String, J)>, String> {
+    let mut out = Vec::new();
+    for k in inbox.iter().filter(|k| k.archive) {
+        let Some(before) = &k.before else { continue };
+        for r in conn.query(
+            &format!("SELECT CAST(\"id\" AS TEXT), \"key\", \"hash\", \"body\", \"received_at\", \"state\", \"done_at\", CAST(\"tx\" AS TEXT), \"response\" FROM \"_quadra_inbox\" WHERE {INBOX_CLOSED} AND \"body\" <> '' ORDER BY \"_quadra_inbox\".\"id\" LIMIT {limit}"),
+            &[Sql::Text(k.name.clone()), Sql::Text(before.clone())],
+        )? {
+            out.push((
+                "inbox".to_string(),
+                serde_json::json!({"inbound": k.name, "id": r[0], "key": r[1], "hash": r[2], "body": r[3], "received_at": r[4], "state": r[5], "done_at": r[6], "tx": r[7], "response": r[8]}),
+            ));
+        }
+    }
+    for k in outbox.iter().filter(|k| k.archive) {
+        let Some(before) = &k.before else { continue };
+        for r in conn.query(
+            &format!("SELECT CAST(\"id\" AS TEXT), CAST(\"tx\" AS TEXT), \"fields\", \"created_at\", \"state\", \"delivered_at\", CAST(\"attempts\" AS TEXT) FROM \"_quadra_outbox\" WHERE {OUTBOX_CLOSED} ORDER BY \"_quadra_outbox\".\"id\" LIMIT {limit}"),
+            &[Sql::Text(k.name.clone()), Sql::Text(before.clone())],
+        )? {
+            out.push((
+                "outbox".to_string(),
+                serde_json::json!({"event": k.name, "id": r[0], "tx": r[1], "fields": r[2], "created_at": r[3], "state": r[4], "delivered_at": r[5], "attempts": r[6]}),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// The closed messages and events whose term ended: the body and the answer of a message
+/// emptied (its thin row deleted once `thin_before` passed too), an event deleted. Returns
+/// (messages emptied, rows deleted).
+pub fn prune_messages(
+    conn: &mut Conn,
+    inbox: &[Keep],
+    outbox: &[Keep],
+) -> Result<(usize, usize), String> {
+    let (mut emptied, mut deleted) = (0, 0);
+    for k in inbox {
+        if let Some(thin) = &k.thin_before {
+            deleted += conn.exec(
+                &format!("DELETE FROM \"_quadra_inbox\" WHERE {INBOX_CLOSED}"),
+                &[Sql::Text(k.name.clone()), Sql::Text(thin.clone())],
+            )? as usize;
+        }
+        if let Some(before) = &k.before {
+            emptied += conn.exec(
+                &format!("UPDATE \"_quadra_inbox\" SET \"body\" = '', \"response\" = NULL, \"report\" = NULL WHERE {INBOX_CLOSED} AND \"body\" <> ''"),
+                &[Sql::Text(k.name.clone()), Sql::Text(before.clone())],
+            )? as usize;
+        }
+    }
+    for k in outbox {
+        if let Some(before) = &k.before {
+            deleted += conn.exec(
+                &format!("DELETE FROM \"_quadra_outbox\" WHERE {OUTBOX_CLOSED}"),
+                &[Sql::Text(k.name.clone()), Sql::Text(before.clone())],
+            )? as usize;
+        }
+    }
+    Ok((emptied, deleted))
+}

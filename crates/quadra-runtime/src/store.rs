@@ -284,6 +284,18 @@ pub struct Erasure {
     pub keep_values: bool,
 }
 
+/// A checkpoint of the history (`[data] archive_after`, `quadra db archive`): the rows `seqs`
+/// moved to the archive `archive` (written before the commit), named in the commit's hash
+/// with the SHA-256 of their rows; the commits up to `before_tx` are checked by their links
+/// and signatures from then on.
+#[derive(Clone, Debug)]
+pub struct CheckpointWrite {
+    pub before_tx: u64,
+    pub archive: String,
+    pub sha256: String,
+    pub seqs: Vec<i64>,
+}
+
 /// A record in the trash (`deletable, trash 30 days`): out of every table and list, kept whole
 /// to be restored until `until`, then deleted for good by the sweep.
 #[derive(Clone, Debug)]
@@ -353,6 +365,8 @@ pub struct Store {
     pub trashed: Vec<Id>,
     /// taken out of the trash in this transaction: restored, or deleted for good
     pub untrashed: Vec<Id>,
+    /// the checkpoint this transaction makes, if any
+    pub checkpoint: Option<CheckpointWrite>,
     /// Records created or written in the current transaction.
     pub dirty: BTreeSet<Id>,
     /// Records unfrozen in the current transaction (`frozen when` stopped holding).

@@ -1852,7 +1852,34 @@ pub fn apply_ops(
                 };
                 i.erase(&rec, reason)?;
             }
-            _ => return Err(fail("`op` must be create, update, action or erase".into())),
+            Some("delete") => {
+                let id = op["id"]
+                    .as_u64()
+                    .ok_or_else(|| fail("`id` is required".into()))?;
+                let of_it =
+                    i.store.exists(id, None) && i.store.get(id).is_some_and(|r| &*r.ent == ent);
+                if !of_it {
+                    return Err(fail(format!("{ent}#{id} does not exist")));
+                }
+                i.delete(&V::Ref {
+                    ent: Rc::from(ent),
+                    id,
+                })?;
+            }
+            Some("restore") => {
+                let id = op["id"]
+                    .as_u64()
+                    .ok_or_else(|| fail("`id` is required".into()))?;
+                i.restore(&V::Ref {
+                    ent: Rc::from(ent),
+                    id,
+                })?;
+            }
+            _ => {
+                return Err(fail(
+                    "`op` must be create, update, action, erase, delete or restore".into(),
+                ))
+            }
         }
     }
     Ok(created.into_inner())

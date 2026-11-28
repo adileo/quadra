@@ -912,6 +912,35 @@ pub fn engine<'m>(
     Ok(interp)
 }
 
+/// `f` on an engine of the database at `time`, committing through `sequencer` when there is
+/// one (else directly).
+pub fn with_engine<T>(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+    sequencer: Option<&crate::Sequencer>,
+    f: impl FnOnce(&mut Interp) -> Result<T, String>,
+) -> Result<T, String> {
+    let db = Database::open(url, model, report)?;
+    let src = crate::source::DbSource::open(url, db.schema.clone(), None)?;
+    let mut interp = Interp::new(model);
+    interp.set_clock(time);
+    interp.store = Store::over(std::rc::Rc::new(std::cell::RefCell::new(src)));
+    interp.load_units();
+    interp.materialize = materialized_formulas(&db.schema);
+    interp.sink = Some(match sequencer {
+        Some(s) => Box::new(crate::SequencedSink {
+            db,
+            model,
+            sequencer: s.clone(),
+            tickets: None,
+        }),
+        None => Box::new(Sink { db, model }),
+    });
+    f(&mut interp)
+}
+
 /// `quadra erase Customer 12 --reason …`: the record's `personal` fields and its lines'
 /// emptied, their past values out of the history, as the operator `who`. Returns the fields
 /// erased.

@@ -668,7 +668,9 @@ impl Cache {
         } else if !self.entries.is_empty() {
             // drop what was written since (an empty cache has nothing to drop: a server's first
             // request does not read the ids of every record written before it)
-            for r in conn.query("SELECT DISTINCT CAST(\"id\" AS TEXT) FROM \"_quadra_records\" WHERE \"last_tx\" > ?bigint", &[Sql::Int(self.watermark as i64)])? {
+            // (and what was erased, taken away or deleted since: a record gone is no longer in
+            // `_quadra_records`)
+            for r in conn.query("SELECT DISTINCT CAST(\"id\" AS TEXT) FROM \"_quadra_records\" WHERE \"last_tx\" > ?bigint UNION SELECT DISTINCT CAST(\"record_id\" AS TEXT) FROM \"_quadra_erasures\" WHERE \"tx\" > ?bigint", &[Sql::Int(self.watermark as i64), Sql::Int(self.watermark as i64)])? {
                 if let Some(e) = self.entries.remove(&(num(&r[0]) as u64)) {
                     self.bytes -= e.bytes;
                 }

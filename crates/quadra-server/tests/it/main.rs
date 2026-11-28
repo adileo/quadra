@@ -4,6 +4,7 @@
 mod agents;
 mod api;
 mod databases;
+mod deletion;
 mod deliver;
 mod files;
 mod host;

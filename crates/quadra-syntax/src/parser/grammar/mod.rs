@@ -495,7 +495,8 @@ fn inbound(p: &mut Parser) {
         while p.eat(NEWLINE) {}
         loop {
             let c = p.start();
-            if p.at_ctx("key") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
+            if keep_line(p) {
+            } else if p.at_ctx("key") && !matches!(p.nth(1), EQ | L_PAREN | DOT | COLON_EQ) {
                 p.bump_ctx();
                 expr(p);
             } else if p.at_ctx("pull") && p.nth(1) == STRING {
@@ -634,7 +635,36 @@ fn endpoint(p: &mut Parser) {
 /// A line of policy of an `outbound … as e:` (or a `publish`): `reply ErpAck`, `retry for 3
 /// days`, `retry 10 times`, `ordered by …`, `latest by …`, `expires after …`, `backoff …`,
 /// `unless …`, `delay …`, `window …`, `key …`. False (nothing eaten) when the line is code.
+/// `keep 1 year`, `keep forever`, `keep 30 days, then archive`: how long the messages of an
+/// `inbound` or the events of an `outbound` are kept once closed.
+fn keep_line(p: &mut Parser) -> bool {
+    if !(p.at_ctx("keep") && matches!(p.nth(1), NUMBER | IDENT)) {
+        return false;
+    }
+    p.bump_ctx();
+    if p.at(NUMBER) {
+        p.bump();
+        p.expect(IDENT);
+        if p.eat(COMMA) {
+            if p.at_ctx("then") && p.nth_at_ctx(1, "archive") {
+                p.bump_ctx();
+                p.bump_ctx();
+            } else {
+                p.error("expected `then archive`: `keep 30 days, then archive`");
+            }
+        }
+    } else if p.at_ctx("forever") {
+        p.bump_ctx();
+    } else {
+        p.error("expected how long (`keep 90 days`) or `keep forever`");
+    }
+    true
+}
+
 fn policy_line(p: &mut Parser) -> bool {
+    if keep_line(p) {
+        return true;
+    }
     if p.at_ctx("reply") && p.nth(1) == IDENT {
         p.bump_ctx();
         path(p);

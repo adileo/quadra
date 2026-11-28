@@ -326,6 +326,10 @@ pub enum Req {
         entity: String,
         id: u64,
     },
+    /// the records in the trash the caller may delete (of `entity`, or of every entity)
+    Trash {
+        entity: Option<String>,
+    },
     /// the file a `File` field names (the `n`th of a list): a signed URL of it
     File {
         entity: String,
@@ -448,6 +452,7 @@ impl Req {
             | Req::Query(_)
             | Req::Record { .. }
             | Req::History { .. }
+            | Req::Trash { .. }
             | Req::File { .. }
             | Req::Search { .. } => true,
             // formulas evaluated as the caller and completions are reads sent as `POST`
@@ -700,6 +705,8 @@ pub struct Engine {
     /// the tenant's sequencer: commits go through it (none: written directly, as the
     /// command line does)
     sequencer: Option<quadra_store::Sequencer>,
+    /// when the history was last archived (`[data] archive_after`)
+    archived_at: Option<std::time::Instant>,
     /// when the log of the integrations was last pruned (`[integrations] log_days`)
     pruned_at: Option<std::time::Instant>,
     /// the documents of an `attach` that could not be rendered (document, record): not tried
@@ -860,6 +867,7 @@ impl Engine {
             snapshot: false,
             sequencer: None,
             pruned_at: None,
+            archived_at: None,
             attach_failed: (0, Default::default()),
             uploads_pruned_at: None,
             agents_seen: HashMap::new(),
@@ -1009,6 +1017,7 @@ impl Engine {
             if let Err(e) = self.side(move |c| quadra_store::deliveries::prune_log(c, &before)) {
                 eprintln!("integrations: the old log was not pruned: {e}");
             }
+            self.prune_messages(model);
         }
         if model.outbounds.is_empty() {
             return Ok((Vec::new(), None, false));
@@ -3291,6 +3300,7 @@ impl Engine {
                     if let Err(e) = &r {
                         eprintln!("sweep: {e}");
                     }
+                    self.archive_due();
                     if let Some(reply) = reply {
                         let _ = reply.send(r);
                     }
@@ -3332,6 +3342,7 @@ impl Engine {
             Req::Query(q) => self.query(&who, &q),
             Req::Record { entity, id, base } => self.record(&who, &entity, id, base),
             Req::Export { entity, id } => self.export(&who, &entity, id),
+            Req::Trash { entity } => self.trash(&who, entity.as_deref()),
             Req::History {
                 entity,
                 id,
@@ -3913,7 +3924,130 @@ impl Engine {
     }
 
     /// A record taken away by its retention: `410` with when and why.
+    /// `[data] archive_after = "2 years"`: once a day, the history older than that moved to an
+    /// archive in the store of files, with its checkpoint, through the sequencer.
+    fn archive_due(&mut self) {
+        let checked = self.checked.clone();
+        let Some(model) = checked.model.as_ref() else {
+            return;
+        };
+        let Some((n, unit)) = model.manifest.data.archive_after.clone() else {
+            return;
+        };
+        if self
+            .archived_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(24 * 3600))
+        {
+            return;
+        }
+        self.archived_at = Some(std::time::Instant::now());
+        let term = quadra_ir::Term {
+            n: n as i64,
+            unit,
+            after: String::new(),
+            span: quadra_ir::Span {
+                file: quadra_sema::FileId(0),
+                range: Default::default(),
+            },
+        };
+        let at = now();
+        let Some(before) = term.before(at) else {
+            return;
+        };
+        let files = match self.files() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("archive: {e}");
+                return;
+            }
+        };
+        let mut put = |key: &str, bytes: &[u8]| {
+            files
+                .blobs
+                .put(key, bytes, "application/gzip", "attachment")
+                .map_err(|e| e.to_string())
+        };
+        match quadra_store::archive::archive_with(
+            &self.url,
+            model,
+            &checked.report,
+            before,
+            at,
+            self.sequencer.as_ref(),
+            &mut put,
+        ) {
+            Ok(Some(c)) => eprintln!(
+                "archive: commit {}: {} values moved to {}",
+                c.tx, c.rows, c.archive
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!("archive: {e}"),
+        }
+    }
+
+    /// The messages received and the events whose term ended (`keep …`, `[data] inbox`,
+    /// `outbox`): first written to an archive in the store of files when they say `then
+    /// archive` (not pruned if it cannot be written), then emptied or deleted.
+    fn prune_messages(&mut self, model: &quadra_ir::Model) {
+        use quadra_store::deliveries::{message_terms, prune_messages, to_archive};
+        let (mut inbox, mut outbox) = message_terms(model, now());
+        if inbox.iter().chain(&outbox).any(|k| k.archive) {
+            let written = to_archive(&mut self.conn, &inbox, &outbox, 100_000).and_then(|rows| {
+                if rows.is_empty() {
+                    return Ok(());
+                }
+                let lines: Vec<J> = rows
+                    .into_iter()
+                    .map(|(kind, mut r)| {
+                        r["kind"] = J::String(kind);
+                        r
+                    })
+                    .collect();
+                let bytes = quadra_store::archive::gz_lines(&lines)?;
+                let key = format!(
+                    "archive/messages-{}.jsonl.gz",
+                    now().format("%Y%m%dT%H%M%S")
+                );
+                self.files()?
+                    .blobs
+                    .put(&key, &bytes, "application/gzip", "attachment")
+                    .map_err(|e| e.to_string())
+            });
+            if let Err(e) = written {
+                eprintln!(
+                    "integrations: the messages to archive were not archived, they stay: {e}"
+                );
+                inbox.retain(|k| !k.archive);
+                outbox.retain(|k| !k.archive);
+            }
+        }
+        match self.side(move |c| prune_messages(c, &inbox, &outbox)) {
+            Ok((0, 0)) => {}
+            Ok((emptied, deleted)) => eprintln!(
+                "integrations: {emptied} messages emptied, {deleted} messages and events deleted (their term ended)"
+            ),
+            Err(e) => eprintln!("integrations: the old messages were not pruned: {e}"),
+        }
+    }
+
     fn erased(&mut self, id: u64) -> Option<Fail> {
+        // in the trash: it can come back
+        if let Ok(r) = self.conn.query(
+            "SELECT \"entity\", \"deleted_at\", \"until_at\" FROM \"_quadra_trash\" WHERE \"id\" = ?bigint",
+            &[quadra_store::conn::Sql::Int(id as i64)],
+        ) {
+            if let Some(r) = r.into_iter().next() {
+                let ent = r[0].clone().unwrap_or_default();
+                return Some((
+                    410,
+                    format!(
+                        "{ent}#{id} is in the trash since {} (until {}): `POST /v1/records/{ent}/{id}/restore` gives it back",
+                        r[1].clone().unwrap_or_default().replace('T', " "),
+                        r[2].clone().unwrap_or_default().replace('T', " "),
+                    ),
+                ));
+            }
+        }
         let r = self
             .conn
             .query(
@@ -3922,15 +4056,69 @@ impl Engine {
             )
             .ok()?;
         let r = r.into_iter().next()?;
+        let cause = r[2].clone().unwrap_or_default();
+        let verb = if cause.starts_with("delete:") || cause.starts_with("trash:") {
+            "deleted"
+        } else {
+            "erased"
+        };
         Some((
             410,
             format!(
-                "{}#{id} was erased on {}: {}",
+                "{}#{id} was {verb} on {}: {}",
                 r[0].clone().unwrap_or_default(),
                 r[1].clone().unwrap_or_default().replace('T', " "),
                 r[2].clone().unwrap_or_default()
             ),
         ))
+    }
+
+    /// `GET /v1/trash[?entity=E]`: the records in the trash of the entities the caller may
+    /// delete, the latest first, with their values (those the caller may see) and until when.
+    fn trash(&mut self, who: &Principal, entity: Option<&str>) -> Result<Reply, Fail> {
+        let checked = self.checked.clone();
+        let model = checked.model.as_ref().unwrap();
+        let mut i = self.interp(model, Some(who), None)?;
+        let rows = self
+            .conn
+            .query(
+                "SELECT CAST(\"id\" AS TEXT), \"entity\", \"data\", \"deleted_at\", CAST(\"user_id\" AS TEXT), \"until_at\" FROM \"_quadra_trash\" ORDER BY \"_quadra_trash\".\"deleted_at\" DESC LIMIT 1000",
+                &[],
+            )
+            .map_err(|e| (500, e))?;
+        let mut allowed: HashMap<String, bool> = HashMap::new();
+        let mut out = Vec::new();
+        for r in rows {
+            let ent = r[1].clone().unwrap_or_default();
+            if entity.is_some_and(|e| e != ent) {
+                continue;
+            }
+            let ok = *allowed
+                .entry(ent.clone())
+                .or_insert_with(|| i.check_permission("delete", &ent, None, None).is_ok());
+            if !ok {
+                continue;
+            }
+            let data: J = serde_json::from_str(r[2].as_deref().unwrap_or("{}")).unwrap_or(J::Null);
+            let mut values = serde_json::Map::new();
+            if let Some(o) = data["records"][0]["values"].as_object() {
+                for (f, v) in o {
+                    if !i.hidden(&ent, f) {
+                        values.insert(f.clone(), v.clone());
+                    }
+                }
+            }
+            out.push(serde_json::json!({
+                "id": r[0].as_deref().and_then(|v| v.parse::<u64>().ok()),
+                "entity": ent,
+                "values": values,
+                "lines": data["records"].as_array().map_or(0, |a| a.len().saturating_sub(1)),
+                "deleted_at": r[3],
+                "deleted_by": r[4].as_deref().and_then(|v| v.parse::<u64>().ok()),
+                "until": r[5],
+            }));
+        }
+        Ok(reply(200, serde_json::json!({ "records": out })))
     }
 
     fn export(&mut self, who: &Principal, entity: &str, id: u64) -> Result<Reply, Fail> {
@@ -4177,9 +4365,12 @@ impl Engine {
         let base = body["base"].as_u64();
         // (an erasure decides nothing on values read: it needs no base)
         if base.is_none()
-            && ops
-                .iter()
-                .any(|o| o["op"] != json!("create") && o["op"] != json!("erase"))
+            && ops.iter().any(|o| {
+                // (`erase`, `delete` and `restore` take a record as it is now)
+                !["create", "erase", "delete", "restore"]
+                    .iter()
+                    .any(|k| o["op"] == json!(k))
+            })
         {
             return Err((400, "`base` is required to change existing records: the commit is refused if they changed since".into()));
         }

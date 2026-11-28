@@ -1906,6 +1906,31 @@ impl Database {
         self.flush()?;
         self.write_outbox(c, tx, outbox_from)?;
         self.write_trash(c, tx)?;
+        if let Some(k) = &c.after.checkpoint {
+            // the rows moved to the archive leave the history; the checkpoint names them
+            for chunk in k.seqs.chunks(500) {
+                let list: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
+                self.wexec(
+                    format!(
+                        "DELETE FROM \"_quadra_history\" WHERE \"seq\" IN ({})",
+                        list.join(", ")
+                    ),
+                    Vec::new(),
+                )?;
+            }
+            let cp = crate::archive::Checkpoint {
+                tx,
+                before_tx: k.before_tx,
+                archive: k.archive.clone(),
+                sha256: k.sha256.clone(),
+                rows: k.seqs.len() as u64,
+            };
+            self.wexec(
+                "INSERT INTO \"_quadra_checkpoints\" (\"tx\", \"before_tx\", \"archive\", \"sha256\", \"rows\") VALUES (?bigint, ?bigint, ?text, ?text, ?bigint)".into(),
+                vec![Sql::Int(tx as i64), Sql::Int(cp.before_tx as i64), Sql::Text(cp.archive.clone()), Sql::Text(cp.sha256.clone()), Sql::Int(cp.rows as i64)],
+            )?;
+            payload.push(crate::archive::entry(&cp));
+        }
         Ok(payload)
     }
 
