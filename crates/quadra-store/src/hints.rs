@@ -422,6 +422,26 @@ impl<'a> Walker<'a> {
                 ),
             },
         };
+        // what goes cold: a query that does not keep to the recent records may read the archive
+        let msg = match self
+            .m
+            .entity(&ent)
+            .and_then(|x| x.cold.as_ref())
+            .and_then(|c| c.term())
+        {
+            Some(t)
+                if !lambdas
+                    .iter()
+                    .any(|(_, body)| quadra_ir::print::expr(body).contains(t.after.as_str())) =>
+            {
+                format!(
+                    "{msg} It may read the archive: closed {ent} records go cold {} (slower to read). A condition on `{}` keeps it to the recent ones; a total kept by a formula (`sum` over a record's lines) does not read them.",
+                    t.text(),
+                    t.after
+                )
+            }
+            _ => msg,
+        };
         self.out.push((e.span.clone(), msg));
     }
 }

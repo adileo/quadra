@@ -570,6 +570,7 @@ pub struct Manifest {
 /// inbox = "90 days"         # the messages received, once handled ("forever", "30 days, then archive")
 /// outbox = "30 days"        # the events, once delivered
 /// archive_after = "2 years" # the history moved to archives by the sweep, with a signed checkpoint
+/// cold_after = "3 years"    # the closed records, cold that long after their last write
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataDecl {
@@ -577,6 +578,9 @@ pub struct DataDecl {
     pub inbox: Option<TermDecl>,
     pub outbox: Option<TermDecl>,
     pub archive_after: Option<(u32, String)>,
+    /// `cold_after = "3 years"`: the closed records of the project's entities go cold that
+    /// long after they were last written (an entity's `archive …` says otherwise)
+    pub cold_after: Option<(u32, String)>,
 }
 
 /// How much of the history of a record is kept.
@@ -684,9 +688,10 @@ fn data(v: &toml::Value) -> Result<DataDecl, String> {
             "inbox" => d.inbox = Some(term_decl(&at, text)?),
             "outbox" => d.outbox = Some(term_decl(&at, text)?),
             "archive_after" => d.archive_after = Some(duration(&at, text)?),
+            "cold_after" => d.cold_after = Some(duration(&at, text)?),
             other => {
                 return Err(format!(
-                    "quadra.toml, [data]: `{other}` is not a setting of the data (history, inbox, outbox, archive_after)"
+                    "quadra.toml, [data]: `{other}` is not a setting of the data (history, inbox, outbox, archive_after, cold_after)"
                 ))
             }
         }

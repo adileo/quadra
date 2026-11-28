@@ -145,3 +145,21 @@ fn hints_say_how_queries_rules_and_formulas_run() {
     // an incremental formula has no hint
     assert!(on(&h, 14).is_empty(), "{joined}");
 }
+
+/// A query of an entity whose records go cold, that does not keep to the recent ones, says it
+/// may read the archive; one with a condition on the term's field does not.
+#[test]
+fn a_query_that_may_read_the_archive_says_so() {
+    let src = "entity Order:\n    archive 2 years after date\n    date: Date\n    total: Decimal\n\nfn all_time() -> Decimal:\n    return Order.where(o => o.total > 0).sum(o => o.total)\n\nfn this_year() -> Decimal:\n    return Order.where(o => o.date >= today() - 365 days).sum(o => o.total)\n";
+    let h = hints_of(src);
+    let archive: Vec<&String> = h
+        .iter()
+        .map(|(_, m)| m)
+        .filter(|m| m.contains("It may read the archive"))
+        .collect();
+    assert_eq!(archive.len(), 1, "{h:#?}");
+    assert!(
+        archive[0].contains("closed Order records go cold 2 years after date"),
+        "{h:#?}"
+    );
+}

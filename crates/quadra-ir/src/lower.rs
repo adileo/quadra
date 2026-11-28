@@ -86,6 +86,43 @@ pub fn lower(project: &Project, analysis: &Analysis) -> Model {
             }
         }
     }
+    // `[data] cold_after`: the entities of the project that do not say go cold that long after
+    // their records were last written (not the standard library's, the ledgers', the lines,
+    // which go with their record)
+    if let Some((n, unit)) = project.manifest.data.cold_after.clone() {
+        let std: std::collections::HashSet<String> = project
+            .files()
+            .filter(|f| f.kind == FileKind::Std)
+            .flat_map(|f| {
+                f.parse
+                    .syntax()
+                    .children()
+                    .filter(|i| i.kind() == ENTITY)
+                    .filter_map(|i| ast::name_text(&i))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for e in l.model.entities.iter_mut() {
+            if e.cold.is_some()
+                || e.is_ledger
+                || e.temporary
+                || e.kind != EntityKind::Entity
+                || std.contains(&e.name)
+                || e.fields.iter().any(|f| f.parent)
+            {
+                continue;
+            }
+            e.cold = Some(Cold::After {
+                term: Term {
+                    n: n as i64,
+                    unit: unit.clone(),
+                    after: "updated_at".into(),
+                    span: e.span,
+                },
+                span: e.span,
+            });
+        }
+    }
     // the images of the documents: read from the project (where it is on a disk)
     let mut paths = Vec::new();
     fn images(items: &[PrintItem], out: &mut Vec<String>) {
@@ -755,6 +792,7 @@ impl<'a> Lower<'a> {
             keep: Keep::Full,
             keep_span: None,
             deletable: None,
+            cold: None,
             span,
         }
     }
@@ -909,6 +947,20 @@ impl<'a> Lower<'a> {
                             e.history = Some(self.term(&m, None));
                         }
                     }
+                }
+                ARCHIVE => {
+                    let span = self.span(&m);
+                    e.cold = Some(if tokens(&m).any(|t| t.text() == "never") {
+                        Cold::Never(span)
+                    } else {
+                        let after = ast::child(&m, PATH)
+                            .map(|p| ast::path_text(&p))
+                            .unwrap_or_default();
+                        Cold::After {
+                            term: self.term(&m, Some(after)),
+                            span,
+                        }
+                    });
                 }
                 DELETABLE => {
                     let trash = tokens(&m)

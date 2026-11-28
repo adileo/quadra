@@ -411,6 +411,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--state",
     "--key",
     "--before",
+    "--at",
 ];
 
 /// The first positional argument (see `positionals`) and the other arguments.
@@ -754,6 +755,37 @@ fn db(args: &[String]) -> ExitCode {
             }
             println!("  commits     {}", s.commits);
             println!("  last        {}", s.last_hash.unwrap_or_default());
+            Ok(())
+        }
+        "cold" => {
+            // `--at 2029-01-01`: what would go cold on that day, with the data as it is
+            let at = match flag(rest, "--at") {
+                Some(d) => chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d")
+                    .map_err(|_| format!("--at {d}: a date, as 2029-01-01"))?
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap(),
+                None => now(),
+            };
+            let lines = ops::cold_report(&url, model, report, at)?;
+            if lines.is_empty() {
+                println!("no entity goes cold: `archive 2 years after paid_at` on an entity, or `[data] cold_after` in quadra.toml");
+                return Ok(());
+            }
+            for l in lines {
+                println!(
+                    "{}  (archive {}): {} of {} record{} closed now, about {} KB",
+                    l.entity,
+                    l.term,
+                    l.closed,
+                    l.records,
+                    if l.records == 1 { "" } else { "s" },
+                    l.bytes / 1024
+                );
+                for (why, n) in l.not_closed.iter().take(3) {
+                    println!("  {n} {why}");
+                }
+            }
+            println!("(what would go cold: moving it is not done yet, phase 19e)");
             Ok(())
         }
         "archive" => {

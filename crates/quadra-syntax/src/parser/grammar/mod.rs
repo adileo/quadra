@@ -1273,6 +1273,25 @@ fn member(p: &mut Parser, ctx: MemberCtx) {
                 m.complete(p, HISTORY);
                 return;
             }
+            "archive" if p.nth(1) == NUMBER || p.nth_text(1) == "never" => {
+                let m = p.start();
+                p.bump_ctx();
+                if p.at_ctx("never") {
+                    p.bump_ctx();
+                } else {
+                    p.bump();
+                    p.expect(IDENT);
+                    if p.at_ctx("after") {
+                        p.bump_ctx();
+                        path(p);
+                    } else {
+                        p.error("expected `after` and the field the time is counted from (`archive 2 years after paid_at`)");
+                    }
+                }
+                end_line(p);
+                m.complete(p, ARCHIVE);
+                return;
+            }
             "deletable" if matches!(p.nth(1), NEWLINE | COMMA | DEDENT) => {
                 let m = p.start();
                 p.bump_ctx();

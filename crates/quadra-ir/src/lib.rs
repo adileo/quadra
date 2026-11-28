@@ -898,6 +898,9 @@ pub struct Entity {
     pub keep_span: Option<Span>,
     /// `deletable`, `deletable, trash 30 days`: its records can be deleted
     pub deletable: Option<Deletable>,
+    /// `archive 2 years after paid_at` (or the project's `[data] cold_after`, counted from
+    /// `updated_at`), `archive never`: when a closed record goes cold
+    pub cold: Option<Cold>,
     pub span: Span,
 }
 
@@ -913,6 +916,27 @@ pub enum Keep {
     /// only the values in force: the history keeps nothing of the entity's records, and the
     /// chain of commits does not cover them (the record is read from its table)
     None,
+}
+
+/// When the closed records of an entity go cold: to the archive of the project, out of the
+/// database in use, read on demand (crate docs: Retention, "Hot and cold"). A cold record is a
+/// slow record, not another one: every read still finds it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum Cold {
+    /// `archive 2 years after paid_at`: a record closed and still for that long after the field
+    After { term: Term, span: Span },
+    /// `archive never`: its records stay in the database in use (the project's default does
+    /// not apply)
+    Never(Span),
+}
+
+impl Cold {
+    pub fn term(&self) -> Option<&Term> {
+        match self {
+            Cold::After { term, .. } => Some(term),
+            Cold::Never(_) => None,
+        }
+    }
 }
 
 /// `deletable`: the records of the entity can be deleted (`delete rec`, `DELETE
@@ -1337,6 +1361,46 @@ impl Model {
 
     pub fn entity(&self, name: &str) -> Option<&Entity> {
         self.index.get(name).map(|&i| &self.entities[i])
+    }
+
+    /// The states of a flow a record does not leave: the values of its field from which no
+    /// transition goes (a record is closed only there, for the archive). Empty when every
+    /// state has a way out.
+    pub fn terminal_states(&self, e: &Entity, flow: &Flow) -> Vec<String> {
+        let states: Vec<String> = match e.field(&flow.field).and_then(|f| f.ty.as_ref()) {
+            Some(Ty::Enum(vs)) => vs.iter().map(|v| v.name.clone()).collect(),
+            Some(Ty::Optional(t)) if matches!(**t, Ty::Enum(_)) => match &**t {
+                Ty::Enum(vs) => vs.iter().map(|v| v.name.clone()).collect(),
+                _ => Vec::new(),
+            },
+            Some(Ty::Path { segments, .. }) => segments
+                .last()
+                .and_then(|n| self.enum_def(n))
+                .map(|d| d.variants.iter().map(|v| v.name.clone()).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let states = if states.is_empty() {
+            let mut all: Vec<String> = flow
+                .transitions
+                .iter()
+                .flat_map(|t| t.from.iter().cloned().chain(std::iter::once(t.to.clone())))
+                .collect();
+            all.sort();
+            all.dedup();
+            all
+        } else {
+            states
+        };
+        states
+            .into_iter()
+            .filter(|s| {
+                !flow
+                    .transitions
+                    .iter()
+                    .any(|t| t.from.iter().any(|f| f == s))
+            })
+            .collect()
     }
 
     pub fn enum_def(&self, name: &str) -> Option<&EnumDef> {

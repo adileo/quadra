@@ -314,6 +314,7 @@ impl<'m> Checker<'m> {
         self.context = String::new();
         self.check_retention();
         self.check_deletable();
+        self.check_cold();
         self.context = String::new();
         for r in &m.reactions {
             self.entity = None;

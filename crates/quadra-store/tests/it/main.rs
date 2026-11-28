@@ -2,6 +2,7 @@
 //! `cargo test -p quadra-store --test it [filter]`.
 
 mod archive;
+mod cold;
 mod crash;
 mod deletion;
 mod deploy;

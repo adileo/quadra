@@ -6,7 +6,7 @@ use chrono::NaiveDateTime;
 use quadra_ir::{Block, Model};
 use quadra_runtime::{ChangeDiff, Ctx, Flow, Interp, ScriptMeta, Store, V};
 use quadra_types::Report;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 fn flow(prefix: &str, e: Flow) -> String {
@@ -910,6 +910,79 @@ pub fn engine<'m>(
     interp.materialize = materialized_formulas(&db.schema);
     interp.sink = Some(Box::new(Sink { db, model }));
     Ok(interp)
+}
+
+/// What would go cold now (`quadra db cold`), per entity with `archive …`.
+#[derive(Debug, Default)]
+pub struct ColdLine {
+    pub entity: String,
+    /// `2 years after paid_at`
+    pub term: String,
+    pub records: usize,
+    pub closed: usize,
+    /// the bytes of the values the closed records hold in the history (what would leave the
+    /// database in use, about)
+    pub bytes: u64,
+    /// why the others are not closed, by kind (`not yet`, `written recently`, `open`), most first
+    pub not_closed: Vec<(String, usize)>,
+}
+
+/// `quadra db cold`: for each entity with `archive …`, how many of its records are closed now
+/// and would go cold, about how much they hold, and why the others are not.
+pub fn cold_report(
+    url: &str,
+    model: &Model,
+    report: &Report,
+    time: NaiveDateTime,
+) -> Result<Vec<ColdLine>, String> {
+    let mut i = engine(url, model, report, time)?;
+    let mut out = Vec::new();
+    let mut ids_closed: Vec<(usize, Vec<u64>)> = Vec::new();
+    for e in &model.entities {
+        let Some(quadra_ir::Cold::After { term, .. }) = &e.cold else {
+            continue;
+        };
+        let mut line = ColdLine {
+            entity: e.name.clone(),
+            term: term.text(),
+            ..Default::default()
+        };
+        let mut why: HashMap<String, usize> = HashMap::new();
+        let mut closed = Vec::new();
+        for id in i.ids(&e.name, None) {
+            line.records += 1;
+            match i.closed(&e.name, id).map_err(|e| flow("cold", e))? {
+                Ok(_) => closed.push(id),
+                Err(w) => {
+                    *why.entry(w.split(':').next().unwrap_or("").to_string())
+                        .or_default() += 1
+                }
+            }
+        }
+        line.closed = closed.len();
+        let mut w: Vec<(String, usize)> = why.into_iter().collect();
+        w.sort_by(|a, b| b.1.cmp(&a.1));
+        line.not_closed = w;
+        ids_closed.push((out.len(), closed));
+        out.push(line);
+    }
+    drop(i);
+    let mut c = crate::Conn::open(url)?;
+    for (n, ids) in ids_closed {
+        for chunk in ids.chunks(500) {
+            let list: Vec<String> = chunk.iter().map(|i| i.to_string()).collect();
+            let r = c.query(
+                &format!("SELECT CAST(COALESCE(SUM(LENGTH(\"value\")), 0) AS TEXT) FROM \"_quadra_history\" WHERE \"record_id\" IN ({})", list.join(", ")),
+                &[],
+            )?;
+            out[n].bytes += r
+                .first()
+                .and_then(|r| r[0].as_deref())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+        }
+    }
+    Ok(out)
 }
 
 /// `f` on an engine of the database at `time`, committing through `sequencer` when there is

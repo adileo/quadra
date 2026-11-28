@@ -815,4 +815,96 @@ impl<'m> Interp<'m> {
         }
         Ok(out)
     }
+
+    /// Whether a record of an entity with `archive …` is closed now, so that it may go cold:
+    /// since when, or why not (`"kind: detail"`). Closed: its term is over, it was not written
+    /// for as long, and it is in a state of each of its flows it does not leave.
+    pub fn closed(&mut self, ent: &str, id: Id) -> R<Result<NaiveDateTime, String>> {
+        let e = self.entity(ent)?;
+        let Some(Cold::After { term, .. }) = &e.cold else {
+            return Ok(Err("never: the entity does not go cold".into()));
+        };
+        let rec = V::Ref {
+            ent: Rc::from(ent),
+            id,
+        };
+        let now = self.clock;
+        let Some(end) = self.term_end(&rec, term)? else {
+            return Ok(Err(format!("no date: `{}` has no value", term.after)));
+        };
+        if end > now {
+            return Ok(Err(format!(
+                "not yet: {} {} after {}, on {}",
+                term.n,
+                term.unit,
+                term.after,
+                end.format("%Y-%m-%d")
+            )));
+        }
+        let mut since = end;
+        if term.after != "updated_at" {
+            let quiet = Term {
+                after: "updated_at".into(),
+                ..term.clone()
+            };
+            if let Some(q) = self.term_end(&rec, &quiet)? {
+                if q > now {
+                    return Ok(Err(format!(
+                        "written recently: still until {}",
+                        q.format("%Y-%m-%d")
+                    )));
+                }
+                since = since.max(q);
+            }
+        }
+        // open while a transition can take it out of its state now (`unless paid > 0 EUR`: a
+        // paid invoice stays Posted; a write that opened one again would take it back)
+        for f in &e.flows {
+            let state = match self.get(&rec, &f.field, None, None)? {
+                V::Variant { name, .. } => name.to_string(),
+                V::None => continue,
+                other => other.to_string(),
+            };
+            for t in f
+                .transitions
+                .iter()
+                .filter(|t| t.from.iter().any(|s| *s == state))
+            {
+                let mut ctx = super::Ctx::for_record(&rec, ent);
+                if let Some(w) = &t.when {
+                    if !self.eval(w, &mut ctx)?.truthy() {
+                        continue;
+                    }
+                }
+                if let Some(u) = &t.unless {
+                    if self.eval(u, &mut ctx)?.truthy() {
+                        continue;
+                    }
+                }
+                return Ok(Err(format!(
+                    "open: in state {state} of `{}`, which it can leave (-> {})",
+                    f.field, t.to
+                )));
+            }
+        }
+        Ok(Ok(since))
+    }
+
+    /// The records closed now, of every entity with `archive …`.
+    pub fn cold_due(&mut self) -> R<Vec<(String, Id)>> {
+        let m = self.m;
+        let mut out = Vec::new();
+        for e in m
+            .entities
+            .iter()
+            .filter(|e| matches!(e.cold, Some(Cold::After { .. })))
+        {
+            for id in self.ids(&e.name, None) {
+                if self.closed(&e.name, id)?.is_ok() {
+                    out.push((e.name.clone(), id));
+                }
+            }
+        }
+        Ok(out)
+    }
 }

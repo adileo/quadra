@@ -364,6 +364,62 @@ impl<'m> Checker<'m> {
         }
     }
 
+    /// `archive …`: its term, and that records of the entity can close.
+    pub(super) fn check_cold(&mut self) {
+        let m = self.m;
+        for e in &m.entities {
+            let Some(Cold::After { term, span }) = &e.cold else {
+                continue;
+            };
+            self.context = format!("entity {}", e.name);
+            self.check_term(e, term);
+            if e.is_ledger {
+                self.error(
+                    *span,
+                    "a ledger's rows are kept in the database in use: it has no `archive`",
+                );
+            }
+            if e.fields.iter().any(|f| f.parent) {
+                self.error(
+                    *span,
+                    format!(
+                        "{} is the line of a record: it goes cold with it (`archive` goes on that record)",
+                        e.name
+                    ),
+                );
+            }
+            if let Some(x) = &e.retention.expire {
+                if x.after == term.after && term_days(term) >= term_days(x) {
+                    self.error(
+                        *span,
+                        format!(
+                            "{} expires ({}) before it would go cold ({}): its records never go cold",
+                            e.name,
+                            x.text(),
+                            term.text()
+                        ),
+                    );
+                }
+            }
+            for f in &e.flows {
+                // (a guarded way out may be closed for a record: `unless paid > 0 EUR`)
+                let guarded = f
+                    .transitions
+                    .iter()
+                    .any(|t| t.when.is_some() || t.unless.is_some());
+                if !guarded && m.terminal_states(e, f).is_empty() {
+                    self.error(
+                        *span,
+                        format!(
+                            "every state of `{}.{}` has a way out: its records never close, so they never go cold (a record goes cold only in a state it does not leave)",
+                            e.name, f.field
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     /// `deletable`: its term, what it cannot be, the permission and the reactions that say
     /// `delete`.
     pub(super) fn check_deletable(&mut self) {
@@ -445,5 +501,16 @@ fn ty_text(t: &Ty) -> String {
         Ty::List(i) => format!("[{}]", ty_text(i)),
         Ty::Set(i) => format!("{{{}}}", ty_text(i)),
         _ => "…".into(),
+    }
+}
+
+/// About how many days a term is (to compare two terms of the same field).
+fn term_days(t: &Term) -> i64 {
+    t.n * match t.unit().unwrap_or("days") {
+        "hours" => 0,
+        "days" => 1,
+        "weeks" => 7,
+        "months" => 30,
+        _ => 365,
     }
 }

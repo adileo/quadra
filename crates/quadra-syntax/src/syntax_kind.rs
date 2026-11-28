@@ -162,6 +162,9 @@ pub enum SyntaxKind {
     /// `deletable`, `deletable, trash 30 days`: an entity whose records can be deleted (through
     /// a trash first)
     DELETABLE,
+    /// `archive 2 years after paid_at`, `archive never`: when a closed record of the entity
+    /// goes cold (to the archive of the project, read on demand)
+    ARCHIVE,
 
     // members
     MEMBER_LIST,

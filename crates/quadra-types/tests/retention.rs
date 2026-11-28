@@ -186,3 +186,23 @@ fn history_none_and_last() {
         "Customer is read by frozen records, which read it as it was when they froze: its history is kept whole (`history none` keeps only the values in force)",
     );
 }
+
+#[test]
+fn archive_needs_a_record_that_can_close() {
+    assert_eq!(
+        errors("entity Invoice:\n    archive 2 years after date\n    date: Date\n    state: enum(Draft, Posted, Paid) default Draft\n    flow state:\n        Draft -> Posted by post\n        Posted -> Paid by pay\n    action post:\n        date = today()\n    action pay:\n        date = today()\n"),
+        Vec::<String>::new()
+    );
+    assert_error(
+        "entity Ticket:\n    archive 1 year after updated_at\n    state: enum(Open, Waiting) default Open\n    flow state:\n        Open -> Waiting by wait\n        Waiting -> Open by reopen\n    action wait:\n        pass\n    action reopen:\n        pass\n",
+        "every state of `Ticket.state` has a way out: its records never close",
+    );
+    assert_error(
+        "entity Order:\n    lines: [Line]\n\nentity Line:\n    archive 1 year after created_at\n    order: Order parent\n    qty: Int\n",
+        "Line is the line of a record: it goes cold with it",
+    );
+    assert_error(
+        "entity Visit:\n    expire 30 days after created_at\n    archive 1 year after created_at\n    page: Text\n",
+        "Visit expires (30 days after created_at) before it would go cold (1 year after created_at)",
+    );
+}
