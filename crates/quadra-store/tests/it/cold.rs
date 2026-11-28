@@ -227,10 +227,18 @@ fn cold_records_are_read_as_before() {
     };
     let seen = before(&url);
     let mut kept = Vec::new();
-    let (vol, n) = ops::cold_run(&url, m, r, at(2027, 6, 1), None, &mut |k, b| {
-        kept.push((k.to_string(), b.len()));
-        Ok(())
-    })
+    let (vol, n) = ops::cold_run(
+        &url,
+        m,
+        r,
+        at(2027, 6, 1),
+        None,
+        &mut |k, b| {
+            kept.push((k.to_string(), b.len()));
+            Ok(())
+        },
+        &mut |_| Ok(()),
+    )
     .unwrap()
     .expect("closed records");
     // four orders done, with their lines
@@ -429,9 +437,17 @@ fn cold_through_the_sequencer() {
         })
         .unwrap();
     drop(i);
-    let (_, n) = ops::cold_run(&url, m, r, at(2027, 6, 1), Some(&s), &mut |_, _| Ok(()))
-        .unwrap()
-        .unwrap();
+    let (_, n) = ops::cold_run(
+        &url,
+        m,
+        r,
+        at(2027, 6, 1),
+        Some(&s),
+        &mut |_, _| Ok(()),
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(n, 2);
     assert_eq!(count(&url, "SELECT 1 FROM \"main\".\"contact\""), 0);
     // erased while cold: back in use, and its value gone
@@ -462,6 +478,36 @@ fn cold_through_the_sequencer() {
         ),
         0
     );
+    // the next run writes the volume again without her: the value is in no file any more
+    let mut removed = Vec::new();
+    let (_, n) = ops::cold_run(
+        &url,
+        m,
+        r,
+        at(2027, 6, 3),
+        Some(&s),
+        &mut |_, _| Ok(()),
+        &mut |k| {
+            removed.push(k.to_string());
+            Ok(())
+        },
+    )
+    .unwrap()
+    .expect("the dirty volume");
+    assert_eq!((n, removed.len()), (0, 1));
+    let in_files = |needle: &str| {
+        std::fs::read_dir(dir.join("data.db.cold"))
+            .unwrap()
+            .flatten()
+            .any(|e| {
+                std::fs::read(e.path())
+                    .unwrap()
+                    .windows(needle.len())
+                    .any(|w| w == needle.as_bytes())
+            })
+    };
+    assert!(!in_files("ann@example.com"));
+    assert!(in_files("bob@example.com"));
     s.stop();
     let (problems, _) = ops::verify(&url, m, r, at(2027, 6, 4)).unwrap();
     assert_eq!(problems, Vec::<String>::new());

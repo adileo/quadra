@@ -930,11 +930,32 @@ pub fn cold_run(
     time: NaiveDateTime,
     sequencer: Option<&crate::Sequencer>,
     put: &mut dyn FnMut(&str, &[u8]) -> Result<(), String>,
+    remove: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<Option<(String, usize)>, String> {
     use sha2::Digest;
     // which, and their versions as copied
+    // (those cold already stay where they are)
+    let cold_now: HashSet<u64> = {
+        let mut c = crate::Conn::open(url)?;
+        if c.table_exists("_quadra_cold")? {
+            c.query(
+                "SELECT CAST(\"id\" AS TEXT) FROM \"main\".\"_quadra_cold\"",
+                &[],
+            )?
+            .into_iter()
+            .filter_map(|r| r[0].as_deref().and_then(|v| v.parse().ok()))
+            .collect()
+        } else {
+            HashSet::new()
+        }
+    };
     let (records, versions) = with_engine(url, model, report, time, None, |i| {
-        let due = i.cold_due().map_err(|e| flow("cold", e))?;
+        let due: Vec<(String, u64)> = i
+            .cold_due()
+            .map_err(|e| flow("cold", e))?
+            .into_iter()
+            .filter(|(_, id)| !cold_now.contains(id))
+            .collect();
         // each closed record with its lines; one that a record staying in use refers to stays
         // in use too (its references hold it: an open order keeps its customer), until nothing
         // more changes
@@ -960,8 +981,11 @@ pub fn cold_run(
             let going: HashSet<u64> = groups.iter().flatten().map(|(_, id)| *id).collect();
             let before = groups.len();
             groups.retain(|g| {
-                g.iter()
-                    .all(|(_, id)| referrers[id].iter().all(|r| going.contains(r)))
+                g.iter().all(|(_, id)| {
+                    referrers[id]
+                        .iter()
+                        .all(|r| going.contains(r) || cold_now.contains(r))
+                })
             });
             if groups.len() == before {
                 break;
@@ -980,20 +1004,28 @@ pub fn cold_run(
             .collect();
         Ok((out, v))
     })?;
-    if records.is_empty() {
-        return Ok(None);
-    }
     let schema = Database::open(url, model, report)?.schema.clone();
     let mut c = crate::Conn::open(url)?;
-    let dir =
-        crate::cold::folder(&mut c)?.ok_or("cold records are kept beside a SQLite database")?;
+    let Some(dir) = crate::cold::folder(&mut c)? else {
+        return Ok(None);
+    };
+    let old = crate::cold::volumes(&mut c)?;
+    // a volume holding records no longer cold in it (written, erased, deleted since) is written
+    // again without them: what was erased leaves it too
+    let dirty = crate::cold::dirty(&mut c)?;
+    if records.is_empty() && dirty.is_empty() {
+        return Ok(None);
+    }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = format!("volume-{}", time.format("%Y%m%dT%H%M%S"));
     let file = dir.join(format!("{name}.db"));
     let _ = std::fs::remove_file(&file);
-    let old = crate::cold::volumes(&mut c)?;
     // many volumes: one new with them all (a connection reads at most a few)
-    let merged: Vec<(String, std::path::PathBuf)> = if old.len() >= 6 { old } else { Vec::new() };
+    let merged: Vec<(String, std::path::PathBuf)> = if old.len() >= 6 {
+        old
+    } else {
+        old.into_iter().filter(|(n, _)| dirty.contains(n)).collect()
+    };
     c.batch(&format!(
         "ATTACH DATABASE '{}' AS \"volume\"",
         file.display().to_string().replace('\'', "''")
@@ -1056,11 +1088,23 @@ pub fn cold_run(
         .collect();
     put(&format!("cold/{name}.db"), &bytes)?;
     let n = records.len();
+    let kept: i64 = merged
+        .iter()
+        .map(|(v, _)| {
+            crate::Conn::open(url)
+                .and_then(|mut c| c.query("SELECT CAST(COUNT(*) AS TEXT) FROM \"_quadra_cold\" WHERE \"volume\" = ?text", &[crate::conn::Sql::Text(v.clone())]))
+                .ok()
+                .and_then(|r| r.into_iter().next())
+                .and_then(|r| r[0].as_deref().and_then(|x| x.parse().ok()))
+                .unwrap_or(0)
+        })
+        .sum();
     let mv = quadra_runtime::store::ColdMove {
         volume: name.clone(),
         sha256: sha,
         records: records.clone(),
         merged: merged.iter().map(|(n, _)| n.clone()).collect(),
+        kept: kept as usize,
     };
     let done = with_engine(url, model, report, time, sequencer, |i| {
         i.system += 1;
@@ -1085,9 +1129,12 @@ pub fn cold_run(
         let _ = std::fs::remove_file(&file);
         return Err(e);
     }
-    // the volumes merged are no longer read
-    for (_, path) in &merged {
+    // the volumes merged are no longer read: gone, here and in the store of files
+    for (old, path) in &merged {
         let _ = std::fs::remove_file(path);
+        if let Err(e) = remove(&format!("cold/{old}.db")) {
+            eprintln!("cold: the volume {old} stays in the store of files: {e}");
+        }
     }
     Ok(Some((name, n)))
 }

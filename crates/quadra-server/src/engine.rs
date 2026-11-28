@@ -3975,6 +3975,7 @@ impl Engine {
             now(),
             self.sequencer.as_ref(),
             &mut put,
+            &mut |key: &str| files.blobs.delete(key).map_err(|e| e.to_string()),
         ) {
             Ok(Some((v, n))) => eprintln!("cold: {n} closed records moved to the volume {v}"),
             Ok(None) => {}

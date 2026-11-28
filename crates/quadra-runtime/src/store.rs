@@ -310,6 +310,8 @@ pub struct ColdMove {
     /// (entity, record)
     pub records: Vec<(String, Id)>,
     pub merged: Vec<String>,
+    /// the records of the merged volumes still cold, now in this one
+    pub kept: usize,
 }
 
 /// A record in the trash (`deletable, trash 30 days`): out of every table and list, kept whole

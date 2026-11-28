@@ -775,7 +775,7 @@ fn db(args: &[String]) -> ExitCode {
             if rest.iter().any(|a| a == "--run") {
                 let _writer = quadra_store::writer::acquire(&url)?;
                 let files = files_store(&root)?;
-                match ops::cold_run(&url, model, report, at, None, &mut |k, b| files.blobs.put(k, b, "application/vnd.sqlite3", "attachment"))? {
+                match ops::cold_run(&url, model, report, at, None, &mut |k, b| files.blobs.put(k, b, "application/vnd.sqlite3", "attachment"), &mut |k| files.blobs.delete(k))? {
                     None => println!("nothing is closed: no record goes cold"),
                     Some((v, n)) => {
                         println!("✓ {n} closed record{} moved to the volume {v}", if n == 1 { "" } else { "s" });

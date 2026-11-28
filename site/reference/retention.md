@@ -500,8 +500,11 @@ every order, old ones too; a condition on the term's field (`o.date >= today() -
 keeps it to the recent ones, and a total kept by a formula (`sum` over a record's lines) does
 not read them at all.
 
+A value erased from a cold record leaves the database in use at once, and its volume within
+the day: a volume holding records that came back (written, erased, deleted) is written again
+without them by the next run, under a new name and a commit of its own, and the old file goes,
+beside the database and from the store of files.
+
 ::: warning Not yet
-A value erased from a cold record leaves the database in use, but stays in its volume, which
-never changes, until the volume is written again without it (to come, as the archives of the
-history are). Volumes are fetched whole, not page by page.
+Volumes are fetched whole, not page by page.
 :::

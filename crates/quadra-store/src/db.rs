@@ -1953,12 +1953,12 @@ impl Database {
             }
             self.wexec(
                 "INSERT INTO \"_quadra_volumes\" (\"name\", \"sha256\", \"tx\", \"records\") VALUES (?text, ?text, ?bigint, ?bigint)".into(),
-                vec![Sql::Text(k.volume.clone()), Sql::Text(k.sha256.clone()), Sql::Int(tx as i64), Sql::Int(k.records.len() as i64)],
+                vec![Sql::Text(k.volume.clone()), Sql::Text(k.sha256.clone()), Sql::Int(tx as i64), Sql::Int((k.records.len() + k.kept) as i64)],
             )?;
             payload.push(crate::cold::entry(
                 &k.volume,
                 &k.sha256,
-                k.records.len() as u64,
+                (k.records.len() + k.kept) as u64,
             ));
         }
         if let Some(k) = &c.after.checkpoint {

@@ -477,3 +477,19 @@ pub fn fetch(
     }
     Ok(n)
 }
+
+/// The volumes in use holding records no longer cold in them (they came back: written,
+/// erased, deleted): to be written again without them.
+pub fn dirty(conn: &mut Conn) -> Result<Vec<String>, String> {
+    if !conn.table_exists("_quadra_volumes")? {
+        return Ok(Vec::new());
+    }
+    Ok(conn
+        .query(
+            "SELECT v.\"name\" FROM \"main\".\"_quadra_volumes\" v WHERE v.\"dropped_tx\" IS NULL AND v.\"records\" > (SELECT COUNT(*) FROM \"main\".\"_quadra_cold\" c WHERE c.\"volume\" = v.\"name\")",
+            &[],
+        )?
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect())
+}
