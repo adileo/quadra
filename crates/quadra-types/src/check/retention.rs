@@ -328,6 +328,108 @@ impl<'m> Checker<'m> {
     }
 }
 
+impl<'m> Checker<'m> {
+    /// `delete rec` / `restore rec`: a record of a `deletable` entity (with a trash, to restore).
+    pub(super) fn check_delete(&mut self, target: &Expr, restore: bool) {
+        let word = if restore { "restore" } else { "delete" };
+        let t = self.infer(target);
+        let en = match t.unopt() {
+            T::Ent(en) => en.clone(),
+            T::Unknown => return,
+            other => {
+                self.error(
+                    target.span,
+                    format!("`{word}` takes a record, not `{other}`"),
+                );
+                return;
+            }
+        };
+        let Some(e) = self.m.entity(&en) else { return };
+        match &e.deletable {
+            None => self.error(
+                target.span,
+                format!(
+                    "records of {en} are not deleted: add `deletable` to it (or `deletable, trash \
+                     30 days`), or cancel or deactivate them with an action"
+                ),
+            ),
+            Some(d) if restore && d.trash.is_none() => self.error(
+                target.span,
+                format!(
+                    "{en} has no trash: a record deleted is gone (`deletable, trash 30 days` \
+                     keeps them there first, to restore)"
+                ),
+            ),
+            _ => {}
+        }
+    }
+
+    /// `deletable`: its term, what it cannot be, the permission and the reactions that say
+    /// `delete`.
+    pub(super) fn check_deletable(&mut self) {
+        let m = self.m;
+        for e in &m.entities {
+            let Some(d) = &e.deletable else { continue };
+            self.context = format!("entity {}", e.name);
+            if let Some(t) = &d.trash {
+                self.check_term(e, t);
+            }
+            if let Some(p) = e.posts.first() {
+                self.error(
+                    d.span,
+                    format!(
+                        "{} posts to {}: its ledger rows are kept for ever, so its records \
+                         cannot be deleted",
+                        e.name, p.ledger
+                    ),
+                );
+            }
+            if e.is_ledger {
+                self.error(
+                    d.span,
+                    "a ledger's rows are kept for ever: it is not `deletable`",
+                );
+            }
+        }
+        let deletable = |name: &str| m.entity(name).is_some_and(|e| e.deletable.is_some());
+        for r in &m.reactions {
+            if r.trigger == Trigger::Deleted && !deletable(&r.entity) {
+                self.error(
+                    r.span,
+                    format!(
+                        "records of {0} are not deleted, so `on {0} deleted` would never run: add \
+                         `deletable` to {0}, or react to `on {0} enters <state>` when a record \
+                         is cancelled or deactivated",
+                        r.entity
+                    ),
+                );
+            }
+        }
+        for rule in m
+            .rules
+            .iter()
+            .chain(m.roles.iter().flat_map(|r| r.rules.iter()))
+        {
+            if !rule.verbs.iter().any(|v| v == "delete") {
+                continue;
+            }
+            for t in &rule.targets {
+                let Some(en) = t.first() else { continue };
+                if en != "*" && !deletable(en) {
+                    self.error(
+                        rule.span,
+                        format!(
+                            "records of {en} are not deleted, so there is no `delete` permission on \
+                             it: add `deletable` to {en}, or permit the action that cancels or \
+                             deactivates them (`run {en}.cancel`)"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn ty_text(t: &Ty) -> String {
     match t {
         Ty::Path { segments, args, .. } => {

@@ -3,6 +3,7 @@
 
 mod archive;
 mod crash;
+mod deletion;
 mod deploy;
 mod due;
 mod erasure;

@@ -1010,6 +1010,11 @@ pub fn sweep_with(
     if !expired.is_empty() {
         written = Some(interp.store.tx);
     }
+    // the records whose time in the trash is over: deleted for good
+    let purged = interp.purge_trash_due().map_err(|e| flow("trash", e))?;
+    if !purged.is_empty() {
+        written = Some(interp.store.tx);
+    }
     // `history …`: once a day, the values replaced long enough ago leave the history
     let compacted = Database::open(url, model, report)?
         .meta("last_history")?
@@ -1043,7 +1048,7 @@ pub fn sweep_with(
     }
     // what this sweep erased or took away: its space given back, the WAL emptied (a
     // sequencer does it by itself after such a batch, and once a day)
-    if sequencer.is_none() && !expired.is_empty() {
+    if sequencer.is_none() && (!expired.is_empty() || !purged.is_empty()) {
         let mut c = crate::Conn::open(url)?;
         crate::conn::reclaim(&mut c)?;
     }

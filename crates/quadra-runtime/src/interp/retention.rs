@@ -8,7 +8,7 @@
 //! a record kept by its own retention refers to it.
 
 use super::{fail, ty_names, ty_names_inner, Interp, R};
-use crate::store::Erasure;
+use crate::store::{Erasure, TrashEntry};
 use crate::value::{Id, V};
 use chrono::NaiveDateTime;
 use quadra_ir::*;
@@ -221,6 +221,7 @@ impl<'m> Interp<'m> {
             by: self.user,
             before: None,
             last: None,
+            keep_values: false,
         });
         Ok(())
     }
@@ -420,6 +421,7 @@ impl<'m> Interp<'m> {
                         by: None,
                         before: None,
                         last: Some(keep),
+                        keep_values: false,
                     });
                     Ok(())
                 })
@@ -452,6 +454,7 @@ impl<'m> Interp<'m> {
                         by: None,
                         before: Some(before),
                         last: None,
+                        keep_values: false,
                     });
                     Ok(())
                 })
@@ -529,8 +532,275 @@ impl<'m> Interp<'m> {
                 by: None,
                 before: None,
                 last: None,
+                keep_values: false,
             });
         }
         Ok(true)
+    }
+
+    /// `delete rec`: a record of a `deletable` entity goes, with its lines: to its trash when
+    /// it has one, else for good. Refused while a retention keeps it or a required reference
+    /// holds it, with why; its optional references become none (a restore gives them back).
+    /// `on E deleted` runs first, while its values are there. What its history keeps of it is
+    /// what the entity's history says: all of it (`full`), nothing (`last N`, `none`).
+    pub fn delete(&mut self, rec: &V) -> R<()> {
+        let V::Ref { id, .. } = rec else {
+            return fail(format!("`delete` takes a record, not {rec}"));
+        };
+        let id = *id;
+        if !self.store.exists(id, None) {
+            return fail(format!("{rec} does not exist"));
+        }
+        let ent = self.ent_of(id).to_string();
+        let e = self.entity(&ent)?;
+        let Some(d) = &e.deletable else {
+            return fail(format!(
+                "records of {ent} are not deleted: add `deletable` to it, or cancel or \
+                 deactivate them with an action"
+            ));
+        };
+        self.check_permission("delete", &ent, None, Some(rec))?;
+        if let Some((at, why)) = self.kept_until(&ent, id)? {
+            return fail(format!(
+                "{ent}#{id} cannot be deleted before {}: {why}",
+                at.format("%Y-%m-%d")
+            ));
+        }
+        // what refers to it: a required reference holds it, an optional one is emptied
+        let mut emptied: Vec<(Id, String)> = Vec::new();
+        for (of, field) in self.references_to(&ent) {
+            if field.parent {
+                continue;
+            }
+            let required = !matches!(
+                field.ty,
+                Some(Ty::Optional(_)) | Some(Ty::List(_)) | Some(Ty::Set(_))
+            );
+            for r in self.referrers(of, field, id, &ent) {
+                if required {
+                    return fail(format!(
+                        "{ent}#{id} cannot be deleted: {}#{r} refers to it (`{}.{}` is \
+                         required)",
+                        of.name, of.name, field.name
+                    ));
+                }
+                emptied.push((r, field.name.clone()));
+            }
+        }
+        for i in 0..self.m.reactions.len() {
+            let r = &self.m.reactions[i];
+            if r.trigger == Trigger::Deleted && r.entity == ent {
+                self.run_reaction(i, rec)?;
+            }
+        }
+        let gone: Vec<(String, Id)> = std::iter::once((ent.clone(), id))
+            .chain(self.lines_of(&ent, id))
+            .collect();
+        let trash = d.trash.clone();
+        // the trash keeps the record whole; the history keeps it when the entity keeps it all
+        let keep_values = trash.is_some() || e.keep == Keep::Full;
+        if let Some(t) = &trash {
+            let mut records = Vec::new();
+            for (ge, gid) in &gone {
+                let ge_e = self.entity(ge)?;
+                let mut vals = Vec::new();
+                for f in ge_e.fields.iter().filter(|f| f.formula.is_none()) {
+                    if let Some(v) = self.store.read(*gid, &f.name, None) {
+                        if !v.is_none() {
+                            vals.push((f.name.clone(), v));
+                        }
+                    }
+                }
+                let (at, by) = self
+                    .store
+                    .get(*gid)
+                    .map(|r| (r.created_at, r.created_by))
+                    .unwrap_or((self.clock, None));
+                records.push((*gid, ge.clone(), vals, at, by));
+            }
+            let until = t.after(self.clock).unwrap_or(self.clock);
+            self.store.trash.insert(
+                id,
+                TrashEntry {
+                    id,
+                    ent: Rc::from(ent.as_str()),
+                    records,
+                    refs: emptied.clone(),
+                    deleted_at: self.clock,
+                    by: self.user,
+                    until,
+                },
+            );
+            self.store.trashed.push(id);
+        }
+        for (r, f) in &emptied {
+            let oe = self.ent_of(*r).to_string();
+            let of = self.entity(&oe)?;
+            let Some(field) = of.fields.iter().find(|x| &x.name == f) else {
+                continue;
+            };
+            let v = self.store.read(*r, f, None).unwrap_or(V::None);
+            let left = match &v {
+                V::List(l) => V::List(Rc::new(
+                    l.iter()
+                        .filter(|x| x.as_ref_id() != Some(id))
+                        .cloned()
+                        .collect(),
+                )),
+                V::Set(l) => V::Set(Rc::new(
+                    l.iter()
+                        .filter(|x| x.as_ref_id() != Some(id))
+                        .cloned()
+                        .collect(),
+                )),
+                _ => V::None,
+            };
+            self.write_field(&oe, *r, field, left, None)?;
+        }
+        let reason = match &trash {
+            Some(t) => format!("delete: {ent}#{id} (to the trash for {} {})", t.n, t.unit),
+            None => format!("delete: {ent}#{id}"),
+        };
+        for (ge, gid) in gone.into_iter().rev() {
+            let ge_e = self.entity(&ge)?;
+            let stored: Vec<String> = ge_e
+                .fields
+                .iter()
+                .filter(|f| f.formula.is_none())
+                .map(|f| f.name.clone())
+                .collect();
+            for f in &stored {
+                if self.store.read(gid, f, None).is_some_and(|v| !v.is_none()) {
+                    self.store.write(gid, f, V::None);
+                }
+            }
+            self.store.remove_record(gid);
+            self.store.erasures.push(Erasure {
+                id: gid,
+                ent: Rc::from(ge.as_str()),
+                fields: stored,
+                whole: true,
+                reason: reason.clone(),
+                by: self.user,
+                before: None,
+                last: None,
+                keep_values,
+            });
+        }
+        Ok(())
+    }
+
+    /// `restore rec`: a record in the trash back with its lines, its values and its id, and
+    /// the references emptied when it went given back (where they are still empty). Refused
+    /// when a value of it that is unique was taken meanwhile (by the check of the commit).
+    pub fn restore(&mut self, rec: &V) -> R<()> {
+        let V::Ref { id, .. } = rec else {
+            return fail(format!("`restore` takes a record, not {rec}"));
+        };
+        let id = *id;
+        let Some(t) = self.store.trashed(id) else {
+            return fail(format!("{rec} is not in the trash"));
+        };
+        self.check_permission("delete", &t.ent, None, None)?;
+        for (rid, re, vals, at, by) in &t.records {
+            if self.store.exists(*rid, None) {
+                return fail(format!("{re}#{rid} exists already"));
+            }
+            self.create_with_id(re, *rid, vals.clone())?;
+            if let Some(r) = self.store.records.get_mut(rid) {
+                r.created_at = *at;
+                r.created_by = *by;
+            }
+        }
+        let target = V::Ref {
+            ent: t.ent.clone(),
+            id,
+        };
+        for (r, f) in &t.refs {
+            if !self.store.exists(*r, None) {
+                continue;
+            }
+            let oe = self.ent_of(*r).to_string();
+            let of = self.entity(&oe)?;
+            let Some(field) = of.fields.iter().find(|x| &x.name == f) else {
+                continue;
+            };
+            let v = self.store.read(*r, f, None).unwrap_or(V::None);
+            let back = match &v {
+                V::List(l) => {
+                    let mut l = (**l).clone();
+                    l.push(target.clone());
+                    V::List(Rc::new(l))
+                }
+                V::Set(l) => {
+                    let mut l = (**l).clone();
+                    l.push(target.clone());
+                    V::Set(Rc::new(l))
+                }
+                V::None => target.clone(),
+                _ => continue,
+            };
+            self.write_field(&oe, *r, field, back, None)?;
+        }
+        self.store.trash.remove(&id);
+        self.store.untrashed.push(id);
+        Ok(())
+    }
+
+    /// The records whose time in the trash is over deleted for good: each in a transaction of
+    /// its own, as the system. What the history keeps of them follows their entity's history.
+    /// Returns them.
+    pub fn purge_trash_due(&mut self) -> R<Vec<Id>> {
+        let now = self.clock;
+        let mut due: Vec<Id> = match self.store.src.clone() {
+            Some(src) => src.borrow_mut().trash_due(now),
+            None => self
+                .store
+                .trash
+                .values()
+                .filter(|t| t.until <= now)
+                .map(|t| t.id)
+                .collect(),
+        };
+        due.sort();
+        let mut out = Vec::new();
+        for id in due {
+            let Some(t) = self.store.trashed(id) else {
+                continue;
+            };
+            let keep = self
+                .m
+                .entity(&t.ent)
+                .map(|e| e.keep == Keep::Full)
+                .unwrap_or(true);
+            self.system += 1;
+            let r = self.with_cause(format!("trash: {}#{id} deleted for good", t.ent), |i| {
+                i.transaction(|i| {
+                    i.store.trash.remove(&id);
+                    i.store.untrashed.push(id);
+                    // the history of what does not keep it whole goes now
+                    if !keep {
+                        for (rid, re, vals, _, _) in &t.records {
+                            i.store.erasures.push(Erasure {
+                                id: *rid,
+                                ent: Rc::from(re.as_str()),
+                                fields: vals.iter().map(|(f, _)| f.clone()).collect(),
+                                whole: false,
+                                reason: format!("trash: {}#{id} deleted for good", t.ent),
+                                by: None,
+                                before: None,
+                                last: None,
+                                keep_values: false,
+                            });
+                        }
+                    }
+                    Ok(())
+                })
+            });
+            self.system -= 1;
+            r?;
+            out.push(id);
+        }
+        Ok(out)
     }
 }

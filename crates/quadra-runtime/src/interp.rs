@@ -1720,6 +1720,15 @@ impl<'m> Interp<'m> {
 
     /// `Entity(field=value, …)`: a new record (or a value, for `record` types).
     pub fn create(&mut self, ent: &str, args: Vec<(String, V)>) -> R<V> {
+        self.create_as(ent, None, args)
+    }
+
+    /// `create` with the id it had (`restore` of a record from the trash).
+    pub(crate) fn create_with_id(&mut self, ent: &str, id: Id, args: Vec<(String, V)>) -> R<V> {
+        self.create_as(ent, Some(id), args)
+    }
+
+    fn create_as(&mut self, ent: &str, forced: Option<Id>, args: Vec<(String, V)>) -> R<V> {
         let e = self.entity(ent)?;
         if ent == "User" {
             if let Some(max) = crate::limits::current().max_users {
@@ -1763,7 +1772,10 @@ impl<'m> Interp<'m> {
                 "`{ent}` is a trait: create one of its entities instead"
             ));
         }
-        let id = self.store.new_id();
+        let id = match forced {
+            Some(id) => id,
+            None => self.store.new_id(),
+        };
         let pending: Vec<String> = self
             .m
             .all_fields(e)
@@ -4627,6 +4639,14 @@ impl<'m> Interp<'m> {
                     return fail(msg);
                 }
             }
+            StmtKind::Delete(target) => {
+                let rec = self.eval(target, ctx)?;
+                self.delete(&rec)?;
+            }
+            StmtKind::Restore(target) => {
+                let rec = self.eval(target, ctx)?;
+                self.restore(&rec)?;
+            }
             StmtKind::Erase { target, reason } => {
                 let rec = self.eval(target, ctx)?;
                 let reason = match reason {
@@ -4867,7 +4887,7 @@ impl<'m> Interp<'m> {
         Ok(())
     }
 
-    fn run_reaction(&mut self, i: usize, rec: &V) -> R<()> {
+    pub(crate) fn run_reaction(&mut self, i: usize, rec: &V) -> R<()> {
         let r = &self.m.reactions[i];
         let desc = match &r.trigger {
             Trigger::Enters(s) => format!("on {} enters {s}", r.entity),
@@ -4880,6 +4900,7 @@ impl<'m> Interp<'m> {
             Trigger::Expired => format!("on {} expired", r.entity),
             Trigger::Skipped => format!("on {} skipped", r.entity),
             Trigger::Rejected => format!("on {} rejected", r.entity),
+            Trigger::Deleted => format!("on {} deleted", r.entity),
         };
         self.system += 1;
         let res = self.with_cause(desc, |s| {
@@ -6190,6 +6211,8 @@ impl<'m> Interp<'m> {
         // the events of this transaction only: the commit writes them to the outbox
         self.store.outbox.clear();
         self.store.erasures.clear();
+        self.store.trashed.clear();
+        self.store.untrashed.clear();
         let r = f(self).and_then(|v| {
             self.settle()?;
             self.thaw_records()?;
@@ -6204,6 +6227,7 @@ impl<'m> Interp<'m> {
                 && self.store.rows.len() == snapshot.rows.len()
                 && self.store.outbox.is_empty()
                 && self.store.erasures.is_empty()
+                && self.store.untrashed.is_empty()
             {
                 let (next, block) = (self.store.next_id, self.store.id_block());
                 self.store = snapshot.clone();

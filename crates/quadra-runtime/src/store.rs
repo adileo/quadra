@@ -165,6 +165,14 @@ pub trait Source {
     }
     /// Reserve `n` record ids for this process; returns the first.
     fn reserve_ids(&mut self, n: u64) -> Id;
+    /// The record `id` in the trash (`_quadra_trash`), if it is there.
+    fn trashed(&mut self, _id: Id) -> Option<TrashEntry> {
+        None
+    }
+    /// The records in the trash whose time is over at `now`.
+    fn trash_due(&mut self, _now: NaiveDateTime) -> Vec<Id> {
+        Vec::new()
+    }
     /// The first infrastructure error met while loading, if any.
     fn error(&mut self) -> Option<String>;
     /// A migration renames `old` to `new` in `ent` at transaction `tx`: records loaded from
@@ -270,6 +278,26 @@ pub struct Erasure {
     /// `history last N` (or `none`: 1) of the entity: the versions of each value of all its
     /// records beyond the last N leave the history (`id` 0, no fields)
     pub last: Option<usize>,
+    /// `whole`, and the history of the record stays as it is (`delete` of an entity with the
+    /// whole history: it is the audit of what the record was; a record in the trash): only its
+    /// rows go
+    pub keep_values: bool,
+}
+
+/// A record in the trash (`deletable, trash 30 days`): out of every table and list, kept whole
+/// to be restored until `until`, then deleted for good by the sweep.
+#[derive(Clone, Debug)]
+pub struct TrashEntry {
+    pub id: Id,
+    pub ent: Rc<str>,
+    /// the record and its lines as they were, the record first: (id, entity, stored values,
+    /// created at, created by)
+    pub records: Vec<(Id, String, Vec<(String, V)>, NaiveDateTime, Option<Id>)>,
+    /// the references to it emptied when it went: (record, field)
+    pub refs: Vec<(Id, String)>,
+    pub deleted_at: NaiveDateTime,
+    pub by: Option<Id>,
+    pub until: NaiveDateTime,
 }
 
 #[derive(Clone, Default)]
@@ -318,6 +346,13 @@ pub struct Store {
     /// in the working set (`history none`: 1, `history last N`: N; not there: all): the
     /// history of the database keeps no more (`Interp::sync_keep`)
     pub keep: std::rc::Rc<rustc_hash::FxHashMap<String, usize>>,
+    /// the records in the trash this working set knows (all of them in memory; with a source,
+    /// those it asked for and those put there in this transaction)
+    pub trash: HashMap<Id, TrashEntry>,
+    /// put in the trash in this transaction (the commit writes them in `_quadra_trash`)
+    pub trashed: Vec<Id>,
+    /// taken out of the trash in this transaction: restored, or deleted for good
+    pub untrashed: Vec<Id>,
     /// Records created or written in the current transaction.
     pub dirty: BTreeSet<Id>,
     /// Records unfrozen in the current transaction (`frozen when` stopped holding).
@@ -954,6 +989,19 @@ impl Store {
         }
         self.dirty.remove(&id);
         self.absent.insert(id);
+    }
+
+    /// The record `id` in the trash, if it is there (asked of the source when not known).
+    pub fn trashed(&mut self, id: Id) -> Option<TrashEntry> {
+        if let Some(t) = self.trash.get(&id) {
+            return Some(t.clone());
+        }
+        if self.untrashed.contains(&id) {
+            return None;
+        }
+        let t = self.src.as_ref()?.borrow_mut().trashed(id)?;
+        self.trash.insert(id, t.clone());
+        Some(t)
     }
 
     pub fn exists(&mut self, id: Id, as_of: Option<u64>) -> bool {

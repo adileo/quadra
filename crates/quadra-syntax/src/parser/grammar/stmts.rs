@@ -95,7 +95,7 @@ pub(crate) fn stmt(p: &mut Parser) {
                     m.complete(p, KEYWORD_STMT);
                     return;
                 }
-                "fail" | "emit" | "use" | "clock" => {
+                "fail" | "emit" | "use" | "clock" | "delete" | "restore" => {
                     let m = p.start();
                     p.bump_ctx();
                     expr(p);

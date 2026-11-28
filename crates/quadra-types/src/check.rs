@@ -313,6 +313,8 @@ impl<'m> Checker<'m> {
         self.check_documents();
         self.context = String::new();
         self.check_retention();
+        self.check_deletable();
+        self.context = String::new();
         for r in &m.reactions {
             self.entity = None;
             self.context = match &r.trigger {
@@ -326,6 +328,7 @@ impl<'m> Checker<'m> {
                 Trigger::Expired => format!("on {} expired", r.entity),
                 Trigger::Skipped => format!("on {} skipped", r.entity),
                 Trigger::Rejected => format!("on {} rejected", r.entity),
+                Trigger::Deleted => format!("on {} deleted", r.entity),
             };
             self.push();
             if r.trigger == Trigger::Rejected {
@@ -1051,6 +1054,8 @@ impl<'m> Checker<'m> {
                 }
             }
             StmtKind::Erase { target, reason } => self.check_erase(target, reason, s.span),
+            StmtKind::Delete(target) => self.check_delete(target, false),
+            StmtKind::Restore(target) => self.check_delete(target, true),
             StmtKind::Fail(e) | StmtKind::Expect(e) | StmtKind::Clock(e) | StmtKind::Expr(e) => {
                 self.infer(e);
             }

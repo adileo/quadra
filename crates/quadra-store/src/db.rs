@@ -32,6 +32,10 @@ const SYSTEM_DDL: &[&str] = &[
     "CREATE TABLE \"_quadra_checkpoints\" (\"tx\" BIGINT PRIMARY KEY, \"before_tx\" BIGINT NOT NULL, \"archive\" TEXT NOT NULL, \"sha256\" TEXT NOT NULL, \"rows\" BIGINT NOT NULL)",
     // the keys that sign the commits (crate::signing), each set by a commit of its own
     "CREATE TABLE \"_quadra_keys\" (\"tx\" BIGINT PRIMARY KEY, \"public\" TEXT NOT NULL)",
+    // the records in the trash (`deletable, trash 30 days`): whole, with their lines and the
+    // references emptied when they went, until the sweep deletes them for good (`until`); not
+    // in the chain (the history has their values, or does not keep them)
+    "CREATE TABLE \"_quadra_trash\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"data\" TEXT NOT NULL, \"deleted_tx\" BIGINT NOT NULL, \"deleted_at\" TEXT NOT NULL, \"user_id\" BIGINT, \"until_at\" TEXT NOT NULL)",
     "CREATE TABLE \"_quadra_records\" (\"id\" BIGINT PRIMARY KEY, \"entity\" TEXT NOT NULL, \"created_tx\" BIGINT NOT NULL, \"created_at\" TEXT NOT NULL, \"created_by\" BIGINT, \"frozen_tx\" BIGINT, \"cause\" TEXT NOT NULL, \"warnings\" TEXT NOT NULL, \"last_tx\" BIGINT NOT NULL DEFAULT 0, \"version_tx\" BIGINT NOT NULL DEFAULT 0, \"kinds\" TEXT)",
     // each value with its salt; the commit hash covers `sha256(salt | value)` (`value_digest`):
     // an erased value loses its value and salt and keeps that digest
@@ -149,7 +153,8 @@ pub const SYSTEM_INDEXES: &[(&str, &str, &[&str])] = &[
 /// 15: the chain covers the digests of the values (`_quadra_history.salt`, `digest`), so values can
 /// be erased; signed commits (`_quadra_keys`); erasures (`_quadra_erasures`, `_quadra_erased`);
 /// `_quadra_files` without the bytes (they are in the store of files), `_quadra_uploads`.
-const SYSTEM_VERSION: &str = "15";
+/// 16: `_quadra_trash`, the records of `deletable, trash …` deleted and not yet for good.
+const SYSTEM_VERSION: &str = "16";
 
 /// The system tables as created on a dialect (SQLite: a `BIGINT PRIMARY KEY` is the table's
 /// rowid, `INTEGER PRIMARY KEY`: one B-tree instead of two).
@@ -1900,6 +1905,7 @@ impl Database {
         }
         self.flush()?;
         self.write_outbox(c, tx, outbox_from)?;
+        self.write_trash(c, tx)?;
         Ok(payload)
     }
 
@@ -2111,7 +2117,10 @@ impl Database {
                 )?;
                 continue;
             }
-            let rows = if er.whole {
+            let rows = if er.whole && er.keep_values {
+                // its history stays (the entity keeps it whole, or the record is in the trash)
+                Vec::new()
+            } else if er.whole {
                 self.conn.query(
                     "SELECT CAST(\"seq\" AS TEXT), \"value\", \"salt\" FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"digest\" IS NULL AND \"tx\" < ?bigint",
                     &[Sql::Int(id), Sql::Int(tx as i64)],
@@ -2284,6 +2293,53 @@ impl Database {
             self.wexec(
                 format!("{ERASE}UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint"),
                 vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The records the transaction put in the trash, and those it took out of it (restored, or
+    /// deleted for good). A record restored is no longer one taken away (`_quadra_erased`).
+    pub(crate) fn write_trash(&mut self, c: &Commit, tx: u64) -> Result<(), String> {
+        let s = &c.after;
+        for id in &s.untrashed {
+            self.wexec(
+                "DELETE FROM \"_quadra_trash\" WHERE \"id\" = ?bigint".into(),
+                vec![Sql::Int(*id as i64)],
+            )?;
+        }
+        if !s.untrashed.is_empty() {
+            for r in s.records.values().filter(|r| r.created_tx == c.tx) {
+                self.wexec(
+                    "DELETE FROM \"_quadra_erased\" WHERE \"id\" = ?bigint".into(),
+                    vec![Sql::Int(r.id as i64)],
+                )?;
+            }
+        }
+        for id in &s.trashed {
+            let Some(t) = s.trash.get(id) else { continue };
+            let fmt = |d: &chrono::NaiveDateTime| d.format("%Y-%m-%dT%H:%M:%S").to_string();
+            let data = json!({
+                "records": t.records.iter().map(|(rid, ent, vals, at, by)| json!({
+                    "id": rid,
+                    "entity": ent,
+                    "values": vals.iter().map(|(f, v)| (f.clone(), to_json(v))).collect::<serde_json::Map<String, J>>(),
+                    "created_at": fmt(at),
+                    "created_by": by,
+                })).collect::<Vec<_>>(),
+                "refs": t.refs.iter().map(|(r, f)| json!([r, f])).collect::<Vec<_>>(),
+            });
+            self.wexec(
+                "INSERT INTO \"_quadra_trash\" (\"id\", \"entity\", \"data\", \"deleted_tx\", \"deleted_at\", \"user_id\", \"until_at\") VALUES (?bigint, ?text, ?text, ?bigint, ?text, ?bigint, ?text)".into(),
+                vec![
+                    Sql::Int(*id as i64),
+                    Sql::Text(t.ent.to_string()),
+                    Sql::Text(data.to_string()),
+                    Sql::Int(tx as i64),
+                    Sql::Text(fmt(&t.deleted_at)),
+                    t.by.map(|u| Sql::Int(u as i64)).unwrap_or(Sql::Null),
+                    Sql::Text(fmt(&t.until)),
+                ],
             )?;
         }
         Ok(())

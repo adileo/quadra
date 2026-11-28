@@ -1256,6 +1256,27 @@ impl Source for DbSource {
         self.error.clone()
     }
 
+    fn trashed(&mut self, id: Id) -> Option<quadra_runtime::store::TrashEntry> {
+        let r = self.conn.query(
+            "SELECT \"entity\", \"data\", \"deleted_at\", CAST(\"user_id\" AS TEXT), \"until_at\" FROM \"_quadra_trash\" WHERE \"id\" = ?bigint",
+            &[Sql::Int(id as i64)],
+        );
+        let r = self.note(r)?.into_iter().next()?;
+        trash_entry(id, &r)
+    }
+
+    fn trash_due(&mut self, now: chrono::NaiveDateTime) -> Vec<Id> {
+        let r = self.conn.query(
+            "SELECT CAST(\"id\" AS TEXT) FROM \"_quadra_trash\" WHERE \"until_at\" <= ?text ORDER BY \"_quadra_trash\".\"id\"",
+            &[Sql::Text(now.format("%Y-%m-%dT%H:%M:%S").to_string())],
+        );
+        self.note(r)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| num(&r[0]) as u64)
+            .collect()
+    }
+
     fn select(
         &mut self,
         r: &quadra_runtime::query::Request,
@@ -1461,4 +1482,53 @@ pub fn reserve_ids(conn: &mut Conn, n: u64) -> Result<Id, String> {
             Err(e)
         }
     }
+}
+
+/// A row of `_quadra_trash` (entity, data, deleted_at, user_id, until_at) read back.
+pub(crate) fn trash_entry(
+    id: Id,
+    r: &[Option<String>],
+) -> Option<quadra_runtime::store::TrashEntry> {
+    let when = |s: &Option<String>| {
+        chrono::NaiveDateTime::parse_from_str(s.as_deref().unwrap_or(""), "%Y-%m-%dT%H:%M:%S").ok()
+    };
+    let data: J = serde_json::from_str(r[1].as_deref()?).ok()?;
+    let records = data["records"]
+        .as_array()?
+        .iter()
+        .map(|x| {
+            let vals = x["values"]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(f, v)| (f.clone(), from_json(v)))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (
+                x["id"].as_u64().unwrap_or(0),
+                x["entity"].as_str().unwrap_or("").to_string(),
+                vals,
+                when(&x["created_at"].as_str().map(str::to_string)).unwrap_or_default(),
+                x["created_by"].as_u64(),
+            )
+        })
+        .collect();
+    let refs = data["refs"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| Some((p[0].as_u64()?, p[1].as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(quadra_runtime::store::TrashEntry {
+        id,
+        ent: std::rc::Rc::from(r[0].as_deref().unwrap_or("")),
+        records,
+        refs,
+        deleted_at: when(&r[2])?,
+        by: r[3].as_deref().and_then(|u| u.parse().ok()),
+        until: when(&r[4])?,
+    })
 }

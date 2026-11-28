@@ -1433,15 +1433,10 @@ impl<'a> Lower<'a> {
             Trigger::Skipped
         } else if words.iter().any(|w| w == "rejected") {
             Trigger::Rejected
+        } else if words.iter().any(|w| w == "deleted") {
+            // (the checker says so when the entity is not `deletable`)
+            Trigger::Deleted
         } else {
-            if words.iter().any(|w| w == "deleted") {
-                self.model.errors.push((
-                    self.span(item),
-                    format!(
-                        "records are not deleted in Quadra, so `on {entity} deleted` would never run: a record that should no longer count is cancelled or deactivated; react to that with `on {entity} enters <state>` or `on {entity} becomes <condition>`"
-                    ),
-                ));
-            }
             // a syntax error was already reported for any other word
             return;
         };
@@ -1481,12 +1476,6 @@ impl<'a> Lower<'a> {
             }
         }
         let mut effect = word.clone().unwrap_or_else(|| "allow".to_string());
-        if verbs.iter().any(|v| v == "delete") {
-            self.model.errors.push((
-                span,
-                "records are not deleted in Quadra, so there is no `delete` permission: a record that should no longer count is cancelled, reversed or deactivated by an action (`run Entity.cancel`)".into(),
-            ));
-        }
         if verbs.iter().any(|v| v == "derived") {
             self.model.errors.push((span, "`derived` is not a permission: use `read`, `create`, `edit`, `run`, `erase`, `all`, `hide` or `show`".into()));
         }
@@ -1842,6 +1831,8 @@ impl<'a> Lower<'a> {
                             reason: es.get(1).map(|e| self.expr(e)),
                         },
                         "fail" => StmtKind::Fail(first(self)),
+                        "delete" => StmtKind::Delete(first(self)),
+                        "restore" => StmtKind::Restore(first(self)),
                         "emit" => StmtKind::Emit(first(self)),
                         "expect" => StmtKind::Expect(first(self)),
                         "clock" => StmtKind::Clock(first(self)),

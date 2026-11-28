@@ -257,6 +257,11 @@ impl<'a, 'b, 'c> Runner<'a, 'b, 'c> {
                 self.interp
                     .expire_due()
                     .map(|_| ())
+                    .map_err(|e| format!("{at}: {}", describe(&e)))?;
+                // and the records whose time in the trash is over
+                self.interp
+                    .purge_trash_due()
+                    .map(|_| ())
                     .map_err(|e| format!("{at}: {}", describe(&e)))
             }
             StmtKind::Expect(e) => self.expect(e, ctx),

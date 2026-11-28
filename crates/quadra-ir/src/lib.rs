@@ -554,6 +554,11 @@ pub enum StmtKind {
         target: Expr,
         reason: Option<Expr>,
     },
+    /// `delete page`: a record of a `deletable` entity deleted (to its trash first, when it has
+    /// one), with its lines
+    Delete(Expr),
+    /// `restore page`: a record in the trash back where it was
+    Restore(Expr),
     Fail(Expr),
     Emit(Expr),
     Expect(Expr),
@@ -1089,6 +1094,9 @@ pub enum Trigger {
     /// `on OrderIn rejected as r:` (the reaction's `entity` is the inbound): a message it
     /// received was rejected for good
     Rejected,
+    /// `on Page deleted as p:`: a record of a `deletable` entity deleted (or put in its trash),
+    /// run before it goes, in the same transaction: its values are still there
+    Deleted,
 }
 
 impl Trigger {

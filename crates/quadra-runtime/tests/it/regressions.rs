@@ -467,7 +467,7 @@ fn deleted_reactions_are_refused() {
             "main.qd",
             "entity Item:\n    code: Code\n\non Item deleted as i:\n    fail \"no\"\n",
         )],
-        "records are not deleted in Quadra",
+        "records of Item are not deleted, so `on Item deleted` would never run: add `deletable` to Item",
     );
 }
 
@@ -570,7 +570,7 @@ test "rules":
         let src = format!("entity Doc:\n    title: Text\n\nrole Clerk:\n    {rule}\n");
         assert_error(&[("main.qd", &src)], expected);
     };
-    refused("delete Doc", "records are not deleted in Quadra");
+    refused("delete Doc", "records of Doc are not deleted, so there is no `delete` permission on it: add `deletable` to Doc");
     refused("read, derived Doc", "`derived` is not a permission");
     refused("hide, read Doc.title", "`hide` cannot be combined");
     assert_error(
@@ -1313,4 +1313,21 @@ fn an_integer_overflow_is_an_error() {
         "{:?}",
         results[0].message
     );
+}
+
+/// `deletable, trash …` in memory, as `quadra test` runs it: a record deleted leaves every
+/// list, `restore` gives it back, `clock` past its time deletes it for good; `on … deleted`
+/// runs before it goes.
+#[test]
+fn delete_restore_and_the_trash_in_tests() {
+    run_files(&[
+        (
+            "main.qd",
+            "entity Page:\n    deletable, trash 30 days\n    slug: Text unique\n\nentity Gone:\n    slug: Text\n\non Page deleted as p:\n    Gone(slug=p.slug)\n",
+        ),
+        (
+            "tests/pages.test.qd",
+            "test \"a page to the trash and back\":\n    clock 2026-01-10 09:00\n    let p = Page(slug=\"home\")\n    delete p\n    expect Page.all().count() == 0\n    expect Gone.all().count() == 1\n    restore p\n    expect Page.all().count() == 1\n    delete p\n    clock 2026-02-20 09:00\n    expect_error \"is not in the trash\":\n        restore p\n",
+        ),
+    ]);
 }
