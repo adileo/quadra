@@ -175,6 +175,18 @@ pub fn model_json(
             "ledger": e.is_ledger,
             "traits": e.traits,
             "can_create": !e.is_ledger && i.can("create", &e.name, None, None),
+            // `deletable`: whether the caller may delete its records, and for how long they
+            // stay in its trash (none: deleted for good)
+            "can_delete": e.deletable.is_some() && i.can("delete", &e.name, None, None),
+            "trash": e.deletable.as_ref().and_then(|d| d.trash.as_ref()).map(|t| format!("{} {}", t.n, t.unit)),
+            "history_kept": match e.keep {
+                quadra_ir::Keep::Full => match &e.history {
+                    Some(t) => format!("{} {}", t.n, t.unit),
+                    None => "full".to_string(),
+                },
+                quadra_ir::Keep::Last(n) => format!("last {n}"),
+                quadra_ir::Keep::None => "none".to_string(),
+            },
             "frozen_when": e.frozen.as_ref().map(|f| quadra_ir::print::expr(&f.when)),
             "fields": fields,
             "actions": actions,
