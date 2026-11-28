@@ -442,7 +442,7 @@ For the records of a `deletable` entity ([Retention and erasure](/reference/rete
 | `DELETE /v1/records/{Entity}/{id}` | the record deleted, with its lines: to the entity's trash when it has one, else for good. Needs the `delete` permission (`403` otherwise); `422` while a required reference or a retention holds it, with why. The same as a `POST /v1/tx` with the `delete` operation (`{"op": "delete", "entity": "Page", "id": 12}`, no `base`) |
 | `POST /v1/records/{Entity}/{id}/restore` | a record in the trash back, with its id and its lines. `422` when a unique value of it was taken meanwhile. The `restore` operation of `POST /v1/tx` |
 | `GET /v1/trash[?entity=Page]` | the records in the trash of the entities the caller may delete, the latest first: `{records: [{id, entity, values, lines, deleted_at, deleted_by, until}]}` (the values the caller may see) |
-| `GET /v1/records/{Entity}/{id}` of a record deleted | `410`: `Page#12 is in the trash since 2026-11-28 09:00:00 (until 2026-12-28 09:00:00)`, or `Session#4 was deleted on …` |
+| `GET /v1/records/{Entity}/{id}` of a record deleted | `410`: `Page#12 is in the trash since 2026-11-28 09:00:00 (until 2026-12-28 09:00:00)`, or `Page#12 was deleted on …` once for good; `404` for an entity with `history none`, which keeps nothing of it |
 
 `/v1/model` says of each entity `can_delete` (it is `deletable` and the caller may delete),
 `trash` (`"30 days"`, or none) and `history_kept` (`"full"`, `"last 10"`, `"none"`, `"1

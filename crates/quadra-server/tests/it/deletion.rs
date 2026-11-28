@@ -175,12 +175,9 @@ fn delete_trash_and_restore_over_http() {
     let sp = format!("/v1/records/Session/{session}");
     let (s, b) = http(port, "DELETE", &sp, &et, None);
     assert_eq!(s, 200, "{b}");
+    // (`history none`: nothing is left of it, not even when it was deleted)
     let (s, b) = http(port, "GET", &sp, &et, None);
-    assert_eq!(s, 410, "{b}");
-    assert!(
-        b["error"].as_str().unwrap_or("").contains("was deleted on"),
-        "{b}"
-    );
+    assert_eq!(s, 404, "{b}");
     drop(_host);
     let (problems, _) = ops::verify(&url, m, r, chrono::Utc::now().naive_utc()).unwrap();
     assert_eq!(problems, Vec::<String>::new());
