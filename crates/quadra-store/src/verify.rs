@@ -197,9 +197,9 @@ fn chain(
     }
     let mut hist = Stream {
         sql: if full {
-            "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM (SELECT \"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" UNION ALL SELECT \"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\", \"digest\" FROM \"_qx_archived\") h WHERE \"seq\" > ?bigint ORDER BY \"seq\" LIMIT ?bigint"
+            "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM (SELECT \"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" UNION ALL SELECT \"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\", \"digest\" FROM \"_qx_archived\") h WHERE \"seq\" > ?bigint AND (\"salt\" IS NULL OR \"salt\" <> '') ORDER BY \"seq\" LIMIT ?bigint"
         } else {
-            "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" WHERE \"seq\" > ?bigint ORDER BY \"_quadra_history\".\"seq\" LIMIT ?bigint"
+            "SELECT CAST(\"seq\" AS TEXT), CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" WHERE \"seq\" > ?bigint AND (\"salt\" IS NULL OR \"salt\" <> '') ORDER BY \"_quadra_history\".\"seq\" LIMIT ?bigint"
         },
         after: i64::MIN,
         buf: VecDeque::new(),

@@ -441,7 +441,7 @@ pub fn load_with(
         }
         for r in conn.query(
             &format!(
-                "SELECT CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\" FROM \"_quadra_history\" WHERE \"record_id\" IN ({}) AND \"tx\" <= ?bigint ORDER BY \"_quadra_history\".\"record_id\", \"_quadra_history\".\"seq\"",
+                "SELECT CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\" FROM \"_quadra_history\" WHERE \"record_id\" IN ({}) AND (\"tx\" <= ?bigint OR \"salt\" = '') ORDER BY \"_quadra_history\".\"record_id\", \"_quadra_history\".\"seq\"",
                 rest.join(", ")
             ),
             &[Sql::Int(base as i64)],
@@ -451,6 +451,13 @@ pub fn load_with(
             let tx = num(&r[0]) as u64;
             let field = renamed(renames, &rec.ent, tx, r[2].clone().unwrap_or_default());
             let v = from_json(&serde_json::from_str(r[3].as_deref().unwrap_or("null")).unwrap_or(J::Null));
+            // `history none`: the value in force, the only one there is, even when it was written
+            // after the snapshot (the sequencer refuses a commit that read it and conflicts)
+            let tx = if r[4].as_deref() == Some("") {
+                tx.min(base)
+            } else {
+                tx
+            };
             rec.fields.insert(field.clone(), v.clone());
             rec.history.push((tx, field, v));
         }

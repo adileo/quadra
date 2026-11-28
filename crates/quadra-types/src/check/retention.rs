@@ -63,6 +63,25 @@ impl<'m> Checker<'m> {
                     );
                 }
             }
+            if e.keep != quadra_ir::Keep::Full && m.read_as_of().contains(&e.name) {
+                let what = match e.keep {
+                    quadra_ir::Keep::None => {
+                        "`history none` keeps only the values in force".to_string()
+                    }
+                    quadra_ir::Keep::Last(n) => {
+                        format!("`history last {n}` drops the older versions")
+                    }
+                    quadra_ir::Keep::Full => String::new(),
+                };
+                self.error(
+                    e.keep_span.unwrap_or(e.span),
+                    format!(
+                        "{} is read by frozen records, which read it as it was when they froze: \
+                         its history is kept whole ({what})",
+                        e.name
+                    ),
+                );
+            }
             if let Some(x) = &e.retention.expire {
                 if let Some(p) = e.posts.first() {
                     self.error(

@@ -1014,7 +1014,10 @@ pub fn sweep_with(
     let compacted = Database::open(url, model, report)?
         .meta("last_history")?
         .and_then(|t| NaiveDateTime::parse_from_str(&t, "%Y-%m-%dT%H:%M:%S").ok());
-    if model.entities.iter().any(|e| e.history.is_some())
+    if model
+        .entities
+        .iter()
+        .any(|e| e.history.is_some() || e.keep != quadra_ir::Keep::Full)
         && compacted.map_or(true, |t| time - t >= chrono::Duration::days(1))
     {
         if interp.compact_history().map_err(|e| flow("history", e))? > 0 {

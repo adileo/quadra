@@ -267,6 +267,9 @@ pub struct Erasure {
     /// `history 1 year` of the entity: the values of all its records replaced before this
     /// instant leave the history (`id` 0, no fields); the values in force stay
     pub before: Option<chrono::NaiveDateTime>,
+    /// `history last N` (or `none`: 1) of the entity: the versions of each value of all its
+    /// records beyond the last N leave the history (`id` 0, no fields)
+    pub last: Option<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -311,6 +314,10 @@ pub struct Store {
     /// Field renames: (entity, old name, new name, transaction). History entries written
     /// before the transaction under the old name are read under the new one.
     pub renames: Vec<(String, String, String, u64)>,
+    /// entity → how many versions of a value written before the transaction its records keep
+    /// in the working set (`history none`: 1, `history last N`: N; not there: all): the
+    /// history of the database keeps no more (`Interp::sync_keep`)
+    pub keep: std::rc::Rc<rustc_hash::FxHashMap<String, usize>>,
     /// Records created or written in the current transaction.
     pub dirty: BTreeSet<Id>,
     /// Records unfrozen in the current transaction (`frozen when` stopped holding).
@@ -922,6 +929,9 @@ impl Store {
             let old = r.fields.insert(key.to_string(), v.clone());
             r.history.push((tx, key.to_string(), v.clone()));
             let ent = r.ent.clone();
+            if let Some(&n) = self.keep.get(&*ent) {
+                trim_history(&mut r.history, key, tx, n);
+            }
             self.dirty.insert(id);
             self.writes += 1;
             self.epoch += 1;
@@ -1213,4 +1223,22 @@ impl Store {
         }
         self.tx = to;
     }
+}
+
+/// The versions of `key` written before `tx` beyond the last `n` dropped (those of `tx` stay:
+/// the transaction still compares with the value before it).
+fn trim_history(h: &mut Vec<(u64, String, V)>, key: &str, tx: u64, n: usize) {
+    let before = h.iter().filter(|(t, f, _)| *t < tx && f == key).count();
+    if before <= n {
+        return;
+    }
+    let mut drop = before - n;
+    h.retain(|(t, f, _)| {
+        if drop > 0 && *t < tx && f == key {
+            drop -= 1;
+            false
+        } else {
+            true
+        }
+    });
 }

@@ -1581,7 +1581,8 @@ enum HItem {
     /// the next record: whether its row reads back exactly, its values of another kind of
     /// number (`ReadBack`), for its row of `_quadra_records`
     Record(bool, Option<String>),
-    Entry(i64, Arc<str>, String),
+    /// a value: (record, field, value, whether its entity has `history none`)
+    Entry(i64, Arc<str>, String, bool),
 }
 
 /// What the main thread asks the import's writer thread to write, in order.
@@ -1615,6 +1616,8 @@ struct Feeder {
     global: usize,
     tx: Option<u64>,
     names: Vec<Vec<Arc<str>>>,
+    /// per plan: its entity has `history none` (its values outside the chain)
+    untracked: Vec<bool>,
     back: ReadBack,
     done: bool,
     /// entries sent and not written yet (the writer counts them down)
@@ -1633,11 +1636,17 @@ impl Feeder {
                     .collect()
             })
             .collect();
+        let untracked = mem
+            .plans
+            .iter()
+            .map(|p| db.schema.untracked.contains(&p.entity))
+            .collect();
         Feeder {
             plan: 0,
             row: 0,
             global: 0,
             tx: None,
+            untracked,
             names,
             back: ReadBack::new(db, mem),
             done: false,
@@ -1675,7 +1684,12 @@ impl Feeder {
                 }
                 let mut text = String::new();
                 quadra_runtime::codec::write_json(v, &mut text);
-                out.push(HItem::Entry(id, self.names[self.plan][i].clone(), text));
+                out.push(HItem::Entry(
+                    id,
+                    self.names[self.plan][i].clone(),
+                    text,
+                    self.untracked[self.plan],
+                ));
             }
             self.row += 1;
             self.global += 1;
@@ -1765,7 +1779,19 @@ impl HistoryIn<'_> {
                             CommitHasher::new(&self.prev, tx, &self.at, None, &self.cause),
                         ));
                     }
-                    HItem::Entry(id, field, value) => {
+                    HItem::Entry(id, field, value, true) => {
+                        // `history none`: outside the chain, no digest
+                        self.seq += 1;
+                        return Some((
+                            self.seq,
+                            self.tx,
+                            id,
+                            field,
+                            value,
+                            crate::db::UNTRACKED.to_string(),
+                        ));
+                    }
+                    HItem::Entry(id, field, value, false) => {
                         // `["h",id,"field","digest"]`, as `history_entry` has it
                         use std::fmt::Write as _;
                         self.seq += 1;

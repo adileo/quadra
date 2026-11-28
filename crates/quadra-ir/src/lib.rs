@@ -886,6 +886,37 @@ pub struct Entity {
     /// `history 1 year`: the values replaced longer ago are taken out of the history (their
     /// digests kept); None: kept for ever
     pub history: Option<Term>,
+    /// `history full | last 10 | none`, or the project's `[data] history`: how many versions of
+    /// each value the history keeps
+    pub keep: Keep,
+    /// where `keep` was said: the entity's line, or the project's default (`[data] history`)
+    pub keep_span: Option<Span>,
+    /// `deletable`, `deletable, trash 30 days`: its records can be deleted
+    pub deletable: Option<Deletable>,
+    pub span: Span,
+}
+
+/// How many versions of each value an entity's history keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub enum Keep {
+    /// every version, for ever (or for the time of `history 1 year`)
+    #[default]
+    Full,
+    /// the last N versions of each value (the one in force among them): the older leave the
+    /// history once a day, their digests kept
+    Last(u32),
+    /// only the values in force: the history keeps nothing of the entity's records, and the
+    /// chain of commits does not cover them (the record is read from its table)
+    None,
+}
+
+/// `deletable`: the records of the entity can be deleted (`delete rec`, `DELETE
+/// /v1/records/{E}/{id}`, the permission `delete E`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Deletable {
+    /// `trash 30 days`: a deleted record goes to the trash first (out of every list, `restore`
+    /// brings it back) and is deleted for good when the time is over
+    pub trash: Option<Term>,
     pub span: Span,
 }
 

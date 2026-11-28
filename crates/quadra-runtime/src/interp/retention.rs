@@ -220,6 +220,7 @@ impl<'m> Interp<'m> {
             reason: reason.to_string(),
             by: self.user,
             before: None,
+            last: None,
         });
         Ok(())
     }
@@ -392,6 +393,41 @@ impl<'m> Interp<'m> {
     pub fn compact_history(&mut self) -> R<usize> {
         let m = self.m;
         let mut n = 0;
+        // `history last N`, `history none`: the versions beyond the last N (none: what an earlier
+        // version of the model kept in the chain before the entity said `none`)
+        for e in &m.entities {
+            let keep = match e.keep {
+                quadra_ir::Keep::Full => continue,
+                quadra_ir::Keep::Last(k) => k as usize,
+                quadra_ir::Keep::None => 1,
+            };
+            let reason = match e.keep {
+                quadra_ir::Keep::None => {
+                    "history none: the versions before the value in force".to_string()
+                }
+                _ => format!("history last {keep}: the versions before the last {keep}"),
+            };
+            let ent = e.name.clone();
+            self.system += 1;
+            let r = self.with_cause(format!("history: {ent}"), |i| {
+                i.transaction(|i| {
+                    i.store.erasures.push(Erasure {
+                        id: 0,
+                        ent: Rc::from(ent.as_str()),
+                        fields: Vec::new(),
+                        whole: false,
+                        reason: reason.clone(),
+                        by: None,
+                        before: None,
+                        last: Some(keep),
+                    });
+                    Ok(())
+                })
+            });
+            self.system -= 1;
+            r?;
+            n += 1;
+        }
         for e in &m.entities {
             let Some(t) = &e.history else { continue };
             let Some(before) = t.before(self.clock) else {
@@ -415,6 +451,7 @@ impl<'m> Interp<'m> {
                         reason: reason.clone(),
                         by: None,
                         before: Some(before),
+                        last: None,
                     });
                     Ok(())
                 })
@@ -491,6 +528,7 @@ impl<'m> Interp<'m> {
                 reason: cause.to_string(),
                 by: None,
                 before: None,
+                last: None,
             });
         }
         Ok(true)

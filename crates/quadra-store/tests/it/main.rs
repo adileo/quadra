@@ -7,6 +7,7 @@ mod deploy;
 mod due;
 mod erasure;
 mod hints;
+mod history;
 mod import;
 mod limits;
 mod sequencer;

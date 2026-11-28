@@ -1231,6 +1231,34 @@ fn member(p: &mut Parser, ctx: MemberCtx) {
                 m.complete(p, HISTORY);
                 return;
             }
+            "history" if matches!(p.nth_text(1), "full" | "none" | "last") => {
+                let m = p.start();
+                p.bump_ctx();
+                let last = p.at_ctx("last");
+                p.bump_ctx();
+                if last {
+                    p.expect(NUMBER);
+                }
+                end_line(p);
+                m.complete(p, HISTORY);
+                return;
+            }
+            "deletable" if matches!(p.nth(1), NEWLINE | COMMA | DEDENT) => {
+                let m = p.start();
+                p.bump_ctx();
+                if p.eat(COMMA) {
+                    if p.at_ctx("trash") {
+                        p.bump_ctx();
+                        p.expect(NUMBER);
+                        p.expect(IDENT);
+                    } else {
+                        p.error("expected `trash` and how long its records stay there (`trash 30 days`)");
+                    }
+                }
+                end_line(p);
+                m.complete(p, DELETABLE);
+                return;
+            }
             // `ns cbc "urn:…"`, `ns "urn:…"`: the namespaces of a record `from xml`
             "ns" if p.nth(1) == STRING || (p.nth(1) == IDENT && p.nth(2) == STRING) => {
                 let m = p.start();

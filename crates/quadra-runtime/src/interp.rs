@@ -504,7 +504,7 @@ impl<'m> Interp<'m> {
             .unwrap()
             .and_hms_opt(9, 0, 0)
             .unwrap();
-        Interp {
+        let mut i = Interp {
             sink: None,
             materialize: Vec::new(),
             m,
@@ -551,7 +551,9 @@ impl<'m> Interp<'m> {
             max_list: crate::limits::current().max_list,
             ticks: 0,
             tz: time::zone(&m.timezone).unwrap_or(chrono_tz::Tz::UTC),
-        }
+        };
+        i.sync_keep();
+        i
     }
 
     // ---- model helpers ----------------------------------------------------------------
@@ -637,7 +639,24 @@ impl<'m> Interp<'m> {
         }
     }
 
+    /// What the working set keeps of the history of each entity's records, as the model says
+    /// (`Store::keep`): called with `load_units`, whenever a store is put in place.
+    pub fn sync_keep(&mut self) {
+        let keep: rustc_hash::FxHashMap<String, usize> = self
+            .m
+            .entities
+            .iter()
+            .filter_map(|e| match e.keep {
+                quadra_ir::Keep::Full => None,
+                quadra_ir::Keep::Last(n) => Some((e.name.clone(), n as usize)),
+                quadra_ir::Keep::None => Some((e.name.clone(), 1)),
+            })
+            .collect();
+        self.store.keep = std::rc::Rc::new(keep);
+    }
+
     pub fn load_units(&mut self) {
+        self.sync_keep();
         for id in self.ids("Uom", None) {
             let code = self
                 .store

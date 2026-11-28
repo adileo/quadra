@@ -285,6 +285,11 @@ pub(crate) fn history_entry(
 /// earlier moment (what was erased later is erased there too).
 pub(crate) const ERASE: &str = "/* erase */ ";
 
+/// The salt of the rows of the history of an entity with `history none`: the value in force,
+/// kept for the engine to read back from, outside the chain of commits (no digest, not in a
+/// commit's hash; a write deletes the row before it, an erasure deletes it).
+pub(crate) const UNTRACKED: &str = "";
+
 /// The entry of an erasure in its commit's hash.
 pub(crate) fn erasure_entry(id: u64, ent: &str, fields: &str, whole: bool, reason: &str) -> J {
     json!(["e", id, ent, fields, whole, reason])
@@ -1610,13 +1615,32 @@ impl Database {
         let map = |t: u64| if t == local { tx } else { t };
         let mut payload: Vec<J> = Vec::new();
         let mut touched: HashSet<u64> = HashSet::new();
-        // history entries of this transaction
+        // history entries of this transaction (`history none`: the value in force only, outside
+        // the chain, the row before it deleted)
         let mut entries: Vec<(u64, String, V)> = Vec::new();
         for r in c.after.records.values() {
+            let untracked = self.schema.untracked.contains(&*r.ent);
+            let mut last: HashMap<&str, &V> = HashMap::new();
             for (t, f, v) in &r.history {
-                if *t == local {
+                if *t == local && untracked {
+                    last.insert(f.as_str(), v);
+                } else if *t == local {
                     entries.push((r.id, f.clone(), v.clone()));
                 }
+            }
+            let mut fields: Vec<(&str, &V)> = last.into_iter().collect();
+            fields.sort_by(|a, b| a.0.cmp(b.0));
+            for (f, v) in fields {
+                self.seq += 1;
+                self.wexec(
+                    "DELETE FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"field\" = ?text AND \"salt\" = ?text".into(),
+                    vec![Sql::Int(r.id as i64), Sql::Text(f.to_string()), Sql::Text(UNTRACKED.into())],
+                )?;
+                self.wexec(
+                    "INSERT INTO \"_quadra_history\" (\"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?text)".into(),
+                    vec![Sql::Int(self.seq), Sql::Int(tx as i64), Sql::Int(r.id as i64), Sql::Text(f.to_string()), Sql::Text(to_json(v).to_string()), Sql::Text(UNTRACKED.into())],
+                )?;
+                touched.insert(r.id);
             }
         }
         // canonical order: by record, then field (writes to one field keep their order), so
@@ -2074,8 +2098,12 @@ impl Database {
         let at = c.time.format("%Y-%m-%dT%H:%M:%S").to_string();
         for (n, er) in c.after.erasures.iter().enumerate() {
             let id = er.id as i64;
-            if let Some(before) = er.before {
-                self.compact_history(er, before, tx)?;
+            if er.before.is_some() || er.last.is_some() {
+                match (er.before, er.last) {
+                    (Some(before), _) => self.compact_history(er, before, tx)?,
+                    (None, Some(n)) => self.compact_last(er, n, tx)?,
+                    _ => {}
+                }
                 payload.push(erasure_entry(0, &er.ent, "[]", false, &er.reason));
                 self.wexec(
                     "INSERT INTO \"_quadra_erasures\" (\"tx\", \"n\", \"record_id\", \"entity\", \"fields\", \"whole\", \"reason\", \"user_id\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?boolean, ?text, ?bigint)".into(),
@@ -2099,6 +2127,14 @@ impl Database {
                 all
             };
             for r in rows {
+                // a value of `history none`, outside the chain: no digest to keep
+                if r[2].as_deref() == Some(UNTRACKED) {
+                    self.wexec(
+                        format!("{ERASE}DELETE FROM \"_quadra_history\" WHERE \"seq\" = ?bigint"),
+                        vec![Sql::Int(num(&r[0]))],
+                    )?;
+                    continue;
+                }
                 let digest = value_digest(
                     r[2].as_deref().unwrap_or(""),
                     r[1].as_deref().unwrap_or("null"),
@@ -2213,6 +2249,32 @@ impl Database {
         let rows = self.conn.query(
             "SELECT CAST(h.\"seq\" AS TEXT), h.\"value\", h.\"salt\" FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE r.\"entity\" = ?text AND h.\"digest\" IS NULL AND EXISTS (SELECT 1 FROM \"_quadra_history\" h2 WHERE h2.\"record_id\" = h.\"record_id\" AND h2.\"field\" = h.\"field\" AND h2.\"seq\" > h.\"seq\" AND h2.\"tx\" <= ?bigint)",
             &[Sql::Text(er.ent.to_string()), Sql::Int(cut)],
+        )?;
+        for r in rows {
+            let digest = value_digest(
+                r[2].as_deref().unwrap_or(""),
+                r[1].as_deref().unwrap_or("null"),
+            );
+            self.wexec(
+                format!("{ERASE}UPDATE \"_quadra_history\" SET \"value\" = NULL, \"salt\" = NULL, \"digest\" = ?text, \"erased_tx\" = ?bigint WHERE \"seq\" = ?bigint"),
+                vec![Sql::Text(digest), Sql::Int(tx as i64), Sql::Int(num(&r[0]))],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `history last N`: the versions of each value of the entity's records beyond the last N
+    /// leave the history, their digests kept (the rows of `history none` are not in the chain:
+    /// left alone, there is one per value).
+    fn compact_last(
+        &mut self,
+        er: &quadra_runtime::store::Erasure,
+        n: usize,
+        tx: u64,
+    ) -> Result<(), String> {
+        let rows = self.conn.query(
+            "SELECT CAST(h.\"seq\" AS TEXT), h.\"value\", h.\"salt\" FROM \"_quadra_history\" h JOIN \"_quadra_records\" r ON r.\"id\" = h.\"record_id\" WHERE r.\"entity\" = ?text AND h.\"digest\" IS NULL AND h.\"salt\" <> '' AND (SELECT COUNT(*) FROM \"_quadra_history\" h2 WHERE h2.\"record_id\" = h.\"record_id\" AND h2.\"field\" = h.\"field\" AND h2.\"seq\" > h.\"seq\") >= ?bigint",
+            &[Sql::Text(er.ent.to_string()), Sql::Int(n as i64)],
         )?;
         for r in rows {
             let digest = value_digest(
@@ -2470,7 +2532,21 @@ impl Database {
         let tx = c.tx;
         let mut payload = Vec::new();
         for r in c.after.sorted() {
+            let untracked = self.schema.untracked.contains(&*r.ent);
             for (t, f, v) in &r.history {
+                if *t == tx && untracked {
+                    // `history none`: the value in force only, outside the chain
+                    self.seq += 1;
+                    self.conn.exec(
+                        "DELETE FROM \"_quadra_history\" WHERE \"record_id\" = ?bigint AND \"field\" = ?text AND \"salt\" = ?text",
+                        &[Sql::Int(r.id as i64), Sql::Text(f.clone()), Sql::Text(UNTRACKED.into())],
+                    )?;
+                    self.conn.exec(
+                        "INSERT INTO \"_quadra_history\" (\"seq\", \"tx\", \"record_id\", \"field\", \"value\", \"salt\") VALUES (?bigint, ?bigint, ?bigint, ?text, ?text, ?text)",
+                        &[Sql::Int(self.seq), Sql::Int(tx as i64), Sql::Int(r.id as i64), Sql::Text(f.clone()), Sql::Text(to_json(v).to_string()), Sql::Text(UNTRACKED.into())],
+                    )?;
+                    continue;
+                }
                 if *t == tx {
                     self.seq += 1;
                     let value = to_json(v).to_string();
@@ -2578,6 +2654,9 @@ impl Database {
         // 1. hash chain
         let mut by_tx: HashMap<i64, Vec<J>> = HashMap::new();
         for r in self.conn.query("SELECT CAST(\"tx\" AS TEXT), CAST(\"record_id\" AS TEXT), \"field\", \"value\", \"salt\", \"digest\" FROM \"_quadra_history\" ORDER BY \"_quadra_history\".\"seq\"", &[])? {
+            if r[4].as_deref() == Some(UNTRACKED) {
+                continue;
+            }
             let e = history_entry(json!(num(&r[1])), r[2].as_deref().unwrap_or(""), r[3].as_deref(), r[4].as_deref(), r[5].as_deref());
             by_tx.entry(num(&r[0])).or_default().push(e);
         }

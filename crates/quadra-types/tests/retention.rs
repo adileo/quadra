@@ -170,3 +170,19 @@ fn erase_needs_personal_fields_and_a_reason() {
         "`erase` needs its reason",
     );
 }
+
+#[test]
+fn history_none_and_last() {
+    let src = "entity Page:\n    history none\n    title: Text\n\nentity Note:\n    history last 10\n    text: Text\n\nentity Log:\n    history full\n    what: Text\n";
+    assert_eq!(errors(src), Vec::<String>::new());
+    assert_error(
+        "entity Note:\n    history last 0\n    text: Text\n",
+        "`history last` is followed by how many versions it keeps",
+    );
+    // a frozen record reads what it refers to as it was
+    let src = "entity Customer:\n    history none\n    name: Text\n\nentity Invoice:\n    customer: Customer\n    paid: Bool default false\n    frozen when paid\n";
+    assert_error(
+        src,
+        "Customer is read by frozen records, which read it as it was when they froze: its history is kept whole (`history none` keeps only the values in force)",
+    );
+}

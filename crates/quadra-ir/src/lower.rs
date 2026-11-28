@@ -45,6 +45,47 @@ pub fn lower(project: &Project, analysis: &Analysis) -> Model {
         }
     }
     l.model.reindex();
+    // `[data] history`: the entities of the project that do not say keep what it says (those
+    // of the standard library keep theirs)
+    if let Some(d) = project.manifest.data.history.clone() {
+        let std: std::collections::HashSet<String> = project
+            .files()
+            .filter(|f| f.kind == FileKind::Std)
+            .flat_map(|f| {
+                f.parse
+                    .syntax()
+                    .children()
+                    .filter(|i| i.kind() == ENTITY)
+                    .filter_map(|i| ast::name_text(&i))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // (an entity frozen records read keeps its history whole: they read it as it was)
+        let as_of = l.model.read_as_of();
+        for e in l.model.entities.iter_mut() {
+            if e.keep_span.is_some()
+                || e.history.is_some()
+                || e.is_ledger
+                || std.contains(&e.name)
+                || as_of.contains(&e.name)
+            {
+                continue;
+            }
+            match &d {
+                quadra_sema::manifest::KeepDecl::Full => {}
+                quadra_sema::manifest::KeepDecl::None => e.keep = Keep::None,
+                quadra_sema::manifest::KeepDecl::Last(n) => e.keep = Keep::Last(*n),
+                quadra_sema::manifest::KeepDecl::For(n, unit) => {
+                    e.history = Some(Term {
+                        n: *n as i64,
+                        unit: unit.clone(),
+                        after: String::new(),
+                        span: e.span.clone(),
+                    })
+                }
+            }
+        }
+    }
     // the images of the documents: read from the project (where it is on a disk)
     let mut paths = Vec::new();
     fn images(items: &[PrintItem], out: &mut Vec<String>) {
@@ -709,6 +750,9 @@ impl<'a> Lower<'a> {
             posts: Vec::new(),
             retention: Retention::default(),
             history: None,
+            keep: Keep::Full,
+            keep_span: None,
+            deletable: None,
             span,
         }
     }
@@ -839,7 +883,39 @@ impl<'a> Lower<'a> {
                     e.retention = r;
                 }
                 HISTORY => {
-                    e.history = Some(self.term(&m, None));
+                    let word = tokens(&m)
+                        .nth(1)
+                        .map(|t| t.text().to_string())
+                        .unwrap_or_default();
+                    e.keep_span = Some(self.span(&m));
+                    match word.as_str() {
+                        "full" => e.keep = Keep::Full,
+                        "none" => e.keep = Keep::None,
+                        "last" => {
+                            let n = tokens(&m)
+                                .find(|t| t.kind() == NUMBER)
+                                .and_then(|t| t.text().replace('_', "").parse().ok())
+                                .unwrap_or(0);
+                            if n == 0 {
+                                let span = self.span(&m);
+                                self.model.errors.push((span, "`history last` is followed by how many versions it keeps (`history last 10`)".into()));
+                            }
+                            e.keep = Keep::Last(n.max(1));
+                        }
+                        _ => {
+                            e.keep = Keep::Full;
+                            e.history = Some(self.term(&m, None));
+                        }
+                    }
+                }
+                DELETABLE => {
+                    let trash = tokens(&m)
+                        .any(|t| t.text() == "trash")
+                        .then(|| self.term(&m, None));
+                    e.deletable = Some(Deletable {
+                        trash,
+                        span: self.span(&m),
+                    });
                 }
                 FROZEN => {
                     let when = exprs(&m)

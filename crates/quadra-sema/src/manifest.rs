@@ -558,6 +558,140 @@ pub struct Manifest {
     /// `[files]`: where the files of `File` fields are kept (none: `.quadra/files` in the
     /// project)
     pub files: Option<FilesDecl>,
+    /// `[data]`: the project's defaults for how much of its data it keeps
+    pub data: DataDecl,
+}
+
+/// `[data]`: what the entities and the messages of the project keep when they do not say.
+///
+/// ```toml
+/// [data]
+/// history = "none"          # full (the default), none, "last 10", "1 year"
+/// inbox = "90 days"         # the messages received, once handled ("forever", "30 days, then archive")
+/// outbox = "30 days"        # the events, once delivered
+/// archive_after = "2 years" # the history moved to archives by the sweep, with a signed checkpoint
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DataDecl {
+    pub history: Option<KeepDecl>,
+    pub inbox: Option<TermDecl>,
+    pub outbox: Option<TermDecl>,
+    pub archive_after: Option<(u32, String)>,
+}
+
+/// How much of the history of a record is kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeepDecl {
+    Full,
+    None,
+    Last(u32),
+    /// the values replaced longer ago than `n` units leave the history
+    For(u32, String),
+}
+
+/// How long a message is kept once it is closed: for ever, or `n` units, then deleted or
+/// archived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TermDecl {
+    Forever,
+    For { n: u32, unit: String, archive: bool },
+}
+
+/// The units of time of the terms (`2 years`, `1 year`): the unit in its plural form.
+pub fn time_unit(u: &str) -> Option<&'static str> {
+    Some(match u {
+        "hour" | "hours" => "hours",
+        "day" | "days" => "days",
+        "week" | "weeks" => "weeks",
+        "month" | "months" => "months",
+        "year" | "years" => "years",
+        _ => return None,
+    })
+}
+
+/// `"2 years"`: the number and the unit.
+fn duration(at: &str, text: &str) -> Result<(u32, String), String> {
+    let mut w = text.split_whitespace();
+    let (Some(n), Some(u), None) = (w.next(), w.next(), w.next()) else {
+        return Err(format!(
+            "{at}: `{text}` is not a time (`30 days`, `2 years`)"
+        ));
+    };
+    let n: u32 = n.parse().ok().filter(|n| *n > 0).ok_or(format!(
+        "{at}: `{text}` is not a time (`30 days`, `2 years`)"
+    ))?;
+    let unit = time_unit(u).ok_or(format!(
+        "{at}: `{u}` is not a unit of time here: hours, days, weeks, months or years"
+    ))?;
+    Ok((n, unit.to_string()))
+}
+
+/// `history = "full" | "none" | "last 10" | "1 year"`.
+pub fn keep_decl(at: &str, text: &str) -> Result<KeepDecl, String> {
+    let t = text.trim();
+    Ok(match t {
+        "full" => KeepDecl::Full,
+        "none" => KeepDecl::None,
+        _ if t.starts_with("last ") => KeepDecl::Last(
+            t[5..]
+                .trim()
+                .parse()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or(format!(
+                    "{at}: `{t}`: `last` is followed by how many versions (`last 10`)"
+                ))?,
+        ),
+        _ => {
+            let (n, u) = duration(at, t).map_err(|_| {
+                format!("{at}: `{t}` is not a history: full, none, `last 10` or a time (`1 year`)")
+            })?;
+            KeepDecl::For(n, u)
+        }
+    })
+}
+
+/// `inbox = "forever" | "90 days" | "30 days, then archive"`.
+pub fn term_decl(at: &str, text: &str) -> Result<TermDecl, String> {
+    let t = text.trim();
+    if t == "forever" {
+        return Ok(TermDecl::Forever);
+    }
+    let (time, archive) = match t.split_once(',') {
+        Some((time, rest)) if rest.trim() == "then archive" => (time, true),
+        Some(_) => {
+            return Err(format!(
+                "{at}: `{t}`: after the time comes only `, then archive`"
+            ))
+        }
+        None => (t, false),
+    };
+    let (n, unit) = duration(at, time)?;
+    Ok(TermDecl::For { n, unit, archive })
+}
+
+fn data(v: &toml::Value) -> Result<DataDecl, String> {
+    let at = "quadra.toml, [data]";
+    let t = v.as_table().ok_or(format!("{at}: [data] is a table"))?;
+    let mut d = DataDecl::default();
+    for (k, v) in t {
+        let text = v
+            .as_str()
+            .ok_or(format!("{at}: {k} is text (`{k} = \"…\"`)"))?;
+        let at = format!("{at}, {k}");
+        match k.as_str() {
+            "history" => d.history = Some(keep_decl(&at, text)?),
+            "inbox" => d.inbox = Some(term_decl(&at, text)?),
+            "outbox" => d.outbox = Some(term_decl(&at, text)?),
+            "archive_after" => d.archive_after = Some(duration(&at, text)?),
+            other => {
+                return Err(format!(
+                    "quadra.toml, [data]: `{other}` is not a setting of the data (history, inbox, outbox, archive_after)"
+                ))
+            }
+        }
+    }
+    Ok(d)
 }
 
 /// `[files]`: an S3 compatible bucket for the files of `File` fields, and a CDN in front of
@@ -811,6 +945,9 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
     }
     if let Some(f) = doc.get("files") {
         m.files = Some(files(&m, f)?);
+    }
+    if let Some(d) = doc.get("data") {
+        m.data = data(d)?;
     }
     if let Some(conns) = doc.get("connections") {
         let conns = conns
@@ -2216,6 +2353,47 @@ from = "Acme <noreply@acme.example.com>"
         assert_eq!(v.get("C").unwrap(), "q");
         assert_eq!(v.get("D").unwrap(), "v");
         assert!(!v.contains_key("E"));
+    }
+
+    #[test]
+    fn data_settings() {
+        let m = parse("[data]\nhistory = \"last 10\"\ninbox = \"30 days, then archive\"\noutbox = \"forever\"\narchive_after = \"2 years\"\n").unwrap();
+        assert_eq!(m.data.history, Some(KeepDecl::Last(10)));
+        assert_eq!(
+            m.data.inbox,
+            Some(TermDecl::For {
+                n: 30,
+                unit: "days".into(),
+                archive: true
+            })
+        );
+        assert_eq!(m.data.outbox, Some(TermDecl::Forever));
+        assert_eq!(m.data.archive_after, Some((2, "years".into())));
+        assert_eq!(
+            parse("[data]\nhistory = \"1 year\"\n")
+                .unwrap()
+                .data
+                .history,
+            Some(KeepDecl::For(1, "years".into()))
+        );
+        for (bad, says) in [
+            ("[data]\nhistory = \"some\"\n", "is not a history"),
+            (
+                "[data]\ninbox = \"3 fortnights\"\n",
+                "is not a unit of time",
+            ),
+            (
+                "[data]\nkeep = \"1 year\"\n",
+                "is not a setting of the data",
+            ),
+            (
+                "[data]\noutbox = \"30 days, then delete\"\n",
+                "then archive",
+            ),
+        ] {
+            let e = parse(bad).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
     }
 
     #[test]

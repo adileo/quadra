@@ -156,8 +156,12 @@ pub enum SyntaxKind {
     /// `expire 2 days after created_at`, `retain 10 years after date, then expire`: how long a
     /// record is kept (an entity's line; on a field, a `MODIFIER`)
     RETENTION,
-    /// `history 1 year`: how long the values an entity's records replaced are kept
+    /// `history 1 year`, `history last 10`, `history none`, `history full`: how much of the
+    /// values an entity's records replaced is kept
     HISTORY,
+    /// `deletable`, `deletable, trash 30 days`: an entity whose records can be deleted (through
+    /// a trash first)
+    DELETABLE,
 
     // members
     MEMBER_LIST,

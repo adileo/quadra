@@ -161,6 +161,10 @@ pub struct Schema {
     pub readable: BTreeSet<String>,
     /// entity → its stored sets (and lists) of references, each in a join table
     pub sets: BTreeMap<String, Vec<SetMap>>,
+    /// the entities with `history none`: the history keeps only the value in force of each of
+    /// their fields (a write replaces the row before), outside the chain of commits
+    /// (`db::UNTRACKED`)
+    pub untracked: BTreeSet<String>,
 }
 
 /// A stored set (or list) of references to records of one entity, held in a join table (one
@@ -589,6 +593,12 @@ pub fn build(model: &Model, report: &Report) -> Schema {
         markers,
         readable,
         sets,
+        untracked: model
+            .entities
+            .iter()
+            .filter(|e| e.keep == quadra_ir::Keep::None)
+            .map(|e| e.name.clone())
+            .collect(),
     };
     schema.indexes = schema.indexes(model);
     schema
